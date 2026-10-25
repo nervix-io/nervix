@@ -15,10 +15,7 @@
     )
 )]
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -72,6 +69,7 @@ mod application;
 mod describe;
 mod impact;
 mod inspection;
+mod limits;
 mod rendering;
 mod request;
 pub(in crate::application) mod restored;
@@ -79,18 +77,10 @@ mod standalone;
 pub(in crate::application) use impact::{QuiescenceAttempt, TransactionStepImpactRecorder};
 use inspection::transaction_inspection_status;
 pub use inspection::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
-
-pub(in crate::application) const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration =
-    Duration::from_secs(15 * 60);
-
-pub(in crate::application) const DEFAULT_TRANSACTION_TOMBSTONE_RETENTION: Duration =
-    Duration::from_secs(15 * 60);
-
-pub(in crate::application) const DEFAULT_TRANSACTION_MAX_STATEMENTS: usize = 256;
-
-pub(in crate::application) const DEFAULT_TRANSACTION_MAX_SOURCE_BYTES: u64 = 1024 * 1024;
-
-pub(in crate::application) const DEFAULT_TRANSACTION_MAX_OPEN: usize = 1024;
+pub use limits::{
+    TransactionBounds, TransactionIdleTimeout, TransactionLimits, TransactionMaxOpen,
+    TransactionMaxSourceBytes, TransactionMaxStatements, TransactionTombstoneRetention,
+};
 
 /// Recovery is independent across transactions, but its background work remains bounded per node.
 /// One held executor still leaves capacity for unrelated domains and for later candidates.
@@ -682,7 +672,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::DescribeUdf(_)
         | Statement::DescribePlacement(_)
         | Statement::DescribeRelocation(_)
-        | Statement::DescribeTransaction(_) => "DESCRIBE",
+        | Statement::DescribeTransaction(_)
+        | Statement::DescribeCluster(_) => "DESCRIBE",
         _ => "statement",
     }
 }
@@ -2522,6 +2513,14 @@ impl SessionServiceImpl {
                 TransactionState::Committing(_) => {}
                 TransactionState::Finished(_) => {
                     self.inner.transaction_bindings.remove(&transaction.id);
+                    #[cfg(feature = "testing")]
+                    self.inner
+                        .runtime
+                        .pause_transaction_cleanup_if_armed(
+                            self.inner.consensus.local_node_id(),
+                            &transaction.domain,
+                        )
+                        .await;
                 }
                 TransactionState::Open(_) => {}
             }

@@ -93,15 +93,17 @@ pre-engagement failure or higher after recorded recovery expansion.
 | `DOMAIN_PAUSE` | The owning domain | Stop domain intake and generators and drain all attached execution work before publication. |
 
 The pause requirement is a typed `NO_PAUSE`, `SUBGRAPH`, or `DOMAIN` value. The displayed level is
-derived from that value, so a domain level cannot carry an entity-only scope. An entity gate is
-installed on every live node for the affected relay and branch coverage. The planner includes
-downstream consumers and every member of an affected hard placement group. Engaging any entity
-gate also requests a force flush of the full current execution graph; **force-flushed work is not
-the set of paused entities**. A domain pause covers all execution nodes on both sides of the
-change. [Data Plane](./data-plane.md) explains the runtime work these gates protect;
-[Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) lists the model changes
-that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its external-source
-behavior under a hold; it is distinct from the step's quiesce level.
+derived from that value, so a domain level cannot carry an entity-only scope. A model change's
+entity gate is installed on every live node for the affected relay and branch coverage. An
+ownership-handoff gate is installed on the live nodes that run part of the moved unit's boundary,
+as [Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover) defines them. The
+planner includes downstream consumers and every member of an affected hard placement group.
+Engaging any entity gate also requests a force flush of the full current execution graph;
+**force-flushed work is not the set of paused entities**. A domain pause covers all execution nodes
+on both sides of the change. [Data Plane](./data-plane.md) explains the runtime work these gates
+protect; [Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) lists the model
+changes that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its
+external-source behavior under a hold; it is distinct from the step's quiesce level.
 
 A [client ingestor](./ingestors.md#client-ingestors) under a hold suspends admission: its producers
 are told admission is suspended, batches that were queued but not admitted are refused as
@@ -117,7 +119,7 @@ execution and every producer still attached.
 When a model alteration pauses an ingestor and gates a shared downstream relay, the coordinator
 first engages an ingestor-only admission hold on every node. It force-flushes the current graph
 and waits for those ingestors' route work and admitted ACK roots while the relay gates remain
-open. A partial branch batch can therefore reach its relay and acknowledging sink. The full
+open. A partial branch batch can therefore reach its relay and acknowledging emitter. The full
 subgraph hold is engaged before the intake hold is released, so admission never reopens between
 the two phases. Both phases share the alteration's physical deadline and retain separate exact
 coordination identities. Failure releases the attempted holds and keeps the committed contract;
@@ -125,6 +127,13 @@ dropping the coordinator leaves their existing owned release and lease cleanup r
 For a planned subgraph pause, transaction inspection records the intake-only scope separately
 from the full subgraph scope, with each scope's actual engagement, drain failure, and release
 outcomes. An already engaged domain pause covers its ingestors throughout these phases.
+
+Emitter publication policy belongs to the concrete destination Model. Impact comparison observes
+that policy separately from the destination definition, so changing only `MODE` retains the
+publishing-policy aspect and entity-pause scope. Comparing destination definitions ignores the
+client and policy while comparing the actual locator and entity options. A complete Plexus
+`SET TO` can change its payload selection and explicitly written construction as part of the same
+atomic alteration; its head and replacement must retain the stored connector/entity kind.
 
 A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
 emitter work. Force flush releases rows into that same wait; a read or network delivery does not
@@ -186,7 +195,7 @@ displayed graph.
 
 The topology includes shared admission gates, branch coverage, hard-group members, moved owners,
 and the source and destination of each move. Every affected node, edge, gate, and effect retains
-the operation numbers that contributed to it. This is why a change to an emitter sink, for
+the operation numbers that contributed to it. This is why a change to an emitter connector, for
 example, can show a changed emitter, upstream gate, force-flushed work, and replacement activation
 as different roles rather than as one ambiguous list of “affected nodes.”
 

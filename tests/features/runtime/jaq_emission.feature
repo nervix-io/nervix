@@ -41,7 +41,7 @@ Feature: JAQ emission
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -104,7 +104,7 @@ Feature: JAQ emission
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-        CREATE EMITTER rabbit_notifications FROM notifications TO RABBITMQ rabbit_main QUEUE notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE RABBITMQ QUEUE EMITTER rabbit_notifications FROM notifications TO rabbit_main QUEUE 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -168,7 +168,7 @@ Feature: JAQ emission
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
-        CREATE EMITTER redis_notifications FROM notifications TO REDIS PUBSUB redis_main CHANNEL notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE REDIS PUBSUB EMITTER redis_notifications FROM notifications TO redis_main CHANNEL 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -190,7 +190,7 @@ Feature: JAQ emission
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: MQTT emitter applies JAQ transformation before emitting
+  Scenario Outline: MQTT TOPIC emitter applies JAQ transformation before emitting
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -231,7 +231,7 @@ Feature: JAQ emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-emitter-{{test_id}}'
         };
-        CREATE EMITTER mqtt_notifications_out FROM notifications TO MQTT mqtt_main TOPIC notifications_out_{{test_id}} MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_notifications_out FROM notifications TO mqtt_main TOPIC 'notifications_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -253,7 +253,7 @@ Feature: JAQ emission
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: NATS emitter applies JAQ transformation before emitting
+  Scenario Outline: NATS SUBJECT emitter applies JAQ transformation before emitting
     Given MQTT is running
     And NATS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -294,7 +294,7 @@ Feature: JAQ emission
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
-        CREATE EMITTER nats_notifications FROM notifications TO NATS nats_main SUBJECT notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE NATS SUBJECT EMITTER nats_notifications FROM notifications TO nats_main SUBJECT 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -357,7 +357,7 @@ Feature: JAQ emission
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER zeromq_notifications FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE ZEROMQ PUSH EMITTER zeromq_notifications FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -379,7 +379,7 @@ Feature: JAQ emission
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: SQS emitter applies JAQ transformation before emitting
+  Scenario Outline: SQS QUEUE emitter applies JAQ transformation before emitting
     Given MQTT is running
     And SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -421,7 +421,7 @@ Feature: JAQ emission
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
-        CREATE EMITTER sqs_notifications FROM notifications TO SQS sqs_main QUEUE notifications_out_{{test_id}} MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE SQS QUEUE EMITTER sqs_notifications FROM notifications TO sqs_main QUEUE 'notifications_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

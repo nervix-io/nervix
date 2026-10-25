@@ -21,6 +21,7 @@ use std::{
 
 use fjall::{Database, Keyspace, PersistMode};
 use nervix_execution::Reservation;
+use nervix_models::RaftLogDurability;
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::{access_with_context, deserialize_using, high::HighSerializer},
@@ -294,8 +295,13 @@ impl<'a> DurableBatch<'a> {
         Ok(writer.bytes)
     }
 
+    /// Commits the batch with the synchronization [`crate::RAFT_LOG_DURABILITY`] promises, which
+    /// is the promise this node publishes among its prerequisites.
     pub(crate) fn commit(self, backend: &impl CommitBackend) -> io::Result<()> {
-        backend.commit(self.mutations, PersistMode::SyncAll)
+        let mode = match crate::RAFT_LOG_DURABILITY {
+            RaftLogDurability::FsyncEveryAppend => PersistMode::SyncAll,
+        };
+        backend.commit(self.mutations, mode)
     }
 
     fn charge_key(&mut self, key: &[u8]) -> io::Result<()> {

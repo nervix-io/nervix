@@ -18,12 +18,11 @@ use std::collections::BTreeMap;
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CodecWireFormat, CommandExecutionReference,
     CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator,
-    CreateReingestor, CreateRelay, CreateSchema, DomainSchedule, EmitSink, EmitterBody,
-    EmitterPublishingMode, ErrorPolicies, FlushPolicy, MaterializedRelayState, MessageErrorPolicy,
-    ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode, SchemaField,
-    SchemaName, WasmStateReset, WasmStateResetReason, WasmStateResetScope, ZeroMqPushSink,
-    ZeroMqSink,
+    CreateReingestor, CreateRelay, CreateSchema, DomainSchedule, EmitterBody, EmitterEntity,
+    ErrorPolicies, FlushPolicy, MaterializedRelayState, MessageErrorPolicy, ModelKind, ModelName,
+    NodeRef, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode, SchemaField, SchemaName,
+    WasmStateReset, WasmStateResetReason, WasmStateResetScope, ZeroMqEmitter, ZeroMqPushEmitter,
 };
 use nervix_primitives::{
     sync::{mpsc, watch},
@@ -536,7 +535,7 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             encoding_rules: Vec::new(),
         })),
         scheduled_model(nervix_models::Model::ClientZeroMq(CreateClientZeroMq {
-            name: named("sink"),
+            name: named("emitter"),
             mount: None,
             config: Vec::new(),
         })),
@@ -553,18 +552,20 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-                client: named("sink"),
-            }))),
+            connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+                ZeroMqPushEmitter {
+                    mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("emitter"),
+                },
+            ))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: RouteConstruction::default(),
             materialized_state: Vec::new(),

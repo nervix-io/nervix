@@ -52,15 +52,13 @@ Feature: ClickHouse name resolution
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE EMITTER to_clickhouse FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE clickhouse_dns_{{test_id}}
-        VALUES {
+      CREATE CLICKHOUSE TABLE EMITTER to_clickhouse FROM notifications
+        TO clickhouse_client TABLE 'clickhouse_dns_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
           "clickhouse_user_id" = input.user_id,
           "clickhouse_now" = NOW() AS STRING,
           "clickhouse_action" = LOWER(input.action)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -131,15 +129,13 @@ Feature: ClickHouse name resolution
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE EMITTER to_clickhouse FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE clickhouse_dns_{{test_id}}
-        VALUES {
+      CREATE CLICKHOUSE TABLE EMITTER to_clickhouse FROM notifications
+        TO clickhouse_client TABLE 'clickhouse_dns_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
           "clickhouse_user_id" = input.user_id,
           "clickhouse_now" = NOW() AS STRING,
           "clickhouse_action" = LOWER(input.action)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -200,15 +196,13 @@ Feature: ClickHouse name resolution
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE EMITTER to_clickhouse FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE clickhouse_dns_{{test_id}}
-        VALUES {
+      CREATE CLICKHOUSE TABLE EMITTER to_clickhouse FROM notifications
+        TO clickhouse_client TABLE 'clickhouse_dns_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
           "clickhouse_user_id" = input.user_id,
           "clickhouse_now" = NOW() AS STRING,
           "clickhouse_action" = LOWER(input.action)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

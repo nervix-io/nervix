@@ -674,9 +674,9 @@ export CHAOS_TRAFFIC_DIR="${artifact_dir}/traffic"
 export CHAOS_SCRIPT_DIR="${script_dir}"
 export CHAOS_NODE_COUNT="${node_count}"
 if [[ "${scenario}" == pause-resume || "${fault}" == *-pause ]]; then
-    export CHAOS_RAFT_HEARTBEAT_INTERVAL=250ms
-    export CHAOS_RAFT_ELECTION_TIMEOUT_MIN=10s
-    export CHAOS_RAFT_ELECTION_TIMEOUT_MAX=12s
+    # Election timeouts are six to twelve heartbeats, so this heartbeat gives 9s to 18s: a short
+    # pause stays far below the shortest of them, and a long one fails over within its wait.
+    export CHAOS_RAFT_HEARTBEAT_INTERVAL=1500ms
     export CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s
 fi
 # The continuous load produces one fixture record per interval.

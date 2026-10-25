@@ -310,8 +310,8 @@ Feature: Altering deduplicators and reorderers
     When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( primary_key I64, secondary_key I64 );
-      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( primary_key integer, secondary_key integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reorder-key.example.com;
@@ -338,13 +338,10 @@ Feature: Altering deduplicators and reorderers
       """
       quiesce level: ENTITY_PAUSE
       """
+    # Both candidates enter one ingestion batch and share the reorder interval.
     When http payload is posted to host "http-{{test_id}}-alter-reorder-key.example.com" path "/events"
       """
-      {"primary_key":1,"secondary_key":2}
-      """
-    And http payload is posted to host "http-{{test_id}}-alter-reorder-key.example.com" path "/events"
-      """
-      {"primary_key":2,"secondary_key":1}
+      [{"primary_key":1,"secondary_key":2},{"primary_key":2,"secondary_key":1}]
       """
     Then within "5s" the relay subscription receives payloads in order
       """

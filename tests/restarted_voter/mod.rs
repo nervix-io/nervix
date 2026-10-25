@@ -1,8 +1,9 @@
-//! Public ownership checks while a restarted voter has only one relayed gossip heartbeat.
+//! Public ownership checks while a restarted voter has only one relayed gossip heartbeat, or starts
+//! beside a peer slow to report ready.
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** The restart action, the first-sample barrier, and public status observations.
+//! - **Owns.** The restart actions, the first-sample barrier, and public status observations.
 //! - **Depends on.** The scenario world, cluster lifecycle, and the typed fault controls.
 //! - **Must not know.** Scheduling decisions or runtime state storage.
 
@@ -19,6 +20,25 @@ async fn restart_with_relayed_voter(world: &mut ScenarioWorld, voter: String) {
     world.active_session_node = None;
     world.active_session_has_subscription = false;
     let restarted = world.cluster_mut().restart_with_relayed_voter(&voter).await;
+    assert!(restarted.is_ok(), "cluster restart failed: {restarted:?}");
+}
+
+/// Restarts the whole cluster with `node` running and gossiping from its start but reported ready
+/// only once the restarted cluster's leader has ended its startup voter observation, as a loaded
+/// host can delay a live node's readiness.
+#[when(
+    expr = "the cluster restarts while node {string} reports ready only after the restarted \
+            leader's startup voter observation ends"
+)]
+async fn restart_with_node_ready_after_startup_observation(
+    world: &mut ScenarioWorld,
+    node: String,
+) {
+    world.forget_session_observations();
+    let restarted = world
+        .cluster_mut()
+        .restart_with_node_ready_after_startup_observation(&node)
+        .await;
     assert!(restarted.is_ok(), "cluster restart failed: {restarted:?}");
 }
 

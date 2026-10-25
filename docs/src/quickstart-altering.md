@@ -2,7 +2,7 @@
 
 Nothing built so far required tearing anything down — every step added nodes. `ALTER` statements
 change what already exists: junction logic, relay properties, schemas, ingestor sources, emitter
-sinks, stateful processor behavior, reingestor wiring, and generator cadence or routes. Nervix
+emitters, stateful processor behavior, reingestor wiring, and generator cadence or routes. Nervix
 classifies each validated change and pauses as little as possible — the statement result reports
 the executed level
 ([ALTER Lock And Quiesce Classification](control-plane.md#alter-lock-and-quiesce-classification)):
@@ -86,7 +86,7 @@ Ingestors and emitters have their own operation sets —
 [Altering Ingestors](ingestors.md#altering-ingestors) (an ingestor's `ALTER` repeats its connector
 and entity, such as `ALTER KAFKA TOPIC INGESTOR kafka_orders`, and every ingestor change is
 entity-pause) and
-[Altering Emitters](emitters.md#altering-emitters) (flush changes are dynamic; sink, client, and
+[Altering Emitters](emitters.md#altering-emitters) (flush changes are dynamic; emitter, client, and
 codec changes are entity-pause; source-list membership changes are domain-pause). Processor
 operations are covered under
 [Altering Deduplicators](processors.md#altering-deduplicators),

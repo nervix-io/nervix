@@ -48,8 +48,7 @@ Feature: MongoDB emission
           'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
         };
-        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_out_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications TO mongodb_client COLLECTION 'notifications_mongodb_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -128,7 +127,7 @@ Feature: MongoDB emission
           'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
         };
-        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_conflict_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } ON CONFLICT ("mongodb_user_id") <conflict_action> MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications TO mongodb_client COLLECTION 'notifications_mongodb_conflict_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } ON CONFLICT ("mongodb_user_id") <conflict_action>
         BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -209,16 +208,14 @@ Feature: MongoDB emission
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
       };
-      CREATE EMITTER to_mongodb
+      CREATE MONGODB COLLECTION EMITTER to_mongodb
       FROM notifications
-      TO MONGODB mongodb_client INSERT TO COLLECTION poison_mongodb_{{test_id}}
-      VALUES {
+      TO mongodb_client COLLECTION 'poison_mongodb_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
         "mongodb_user_id" = input.user_id,
         "mongodb_now" = NOW() AS STRING,
         "mongodb_action" = LOWER(input.action)
-      }
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
       SET error_code = error.code,
@@ -290,12 +287,10 @@ Feature: MongoDB emission
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
       };
-      CREATE EMITTER to_mongodb
+      CREATE MONGODB COLLECTION EMITTER to_mongodb
       FROM notifications
-      TO MONGODB mongodb_client INSERT TO COLLECTION batch_mongodb_{{test_id}}
-      VALUES { "mongodb_user_id" = input.user_id }
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      TO mongodb_client COLLECTION 'batch_mongodb_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { "mongodb_user_id" = input.user_id } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
@@ -362,16 +357,14 @@ Feature: MongoDB emission
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
       };
-      CREATE EMITTER to_mongodb
+      CREATE MONGODB COLLECTION EMITTER to_mongodb
       FROM notifications
-      TO MONGODB mongodb_client INSERT TO COLLECTION range_mongodb_{{test_id}}
-      VALUES {
+      TO mongodb_client COLLECTION 'range_mongodb_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
         "mongodb_user_id" = input.user_id,
         "mongodb_action" = LOWER(input.action)
       }
-      <conflict_clause>
-      MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-      BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+      <conflict_clause> BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
       SET error_code = error.code,
@@ -421,6 +414,7 @@ Feature: MongoDB emission
       | 3            | ON CONFLICT ("mongodb_user_id") DO UPDATE | VEC<STRING>          |
 
   @database_emitter_modes
+  @mongodb_write_concern
   Scenario Outline: A MongoDB write concern the replica set cannot satisfy keeps the documents the server wrote and retries only the rest
     Given MQTT is running
     And MongoDB replica set is running
@@ -465,21 +459,27 @@ Feature: MongoDB emission
         'addr' = '{{mongodb_replica_set_addr}}&w=2',
         'database' = 'nervix'
       };
-      CREATE EMITTER to_mongodb
+      CREATE MONGODB COLLECTION EMITTER to_mongodb
       FROM notifications
-      TO MONGODB mongodb_client INSERT TO COLLECTION write_concern_mongodb_{{test_id}}
+      TO mongodb_client COLLECTION 'write_concern_mongodb_{{test_id}}'
+      MODE ACK RETRY POLICY BACKOFF 1s MAX 2s
       VALUES {
         "mongodb_user_id" = input.user_id,
         "mongodb_action" = LOWER(input.action)
       }
       <conflict_clause>
-      MODE ACK RETRY POLICY BACKOFF 1s MAX 2s
       BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       START;
       """
+    Then within "20s" DESCRIBE EMITTER "to_mongodb" on the leader node contains
+      """
+      status: OK
+      """
+    And the last command output owner is saved as placeholder "write_concern_owner"
+    When client "write_concern_observer" connects to node "{{write_concern_owner}}"
     When these MQTT messages are rapidly published to topic "mongodb_write_concern_in_{{test_id}}"
       """
       {"user_id":1,"action":"FIRST"}
@@ -489,11 +489,7 @@ Feature: MongoDB emission
       {"user_id":5,"action":"FIFTH"}
       {"user_id":6,"action":"SIXTH"}
       """
-    Then within "20s" DESCRIBE EMITTER "to_mongodb" on the leader node contains
-      """
-      write concern failed
-      """
-    And the MongoDB collection eventually holds exactly these documents
+    Then the MongoDB collection eventually holds exactly these documents
       """
       {"mongodb_user_id":1,"mongodb_action":"first"}
       {"mongodb_user_id":2,"mongodb_action":"second"}
@@ -502,10 +498,19 @@ Feature: MongoDB emission
       {"mongodb_user_id":5,"mongodb_action":"fifth"}
       {"mongodb_user_id":6,"mongodb_action":"sixth"}
       """
+    When physical time passes for "3s"
+    Then within "20s" DESCRIBE EMITTER "to_mongodb" on the leader node contains
+      """
+      status: OK
+      """
+    And within "20s" client "write_concern_observer" observes a server error containing
+      """
+      MongoDB <write_operation> write concern failed with code 100 (UnsatisfiableWriteConcern)
+      """
 
     Examples:
-      | nodes | collection                 | conflict_clause                           |
-      | 1     | exists                     |                                           |
-      | 3     | exists                     |                                           |
-      | 1     | with unique user id exists | ON CONFLICT ("mongodb_user_id") DO UPDATE |
-      | 3     | with unique user id exists | ON CONFLICT ("mongodb_user_id") DO UPDATE |
+      | nodes | collection                 | conflict_clause                           | write_operation |
+      | 1     | exists                     |                                           | insert_many     |
+      | 3     | exists                     |                                           | insert_many     |
+      | 1     | with unique user id exists | ON CONFLICT ("mongodb_user_id") DO UPDATE | bulk_write      |
+      | 3     | with unique user id exists | ON CONFLICT ("mongodb_user_id") DO UPDATE | bulk_write      |

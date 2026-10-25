@@ -126,7 +126,7 @@ Feature: JAQ native codec
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING xml_notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING xml_notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -228,7 +228,7 @@ Feature: JAQ native codec
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING json_notification_codec
+      CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING json_notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -273,8 +273,8 @@ Feature: JAQ native codec
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE EMITTER emitted_readings FROM readings
-        TO KAFKA kafka_main TOPIC readings_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER emitted_readings FROM readings
+        TO kafka_main TOPIC 'readings_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING transforming_reading_codec
         INHERIT ALL

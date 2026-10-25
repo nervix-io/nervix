@@ -225,7 +225,7 @@ fn a_bare_keyword_is_not_accepted_as_a_duration() {
     .expect("an identifier parses and is validated where it is consumed");
 }
 
-/// A codec is required by the sink, so the grammar asks for it right after the sink.
+/// A codec is required by the emitter, so the grammar asks for it right after the emitter.
 ///
 /// Written before `TO`, the requirement could only be checked once the whole statement was
 /// read, and a `try_map` over the whole statement reports its failure at the statement's first
@@ -234,13 +234,13 @@ fn a_bare_keyword_is_not_accepted_as_a_duration() {
 #[test]
 fn a_cross_clause_constraint_is_reported_where_it_was_broken() {
     let error = parse_statement(
-        "CREATE EMITTER e FROM r TO KAFKA c TOPIC t MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX \
-         30s FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG",
+        "CREATE KAFKA TOPIC EMITTER e FROM r TO c TOPIC 't' MODE NO ACK RETRY POLICY BACKOFF \
+         250ms MAX 30s FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG",
     )
-    .expect_err("an encoded sink needs a codec");
+    .expect_err("an encoded emitter needs a codec");
     assert!(
         format!("{error:?}").contains("expected ENCODE USING"),
-        "the codec is required by the sink, so the grammar should ask for it: {error:?}"
+        "the codec is required by the emitter, so the grammar should ask for it: {error:?}"
     );
 }
 
@@ -347,21 +347,9 @@ fn show_ingestors_parses_alone_and_refuses_trailing_words() {
 
 #[test]
 fn emitter_context_suggestions_do_not_leak_schema_keywords() {
-    let input = "CREATE EMITTER emit FROM p99 TO ";
+    let input = "CREATE KAFKA TOPIC EMITTER emit FROM events TO ";
     let suggestions = suggest_statement(input, input.len());
-    assert!(suggestions.contains(&"KAFKA".to_string()));
-    assert!(suggestions.contains(&"RABBITMQ".to_string()));
-    assert!(suggestions.contains(&"REDIS".to_string()));
-    assert!(suggestions.contains(&"MQTT".to_string()));
-    assert!(suggestions.contains(&"NATS".to_string()));
-    assert!(suggestions.contains(&"ZEROMQ".to_string()));
-    assert!(suggestions.contains(&"SQS".to_string()));
-    assert!(suggestions.contains(&"CLICKHOUSE".to_string()));
-    assert!(suggestions.contains(&"POSTGRES".to_string()));
-    assert!(suggestions.contains(&"MYSQL".to_string()));
-    assert!(suggestions.contains(&"MONGODB".to_string()));
-    assert!(!suggestions.contains(&"JSON".to_string()));
-    assert!(!suggestions.contains(&"AVRO".to_string()));
+    assert_eq!(suggestions, vec!["ref:client"]);
 }
 
 #[test]
@@ -518,7 +506,7 @@ fn alter_context_suggestions_include_all_supported_model_families() {
     assert!(suggestions.contains(&"JUNCTION".to_string()));
     assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
     assert!(suggestions.contains(&"REORDERER".to_string()));
-    assert!(suggestions.contains(&"EMITTER".to_string()));
+    assert!(suggestions.contains(&"KAFKA TOPIC EMITTER".to_string()));
     assert!(suggestions.contains(&"KAFKA TOPIC INGESTOR".to_string()));
     assert!(suggestions.contains(&"CLIENT PRODUCER INGESTOR".to_string()));
     assert!(suggestions.contains(&"REINGESTOR".to_string()));
@@ -652,6 +640,7 @@ fn parses_describe_resource_summary_statement() {
 fn describe_context_suggestions_include_resource_and_stream() {
     let input = "DESCRIBE ";
     let suggestions = suggest_statement(input, input.len());
+    assert!(suggestions.contains(&"CLUSTER".to_string()));
     assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
     assert!(suggestions.contains(&"DOMAIN".to_string()));
     assert!(suggestions.contains(&"EMITTER".to_string()));
@@ -661,6 +650,22 @@ fn describe_context_suggestions_include_resource_and_stream() {
     assert!(suggestions.contains(&"RESOURCE".to_string()));
     assert!(suggestions.contains(&"RELAY".to_string()));
     assert!(suggestions.contains(&"WINDOW".to_string()));
+}
+
+#[test]
+fn parses_describe_cluster_statement() {
+    let parsed = parse_statement("DESCRIBE CLUSTER;").expect("parse should succeed");
+    assert_eq!(
+        parsed,
+        Statement::DescribeCluster(nervix_models::DescribeCluster)
+    );
+}
+
+#[test]
+fn describe_cluster_context_offers_no_clause_of_show_cluster_status() {
+    let input = "DESCRIBE CLUSTER ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(!suggestions.contains(&"STATUS".to_string()));
 }
 
 #[test]
@@ -1026,9 +1031,10 @@ fn parses_single_reingestor_output_route_with_filter_map() {
 #[test]
 fn parses_emitter_statement_with_implicit_attached_mode() {
     let parsed = parse_statement(
-        "CREATE EMITTER emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out MODE \
-         NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec FLUSH EACH \
-         100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        "CREATE KAFKA TOPIC EMITTER emit FROM notifications TO kafka_main TOPIC \
+         'notifications_out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
+         notification_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL \
+         ERROR LOG;",
     )
     .expect("parse should succeed");
 
@@ -1054,8 +1060,8 @@ fn runtime_nodes_require_supported_error_policy_blocks() {
         ),
         (
             "emitter",
-            "CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC \
-             notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
+            "CREATE KAFKA TOPIC EMITTER kafka_emit FROM notifications TO kafka_main TOPIC \
+             'notifications_out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
              notification_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG",
             " ON GENERAL ERROR LOG;",
         ),
@@ -1303,8 +1309,8 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
         &[]
     )]
 #[case::alter_emitter(
-        "ALTER EMITTER event_sink SET TO ZEROMQ sink_b MODE NO_ACK RETRY POLICY BACKOFF 250ms \
-             MAX 30s, SET CLIENT sink_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
+        "ALTER ZEROMQ PUSH EMITTER event_emitter SET TO emitter_b MODE NO ACK RETRY POLICY BACKOFF 250ms \
+             MAX 30s ENCODE USING event_codec, SET CLIENT emitter_c, SET ENCODE USING event_codec, SET COLLECT FOR 10ms MAX \
              BATCH SIZE 1MiB, SET DETACHED, SET FLUSH IMMEDIATE;",
         None,
         &[]
@@ -1684,10 +1690,10 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::emitter(
         r#"
-            CREATE EMITTER emit
+            CREATE KAFKA TOPIC EMITTER emit
                 FROM p99
                 COLLECT FOR 50ms
-                TO KAFKA broker1 TOPIC topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                TO broker1 TOPIC 'topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,
@@ -1696,9 +1702,9 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::pulsar_emitter(
         r#"
-            CREATE EMITTER emit
+            CREATE PULSAR TOPIC EMITTER emit
                 FROM p99
-                TO PULSAR pulsar_main TOPIC topic MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s
+                TO pulsar_main TOPIC 'topic' MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s
                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1708,9 +1714,9 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::rabbitmq_emitter(
         r#"
-            CREATE EMITTER emit
+            CREATE RABBITMQ QUEUE EMITTER emit
                 FROM p99
-                TO RABBITMQ broker1 QUEUE outbox MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+                TO broker1 QUEUE 'outbox' MODE ACK SEQUENTIAL ACK TIMEOUT 30s
                 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec
                 FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -1720,9 +1726,9 @@ fn create_client_name_completion_is_not_semantic_reference_lookup() {
     )]
 #[case::redis_emitter(
         r#"
-            CREATE EMITTER emit
+            CREATE REDIS PUBSUB EMITTER emit
                 FROM p99
-                TO REDIS PUBSUB broker1 CHANNEL outbox MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                TO broker1 CHANNEL 'outbox' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
                 ENCODE USING my_codec FLUSH EACH 100ms MAX BATCH SIZE 1MiB
                 ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#,

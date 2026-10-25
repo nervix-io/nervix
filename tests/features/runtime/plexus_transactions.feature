@@ -1501,10 +1501,6 @@ Feature: Plexus transactions
 
   Scenario: An orphaned transaction expires and retains its outcome
     Given the transaction idle timeout is configured as "250ms"
-    # The scenario has to notice EXPIRED and then attach before the tombstone is swept, so the
-    # retention has to cover a poll interval plus a client round trip. One second did not, and the
-    # attach intermittently found the transaction already unknown. Removal still lands well inside
-    # the ten seconds the "eventually removed" step allows.
     And the transaction tombstone retention is configured as "5s"
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -1516,6 +1512,7 @@ Feature: Plexus transactions
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     Given client "owner" is connected to node "{{old_leader}}"
     And client "observer" is connected to node "{{new_leader}}"
+    And transaction tombstone cleanup for domain "{{domain}}" pauses on every node
     When client "owner" executes these Plexus commands
       """
       BEGIN;
@@ -1523,13 +1520,15 @@ Feature: Plexus transactions
     Then client "owner" transaction id is saved as placeholder "transaction_id"
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
+    And transaction tombstone cleanup for domain "{{domain}}" is paused on node "{{new_leader}}"
     And transaction "{{transaction_id}}" eventually has state "EXPIRED"
     When client "observer" fails to attach to transaction "{{transaction_id}}"
     Then the last command error contains
       """
       finished with outcome EXPIRED
       """
-    And transaction "{{transaction_id}}" is eventually removed
+    When transaction tombstone cleanup for domain "{{domain}}" is released on every node
+    Then transaction "{{transaction_id}}" is eventually removed
     When client "observer" fails to attach to transaction "{{transaction_id}}"
     Then the last command error contains
       """

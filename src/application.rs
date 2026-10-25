@@ -36,22 +36,27 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::SocketAddr,
-    path::PathBuf,
     time::Duration,
 };
 
 use admitted_connection::AdmittingListener;
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
-use authentication::{DEFAULT_USER, user_credentials};
+use authentication::user_credentials;
 use background_task::{
     await_background_task_shutdown, join_public_listeners, request_shutdown_on_completion,
 };
 use clap::Parser;
 use clap_complete::Shell;
-pub use cli::{Args, Command};
+#[cfg(feature = "deloxide")]
+pub use cli::DiagnosticArgs;
+pub use cli::{
+    Args, CapacityArgs, Command, ConsensusArgs, MembershipArgs, MemoryPressureArgs, NodeArgs,
+    ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride, SettingsArgs, ShutdownArgs,
+    TracingArgs, TransactionArgs,
+};
 use cli_completions::print_completions;
-pub use cli_values::InternalTransportMode;
+pub use cli_values::{HumanBytes, HumanDuration, InternalTransportMode, RefusedCliValue};
+#[cfg(test)]
 use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_ratio};
 use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
@@ -68,9 +73,7 @@ use futures_util::{
 use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_consensus::{ConsensusSettings, RaftRetentionPolicy, TransactionState};
-use nervix_dns::{DnsConfiguration, DnsResolver};
-use nervix_execution::Executor;
+use nervix_consensus::{ConsensusSettings, TransactionState};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
     ApplicationHealthProbe,
@@ -109,7 +112,7 @@ use nervix_models::{
 use nervix_primitives::{
     collections::DashMap,
     net::TcpListener,
-    sync::{StdArc, broadcast},
+    sync::{StdArc, broadcast, watch},
     time::sleep,
 };
 use observability_http::serve_observability_http;
@@ -132,11 +135,6 @@ use tls::{
     HttpsListenerCertificates, InterconnectTlsPaths, load_grpc_tls_server_config,
     load_web_console_tls_server_config, reload_interconnect_tls,
 };
-use transaction::{
-    DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
-    DEFAULT_TRANSACTION_MAX_SOURCE_BYTES, DEFAULT_TRANSACTION_MAX_STATEMENTS,
-    DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-};
 use web_console::{serve_web_console_http, serve_web_console_https, web_console_advertise_url};
 
 use crate::{
@@ -157,6 +155,7 @@ mod cli_completions;
 mod cli_values;
 mod client_consumers;
 mod client_producers;
+mod cluster_description;
 mod cluster_status;
 mod command_execution;
 mod command_result;
@@ -169,12 +168,16 @@ mod entity_gate;
 mod error;
 mod http_endpoint;
 mod interconnect_relay;
+mod join_supervision;
 mod leader_redirect;
 mod model_mutation;
 mod model_validation;
+mod node_identity;
+mod node_settings;
 mod observability_http;
 mod observation;
 mod ownership_handoff;
+mod preflight;
 mod relocation;
 mod resource;
 mod restore;
@@ -200,24 +203,37 @@ mod wasm_state_recovery;
 mod wasm_state_reset;
 mod web_console;
 
-pub use command_execution::CommandExecutionPolicy;
+pub use command_execution::{
+    CommandExecutionCapacity, CommandExecutionPolicy, CommandRetryValidity,
+};
+use join_supervision::{JoinOutcome, JoinStanding, JoinSupervision};
 use nervix_primitives::sync::Arc;
+pub use node_identity::NodeIdentity;
+pub use node_settings::NodeSettings;
+use preflight::{Preflight, PreflightOutcome};
+pub use scheduling::{ReplicaCount, SchedulingSettings};
 use service_tasks::ServiceTasks;
 use shutdown::BeforeDeadline;
 pub use shutdown::{
-    ShutdownCoordinator, ShutdownDeadline, ShutdownOutcome, ShutdownPhase, ShutdownPhaseOutcome,
-    ShutdownRequest, ShutdownRequestOutcome,
+    DrainTimeout, ShutdownCoordinator, ShutdownDeadline, ShutdownOutcome, ShutdownPhase,
+    ShutdownPhaseOutcome, ShutdownRequest, ShutdownRequestOutcome, ShutdownSettings,
+    ShutdownSettingsError, ShutdownTimeout,
 };
 use tonic::transport::Server;
 use tracing::{Instrument as _, debug, error, info, warn};
+pub use transaction::{
+    TransactionBounds, TransactionIdleTimeout, TransactionLimits, TransactionMaxOpen,
+    TransactionMaxSourceBytes, TransactionMaxStatements, TransactionTombstoneRetention,
+};
 use typed_builder::TypedBuilder;
 
 use crate::{
     ConfiguredFaultInjection, cluster,
-    memory_pressure::{MemoryPressureConfig, MemoryPressureController},
-    resource::{ResourceStore, ResourceStoreLimits},
+    memory_pressure::MemoryPressureController,
+    resource::ResourceStore,
     runtime::{
-        EntityGateLease, OwnershipHandoffError, OwnershipHandoffResult, Runtime, RuntimeEvent,
+        EntityGateLease, OwnershipHandoffError, OwnershipHandoffResult, Runtime,
+        RuntimeEnvironment, RuntimeEvent,
     },
 };
 
@@ -236,84 +252,24 @@ struct ReachablePeer {
     endpoint: NodeEndpoint,
 }
 
+/// One node: who it is and where it is reached, the settings it runs with, and the shutdown it
+/// stops within.
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct Application {
-    pub addr: SocketAddr,
-    #[builder(default = InternalTransportMode::Http)]
-    pub grpc_mode: InternalTransportMode,
+    pub identity: NodeIdentity,
     #[builder(default)]
-    pub grpc_https_listen_addr: Option<SocketAddr>,
-    #[builder(default)]
-    pub grpc_https_advertise_addr: Option<NodeEndpoint>,
-    pub http_listen_addr: SocketAddr,
-    pub https_listen_addr: SocketAddr,
-    pub observability_listen_addr: SocketAddr,
-    #[builder(default = SocketAddr::from(([127, 0, 0, 1], 0)))]
-    pub web_console_listen_addr: SocketAddr,
-    #[builder(default)]
-    pub web_console_advertise_addr: Option<NodeEndpoint>,
-    #[builder(default)]
-    pub web_console_https_listen_addr: Option<SocketAddr>,
-    #[builder(default)]
-    pub web_console_tls_cert: Option<PathBuf>,
-    #[builder(default)]
-    pub web_console_tls_key: Option<PathBuf>,
-    pub cluster_id: String,
-    pub node_id: ClusterNodeName,
-    pub grpc_advertise_addr: NodeEndpoint,
-    pub interconnect_listen_addr: SocketAddr,
-    pub interconnect_advertise_addr: NodeEndpoint,
-    pub interconnect_tls_ca: PathBuf,
-    pub interconnect_tls_cert: PathBuf,
-    pub interconnect_tls_key: PathBuf,
-    pub allow_bootstrap: bool,
-    #[builder(default = DEFAULT_USER.to_string())]
-    pub default_user: String,
-    #[builder(default)]
-    pub init_default_user_password: Option<String>,
-    pub node_unavailability_timeout: Duration,
-    pub raft_heartbeat_interval: Duration,
-    pub raft_election_timeout_min: Duration,
-    pub raft_election_timeout_max: Duration,
-    #[builder(default)]
-    pub raft_retention: RaftRetentionPolicy,
-    #[builder(default = DEFAULT_TRANSACTION_IDLE_TIMEOUT)]
-    pub transaction_idle_timeout: Duration,
-    #[builder(default = DEFAULT_TRANSACTION_TOMBSTONE_RETENTION)]
-    pub transaction_tombstone_retention: Duration,
-    #[builder(default)]
-    pub command_execution: CommandExecutionPolicy,
-    #[builder(default = DEFAULT_TRANSACTION_MAX_STATEMENTS)]
-    pub transaction_max_statements: usize,
-    #[builder(default = DEFAULT_TRANSACTION_MAX_SOURCE_BYTES)]
-    pub transaction_max_source_bytes: u64,
-    #[builder(default = DEFAULT_TRANSACTION_MAX_OPEN)]
-    pub transaction_max_open: usize,
-    #[builder(default = 0)]
-    pub replica_count: usize,
-    #[builder(default = Duration::from_secs(30))]
-    pub state_snapshot_interval: Duration,
-    #[builder(default = crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES)]
-    pub restore_staging_max_bytes: u64,
-    #[builder(default)]
-    pub memory_pressure: Option<MemoryPressureConfig>,
-    pub cluster_bootstrap_host: Option<String>,
-    #[builder(default = DnsConfiguration::system())]
-    pub dns: DnsConfiguration,
-    pub db_path: PathBuf,
-    #[builder(default = PathBuf::from(crate::runtime::DEFAULT_TEMP_DIR))]
-    pub temp_dir: PathBuf,
-    #[builder(default)]
-    pub resource_store_limits: ResourceStoreLimits,
+    pub settings: NodeSettings,
     #[builder(default)]
     #[doc(hidden)]
     pub fault_injection: ConfiguredFaultInjection,
-    #[builder(default)]
+    /// Bound by the shutdown timeout the settings hold, so the two can never disagree.
+    #[builder(
+        default = ShutdownCoordinator::new(settings.shutdown.shutdown_timeout()),
+        setter(skip)
+    )]
     pub shutdown: ShutdownCoordinator,
     #[builder(default = true)]
     pub graceful_shutdown_drain: bool,
-    #[builder(default = shutdown::DEFAULT_DRAIN_TIMEOUT)]
-    pub drain_timeout: Duration,
 }
 
 /// Runs the server command line with termination signals the caller has already registered, so
@@ -342,64 +298,67 @@ impl Application {
         self,
         tracing: Option<&TracingGuard>,
     ) -> Result<(), Report<AppError>> {
-        let addr = self.addr;
-        let grpc_mode = self.grpc_mode;
+        let addr = self.identity.addr;
+        let grpc_mode = self.identity.grpc_mode;
         let grpc_listen_addr = match grpc_mode {
             InternalTransportMode::Http => addr,
             InternalTransportMode::Https => self
+                .identity
                 .grpc_https_listen_addr
                 .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsListenAddress))?,
         };
-        let http_listen_addr = self.http_listen_addr;
-        let https_listen_addr = self.https_listen_addr;
-        let observability_listen_addr = self.observability_listen_addr;
-        let web_console_listen_addr = self.web_console_listen_addr;
-        let web_console_https_listen_addr = self.web_console_https_listen_addr;
+        let http_listen_addr = self.identity.http_listen_addr;
+        let https_listen_addr = self.identity.https_listen_addr;
+        let observability_listen_addr = self.identity.observability_listen_addr;
+        let web_console_listen_addr = self.identity.web_console_listen_addr;
+        let web_console_https_listen_addr = self.identity.web_console_https_listen_addr;
         let web_console_advertise_url = web_console_advertise_url(
-            self.web_console_advertise_addr,
+            self.identity.web_console_advertise_addr.clone(),
             web_console_listen_addr,
             web_console_https_listen_addr,
         )
         .change_context(AppError::BuildConsoleAdvertiseUrl)?;
         let graceful_shutdown_drain = self.graceful_shutdown_drain;
-        let drain_timeout = self.drain_timeout;
-        let cluster_id = self.cluster_id.clone();
-        let node_id = self.node_id.clone();
+        let drain_timeout = self.settings.shutdown.drain_timeout();
+        let cluster_id = self.identity.cluster_id.clone();
+        let node_id = self.identity.node_id.clone();
         let grpc_advertise_addr = match grpc_mode {
-            InternalTransportMode::Http => self.grpc_advertise_addr,
+            InternalTransportMode::Http => self.identity.grpc_advertise_addr.clone(),
             InternalTransportMode::Https => self
+                .identity
                 .grpc_https_advertise_addr
+                .clone()
                 .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsAdvertiseAddress))?,
         };
         let grpc_advertise_url = NodeServiceUrl::new(grpc_mode.scheme(), &grpc_advertise_addr)
             .change_context(AppError::BuildClientAdvertiseUrl)?;
-        let interconnect_listen_addr = self.interconnect_listen_addr;
-        let interconnect_advertise_addr = self.interconnect_advertise_addr.clone();
+        let interconnect_listen_addr = self.identity.interconnect_listen_addr;
+        let interconnect_advertise_addr = self.identity.interconnect_advertise_addr.clone();
         let interconnect_tls_paths = InterconnectTlsPaths {
-            ca: self.interconnect_tls_ca.clone(),
-            certificate: self.interconnect_tls_cert.clone(),
-            private_key: self.interconnect_tls_key.clone(),
+            ca: self.identity.interconnect_tls_ca.clone(),
+            certificate: self.identity.interconnect_tls_cert.clone(),
+            private_key: self.identity.interconnect_tls_key.clone(),
         };
-        let allow_bootstrap = self.allow_bootstrap;
-        let cluster_bootstrap_host = self.cluster_bootstrap_host.clone();
-        let default_user = self.default_user.clone();
-        let init_default_user_password = self.init_default_user_password.clone();
-        let node_unavailability_timeout = self.node_unavailability_timeout;
-        let raft_heartbeat_interval = self.raft_heartbeat_interval;
-        let raft_election_timeout_min = self.raft_election_timeout_min;
-        let raft_election_timeout_max = self.raft_election_timeout_max;
-        let raft_retention = self.raft_retention;
-        let transaction_idle_timeout = self.transaction_idle_timeout;
-        let transaction_tombstone_retention = self.transaction_tombstone_retention;
-        let transaction_max_statements = self.transaction_max_statements;
-        let transaction_max_source_bytes = self.transaction_max_source_bytes;
-        let transaction_max_open = self.transaction_max_open;
-        let replica_count = self.replica_count;
-        let state_snapshot_interval = self.state_snapshot_interval;
-        let restore_staging_max_bytes = self.restore_staging_max_bytes;
+        let allow_bootstrap = self.identity.allow_bootstrap;
+        let cluster_bootstrap_host = self.identity.cluster_bootstrap_host.clone();
+        let default_user = self.identity.default_user.clone();
+        let init_default_user_password = self.identity.init_default_user_password.clone();
+        let settings = self.settings;
+        let node_unavailability_timeout = settings.membership.node_unavailability_timeout();
+        let raft_timings = settings.raft;
+        let raft_retention = settings.raft_retention;
+        let transaction_idle_timeout = settings.transactions.idle_timeout();
+        let transaction_tombstone_retention = settings.transactions.tombstone_retention();
+        let transaction_max_statements = settings.transactions.max_statements();
+        let transaction_max_source_bytes = settings.transactions.max_source_bytes();
+        let transaction_max_open = settings.transactions.max_open();
+        let replica_count = settings.scheduling.replica_count();
+        let runtime_settings = settings.runtime;
+        let state_snapshot_interval = runtime_settings.state_snapshot_interval();
         let memory_pressure_controller = {
-            let mapping_input = self
+            let mapping_input = settings
                 .memory_pressure
+                .config()
                 .map(MemoryPressureController::new)
                 .transpose();
             match mapping_input {
@@ -413,9 +372,9 @@ impl Application {
                 }),
             }
         }?;
-        let db_path = self.db_path.clone();
-        let temp_dir = self.temp_dir.clone();
-        let resource_store_limits = self.resource_store_limits;
+        let db_path = self.identity.db_path.clone();
+        let temp_dir = self.identity.temp_dir.clone();
+        let resource_store_limits = settings.resources.limits();
         let shutdown_coordinator = self.shutdown.clone();
         let shutdown = shutdown_coordinator.drain_support_token();
         let fault_injection = self.fault_injection.clone();
@@ -431,34 +390,61 @@ impl Application {
         } else {
             None
         };
-        let web_console_tls_server_config =
-            match (&self.web_console_tls_cert, &self.web_console_tls_key) {
-                (Some(cert_path), Some(key_path)) => {
-                    let Some(_) = web_console_https_listen_addr else {
-                        return Err(Report::new(AppError::MissingWebConsoleHttpsListenAddress));
-                    };
-                    let config = match load_web_console_tls_server_config(cert_path, key_path) {
-                        Ok(config) => config,
-                        Err(error) => {
-                            error!(?error, "failed to build web console tls server config");
-                            return Err(error);
-                        }
-                    };
-                    Some(config)
-                }
-                (Some(_), None) => {
-                    return Err(Report::new(AppError::MissingWebConsoleTlsPrivateKey));
-                }
-                (None, Some(_)) => {
+        let web_console_tls_server_config = match (
+            &self.identity.web_console_tls_cert,
+            &self.identity.web_console_tls_key,
+        ) {
+            (Some(cert_path), Some(key_path)) => {
+                let Some(_) = web_console_https_listen_addr else {
+                    return Err(Report::new(AppError::MissingWebConsoleHttpsListenAddress));
+                };
+                let config = match load_web_console_tls_server_config(cert_path, key_path) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        error!(?error, "failed to build web console tls server config");
+                        return Err(error);
+                    }
+                };
+                Some(config)
+            }
+            (Some(_), None) => {
+                return Err(Report::new(AppError::MissingWebConsoleTlsPrivateKey));
+            }
+            (None, Some(_)) => {
+                return Err(Report::new(AppError::MissingWebConsoleTlsCertificate));
+            }
+            (None, None) => {
+                if web_console_https_listen_addr.is_some() {
                     return Err(Report::new(AppError::MissingWebConsoleTlsCertificate));
                 }
-                (None, None) => {
-                    if web_console_https_listen_addr.is_some() {
-                        return Err(Report::new(AppError::MissingWebConsoleTlsCertificate));
-                    }
-                    None
-                }
-            };
+                None
+            }
+        };
+        let dns_configuration = self.identity.dns.clone();
+        let preflight = Preflight {
+            settings: &settings,
+            db_path: &db_path,
+            temp_dir: &temp_dir,
+            dns: &dns_configuration,
+        }
+        .run()
+        .instrument(tracing::info_span!("startup_preflight", node_id = %node_id))
+        .await;
+        let PreflightOutcome {
+            executor,
+            dns,
+            memory,
+            restore_staging_max_bytes,
+        } = match preflight {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                error!(
+                    error = format!("{error:#}"),
+                    "the startup preflight refused this node"
+                );
+                return Err(error.change_context(AppError::Preflight));
+            }
+        };
         let grpc_listener = TcpListener::bind(grpc_listen_addr)
             .await
             .change_context(AppError::BindGrpcListenAddress)?;
@@ -493,11 +479,6 @@ impl Application {
         let interconnect_tls = interconnect_tls_material
             .tls_bundle()
             .change_context(AppError::LoadInterconnectTls)?;
-        let dns_configuration = self.dns.clone();
-        let dns = DnsResolver::load(dns_configuration.clone())
-            .instrument(tracing::info_span!("load_dns_configuration", node_id = %node_id))
-            .await
-            .change_context(AppError::LoadDnsConfiguration)?;
         if let Some(tracing) = tracing {
             tracing.install_dns(&dns);
         }
@@ -520,9 +501,12 @@ impl Application {
             interconnect_advertise_addr = %interconnect_advertise_addr,
             allow_bootstrap,
             node_unavailability_timeout = ?node_unavailability_timeout,
-            raft_heartbeat_interval = ?raft_heartbeat_interval,
-            raft_election_timeout_min = ?raft_election_timeout_min,
-            raft_election_timeout_max = ?raft_election_timeout_max,
+            raft_heartbeat_interval = ?raft_timings.heartbeat_interval(),
+            raft_election_timeout_min = ?raft_timings.election_timeout_min(),
+            raft_election_timeout_max = ?raft_timings.election_timeout_max(),
+            gossip_interval = ?settings.membership.gossip_interval(),
+            clock_skew_tolerance = ?settings.membership.clock_skew_tolerance(),
+            memory = %memory,
             replica_count,
             state_snapshot_interval = ?state_snapshot_interval,
             cluster_id,
@@ -536,7 +520,6 @@ impl Application {
             "starting nervix server"
         );
 
-        let executor = Executor::default();
         let db = ApplicationStartup::open_node_database(db_path.clone(), &executor).await?;
         let registry = Arc::new(
             match Registry::from_database(db.clone(), Some(db_path.as_path())) {
@@ -548,14 +531,16 @@ impl Application {
             },
         );
         let runtime = {
-            let mapping_input = Runtime::with_persistence_and_temp_dir(
-                executor,
-                Some(dns.clone()),
-                Some(db.clone()),
-                state_snapshot_interval,
-                fault_injection.clone(),
-                temp_dir.clone(),
-                restore_staging_max_bytes,
+            let mapping_input = Runtime::with_environment(
+                RuntimeEnvironment {
+                    executor,
+                    dns: Some(dns.clone()),
+                    db: Some(db.clone()),
+                    restore_staging_max_bytes,
+                    fault_injection: fault_injection.clone(),
+                    temp_dir: temp_dir.clone(),
+                },
+                runtime_settings,
             );
             match mapping_input {
                 Ok(mapped_value) => Ok(mapped_value),
@@ -623,6 +608,7 @@ impl Application {
                 cluster_id: cluster_id.clone(),
                 node_id: node_id.clone(),
                 advertised_host: interconnect_advertise_addr.host().to_string(),
+                join_terms: settings.join_terms(),
             },
             interconnect_tls,
             Default::default(),
@@ -646,9 +632,7 @@ impl Application {
             interconnect_advertise_addr: interconnect_advertise_addr.clone(),
             interconnect: interconnect.clone(),
             executor: startup.runtime.executor().clone(),
-            raft_heartbeat_interval,
-            raft_election_timeout_min,
-            raft_election_timeout_max,
+            raft_timings,
             raft_retention,
         };
         let consensus_result = startup
@@ -663,6 +647,11 @@ impl Application {
         };
         let recovered_members = consensus.observer().stored_membership_nodes();
         startup.consensus = Some(consensus);
+        let join_standing = if recovered_members.contains_key(&node_id) {
+            JoinStanding::RecoveredMember
+        } else {
+            JoinStanding::Newcomer
+        };
         let mut recovery_endpoints = BTreeSet::new();
         for (member, address) in recovered_members {
             if member == node_id {
@@ -692,7 +681,8 @@ impl Application {
             bootstrap_host: cluster_bootstrap_host.clone(),
             recovery_endpoints,
             interconnect: interconnect.clone(),
-            node_unavailability_timeout,
+            membership: settings.membership,
+            prerequisites: interconnect.local_prerequisites(),
             fault_injection: fault_injection.clone(),
         })
         .await
@@ -733,8 +723,12 @@ impl Application {
         let startup = startup
             .require_handler_registration(&cluster, health_handler)
             .await?;
-        let application_revision_handler =
-            completion::register_application_revision_handler(cluster.clone(), &interconnect);
+        let application_revision_handler = completion::register_application_revision_handler(
+            cluster.clone(),
+            &interconnect,
+            #[cfg(feature = "testing")]
+            fault_injection.clone(),
+        );
         let startup = startup
             .require_handler_registration(&cluster, application_revision_handler)
             .await?;
@@ -749,6 +743,10 @@ impl Application {
         );
         let startup = startup
             .require_handler_registration(&cluster, completion_peers_handler)
+            .await?;
+        let clock_probe_handler = cluster::register_clock_probe_handler(&interconnect);
+        let startup = startup
+            .require_handler_registration(&cluster, clock_probe_handler)
             .await?;
         let ApplicationStartup {
             db,
@@ -770,6 +768,7 @@ impl Application {
             runtime.executor().clone(),
             interconnect.clone(),
             consensus.observer(),
+            cluster.prerequisites_view(),
         );
         runtime
             .metrics()
@@ -800,15 +799,45 @@ impl Application {
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
+        let interconnect_tls_cluster = cluster.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
             reload_interconnect_tls(
                 interconnect_tls_transport,
+                interconnect_tls_cluster,
                 interconnect_tls_paths,
                 interconnect_tls_fingerprint,
                 interconnect_tls_shutdown,
             )
             .await;
         }));
+        let (join_refusal_sender, join_refusal) = watch::channel(None);
+        if has_bootstrap_candidates {
+            let supervision = JoinSupervision {
+                transport: interconnect.clone(),
+                cluster: cluster.clone(),
+                observer: consensus.observer(),
+                local_node: node_id.clone(),
+                standing: join_standing,
+                clock_skew_tolerance: settings.membership.clock_skew_tolerance(),
+                probe_retry_interval: settings.membership.gossip_interval(),
+            };
+            let join_shutdown = shutdown.clone();
+            let join_coordinator = shutdown_coordinator.clone();
+            background_tasks.push(nervix_primitives::task::spawn(async move {
+                let outcome = supervision.run(join_shutdown).await;
+                let JoinOutcome::Refused(refusal) = outcome else {
+                    return;
+                };
+                error!(refusal = %refusal, "this node was refused at join and stops");
+                join_refusal_sender.send_replace(Some(refusal));
+                match join_coordinator.request_stop() {
+                    ShutdownRequestOutcome::Accepted(_) => {}
+                    ShutdownRequestOutcome::AlreadyRequested(_) => {
+                        debug!("the node was already stopping when its join was refused");
+                    }
+                }
+            }));
+        }
         if let Some(controller) = memory_pressure_controller {
             let memory_runtime = runtime.clone();
             let memory_shutdown = shutdown.clone();
@@ -1082,6 +1111,8 @@ impl Application {
                             );
                             break;
                         }
+                        #[cfg(feature = "testing")]
+                        fault_injection_for_reconcile.end_startup_voter_observation();
                         let live_voters = live_node_ids
                             .into_iter()
                             .filter(|node| topology.voters().contains(node))
@@ -1541,7 +1572,7 @@ impl Application {
                 transaction_max_source_bytes,
                 transaction_max_open,
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
-                command_execution_policy: self.command_execution,
+                command_execution_policy: settings.commands,
                 command_executions: Default::default(),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_recovery: Default::default(),
@@ -2647,6 +2678,10 @@ impl Application {
         }
         shutdown_coordinator.finish(terminal_teardown_outcome.unless_deadline_passed(deadline));
 
+        let refused_join = join_refusal.borrow().clone();
+        if let Some(refusal) = refused_join {
+            return Err(Report::new(refusal).change_context(AppError::JoinRefused));
+        }
         listeners.result?;
         cluster_shutdown_result?;
         database_owner_outcome?;
@@ -2666,7 +2701,9 @@ impl Application {
 /// only through the names below.
 pub use error::AppError;
 pub use termination_signals::TerminationSignals;
-pub use tracing_setup::{TracingGuard, init_tracing, init_tracing_to_file};
+pub use tracing_setup::{
+    TraceSampleRatio, TraceSampleRatioError, TracingGuard, init_tracing, init_tracing_to_file,
+};
 pub use transaction::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
 
 #[cfg(test)]

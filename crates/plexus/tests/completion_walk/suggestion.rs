@@ -56,6 +56,13 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("jaq_program", "'.'"),
     // External names follow their own system's rules and are quoted, so each filler satisfies the
     // rule of its kind.
+    ("clickhouse_table", "'nx_table'"),
+    ("iceberg_table", "'nx_table'"),
+    ("mongodb_collection", "'nx_collection'"),
+    ("mqtt_topic", "'nx/topic'"),
+    ("mysql_table", "'nx_table'"),
+    ("nats_publish_subject", "'nx.subject'"),
+    ("postgres_table", "'nx_table'"),
     ("kafka_consumer_group", "'nx-group'"),
     ("kafka_topic", "'nx.topic'"),
     ("message_count", "100"),
@@ -84,6 +91,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     ("timestamp", "'2026-01-01T00:00:00Z'"),
     // Server-issued identities are quoted literals rather than Plexus names.
     ("transaction_id", "'nx_transaction'"),
+    ("upgrade_header_name", "'x-nx-header'"),
     ("word", "nx_word"),
 ];
 

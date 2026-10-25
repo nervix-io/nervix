@@ -45,8 +45,8 @@ Feature: Connector names head client definitions
       | 3            | ZEROMQ       |                       |                                                         |
       | 1            | SQS          |                       |                                                         |
       | 3            | SQS          |                       |                                                         |
-      | 1            | WEBSOCKETS   |                       |                                                         |
-      | 3            | WEBSOCKETS   |                       |                                                         |
+      | 1            | WEBSOCKETS   |                       | 'endpoint' = 'ws://127.0.0.1:19080/events'              |
+      | 3            | WEBSOCKETS   |                       | 'endpoint' = 'ws://127.0.0.1:19080/events'              |
       | 1            | SYSLOG       |                       |                                                         |
       | 3            | SYSLOG       |                       |                                                         |
       | 1            | CLICKHOUSE   |                       |                                                         |
@@ -87,7 +87,7 @@ Feature: Connector names head client definitions
         MODE NO ACK ON QUIESCE SUSPEND DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER publishing FROM events TO HTTP api METHOD 'POST' PATH '/events'
+      CREATE HTTP REQUEST EMITTER publishing FROM events TO api METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -103,15 +103,15 @@ Feature: Connector names head client definitions
       """
     Then the last command output contains
       """
-      TO HTTP api
+      TO api METHOD 'POST' PATH '/events'
       """
     When these Plexus statements are executed on the leader node
       """
       CREATE KAFKA CLIENT wrong_client CONFIG {};
       """
-    And these Plexus statements fail with "HTTP emitter requires a HTTP client, found KAFKA client 'wrong_client'"
+    And these Plexus statements fail with "HTTP REQUEST emitter requires a HTTP client, found KAFKA client 'wrong_client'"
       """
-      CREATE EMITTER wrong_kind FROM events TO HTTP wrong_client METHOD 'POST' PATH '/events'
+      CREATE HTTP REQUEST EMITTER wrong_kind FROM events TO wrong_client METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

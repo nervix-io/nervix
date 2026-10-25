@@ -1,12 +1,12 @@
 Feature: Emitter batching configuration
-  An emitter may declare a BATCH MAX MESSAGES and MAX SIZE clause between its sink clause and its
-  flush policy. The clause is optional for every sink except ClickHouse, Postgres, MySQL and
+  An emitter may declare a BATCH MAX MESSAGES and MAX SIZE clause between its emitter clause and its
+  flush policy. The clause is optional for every emitter except ClickHouse, Postgres, MySQL and
   MongoDB, whose writes always carry several rows. It renders in SHOW CREATE and DESCRIBE, is
-  validated where it is written and against the sink and codec it applies to, and is added,
+  validated where it is written and against the emitter and codec it applies to, and is added,
   replaced or removed by ALTER EMITTER as an entity-pause change.
 
   @emitter_batching_round_trip
-  Scenario Outline: The batching clause round-trips through SHOW CREATE and DESCRIBE for every sink
+  Scenario Outline: The batching clause round-trips through SHOW CREATE and DESCRIBE for every emitter
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -85,121 +85,108 @@ Feature: Emitter batching configuration
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
 
-      CREATE EMITTER kafka_single FROM outgoing
-        TO KAFKA kafka_main TOPIC kafka_single
-          MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE KAFKA TOPIC EMITTER kafka_single FROM outgoing
+        TO kafka_main TOPIC 'kafka_single'
+          MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER kafka_batched FROM outgoing
-        TO KAFKA kafka_main TOPIC kafka_batched
+      CREATE KAFKA TOPIC EMITTER kafka_batched FROM outgoing
+        TO kafka_main TOPIC 'kafka_batched'
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL WHERE input.seq > 0
         BATCH MAX MESSAGES 500 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER pulsar_batched FROM outgoing
-        TO PULSAR pulsar_main TOPIC pulsar_batched
-          MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE PULSAR TOPIC EMITTER pulsar_batched FROM outgoing
+        TO pulsar_main TOPIC 'pulsar_batched'
+          MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 1 MAX SIZE 1B
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER rabbit_batched FROM outgoing
-        TO RABBITMQ rabbit_main QUEUE rabbit_batched
-          MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE RABBITMQ QUEUE EMITTER rabbit_batched FROM outgoing
+        TO rabbit_main QUEUE 'rabbit_batched'
+          MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 65536 MAX SIZE 16MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER redis_batched FROM outgoing
-        TO REDIS PUBSUB redis_main CHANNEL redis_batched
-          MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE REDIS PUBSUB EMITTER redis_batched FROM outgoing
+        TO redis_main CHANNEL 'redis_batched'
+          MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 100 MAX SIZE 1048576B
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER mqtt_batched FROM outgoing
-        TO MQTT mqtt_main TOPIC mqtt_batched
+      CREATE MQTT TOPIC EMITTER mqtt_batched FROM outgoing
+        TO mqtt_main TOPIC 'mqtt_batched'
           MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 100 MAX SIZE 256KB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER nats_batched FROM outgoing
-        TO NATS nats_main SUBJECT nats_batched
+      CREATE NATS SUBJECT EMITTER nats_batched FROM outgoing
+        TO nats_main SUBJECT 'nats_batched'
           MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 100 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER zeromq_batched FROM outgoing
-        TO ZEROMQ zeromq_main
-          MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE ZEROMQ PUSH EMITTER zeromq_batched FROM outgoing
+        TO zeromq_main
+          MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 100 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER sqs_batched FROM outgoing
-        TO SQS sqs_main QUEUE sqs_batched
+      CREATE SQS QUEUE EMITTER sqs_batched FROM outgoing
+        TO sqs_main QUEUE 'sqs_batched'
           MODE BATCH RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 100 MAX SIZE 256KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER sentry_batched FROM outgoing
-        TO SENTRY sentry_main
+      CREATE SENTRY EVENT EMITTER sentry_batched FROM outgoing
+        TO sentry_main
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING sentry_codec
         INHERIT ALL
         BATCH MAX MESSAGES 50 MAX SIZE 900KB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER syslog_batched FROM outgoing
-        TO SYSLOG syslog_main
-          MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s
+      CREATE SYSLOG COLLECTOR EMITTER syslog_batched FROM outgoing
+        TO syslog_main
+          MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 20 MAX SIZE 60KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER otel_batched FROM outgoing
-        TO OTEL otel_main LOGS
-          VALUES { 'time' = NOW(), 'body' = 'batched' }
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
-        BATCH MAX MESSAGES 1000 MAX SIZE 3MiB
+      CREATE OTEL LOGS EMITTER otel_batched FROM outgoing
+        TO otel_main
+          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'time' = NOW(), 'body' = 'batched' } BATCH MAX MESSAGES 1000 MAX SIZE 3MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER clickhouse_rows FROM outgoing
-        TO CLICKHOUSE clickhouse_main INSERT TO TABLE clickhouse_events
-          VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
-        BATCH MAX MESSAGES 500 MAX SIZE 8MiB
+      CREATE CLICKHOUSE TABLE EMITTER clickhouse_rows FROM outgoing
+        TO clickhouse_main TABLE 'clickhouse_events'
+          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 500 MAX SIZE 8MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER postgres_rows FROM outgoing
-        TO POSTGRES postgres_main INSERT TO TABLE postgres_events
-          VALUES { 'seq' = input.seq }
-          ON CONFLICT ('seq') DO NOTHING
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
-        WHERE input.seq > 0
+      CREATE POSTGRES TABLE EMITTER postgres_rows FROM outgoing
+        TO postgres_main TABLE 'postgres_events'
+          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq }
+          ON CONFLICT ('seq') DO NOTHING WHERE input.seq > 0
         BATCH MAX MESSAGES 250 MAX SIZE 4MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER mysql_rows FROM outgoing
-        TO MYSQL mysql_main INSERT TO TABLE mysql_events
-          VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
-        BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+      CREATE MYSQL TABLE EMITTER mysql_rows FROM outgoing
+        TO mysql_main TABLE 'mysql_events'
+          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 100 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER mongodb_rows FROM outgoing
-        TO MONGODB mongodb_main INSERT TO COLLECTION mongodb_events
-          VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
-        BATCH MAX MESSAGES 100 MAX SIZE 16MiB
+      CREATE MONGODB COLLECTION EMITTER mongodb_rows FROM outgoing
+        TO mongodb_main COLLECTION 'mongodb_events'
+          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 100 MAX SIZE 16MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER iceberg_files FROM outgoing
-        TO ICEBERG ON S3 object_store TABLE iceberg_events
-          VALUES { 'seq' = input.seq }
+      CREATE ICEBERG TABLE EMITTER iceberg_files FROM outgoing
+        TO object_store TABLE 'iceberg_events'
           LOCATION 's3://nervix-iceberg/tables/emitter-batching-{{test_id}}'
-          CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s
-        BATCH MAX MESSAGES 65536 MAX SIZE 128MiB
+          CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 65536 MAX SIZE 128MiB
         FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     Then SHOW CREATE EMITTER on the leader node renders these clauses
@@ -226,9 +213,9 @@ Feature: Emitter batching configuration
       """
     Then the last command output contains
       """
-      CREATE ATTACHED EMITTER kafka_batched
+      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_batched
         FROM outgoing
-        TO KAFKA kafka_main TOPIC kafka_batched
+        TO kafka_main TOPIC 'kafka_batched'
           MODE ACK PARALLEL MAX 4 ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
@@ -252,7 +239,7 @@ Feature: Emitter batching configuration
       """
     Then the last command output contains
       """
-      sink: POSTGRES client=postgres_main table=postgres_events conflict=ON CONFLICT (seq) DO NOTHING
+      to: POSTGRES TABLE postgres_main TABLE 'postgres_events' ON CONFLICT ('seq') DO NOTHING
       batch: MAX MESSAGES 250 MAX SIZE 4MiB
       flush: FLUSH IMMEDIATE
       """
@@ -286,19 +273,19 @@ Feature: Emitter batching configuration
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER event_sink FROM outgoing
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE ZEROMQ PUSH EMITTER event_emitter FROM outgoing
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER event_sink SET BATCH MAX MESSAGES 500 MAX SIZE 1MiB;
+      ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH MAX MESSAGES 500 MAX SIZE 1MiB;
       """
     Then the last command output contains
       """
@@ -306,14 +293,14 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands are executed on the leader node
       """
-      SHOW CREATE EMITTER event_sink;
+      SHOW CREATE EMITTER event_emitter;
       """
     Then the last command output contains
       """
-      CREATE ATTACHED EMITTER event_sink
+      CREATE ATTACHED ZEROMQ PUSH EMITTER event_emitter
         FROM outgoing
-        TO ZEROMQ sink
-          MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+        TO emitter
+          MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING event_codec
         INHERIT ALL
         BATCH MAX MESSAGES 500 MAX SIZE 1MiB
@@ -323,7 +310,7 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER event_sink SET BATCH MAX MESSAGES 20 MAX SIZE 64KiB;
+      ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH MAX MESSAGES 20 MAX SIZE 64KiB;
       """
     Then the last command output contains
       """
@@ -331,7 +318,7 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands are executed on the leader node
       """
-      DESCRIBE EMITTER event_sink;
+      DESCRIBE EMITTER event_emitter;
       """
     Then the last command output contains
       """
@@ -339,7 +326,7 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER event_sink DROP BATCH;
+      ALTER ZEROMQ PUSH EMITTER event_emitter DROP BATCH;
       """
     Then the last command output contains
       """
@@ -347,7 +334,7 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands are executed on the leader node
       """
-      DESCRIBE EMITTER event_sink;
+      DESCRIBE EMITTER event_emitter;
       """
     Then the last command output contains
       """
@@ -355,7 +342,7 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands fail with "emitter batching is not configured"
       """
-      ALTER EMITTER event_sink DROP BATCH;
+      ALTER ZEROMQ PUSH EMITTER event_emitter DROP BATCH;
       """
 
     Examples:
@@ -384,35 +371,36 @@ Feature: Emitter batching configuration
         'addr' = 'mongodb://127.0.0.1:27017',
         'database' = 'nervix'
       };
-      CREATE EMITTER row_sink FROM outgoing
-        TO MONGODB mongodb_main INSERT TO COLLECTION batching_rows
-          VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms
-        BATCH MAX MESSAGES 100 MAX SIZE 1MiB
+      CREATE MONGODB COLLECTION EMITTER row_sink FROM outgoing
+        TO mongodb_main COLLECTION 'batching_rows'
+          MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'seq' = input.seq } BATCH MAX MESSAGES 100 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER record_sink FROM outgoing
-        TO OTEL otel_main LOGS
-          VALUES { 'time' = NOW(), 'body' = 'record' }
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE OTEL LOGS EMITTER record_sink FROM outgoing
+        TO otel_main
+          MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'time' = NOW(), 'body' = 'record' } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these Plexus commands fail with "MONGODB COLLECTION emitters require BATCH MAX MESSAGES"
+      """
+      ALTER MONGODB COLLECTION EMITTER row_sink DROP BATCH;
+      """
+    When these Plexus statements fail with "BATCH"
+      """
+      CREATE MONGODB COLLECTION EMITTER incomplete_replacement FROM outgoing
+        TO mongodb_main COLLECTION 'records'
+          MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'seq' = input.seq }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      """
-    When these Plexus commands fail with "MONGODB emitters require BATCH MAX MESSAGES"
-      """
-      ALTER EMITTER row_sink DROP BATCH;
-      """
-    When these Plexus commands fail with "MONGODB emitters require BATCH MAX MESSAGES"
-      """
-      ALTER EMITTER record_sink
-        SET TO MONGODB mongodb_main INSERT TO COLLECTION records VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms;
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER row_sink SET BATCH MAX MESSAGES 10 MAX SIZE 2MiB;
-      ALTER EMITTER record_sink
-        SET TO MONGODB mongodb_main INSERT TO COLLECTION records VALUES { 'seq' = input.seq }
-          MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms,
-        SET BATCH MAX MESSAGES 25 MAX SIZE 4MiB;
+      ALTER MONGODB COLLECTION EMITTER row_sink SET BATCH MAX MESSAGES 10 MAX SIZE 2MiB;
+      BEGIN;
+      DROP EMITTER record_sink;
+      CREATE MONGODB COLLECTION EMITTER record_sink FROM outgoing
+        TO mongodb_main COLLECTION 'records'
+          MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'seq' = input.seq }
+        BATCH MAX MESSAGES 25 MAX SIZE 4MiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      COMMIT;
       """
     Then SHOW CREATE EMITTER on the leader node renders these clauses
       | emitter     | clause                              |
@@ -425,7 +413,7 @@ Feature: Emitter batching configuration
       | 3            |
 
   @emitter_batching_validation
-  Scenario Outline: Batching limits and the sink and codec contracts are validated
+  Scenario Outline: Batching limits and the emitter and codec contracts are validated
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -452,26 +440,26 @@ Feature: Emitter batching configuration
       """
     When these Plexus commands fail with "<diagnostic>"
       """
-      CREATE EMITTER rejected FROM outgoing
-        TO <sink>
+      CREATE <emitter_kind> EMITTER rejected FROM outgoing
+        TO <connector_body>
         <batch>
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
     Examples:
-      | cluster_size | sink                                                                                                                    | batch                                      | diagnostic                                                                 |
-      | 1            | KAFKA kafka_main TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL         | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    |
-      | 1            | KAFKA kafka_main TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL         | BATCH MAX MESSAGES 65537 MAX SIZE 1MiB     | BATCH MAX MESSAGES must be between 1 and 65536, found 65537                |
-      | 1            | KAFKA kafka_main TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL         | BATCH MAX MESSAGES 10 MAX SIZE 0MiB        | BATCH MAX SIZE must be greater than zero                                   |
-      | 1            | KAFKA kafka_main TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL         | BATCH MAX MESSAGES 10 MAX SIZE 1.5MiB      | must be a whole number followed by B, KB, KiB, MB, MiB, GB, GiB, TB or TiB |
-      | 1            | KAFKA kafka_main TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL         | BATCH MAX MESSAGES 10 MAX SIZE 16777216TiB | exceeds the largest size a 64-bit byte count can hold                      |
-      | 1            | SQS sqs_main QUEUE events MODE BATCH RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL              | BATCH MAX MESSAGES 10 MAX SIZE 512KiB      | SQS emitters accept BATCH MAX SIZE up to 256KiB                            |
-      | 1            | SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING sentry_codec INHERIT ALL                      | BATCH MAX MESSAGES 10 MAX SIZE 900KB       | requires codec 'sentry_codec' to declare an ON EMITTING BATCH              |
-      | 1            | MONGODB mongodb_main INSERT TO COLLECTION events VALUES { 'seq' = input.seq } MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s |                                            | BATCH MAX MESSAGES                                                         |
-      | 3            | KAFKA kafka_main TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL         | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    |
-      | 3            | SQS sqs_main QUEUE events MODE BATCH RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL              | BATCH MAX MESSAGES 10 MAX SIZE 512KiB      | SQS emitters accept BATCH MAX SIZE up to 256KiB                            |
-      | 3            | SENTRY sentry_main MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING sentry_codec INHERIT ALL                      | BATCH MAX MESSAGES 10 MAX SIZE 900KB       | requires codec 'sentry_codec' to declare an ON EMITTING BATCH              |
-      | 3            | MONGODB mongodb_main INSERT TO COLLECTION events VALUES { 'seq' = input.seq } MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s |                                            | BATCH MAX MESSAGES                                                         |
+      | cluster_size | connector_body                                                                                              | batch                                      | diagnostic                                                                 | emitter_kind       |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    | KAFKA TOPIC        |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 65537 MAX SIZE 1MiB     | BATCH MAX MESSAGES must be between 1 and 65536, found 65537                | KAFKA TOPIC        |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 0MiB        | BATCH MAX SIZE must be greater than zero                                   | KAFKA TOPIC        |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 1.5MiB      | must be a whole number followed by B, KB, KiB, MB, MiB, GB, GiB, TB or TiB | KAFKA TOPIC        |
+      | 1            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 10 MAX SIZE 16777216TiB | exceeds the largest size a 64-bit byte count can hold                      | KAFKA TOPIC        |
+      | 1            | sqs_main QUEUE 'events' MODE BATCH RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL    | BATCH MAX MESSAGES 10 MAX SIZE 512KiB      | SQS QUEUE emitters accept BATCH MAX SIZE up to 256KiB                      | SQS QUEUE          |
+      | 1            | sentry_main MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING sentry_codec INHERIT ALL                 | BATCH MAX MESSAGES 10 MAX SIZE 900KB       | requires codec 'sentry_codec' to declare an ON EMITTING BATCH              | SENTRY EVENT       |
+      | 1            | mongodb_main COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq }     |                                            | BATCH MAX MESSAGES                                                         | MONGODB COLLECTION |
+      | 3            | kafka_main TOPIC 'events' MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL | BATCH MAX MESSAGES 0 MAX SIZE 1MiB         | BATCH MAX MESSAGES must be between 1 and 65536, found 0                    | KAFKA TOPIC        |
+      | 3            | sqs_main QUEUE 'events' MODE BATCH RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING event_codec INHERIT ALL    | BATCH MAX MESSAGES 10 MAX SIZE 512KiB      | SQS QUEUE emitters accept BATCH MAX SIZE up to 256KiB                      | SQS QUEUE          |
+      | 3            | sentry_main MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s ENCODE USING sentry_codec INHERIT ALL                 | BATCH MAX MESSAGES 10 MAX SIZE 900KB       | requires codec 'sentry_codec' to declare an ON EMITTING BATCH              | SENTRY EVENT       |
+      | 3            | mongodb_main COLLECTION 'events' MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s VALUES { 'seq' = input.seq }     |                                            | BATCH MAX MESSAGES                                                         | MONGODB COLLECTION |
 
   @emitter_batching_codec_grammar
   Scenario: ON EMITTING BATCH is only written after ON EMITTING
@@ -525,8 +513,8 @@ Feature: Emitter batching configuration
       CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}'
       };
-      CREATE EMITTER bounded_events FROM events
-        TO KAFKA kafka_main TOPIC bounded_events_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER bounded_events FROM events
+        TO kafka_main TOPIC 'bounded_events_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL

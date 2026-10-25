@@ -27,7 +27,7 @@ use super::*;
 
 #[path = "source_readiness.rs"]
 mod readiness;
-pub(in crate::runtime) use readiness::SourceInstanceReadiness;
+pub(in crate::runtime) use readiness::IngestorInstanceReadiness;
 
 pub(super) const DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -377,7 +377,14 @@ impl IngestorQuiescePublication {
 /// buffer owns these values and appends them into the group's builders on replay.
 #[derive(Debug, Clone)]
 pub(in crate::runtime) enum BufferedIngestMetadata {
-    Syslog { peer_addr: std::net::SocketAddr },
+    Websockets {
+        frame_type: nervix_models::WebsocketsFrameType,
+        // Retains the message's exact connection header snapshot without copying it per frame.
+        headers: Arc<RetainedIngestHeaders>,
+    },
+    Syslog {
+        peer_addr: std::net::SocketAddr,
+    },
     Headers(RetainedIngestHeaders),
 }
 
@@ -390,6 +397,13 @@ impl BufferedIngestMetadata {
 
     pub(super) fn row(&self) -> IngestMetadataRow<'_> {
         match self {
+            Self::Websockets {
+                frame_type,
+                headers,
+            } => IngestMetadataRow::Websockets {
+                frame_type: *frame_type,
+                headers,
+            },
             Self::Syslog { peer_addr } => IngestMetadataRow::Syslog {
                 peer_addr: *peer_addr,
             },
@@ -1131,18 +1145,22 @@ pub(crate) struct IngestorQuiesceCounters {
 
 #[derive(Debug)]
 pub(super) struct IngestorReadiness {
-    instances: Vec<SourceInstanceReadiness>,
+    instances: Vec<IngestorInstanceReadiness>,
 }
 
 impl IngestorReadiness {
     pub(super) fn new(expected_instances: NonZeroU64) -> Self {
         let count: usize = expected_instances.get().arch_into();
-        let instances = (0..count).map(|_| SourceInstanceReadiness::new()).collect();
+        let instances = (0..count)
+            .map(|_| IngestorInstanceReadiness::new())
+            .collect();
         Self { instances }
     }
 
     pub(super) fn is_ready(&self) -> bool {
-        self.instances.iter().all(SourceInstanceReadiness::is_ready)
+        self.instances
+            .iter()
+            .all(IngestorInstanceReadiness::is_ready)
     }
 
     pub(super) fn retire(&self) {
@@ -1220,7 +1238,7 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
         expected_instances: NonZeroU64,
-    ) -> Vec<SourceInstanceReadiness> {
+    ) -> Vec<IngestorInstanceReadiness> {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         if let Some(predecessor) = self.inner.ingestor_readiness.get(&key) {
             predecessor.retire();

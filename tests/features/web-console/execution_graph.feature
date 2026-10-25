@@ -25,7 +25,7 @@ Feature: Web console execution graph
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER orders_out FROM orders TO KAFKA kafka_out TOPIC orders_out_topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING order_codec
+      CREATE KAFKA TOPIC EMITTER orders_out FROM orders TO kafka_out TOPIC 'orders_out_topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING order_codec
         INHERIT ALL
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -84,7 +84,7 @@ Feature: Web console execution graph
         INHERIT ALL
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE EMITTER high_value_out FROM high_value_orders TO KAFKA kafka_out TOPIC high_value_topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING order_codec
+      CREATE KAFKA TOPIC EMITTER high_value_out FROM high_value_orders TO kafka_out TOPIC 'high_value_topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING order_codec
         INHERIT ALL
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

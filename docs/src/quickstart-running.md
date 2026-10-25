@@ -30,7 +30,11 @@ nervix-server \
 - `--init-default-user-password` seeds the `default` user's password on the very first startup.
   Once the user exists, remove the flag from normal startup.
 
-Every flag has a `NERVIX_*` environment variable twin, such as `NERVIX_NODE_ID`. Control-plane
+Every flag has a `NERVIX_*` environment variable twin, such as `NERVIX_NODE_ID`.
+`nervix-server --help` lists every option by area, with its default and environment variable, and
+the [nervix-server Reference](nervix-server-reference.md) is that same output for this release. A
+node checks every setting, and the relationships between settings, before it opens a store or binds
+a listener, and refuses to start with an error that names the settings involved. Control-plane
 state is persisted under `./.nervix-db` by default; use `--db-path` to relocate it. The directory
 contains the node database for registry and runtime state and a separate `consensus` database whose
 journal carries only Raft state.

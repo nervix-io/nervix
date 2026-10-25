@@ -219,7 +219,7 @@ async fn a_console_download_stops_at_its_client_close_while_frames_remain() {
     } = build_test_service(true).await;
     let (mut console, server) = console_connection().await;
     let codec = ServerBackupDownloadWebSocketCodec::new(limits());
-    let (mut sink, mut messages) = server.split();
+    let (mut connector, mut messages) = server.split();
     // Every frame of the answer is ready at once, as when a small archive streams.
     let failed = BackupDownloadFailed {
         failure: BackupDownloadFailure::ReadFailed,
@@ -239,7 +239,7 @@ async fn a_console_download_stops_at_its_client_close_while_frames_remain() {
     let ended = service
         .send_download_frames(
             &codec,
-            &mut sink,
+            &mut connector,
             &mut messages,
             Box::pin(stream::iter(frames)),
         )
@@ -580,13 +580,13 @@ async fn a_download_sending_its_frames_stops_when_its_connection_ends_or_the_nod
     } = build_test_service(true).await;
     let (_console, server) = console_connection().await;
     let codec = ServerBackupDownloadWebSocketCodec::new(limits());
-    let (mut sink, _messages) = server.split();
+    let (mut connector, _messages) = server.split();
 
     // Messages that end without a close come from a connection that failed.
     let mut ended = stream::empty::<Result<Message, tungstenite::Error>>();
     let frames = Box::pin(stream::pending::<EncodedFrame<BackupDownloadFrame>>());
     let end = service
-        .send_download_frames(&codec, &mut sink, &mut ended, frames)
+        .send_download_frames(&codec, &mut connector, &mut ended, frames)
         .await;
     assert!(matches!(end, Some(ConsoleCallEnd::Failed)), "found {end:?}");
 
@@ -595,7 +595,7 @@ async fn a_download_sending_its_frames_stops_when_its_connection_ends_or_the_nod
     let mut silent = stream::pending::<Result<Message, tungstenite::Error>>();
     let frames = Box::pin(stream::pending::<EncodedFrame<BackupDownloadFrame>>());
     let end = service
-        .send_download_frames(&codec, &mut sink, &mut silent, frames)
+        .send_download_frames(&codec, &mut connector, &mut silent, frames)
         .await;
     assert!(
         matches!(end, Some(ConsoleCallEnd::ShuttingDown)),

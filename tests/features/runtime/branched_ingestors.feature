@@ -46,7 +46,9 @@ Feature: Ingestor branch consistency
       CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
-          'addr' = '{{redis_addr}}'
+          'addr' = '{{redis_addr}}',
+          'subscription_buffer_messages' = '1024',
+          'idle_timeout_ms' = '30000'
         }; CREATE MQTT TOPIC INGESTOR mqtt_notifications
         FROM mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec

@@ -74,7 +74,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | KAFKA TOPIC | Compare `KAFKA TOPIC`: locator, options, modes, ingest metadata. Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Emit locators currently use the emitter grammar’s unquoted name, while ingest validates a quoted broker topic. |
+| Entity | KAFKA TOPIC | Compare `KAFKA TOPIC`: options, modes, ingest metadata. Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names. |
 | Reference | KAFKA client |  |
 | Locator and validation rule | TOPIC 'orders' (kafka_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -86,15 +86,15 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Position class | replayable |  |
 | Acknowledgement confirmation | answered |  |
 | Buffers | messages librdkafka prefetches: driver default, queued.min.messages 100000 per partition, queued.max.messages.kbytes 65536; when full, holds back what fills it<br>admitted synchronous control jobs per node: at most 1024 pending jobs; when full, immediately refuses the request for its sender to retry |  |
-| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded |  |
-| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>receive.message.max.bytes 100000000 |  |
+| Network waits | name resolution: unbounded<br>connection setup: TCP, TLS and SASL: driver default, socket.connection.setup.timeout.ms, 30 s<br>a fetch: driver default, socket.timeout.ms, 60 s<br>a consumer-group commit under ACK: fixed 30s<br>metadata, partition inspection, offset lookups, watermarks and seeks including executor admission: driver default, socket.timeout.ms, 60 s per control job<br>subscribe, assign and unsubscribe: unbounded<br>destroying a consumer that joined its group, for its LeaveGroup answer: driver default, 5 s per LeaveGroup request |  |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>Connector control execution has two workers per node by default. A commit still unanswered after its caller's 30 s deadline retains its worker and the source's one in-flight commit until the native call ends. Native subscribe, assign and unsubscribe have no cancellable deadline; their caller waits socket.timeout.ms at most.<br>A consumer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes librdkafka's 5 s LeaveGroup timeout.<br>receive.message.max.bytes 100000000 |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### PULSAR TOPIC ingest
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: locator, options, modes, headers. Consumption owns a subscription and broker positions; publication uses a producer receipt. Emit locators currently use the emitter grammar’s unquoted topic, while ingest validates a quoted Pulsar name. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers. Consumption owns a subscription and broker positions; publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
 | Reference | PULSAR client |  |
 | Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
 | Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -124,17 +124,17 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Metadata | Not offered: The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace. |  |
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
-| Acknowledgement confirmation | queued |  |
-| Buffers | each incoming packet, whose bound every CONNECT advertises as its Maximum Packet Size: at most 10240 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>SUBSCRIBE and PUBACK requests for the connection: driver default, 1024 requests; when full, holds back what fills it |  |
-| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |  |
-| Driver limits | A packet above the advertised Maximum Packet Size that a broker sends anyway ends the connection with DISCONNECT Packet too large. |  |
+| Acknowledgement confirmation | written |  |
+| Buffers | each raw MQTT frame, whose protocol bound every CONNECT advertises as its Maximum Packet Size; one packet is decoded before admission: at most 268435460 bytes; when full, its peer, told this capacity, discards what does not fit instead of sending it<br>each admitted publish including its packet headers, copied out of raw framing: at most 10240 bytes; when full, drops and counts what does not fit<br>admitted publishes or compact discard acknowledgements the connection reads ahead of the host: set by the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK; when full, holds back what fills it<br>the next classified packet outcome held for room in read-ahead: at most 1 outcome; when full, holds back what fills it<br>a deferred or in-progress size rejection retained across reads: at most 1 discard; when full, holds back what fills it<br>SUBSCRIBE and PUBACK requests for the connection: set by the Receive Maximum, or 1 under NO ACK; when full, holds back what fills it |  |
+| Network waits | connection: name resolution, TCP, TLS and CONNECT: driver default, 5 s<br>SUBACK: unbounded<br>ordinary and oversized-discard acknowledgements written to the connection: driver default, one keep-alive interval of 60 s, or the broker's<br>a silent connection: driver default, keep-alive of 60 s, or the broker's |  |
+| Driver limits | A publish above the admission bound is acknowledged before it is counted as oversized; its topic, payload and properties never enter read-ahead. The raw framing bound is MQTT's protocol maximum, separate from the admission bound. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### NATS SUBJECT ingest
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | NATS SUBJECT | Compare `NATS SUBJECT`: locator, options, modes. Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Emit subject names currently use the unquoted emitter grammar, and ingest validates quoted subscription subjects. |
+| Entity | NATS SUBJECT | Compare `NATS SUBJECT`: locator, options, modes. Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
 | Reference | NATS client |  |
 | Locator and validation rule | SUBJECT 'orders.created' (nats_subject) |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
@@ -154,10 +154,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: locator, options, modes. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Queue names currently use the unquoted emitter grammar and quoted ingest validator respectively. |
+| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: options, modes. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
 | Reference | RABBITMQ client |  |
 | Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
-| Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Modes (complete bodies after MODE) | NO ACK<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `INSTANCES 2` (positive count); optional; default 1 |  |
 | Headers | `read_header`, `read_headers`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |  |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND |  |
@@ -165,30 +165,30 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Every live node | no; scheduled owner |  |
 | Position class | broker_redelivered |  |
 | Acknowledgement confirmation | written |  |
-| Buffers | deliveries the broker sends ahead of their acknowledgement: at most 1 delivery; when full, holds back what fills it |  |
-| Network waits | connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |  |
-| Driver limits | A frame above the negotiated frame_max ends the connection. |  |
+| Buffers | Lapin's existing consumer delivery queue; broker prefetch bounds it in acknowledged modes, but automatic acknowledgements do not apply that bound: unbounded<br>deliveries gathered for one host read: set by 1 under NO ACK and ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 65,535; when full, holds back what fills it |  |
+| Network waits | gathering further deliveries after the first under ACK PARALLEL; cancellation hands over every delivery already gathered: `BATCH TIMEOUT`<br>connection: name resolution, address attempts, TLS, the AMQP handshake, channel open and consume: `connect_timeout_ms`; 30s when omitted<br>a silent connection: driver default, twice the negotiated heartbeat |  |
+| Driver limits | Consumer prefetch is 1 under ACK SEQUENTIAL and ACK PARALLEL MAX under ACK PARALLEL, at most 65,535; the broker holds back deliveries beyond that window.<br>NO ACK has no prefetch bound; auto-acknowledged deliveries can accumulate in Lapin's existing consumer queue while the host is not reading.<br>A frame above the negotiated frame_max ends the connection. |  |
 | Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
 
 ### REDIS PUBSUB ingest
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | REDIS PUBSUB | Compare `REDIS PUBSUB`: locator, modes. Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Emit channel names currently use the unquoted emitter grammar. |
+| Entity | REDIS PUBSUB | Compare `REDIS PUBSUB`: modes. Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |
 | Reference | REDIS client |  |
 | Locator and validation rule | CHANNEL 'orders' (redis_channel) |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Emit channel names currently use the unquoted emitter grammar. |  |
+| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
 | Metadata | Not offered: The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace. |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | messages the driver reads ahead of the host: unbounded |  |
-| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>reading the next message: unbounded |  |
+| Buffers | messages read ahead of intake: set by subscription_buffer_messages; when full, holds back what fills it |  |
+| Network waits | subscription: name resolution, address attempts, TLS, Redis setup and SUBSCRIBE: `connect_timeout_ms`; 30s when omitted<br>idle subscription activity, including its PING probe: `idle_timeout_ms`; required |  |
 | Driver limits | None declared. |  |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
 
 ### PROMETHEUS QUERY ingest
 
@@ -234,7 +234,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: locator, options, modes. Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Emit queue names currently use the unquoted emitter grammar. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes. Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
 | Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
@@ -258,17 +258,17 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Reference | WEBSOCKETS client |  |
 | Locator and validation rule | Not offered: The configured client or endpoint owns the address and path; this body has no separate external-name locator. |  |
 | Modes (complete bodies after MODE) | NO ACK |  |
-| Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: A frame carries its payload; handshake headers are not a per-frame header map. |  |
+| Options in statement order | `HEADERS { 'authorization' = 'Bearer token' }` (composed clause); optional; omitted when unset |  |
+| Headers | `read_header`, `read_headers`; `repeats_by_name`, lowercase names: every value of a name, together and in the order written; the order of different names is not declared; a name is recorded in ASCII lowercase, so names that differ only in letter case are one name |  |
 | Quiesce (complete bodies after ON QUIESCE) | BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |  |
-| Metadata | Not offered: The current frame declaration has no typed frame or handshake metadata namespace. |  |
+| Metadata | metadata.frame_type: STRING OPTIONAL |  |
 | Every live node | no; scheduled owner |  |
 | Position class | none |  |
 | Acknowledgement confirmation | none |  |
-| Buffers | frames that arrive while the signaling handshake runs: unbounded |  |
-| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: unbounded<br>close: fixed 1s |  |
-| Driver limits | A message above 64 MiB or a frame above 16 MiB ends the connection. |  |
-| Stalled-peer checks | `STALLED PEER connect_timeout_ms` |  |
+| Buffers | accepted signaling frames retained for source reads: set by handshake_buffer_capacity messages (default 16), each at most max_message_size bytes; when full, holds back what fills it<br>one accepted frame waiting for handoff room: set by max_message_size bytes (default 67108864); when full, holds back what fills it<br>the incoming message assembled by the transport: set by max_message_size bytes (default 67108864), with each frame bounded by max_frame_size bytes (default 16777216); when exceeded, fails the read and reconnects on the retry policy |  |
+| Network waits | connection: name resolution, address attempts, TLS and the opening upgrade: `connect_timeout_ms`; 30s when omitted<br>the signaling handshake: `the signaling protocol's TIMEOUT`<br>reading the next frame: `idle_timeout_ms`; when omitted, three ping_interval_ms intervals, or 30 s without configured pings<br>writing a configured ping: fixed 1s<br>close: fixed 1s |  |
+| Driver limits | None declared. |  |
+| Stalled-peer checks | `STALLED PEER connect_timeout_ms`<br>`STALLED PEER idle_timeout_ms` |  |
 
 ### WEBSOCKETS ENDPOINT ingest
 
@@ -358,10 +358,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | KAFKA TOPIC | Compare `KAFKA TOPIC`: locator, options, modes. Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Emit locators currently use the emitter grammar’s unquoted name, while ingest validates a quoted broker topic. |
+| Entity | KAFKA TOPIC | Compare `KAFKA TOPIC`: options, modes. Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names. |
 | Reference | KAFKA client |  |
-| Locator and validation rule | TOPIC orders (topic_name) |  |
-| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Locator and validation rule | TOPIC 'orders' (kafka_topic) |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `write_header`; `ordered_repeats`, exact names: every header in the order it was written; a repeated name keeps each of its values in its place; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
@@ -371,18 +371,18 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Envelope | Not offered: This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity. |  |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | records the producer queues under ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, holds back what fills it<br>records the producer queues under NO ACK: driver default, queue.buffering.max.messages 100000, queue.buffering.max.kbytes 1048576; when full, fails the publish for the host to retry<br>records awaiting confirmation under ACK: set by ACK PARALLEL MAX; when full, holds back what fills it |  |
-| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, message.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT` |  |
-| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR. |  |
+| Network waits | a produce request: driver default, request.timeout.ms, 30 s<br>delivery under NO ACK: driver default, message.timeout.ms, 300 s<br>delivery under ACK: `ACK TIMEOUT`<br>destroying a producer, for its polling thread and the reports of the records its purge failed: driver default, 100 ms poll, then a 500 ms flush |  |
+| Driver limits | Every librdkafka key passes through, so a client can change each driver default above.<br>message.max.bytes 1000000<br>A record whose payload exceeds the whole queue.buffering.max.kbytes is rejected through ON MESSAGE ERROR.<br>A producer whose last handle is gone is destroyed by one connector control job, which waits for a place rather than being refused; no Nervix key changes rust-rdkafka's 100 ms poll or 500 ms flush, and librdkafka then joins its threads, a broker thread still resolving a name included. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### PULSAR TOPIC emit
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: locator, options, modes, headers. Consumption owns a subscription and broker positions; publication uses a producer receipt. Emit locators currently use the emitter grammar’s unquoted topic, while ingest validates a quoted Pulsar name. |
+| Entity | PULSAR TOPIC | Compare `PULSAR TOPIC`: options, modes, headers. Consumption owns a subscription and broker positions; publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names. |
 | Reference | PULSAR client |  |
-| Locator and validation rule | TOPIC orders (topic_name) |  |
-| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Locator and validation rule | TOPIC 'orders' (pulsar_topic) |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
@@ -400,10 +400,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: locator, options, modes. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Queue names currently use the unquoted emitter grammar and quoted ingest validator respectively. |
+| Entity | RABBITMQ QUEUE | Compare `RABBITMQ QUEUE`: options, modes. A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names. |
 | Reference | RABBITMQ client |  |
-| Locator and validation rule | QUEUE orders (queue_name) |  |
-| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Locator and validation rule | QUEUE 'orders' (rabbitmq_queue) |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `write_header`; `sorted_by_name`, exact names: one value per name, the last one written for it; names in ascending byte order; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
@@ -421,12 +421,12 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | REDIS PUBSUB | Compare `REDIS PUBSUB`: locator, modes. Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Emit channel names currently use the unquoted emitter grammar. |
+| Entity | REDIS PUBSUB | Compare `REDIS PUBSUB`: modes. Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |
 | Reference | REDIS client |  |
-| Locator and validation rule | CHANNEL orders (channel_name) |  |
-| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Locator and validation rule | CHANNEL 'orders' (redis_channel) |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
-| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Emit channel names currently use the unquoted emitter grammar. |  |
+| Headers | Not offered: Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names. |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
 | BATCH | optional |  |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |  |
@@ -444,7 +444,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | --- | --- | --- |
 | Entity | MQTT TOPIC | Compare `MQTT TOPIC`: locator, options, modes. Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |
 | Reference | MQTT client |  |
-| Locator and validation rule | TOPIC orders (topic_name) |  |
+| Locator and validation rule | TOPIC 'devices/Orders' (mqtt_topic) |  |
 | Modes (complete bodies after MODE) | QOS 0 RETRY POLICY BACKOFF 1s MAX 30s<br>QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s<br>QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | Not offered: Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation. |  |
@@ -463,10 +463,10 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | NATS SUBJECT | Compare `NATS SUBJECT`: locator, options, modes. Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Emit subject names currently use the unquoted emitter grammar, and ingest validates quoted subscription subjects. |
+| Entity | NATS SUBJECT | Compare `NATS SUBJECT`: locator, options, modes. Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards. |
 | Reference | NATS client |  |
-| Locator and validation rule | SUBJECT orders (subject_name) |  |
-| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s<br>JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Locator and validation rule | SUBJECT 'orders.Created' (nats_publish_subject) |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s<br>JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | `write_header`; `repeats_by_name`, exact names: every value of a name, together and in the order written; the order of different names is not declared; a name matches only a name spelled the same, letter case included |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
@@ -487,7 +487,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Entity | ZEROMQ PUSH | Compare `ZEROMQ PULL`: modes. The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |
 | Reference | ZEROMQ client |  |
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |  |
-| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
@@ -505,9 +505,9 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 
 | Capability | Declaration | Mirror and transport reason |
 | --- | --- | --- |
-| Entity | SQS QUEUE | Compare `SQS QUEUE`: locator, options, modes. Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Emit queue names currently use the unquoted emitter grammar. |
+| Entity | SQS QUEUE | Compare `SQS QUEUE`: options, modes. Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix. |
 | Reference | SQS client |  |
-| Locator and validation rule | QUEUE orders (queue_name) |  |
+| Locator and validation rule | QUEUE 'orders' (sqs_queue) |  |
 | Modes (complete bodies after MODE) | SINGLE RETRY POLICY BACKOFF 1s MAX 30s<br>BATCH RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `FIFO GROUP tenant` (expression); `FIFO GROUP FROM BRANCH` (keyword choice); optional; omitted when unset |  |
 | Headers | `write_header`; `last_wins`, exact names: one value per name, the last one written for it; the order of names is not declared; a name matches only a name spelled the same, letter case included |  |
@@ -550,7 +550,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Entity | SYSLOG COLLECTOR | Compare `SYSLOG LISTENER`: modes. A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |
 | Reference | SYSLOG client |  |
 | Locator and validation rule | Not offered: The configured client owns the transport address; no separate external entity name is written in this body. |  |
-| Modes (complete bodies after MODE) | NO_ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
+| Modes (complete bodies after MODE) | NO ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | Not offered: A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map. |  |
 | Body | ENCODE USING &lt;codec&gt; |  |
@@ -633,7 +633,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | --- | --- | --- |
 | Entity | CLICKHOUSE TABLE | No ingest entity is declared. The ClickHouse connector inserts mapped rows into an existing table; it declares no change-data-capture or query ingestor. |
 | Reference | CLICKHOUSE client |  |
-| Locator and validation rule | INSERT TO TABLE orders (table_name) |  |
+| Locator and validation rule | TABLE 'Orders' (clickhouse_table) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | No entity-specific options. |  |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |  |
@@ -654,7 +654,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | --- | --- | --- |
 | Entity | POSTGRES TABLE | No ingest entity is declared. The Postgres connector inserts mapped rows and handles declared conflicts; it declares no replication-slot or query ingestor. |
 | Reference | POSTGRES client |  |
-| Locator and validation rule | INSERT TO TABLE orders (table_name) |  |
+| Locator and validation rule | TABLE 'Orders' (postgres_table) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (keyword choice); optional; omitted when unset |  |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |  |
@@ -675,7 +675,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | --- | --- | --- |
 | Entity | MYSQL TABLE | No ingest entity is declared. The MySQL connector inserts mapped rows and handles declared conflicts; it declares no binlog or query ingestor. |
 | Reference | MYSQL client |  |
-| Locator and validation rule | INSERT TO TABLE orders (table_name) |  |
+| Locator and validation rule | TABLE 'Orders' (mysql_table) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `ON CONFLICT DO NOTHING` (keyword choice); `ON CONFLICT DO UPDATE` (keyword choice); optional; omitted when unset |  |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |  |
@@ -696,7 +696,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | --- | --- | --- |
 | Entity | MONGODB COLLECTION | No ingest entity is declared. The MongoDB connector writes mapped documents to an existing collection; it declares no change-stream ingestor. |
 | Reference | MONGODB client |  |
-| Locator and validation rule | INSERT TO COLLECTION orders (collection_name) |  |
+| Locator and validation rule | COLLECTION 'Orders' (mongodb_collection) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `ON CONFLICT ('id') DO NOTHING` (keyword choice); `ON CONFLICT ('id') DO UPDATE` (keyword choice); optional; omitted when unset |  |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |  |
@@ -717,7 +717,7 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | --- | --- | --- |
 | Entity | ICEBERG TABLE | No ingest entity is declared. The Iceberg connector stages data files and commits through an object store and catalog; it declares no table-scanning ingestor. |
 | Reference | S3 \| GCS \| AZURE_BLOB store and catalog clients |  |
-| Locator and validation rule | TABLE orders (table_name) |  |
+| Locator and validation rule | TABLE 'Orders' (iceberg_table) |  |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |  |
 | Options in statement order | `LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |  |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |  |

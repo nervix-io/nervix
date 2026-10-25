@@ -13,7 +13,7 @@ failure leaves behind.
 
 The central rule is that guest state and message delivery are separate guarantees. A checkpoint
 makes the guest's computation state durable before the source acknowledgements it covers are
-released. It does not make the guest, its output, and external sinks one transaction, so a path
+released. It does not make the guest, its output, and external emitters one transaction, so a path
 through a WASM processor is at least once.
 
 [Execution Plans](./execution-plans.md) explains how the committed schedule carries a pinned
@@ -305,6 +305,15 @@ revision through the bulk pool in 64 KiB chunks. It verifies the complete byte c
 before writing the checkpoint to its own storage. A save up to the host's 64 MiB guest buffer can
 therefore cross the 2 MiB replication-message limit. The bulk fetch has a sixty-second progress
 deadline inside the checkpoint's ninety-second completion budget.
+
+The fetch's bulk stream grants the owner a 1 MiB receive window, so the owner keeps sixteen 64 KiB
+chunks in flight. A save then crosses in one round trip per window rather than one per chunk, which
+matters on a loaded node, where every round trip waits for several scheduled tasks on both sides.
+The ninety seconds are fixed rather than derived from the save's size. A deadline that grew with
+the save would let a replica that falls behind its owner hold acknowledgements longer instead of
+failing the checkpoint, and the largest save the host allows, 64 MiB, crosses well inside it. See
+[Cluster Interconnect](./interconnect.md#wire-contract-and-payloads) for the window and the memory
+that backs it.
 
 ### Local Durability
 
@@ -685,7 +694,7 @@ an input, the guest state that reflects the input is on the stable storage of th
 of every replica the checkpoint was confirmed by. It is not an exactly-once guarantee for the guest
 or for external delivery:
 
-- output is dispatched before its checkpoint, so a sink can publish output whose input is later
+- output is dispatched before its checkpoint, so an emitter can publish output whose input is later
   negatively acknowledged and redelivered, and the redelivered input produces it again;
 - the state a branch continues from can already reflect a redelivered input: a guest counts buffered
   input as it accepts it, a checkpoint that failed at its replicas stays on the owner's storage, and
@@ -696,7 +705,7 @@ or for external delivery:
   local durability.
 
 A guest therefore applies a redelivered input again unless it recognizes the input itself, and
-exactly-once external effects need a sink whose writes are idempotent. See [Recovery, Replay And
+exactly-once external effects need an emitter whose writes are idempotent. See [Recovery, Replay And
 Duplicates](./wasm-processor-guests.md#recovery-replay-and-duplicates) and [ACK Semantics And
 Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery).
 
@@ -791,6 +800,7 @@ branches.
 | Recovery budget | `wasm_state_recovery.feature`: preserve, recover once, and a failed fresh initialization that spends the attempt across a restart |
 | Restart | `wasm_processor.feature`: guest state restored after a cluster restart and not resurrected by a returning former owner |
 | Large backup and restore | `backup_guest_saves.feature`: two 40 MiB branch saves on one and three nodes, bounded bulk capture, interrupted capture cleanup, exact restored bytes and the next guest callback |
+| Large saves within the replica deadline | `large_wasm_state_replication.feature`: 40 MiB saves of interleaved branches reach the checkpoint boundary on three nodes with one replica; the interconnect check that a bulk response puts one whole bulk receive window in flight before its reader reads, backed by exactly one `bulk_window` reservation |
 
 The [WASM state qualification
 ledger](https://github.com/nervix-io/nervix/blob/main/tests/wasm-state-qualification-ledger.md)

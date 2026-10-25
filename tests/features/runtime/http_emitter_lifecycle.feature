@@ -1,4 +1,4 @@
-Feature: HTTP emitter lifecycle
+Feature: HTTP REQUEST emitter lifecycle
   A configuration change drains requests with the client and request fields that admitted them.
   A stopped emitter retains no prepared HTTP request; an attached source decides redelivery.
 
@@ -36,8 +36,8 @@ Feature: HTTP emitter lifecycle
       CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP first_api METHOD 'POST' PATH concat('/first/', input.event_id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO first_api METHOD 'POST' PATH concat('/first/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -49,7 +49,7 @@ Feature: HTTP emitter lifecycle
     Then HTTP receiver "first" eventually receives at least 1 requests
     When these Plexus commands begin executing in the background
       """
-      ALTER EMITTER published SET TO HTTP second_api
+      ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.event_id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
@@ -81,7 +81,7 @@ Feature: HTTP emitter lifecycle
       | 3            |
 
   @http_emitter_failed_drain
-  Scenario Outline: A failed HTTP emitter drain leaves the admitted request and active destination intact
+  Scenario Outline: A failed HTTP REQUEST emitter drain leaves the admitted request and active destination intact
     Given HTTP receiver "first" is running
     And HTTP receiver "first" answers with
       """
@@ -114,8 +114,8 @@ Feature: HTTP emitter lifecycle
       CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP first_api METHOD 'POST' PATH concat('/first/', input.event_id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO first_api METHOD 'POST' PATH concat('/first/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -128,7 +128,7 @@ Feature: HTTP emitter lifecycle
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
     When these Plexus commands fail with "timed out draining domain"
       """
-      ALTER EMITTER published SET TO HTTP second_api
+      ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.event_id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
@@ -138,7 +138,7 @@ Feature: HTTP emitter lifecycle
       """
     Then the last command output contains
       """
-      TO HTTP first_api METHOD 'POST' PATH concat('/first/', input.event_id)
+      TO first_api METHOD 'POST' PATH concat('/first/', input.event_id)
       """
     When HTTP receiver "first" releases its held responses with "respond 204"
     And http payload is posted to host "http-drain-{{test_id}}.example.com" path "/events"
@@ -191,18 +191,18 @@ Feature: HTTP emitter lifecycle
       CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'POST' PATH '/coded'
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'POST' PATH '/coded'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         INHERIT id INVOKE write_header('X-Mode', 'coded')
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER set_body FROM spare
-        TO HTTP api_client METHOD 'POST' PATH '/set'
+      CREATE HTTP REQUEST EMITTER set_body FROM spare
+        TO api_client METHOD 'POST' PATH '/set'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         SET id = input.id
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER scoped FROM spare
-        TO HTTP api_client METHOD 'POST' PATH '/scoped'
+      CREATE HTTP REQUEST EMITTER scoped FROM spare
+        TO api_client METHOD 'POST' PATH '/scoped'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING optional_codec
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
@@ -224,7 +224,7 @@ Feature: HTTP emitter lifecycle
       """
     When these Plexus commands fail with "emitter body selection does not support the retained construction"
       """
-      ALTER EMITTER published SET TO HTTP api_client
+      ALTER HTTP REQUEST EMITTER published SET TO api_client
         METHOD 'DELETE' PATH '/empty'
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
@@ -242,13 +242,13 @@ Feature: HTTP emitter lifecycle
       """
     When these Plexus commands fail with "emitter body selection does not support the retained construction"
       """
-      ALTER EMITTER set_body SET TO HTTP api_client
+      ALTER HTTP REQUEST EMITTER set_body SET TO api_client
         METHOD 'DELETE' PATH '/empty'
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
     When these Plexus commands fail with "partial_output"
       """
-      ALTER EMITTER scoped SET TO HTTP api_client
+      ALTER HTTP REQUEST EMITTER scoped SET TO api_client
         METHOD 'DELETE' PATH '/empty'
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
@@ -264,8 +264,8 @@ Feature: HTTP emitter lifecycle
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'GET' PATH '/refused'
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'GET' PATH '/refused'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         INHERIT id
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -281,8 +281,8 @@ Feature: HTTP emitter lifecycle
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'DELETE' PATH '/refused'
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'DELETE' PATH '/refused'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -309,8 +309,8 @@ Feature: HTTP emitter lifecycle
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'DELETE' PATH '/empty'
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'DELETE' PATH '/empty'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING optional_codec
         INVOKE write_header('X-Mode', 'replacement')
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -327,7 +327,7 @@ Feature: HTTP emitter lifecycle
     And transaction "{{transaction_id}}" report step 1 eventually records planned quiesce "ENTITY_PAUSE", actual quiesce "ENTITY_PAUSE", execution "APPLIED", and outcomes "REQUESTED,CONFIRMED,RELEASED"
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published SET TO HTTP api_client
+      ALTER HTTP REQUEST EMITTER published SET TO api_client
         METHOD 'DELETE' PATH '/empty'
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
@@ -353,7 +353,7 @@ Feature: HTTP emitter lifecycle
       | 3            |
 
   @http_emitter_impact
-  Scenario Outline: HTTP emitter changes use their effective quiesce levels
+  Scenario Outline: HTTP REQUEST emitter changes use their effective quiesce levels
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -381,8 +381,8 @@ Feature: HTTP emitter lifecycle
       CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP first_api METHOD 'POST' PATH '/first'
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO first_api METHOD 'POST' PATH '/first'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -390,7 +390,7 @@ Feature: HTTP emitter lifecycle
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published SET MODE ACK RETRY POLICY BACKOFF 200ms MAX 200ms;
+      ALTER HTTP REQUEST EMITTER published SET MODE ACK RETRY POLICY BACKOFF 200ms MAX 200ms;
       """
     Then the last command output contains
       """
@@ -398,7 +398,7 @@ Feature: HTTP emitter lifecycle
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published SET CLIENT second_api;
+      ALTER HTTP REQUEST EMITTER published SET CLIENT second_api;
       """
     Then the last command output contains
       """
@@ -410,7 +410,7 @@ Feature: HTTP emitter lifecycle
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published SET FLUSH IMMEDIATE;
+      ALTER HTTP REQUEST EMITTER published SET FLUSH IMMEDIATE;
       """
     Then the last command output contains
       """
@@ -423,7 +423,7 @@ Feature: HTTP emitter lifecycle
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published ADD FROM backup;
+      ALTER HTTP REQUEST EMITTER published ADD FROM backup;
       """
     Then the last command output contains
       """
@@ -492,8 +492,8 @@ Feature: HTTP emitter lifecycle
       CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'POST' PATH concat('/events/', input.id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'POST' PATH concat('/events/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -522,7 +522,7 @@ Feature: HTTP emitter lifecycle
       | 3            | CORDON NODE node-2; CORDON NODE node-3; |
 
   @http_emitter_shutdown_flush
-  Scenario Outline: Graceful shutdown force-flushes an HTTP emitter inside the drain deadline
+  Scenario Outline: Graceful shutdown force-flushes an HTTP REQUEST emitter inside the drain deadline
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And graceful shutdown drain is enabled
@@ -550,8 +550,8 @@ Feature: HTTP emitter lifecycle
       CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'POST' PATH concat('/events/', input.id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'POST' PATH concat('/events/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -612,8 +612,8 @@ Feature: HTTP emitter lifecycle
       CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP first_api METHOD 'POST' PATH concat('/first/', input.id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO first_api METHOD 'POST' PATH concat('/first/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -628,7 +628,7 @@ Feature: HTTP emitter lifecycle
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
     When these Plexus commands fail with "timed out draining domain"
       """
-      ALTER EMITTER published SET TO HTTP second_api
+      ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
@@ -644,7 +644,7 @@ Feature: HTTP emitter lifecycle
     # redelivers the record, which the replacement sends to the second destination.
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published SET TO HTTP second_api
+      ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       START;

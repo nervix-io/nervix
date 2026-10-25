@@ -53,6 +53,8 @@ pub(in crate::runtime) enum IngestGroupRecordOperation {
 
 #[derive(Debug, Clone, Copy, strum::Display)]
 pub(in crate::runtime) enum IngestMetadataOperation {
+    #[strum(serialize = "open ingest metadata")]
+    Open,
     #[strum(serialize = "append ingest metadata")]
     Append,
     #[strum(serialize = "finish ingest metadata")]
@@ -330,7 +332,7 @@ pub(super) enum BoundIngestorInput {
     /// A transport: the codec that decodes its payloads, and the plan of its source.
     Transport {
         codec: Arc<CompiledCodec>,
-        source: SourceStartPlan,
+        source: IngestorConnectorPlan,
     },
     /// Batches producers submit, which already carry the plan's schema, and the `START`
     /// generation of the execution the ingestor was bound in.
@@ -466,7 +468,7 @@ pub(super) struct IngestGroupRows {
 /// accepts the payloads that did decode, giving every message of each payload the payload's
 /// metadata row and a share of its ACK set.
 pub(super) struct PendingIngestGroup {
-    pub(super) scope: SourceMetadataScope,
+    pub(super) scope: IngestorMetadataScope,
     /// The number of rows the group is expected to reach, used to size its builders.
     pub(super) row_bound: usize,
     pub(super) records: Option<RuntimeRecordBatchBuilder>,
@@ -482,7 +484,7 @@ pub(super) struct PendingIngestGroup {
 }
 
 impl PendingIngestGroup {
-    pub(super) fn new(scope: SourceMetadataScope, row_bound: usize) -> Self {
+    pub(super) fn new(scope: IngestorMetadataScope, row_bound: usize) -> Self {
         Self {
             scope,
             row_bound,
@@ -586,10 +588,19 @@ impl PendingIngestGroup {
             }));
         }
 
-        let (scope, row_bound) = (self.scope, self.row_bound);
+        if self.metadata.is_none() {
+            self.metadata = Some(
+                IngestMetadataBuilders::new(self.scope, self.row_bound).change_context(
+                    IngestGroupError::Metadata {
+                        operation: IngestMetadataOperation::Open,
+                    },
+                )?,
+            );
+        }
         let builders = self
             .metadata
-            .get_or_insert_with(|| IngestMetadataBuilders::new(scope, row_bound));
+            .as_mut()
+            .verified("this group opens its metadata builders immediately above");
         for (row, payload_acks) in metadata.iter().zip(acks) {
             let messages = self
                 .undispatched_payloads
@@ -775,7 +786,7 @@ pub(super) struct IngestorMessageError<'a> {
 /// metadata schema is fixed by the source's scope when the ingestor starts, so every group the
 /// collector opens builds the same columns.
 pub(super) struct IngestRouteCollector {
-    pub(super) scope: SourceMetadataScope,
+    pub(super) scope: IngestorMetadataScope,
     /// The number of rows a group is expected to reach, used to size its metadata builders.
     pub(super) row_bound: usize,
     pub(super) context: Option<IngestGroupContext>,
@@ -795,7 +806,7 @@ impl IngestRouteCollector {
     /// Sources that flush one group per message or per poll pass their own bound so a
     /// short group does not size its builders for a streaming one.
     pub(super) fn new(
-        scope: SourceMetadataScope,
+        scope: IngestorMetadataScope,
         row_bound: usize,
         metrics: MessageMetricsHandle,
     ) -> Self {
@@ -2091,7 +2102,7 @@ impl Runtime {
             filter_where: filter_where.cloned(),
         };
         let mut collector =
-            IngestRouteCollector::new(SourceMetadataScope::Headers, row_count, metrics.clone());
+            IngestRouteCollector::new(IngestorMetadataScope::Headers, row_count, metrics.clone());
         let routing =
             collector
                 .routing_snapshot(self, domain)

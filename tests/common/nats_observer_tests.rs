@@ -103,18 +103,30 @@ async fn a_step_takes_buffered_deliveries_without_a_poll_per_message() {
 
 /// A NATS server that answers its one client's handshake and pings, and delivers a burst of
 /// numbered messages to the first subscription the client opens.
-struct StandInNatsServer {
-    address: SocketAddr,
+pub(super) struct StandInNatsServer {
+    pub(super) address: SocketAddr,
     _connection: AbortOnDropHandle<io::Result<()>>,
 }
 
 impl StandInNatsServer {
     async fn start(burst: u64) -> io::Result<Self> {
+        Self::start_with_frames(burst, Self::burst).await
+    }
+
+    pub(super) async fn start_sequence(burst: usize) -> io::Result<Self> {
+        let burst = u64::try_from(burst).assured("the fixture's bounded burst fits in u64");
+        Self::start_with_frames(burst, Self::sequence_frames).await
+    }
+
+    async fn start_with_frames(
+        burst: u64,
+        frames: fn(&str, &str, u64) -> Vec<u8>,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let address = listener.local_addr()?;
         let connection = spawn(async move {
             let (stream, _) = listener.accept().await?;
-            Self::serve(stream, burst).await
+            Self::serve(stream, burst, frames).await
         });
         Ok(Self {
             address,
@@ -122,7 +134,11 @@ impl StandInNatsServer {
         })
     }
 
-    async fn serve(stream: TcpStream, burst: u64) -> io::Result<()> {
+    async fn serve(
+        stream: TcpStream,
+        burst: u64,
+        frames: fn(&str, &str, u64) -> Vec<u8>,
+    ) -> io::Result<()> {
         let (reader, mut writer) = stream.into_split();
         writer.write_all(SERVER_INFO).await?;
         let mut lines = BufReader::new(reader).lines();
@@ -140,7 +156,7 @@ impl StandInNatsServer {
                     "the client opened a subscription without a subject and id: {subscription:?}"
                 )));
             };
-            writer.write_all(&Self::burst(subject, sid, burst)).await?;
+            writer.write_all(&frames(subject, sid, burst)).await?;
         }
         Ok(())
     }
@@ -151,6 +167,25 @@ impl StandInNatsServer {
         for sequence in 1..=burst {
             let payload = sequence.to_string();
             let frame = format!("MSG {subject} {sid} {}\r\n{payload}\r\n", payload.len());
+            frames.extend_from_slice(frame.as_bytes());
+        }
+        frames
+    }
+
+    /// The complete JSON sequence and repeated headers checked by the scenario assertion.
+    fn sequence_frames(subject: &str, sid: &str, burst: u64) -> Vec<u8> {
+        let headers = "NATS/1.0\r\nroute: primary\r\nroute: columnar\r\n\r\n";
+        let mut frames = Vec::new();
+        for sequence in 1..=burst {
+            let payload = format!("{{\"sequence\":{sequence}}}");
+            let total = headers
+                .len()
+                .checked_add(payload.len())
+                .assured("each bounded JSON message and header block fit in usize");
+            let frame = format!(
+                "HMSG {subject} {sid} {} {total}\r\n{headers}{payload}\r\n",
+                headers.len(),
+            );
             frames.extend_from_slice(frame.as_bytes());
         }
         frames

@@ -187,22 +187,18 @@ Feature: Typed error qualification through public streams
       CREATE POSTGRES CLIENT database
         POOL SIZE MIN 1 MAX 4
         CONFIG { 'addr' = '127.0.0.1:5432' };
-      CREATE EMITTER direct_values FROM secret_events
-        TO POSTGRES database INSERT TO TABLE existing_events
-        VALUES { "id" = input.id, "secret" = input.secret }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER direct_values FROM secret_events
+        TO database TABLE 'existing_events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "id" = input.id, "secret" = input.secret } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
     When these Plexus commands are executed on the leader node
       """
-      CREATE EMITTER direct_values_allowed FROM secret_events
-        TO POSTGRES database INSERT TO TABLE existing_events
-        VALUES { "id" = input.id, "secret" = leak_sensitive(input.secret) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER direct_values_allowed FROM secret_events
+        TO database TABLE 'existing_events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "id" = input.id, "secret" = leak_sensitive(input.secret) } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

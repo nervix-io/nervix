@@ -328,7 +328,8 @@ owns `task::block_in_place`, which blocks the runtime worker thread that calls i
 
 Connector network control calls use a storage class of their own, with two admitted workers by
 default and the same bounded queue policy as other classes. Kafka source metadata, watermarks,
-timestamp queries, seeks, assignments and consumer-group commits use it. A synchronous commit may
+timestamp queries, seeks, assignments and consumer-group commits use it, and so does the destruction
+of a Kafka consumer or producer whose last handle is gone. A synchronous commit may
 outlive its caller's thirty-second wait, so sharing filesystem or consensus worker permits would
 let an unavailable broker hold those operations behind it. The connector class bounds those jobs
 without taking another class's admission. All classes still use the process-wide blocking pool;
@@ -342,8 +343,8 @@ a file whose owners block in different ways, such as the CLI's, has a permission
 
 | Owner | Blocks through | Why it stays outside the executor | What bounds it |
 | --- | --- | --- | --- |
-| The resolver's configuration load in `nervix-dns` | `task::spawn_blocking` | A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one | Two small files, read once for each resolver built |
-| The Kafka sink's final producer-queue drain | `task::spawn_blocking` | librdkafka's flush waits on the network, independently of the source control-call class | The host's physical flush deadline |
+| The resolver's configuration load in `nervix-dns` | `task::spawn_blocking` | The Rust client and the CLI build the same resolver without an executor, and a node loads it through the same function in its startup preflight | Two small files, read once for each resolver built |
+| The Kafka emitter's final producer-queue drain | `task::spawn_blocking` | librdkafka's flush waits on the network, independently of the source control-call class | The host's physical flush deadline |
 | The Rust client's backup download and restore upload, and the CLI's event printer | `task::spawn_blocking` | A client tool is not a node and has no executor | One rename of a written archive, one sequential read of an archive, and one printer thread for the life of the command |
 | The CLI's completion prompt | `task::block_in_place` | A client tool is not a node and has no executor; its line editor asks for completions synchronously on the thread that runs the CLI's main task, so the prompt waits there for the completion while the runtime's workers keep the session running | One completion at a time, only while the operator waits at the prompt; each page of suggestions ends by the client's retry deadline, and a repeated continuation ends the completion |
 | The benchmark driver and the scenario harness | `task::spawn_blocking` | A harness is not a node; it waits on brokers, databases, probe threads and the C binding from its own process | Each call's own timeout, or the probe or thread it joins |

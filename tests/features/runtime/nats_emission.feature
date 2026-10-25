@@ -1,5 +1,5 @@
 Feature: NATS emission
-  Scenario Outline: NATS emitter drains a wide columnar batch in order without duplicates
+  Scenario Outline: NATS SUBJECT emitter drains a wide columnar batch in order without duplicates
     Given NATS is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -65,10 +65,10 @@ Feature: NATS emission
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE ATTACHED EMITTER columnar_events_out
+      CREATE ATTACHED NATS SUBJECT EMITTER columnar_events_out
         FROM columnar_events
-        TO NATS nats_main SUBJECT columnar_out_{{test_id}}
-          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO nats_main SUBJECT 'columnar_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING columnar_event_codec
         INHERIT ALL EXCEPT secret
         SET secret = leak_sensitive(input.secret)
@@ -97,10 +97,8 @@ Feature: NATS emission
       relay="columnar_events"
       """
     When emitter "columnar_events_out" leaves stall mode
-    # The stall releases every buffered message at once, so this drains a larger burst than the
-    # streaming scenario below and is given the same budget. Measured drain of 32768 messages is
-    # about four seconds on an idle machine, which left the previous five second bound inside its
-    # own margin: it failed attempts on CI for this branch and for main alike.
+    # The independent sequence observation drains the complete burst while the runner polls
+    # other scenarios, retaining the original deadline and every sequence/header assertion.
     Then within "90s" the observed broker receives <message_count> messages in sequence by field "sequence" with headers
       """
       route=primary
@@ -112,7 +110,7 @@ Feature: NATS emission
       | 1            | 32768         |
       | 3            | 32768         |
 
-  Scenario Outline: NATS emitter publishes JSON payloads from a relay
+  Scenario Outline: NATS SUBJECT emitter publishes JSON payloads from a relay
     Given MQTT is running
     And NATS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
@@ -155,7 +153,7 @@ Feature: NATS emission
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
-        CREATE EMITTER nats_notifications FROM notifications TO NATS nats_main SUBJECT notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE NATS SUBJECT EMITTER nats_notifications FROM notifications TO nats_main SUBJECT 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -187,7 +185,7 @@ Feature: NATS emission
       | 3            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: NATS emitter honors its flush deadline during sustained input collection
+  Scenario Outline: NATS SUBJECT emitter honors its flush deadline during sustained input collection
     # The message count stays below Core NATS's bounded subscription queue. The emitter's input
     # and output size limits are deliberately above this narrow batch's Arrow footprint, so
     # their independent timers must make progress.
@@ -235,11 +233,11 @@ Feature: NATS emission
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE ATTACHED EMITTER narrow_events_out
+      CREATE ATTACHED NATS SUBJECT EMITTER narrow_events_out
         FROM narrow_events
         COLLECT FOR 1ms MAX BATCH SIZE 64MiB
-        TO NATS nats_main SUBJECT narrow_out_{{test_id}}
-          MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO nats_main SUBJECT 'narrow_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING narrow_event_codec
         INHERIT ALL
         INVOKE write_header("route", "narrow")
@@ -267,6 +265,8 @@ Feature: NATS emission
       direction="sent"
       relay="narrow_events"
       """
+    # Verify every sequence and header on the observation's runtime task, so a loaded scenario
+    # runner cannot spend the delivery budget between polls of an already buffered message.
     Then within "90s" the observed broker receives <message_count> messages in sequence by field "sequence" with headers
       """
       route=narrow
@@ -316,8 +316,8 @@ Feature: NATS emission
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE NATS CLIENT nats_main CONFIG { 'addr' = '{{nats_addr}}' };
-      CREATE EMITTER nats_jetstream FROM notifications
-        TO NATS nats_main SUBJECT jetstream_out_{{test_id}}
+      CREATE NATS SUBJECT EMITTER nats_jetstream FROM notifications
+        TO nats_main SUBJECT 'jetstream_out_{{test_id}}'
           MODE JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 1s
             RETRY POLICY BACKOFF 100ms MAX 500ms
           ENCODE USING notification_codec
@@ -399,8 +399,8 @@ Feature: NATS emission
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       CREATE NATS CLIENT nats_out CONFIG { 'addr' = '{{nats_controlled_addr}}' };
-      CREATE EMITTER window_out FROM window_records
-        TO NATS nats_out SUBJECT window_out_{{test_id}}
+      CREATE NATS SUBJECT EMITTER window_out FROM window_records
+        TO nats_out SUBJECT 'window_out_{{test_id}}'
           MODE JETSTREAM ACK PARALLEL MAX 16384 ACK TIMEOUT 3s
             RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING window_record_codec
@@ -473,9 +473,9 @@ Feature: NATS emission
         'addr' = '{{nats_controlled_addr}}',
         'timeout_ms' = '1000'
       };
-      CREATE EMITTER held_output FROM held_events
-        TO NATS held_nats SUBJECT held_out_{{test_id}}
-          MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE NATS SUBJECT EMITTER held_output FROM held_events
+        TO held_nats SUBJECT 'held_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING held_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE

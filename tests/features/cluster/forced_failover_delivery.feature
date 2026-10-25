@@ -30,8 +30,8 @@ Feature: Forced ownership recovery while a former owner holds relay deliveries
         TO forced_records INHERIT ALL UNBRANCHED
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER forced_sink FROM forced_records
-        TO KAFKA forced_kafka TOPIC forced_delivery_out_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER forced_sink FROM forced_records
+        TO forced_kafka TOPIC 'forced_delivery_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING forced_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

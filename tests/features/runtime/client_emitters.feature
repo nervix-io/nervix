@@ -25,8 +25,8 @@ Feature: Client emitters
         TO invoices INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders, invoices
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders, invoices
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -74,14 +74,14 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER first_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER first_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER second_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER second_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -125,8 +125,8 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -179,8 +179,8 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -225,8 +225,8 @@ Feature: Client emitters
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id
         SET cents = input.amount * 100
@@ -240,7 +240,7 @@ Feature: Client emitters
       """
     Then the last command output contains
       """
-      TO CLIENT SCHEMA outgoing
+      TO SCHEMA outgoing
       """
     And the last command output contains
       """
@@ -256,11 +256,11 @@ Feature: Client emitters
       """
     And the last command output contains
       """
-      sink: CLIENT schema=outgoing
+      to: CLIENT CONSUMER SCHEMA outgoing
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER app_output SET TO CLIENT SCHEMA outgoing
+      ALTER CLIENT CONSUMER EMITTER app_output SET TO SCHEMA outgoing
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s;
       SHOW CREATE EMITTER app_output;
       """
@@ -296,8 +296,8 @@ Feature: Client emitters
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -365,8 +365,8 @@ Feature: Client emitters
     And client "app" is connected to the leader node
     When client "app" fails to execute these Plexus commands
       """
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET secret = input.secret
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -378,8 +378,8 @@ Feature: Client emitters
       """
     When client "app" executes these Plexus commands
       """
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET secret = leak_sensitive(input.secret)
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -407,8 +407,8 @@ Feature: Client emitters
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id
         SET cents = input.amount * 100
@@ -468,8 +468,8 @@ Feature: Client emitters
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id
         SET cents = input.amount * 100
@@ -517,8 +517,8 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE DETACHED CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -564,8 +564,8 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -609,8 +609,8 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -652,8 +652,8 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1KiB FLUSH IMMEDIATE
@@ -684,8 +684,8 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -720,7 +720,7 @@ Feature: Client emitters
       """
     Then the last command output contains
       """
-      TO CLIENT SCHEMA outgoing
+      TO SCHEMA outgoing
       """
     When output batch "first output" is acknowledged
     And consumer "output" finishes waiting for output batch "second output"
@@ -753,8 +753,8 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -772,7 +772,7 @@ Feature: Client emitters
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
     When these Plexus commands fail with "timed out draining domain"
       """
-      ALTER EMITTER app_output SET TO CLIENT SCHEMA outgoing
+      ALTER CLIENT CONSUMER EMITTER app_output SET TO SCHEMA outgoing
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s;
       """
     And these Plexus commands are executed on the leader node
@@ -787,7 +787,7 @@ Feature: Client emitters
     Then batch "held input" completes
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER app_output SET FLUSH EACH 10ms MAX BATCH SIZE 1MiB;
+      ALTER CLIENT CONSUMER EMITTER app_output SET FLUSH EACH 10ms MAX BATCH SIZE 1MiB;
       """
     And producer "input" submits batch "after flush input" with rows
       | id  | amount |
@@ -798,7 +798,7 @@ Feature: Client emitters
     Then batch "after flush input" completes
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER app_output SET TO CLIENT SCHEMA outgoing
+      ALTER CLIENT CONSUMER EMITTER app_output SET TO SCHEMA outgoing
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s;
       """
     Then consumer "original" eventually ends
@@ -826,8 +826,8 @@ Feature: Client emitters
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -866,8 +866,8 @@ Feature: Client emitters
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE

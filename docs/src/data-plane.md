@@ -8,7 +8,7 @@ It executes the typed revision of a committed schedule. [Execution Plans](./exec
 describes the decisions, local binding, and publication that prepare its tasks.
 
 [Connector Crates And The Connector Contract](./connector-contract.md) defines how the host
-admits external source messages and publishes through external sinks, including their ACK and
+admits external source messages and publishes through external emitters, including their ACK and
 commit boundaries. This chapter follows the Arrow batches those boundaries hand to the graph.
 
 It is responsible for:
@@ -108,11 +108,11 @@ and the source redelivers the record. An acknowledgement lost between two nodes 
 therefore fails the source attempt instead of keeping it waiting. See
 [Record Acknowledgements The Receiver Stops Reporting](interconnect.md#record-acknowledgements-the-receiver-stops-reporting).
 
-ACK guards, tokens, and maps remain in memory. They do not record a transactional per-sink commit
+ACK guards, tokens, and maps remain in memory. They do not record a transactional per-emitter commit
 ledger. After source redelivery, every attached path processes the record again. This is why an
-already successful non-idempotent sink can receive a duplicate after a sibling path fails. See
+already successful non-idempotent emitter can receive a duplicate after a sibling path fails. See
 [ACK Semantics And Effective Delivery](emitters.md#ack-semantics-and-effective-delivery) for the
-sink consequences and mitigations.
+emitter consequences and mitigations.
 
 Every internal schema type has one Arrow representation, which relays, processors, and the VM share;
 [Typed Batches And Registers](./vm-functions.md#typed-batches-and-registers) lists them. The

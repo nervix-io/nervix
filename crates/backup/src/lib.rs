@@ -54,7 +54,7 @@ pub use describe::{
     SkippedStateReason, SkippedStateSection, describe_archive, read_archive_contents,
 };
 pub use error::{ArchiveReadError, ArchiveWriteError};
-pub use layout::{ArchiveLayout, ArchivePiece, SectionSink};
+pub use layout::{ArchiveLayout, ArchivePiece, SectionRecordWriter};
 pub use manifest::{
     ARCHIVE_FORMAT_MAJOR, ArchiveScope, BackupManifest, DomainCapture, RaftLogPosition,
     SectionContent, SectionDigest, SectionEntry,

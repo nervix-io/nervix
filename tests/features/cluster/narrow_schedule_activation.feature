@@ -740,7 +740,7 @@ Feature: Narrow schedule activation on ownership change
       """
     And these Plexus commands are executed on the leader node
       """
-      CREATE JUNCTION corridor_sink FROM corridor_stage
+      CREATE JUNCTION corridor_emitter FROM corridor_stage
         BRANCHED BY by_group_tenant
         TO corridor_output
         INHERIT ALL
@@ -748,7 +748,7 @@ Feature: Narrow schedule activation on ownership change
         ON MESSAGE ERROR LOG;
 
       CREATE PLACEMENT keep_corridor_local
-        FROM corridor_source TO corridor_sink PREFER COLOCATION RANK 1;
+        FROM corridor_source TO corridor_emitter PREFER COLOCATION RANK 1;
       """
     When these Plexus commands are executed through the client on node "node-1"
       """
@@ -773,7 +773,7 @@ Feature: Narrow schedule activation on ownership change
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=junction name=corridor_sink owner=node-3
+      - domain={{domain}} kind=junction name=corridor_emitter owner=node-3
       """
     When these Plexus commands are executed on node "node-1"
       """
@@ -812,7 +812,7 @@ Feature: Narrow schedule activation on ownership change
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "consolidated_owner"
-    And within "10s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "consolidated_owner"
+    And within "10s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "consolidated_owner"
     When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;

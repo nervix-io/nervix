@@ -38,7 +38,11 @@ use nervix_models::{
 use nervix_recovery::NoReceiver as _;
 use tracing::{debug, info};
 
-use super::{AppError, entity_gate::ClusterEntityGate, session_service::SessionServiceImpl};
+use super::{
+    AppError,
+    entity_gate::{ClusterEntityGate, ClusterEntityGateScope, EntityGateParticipants},
+    session_service::SessionServiceImpl,
+};
 use crate::runtime::{GuestWasmStateResetRequest, Runtime, WasmStateResetPreparation};
 
 #[derive(Debug, thiserror::Error)]
@@ -445,10 +449,13 @@ impl SessionServiceImpl {
             .assured("the configured entity-gate duration stays within the monotonic clock");
         let gate = self
             .engage_cluster_entity_gates(
-                domain,
-                &plan.relays,
-                std::slice::from_ref(&plan.entity),
-                purpose,
+                ClusterEntityGateScope {
+                    domain,
+                    relays: &plan.relays,
+                    affected_entities: std::slice::from_ref(&plan.entity),
+                    purpose,
+                    participants: EntityGateParticipants::EveryAvailableNode,
+                },
                 deadline,
                 None,
             )

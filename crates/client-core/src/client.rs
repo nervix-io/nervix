@@ -300,7 +300,7 @@ impl Client {
             nervix_primitives::task::consume_budget().await;
             let attempt = async {
                 let channel = connector.connect(&candidate).await?;
-                Exchange::open(channel, &connector, events.sinks.clone()).await
+                Exchange::open(channel, &connector, events.emitters.clone()).await
             };
             match nervix_primitives::time::timeout_at(deadline, attempt).await {
                 Err(_) => {
@@ -328,7 +328,7 @@ impl Client {
             .map_err(|error| Report::new(ClientError::BuildAuthenticationMetadata(error)))?;
         connector.load_dns().await?;
         let events = SessionEvents::new();
-        let exchange = Exchange::open(channel, &connector, events.sinks.clone()).await?;
+        let exchange = Exchange::open(channel, &connector, events.emitters.clone()).await?;
         Ok(Self::assemble(
             exchange,
             events,
@@ -839,7 +839,12 @@ impl Client {
                 let generation = exchange.generation.clone();
                 let requests = exchange.requests();
                 drop(exchange);
-                let Some(attempt) = self.inner.events.sinks.desired.begin(contract, generation)
+                let Some(attempt) = self
+                    .inner
+                    .events
+                    .emitters
+                    .desired
+                    .begin(contract, generation)
                 else {
                     return Ok(CommandOutcome::failed_locally(format!(
                         "subscription '{}' is already desired or awaiting deletion",
@@ -865,7 +870,7 @@ impl Client {
                 let cancellation = self
                     .inner
                     .events
-                    .sinks
+                    .emitters
                     .desired
                     .cancel(subscription, generation);
                 let attempt = match cancellation {
@@ -967,14 +972,14 @@ impl Client {
         let outcome = match response {
             Ok(ReplyBody::Subscribe(outcome)) => outcome,
             Ok(other) => {
-                self.inner.events.sinks.desired.created(&attempt, None);
+                self.inner.events.emitters.desired.created(&attempt, None);
                 return Err(Report::new(ClientError::unexpected_reply(
                     RequestKind::Subscribe,
                     other,
                 )));
             }
             Err(report) => {
-                self.inner.events.sinks.desired.created(&attempt, None);
+                self.inner.events.emitters.desired.created(&attempt, None);
                 return Err(report);
             }
         };
@@ -982,7 +987,7 @@ impl Client {
             nervix_client_wire::SubscribeDisposition::Opened(opened) => Some(&opened.subscription),
             nervix_client_wire::SubscribeDisposition::Failed => None,
         };
-        self.inner.events.sinks.desired.created(&attempt, opened);
+        self.inner.events.emitters.desired.created(&attempt, opened);
         let mut outcome = CommandOutcome::from(outcome);
         outcome.locate_diagnostics_in_query(offset);
         Ok(outcome)
@@ -998,7 +1003,7 @@ impl Client {
         attempt: DeleteAttempt,
         exchange: Arc<ExchangeRequests>,
     ) -> error_stack::Result<CommandOutcome, ClientError> {
-        let desired = &self.inner.events.sinks.desired;
+        let desired = &self.inner.events.emitters.desired;
         let mut changed = desired.watch();
         while desired.deletion_waits(&attempt) {
             nervix_primitives::task::consume_budget().await;
@@ -1229,7 +1234,7 @@ impl Client {
     /// ended reads [`SubscriptionLifecycle::Ended`] until it is subscribed again under its name or
     /// deleted.
     pub fn subscription_lifecycle(&self, name: &SubscriptionName) -> Option<SubscriptionLifecycle> {
-        self.inner.events.sinks.desired.lifecycle(name)
+        self.inner.events.emitters.desired.lifecycle(name)
     }
 
     /// Waits for the next event of a subscription the client holds.
@@ -1248,13 +1253,13 @@ impl Client {
     pub async fn next_subscription(&self) -> error_stack::Result<SubscriptionEvent, ClientError> {
         loop {
             nervix_primitives::task::consume_budget().await;
-            let mut desired_changed = match self.inner.events.sinks.desired.next_event_or_changes()
-            {
-                DesiredSubscriptionEvent::Event(event) => return Ok(event),
-                DesiredSubscriptionEvent::Waiting(changes) => changes,
-            };
+            let mut desired_changed =
+                match self.inner.events.emitters.desired.next_event_or_changes() {
+                    DesiredSubscriptionEvent::Event(event) => return Ok(event),
+                    DesiredSubscriptionEvent::Waiting(changes) => changes,
+                };
             let result = nervix_primitives::select! {
-                result = self.inner.events.sinks.subscriptions.next() => result,
+                result = self.inner.events.emitters.subscriptions.next() => result,
                 changed = desired_changed.changed() => {
                     changed.assured(
                         "the client holds the sender of its own subscription notifications",
@@ -1265,7 +1270,13 @@ impl Client {
             match result {
                 Ok(event) => {
                     let generation = self.inner.exchange.lock().await.generation.clone();
-                    if self.inner.events.sinks.desired.admit(&event, &generation) {
+                    if self
+                        .inner
+                        .events
+                        .emitters
+                        .desired
+                        .admit(&event, &generation)
+                    {
                         return Ok(event);
                     }
                 }
@@ -1275,10 +1286,16 @@ impl Client {
                     }));
                 }
                 Err(_) => {
-                    if let Some(event) = self.inner.events.sinks.desired.take_event() {
+                    if let Some(event) = self.inner.events.emitters.desired.take_event() {
                         return Ok(event);
                     }
-                    if self.inner.events.sinks.desired.has_acknowledged_desired() {
+                    if self
+                        .inner
+                        .events
+                        .emitters
+                        .desired
+                        .has_acknowledged_desired()
+                    {
                         match self.recover_session(RecoveryMode::IfClosed).await? {
                             SessionRecovery::Ready => continue,
                             SessionRecovery::Unavailable => {
@@ -1292,7 +1309,7 @@ impl Client {
                         return Err(Report::new(ClientError::SessionClosed));
                     }
                     nervix_primitives::select! {
-                        () = self.inner.events.sinks.subscriptions.resumed() => {}
+                        () = self.inner.events.emitters.subscriptions.resumed() => {}
                         changed = desired_changed.changed() => {
                             changed.assured(
                                 "the client holds the sender of its own subscription notifications",
@@ -1314,7 +1331,7 @@ impl Client {
     /// that gap. [`ClientError::SessionClosed`] means the session ended and the client knows no
     /// server to open another on.
     pub async fn next_server_event(&self) -> error_stack::Result<ServerEvent, ClientError> {
-        let notices = &self.inner.events.sinks.notices;
+        let notices = &self.inner.events.emitters.notices;
         loop {
             nervix_primitives::task::consume_budget().await;
             match notices.next().await {
@@ -1377,7 +1394,7 @@ impl Client {
     /// The latest clock of a domain the session follows, with the arithmetic that projects it.
     /// `None` when the session does not follow the domain's clock.
     pub fn domain_clock(&self, domain: &DomainName) -> Option<AttachedDomainClock> {
-        self.inner.events.sinks.clocks.latest(domain)
+        self.inner.events.emitters.clocks.latest(domain)
     }
 
     /// Waits for the next event about the domain clocks the session follows.
@@ -1394,7 +1411,7 @@ impl Client {
     pub async fn next_domain_clock_event(
         &self,
     ) -> error_stack::Result<DomainClockEvent, ClientError> {
-        let clocks = &self.inner.events.sinks.clocks;
+        let clocks = &self.inner.events.emitters.clocks;
         loop {
             nervix_primitives::task::consume_budget().await;
             let mut changed = clocks.watch();
@@ -1462,7 +1479,7 @@ impl Client {
     ) -> error_stack::Result<ReplyBody, ClientError> {
         let release = match request {
             ClientRequest::DetachDomainClock(detach) => {
-                let release = self.inner.events.sinks.clocks.release(&detach.domain);
+                let release = self.inner.events.emitters.clocks.release(&detach.domain);
                 release.settled().await;
                 Some(release)
             }
@@ -1597,7 +1614,7 @@ impl Client {
         let exchange = Exchange::open(
             channel,
             &self.inner.connector,
-            self.inner.events.sinks.clone(),
+            self.inner.events.emitters.clone(),
         )
         .await?;
         self.inner.servers.lock().await.connected(server);

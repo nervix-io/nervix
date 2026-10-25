@@ -211,7 +211,7 @@ valid retroactively.
 
 Within a transaction, each consecutive run of model mutations can mix `CREATE`,
 `ALTER SCHEMA`, `ALTER WIRE ... SCHEMA`, `ALTER RELAY`, `ALTER JUNCTION`, `ALTER DEDUPLICATOR`,
-`ALTER REORDERER`, `ALTER EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`,
+`ALTER REORDERER`, `ALTER <CONNECTOR> <ENTITY> EMITTER`, `ALTER <CONNECTOR> <ENTITY> INGESTOR`, `ALTER REINGESTOR`,
 `ALTER GENERATOR`, `ALTER PLACEMENT`, and `DROP`. Nervix applies that run as one registry
 mutation: all operations are evaluated in written order against one candidate model map, the
 complete domain graph is revalidated, and one atomic storage batch persists the base-to-final
@@ -451,7 +451,7 @@ operator `PAUSE` or `RESUME` statement.
   tasks and hands pending materialized-state work to their replacements. Deduplicator key changes
   also purge the old keyspace before the replacement starts; reorderer ordering changes flush the
   old ordering buffers before swapping. Relay materialized-state changes update membership in
-  place. Emitter source-predicate, sink, publishing-mode (including any confirmation window,
+  place. Emitter source-predicate, emitter, publishing-mode (including any confirmation window,
   timeout, or retry-policy variable), client, codec, input-collection, and attachment changes
   drain and replace only the affected emitter task. Every ingestor alteration quiesces and drains
   only the affected ingestor instances under their declared source mode, then starts their desired
@@ -488,7 +488,7 @@ operator `PAUSE` or `RESUME` statement.
   eviction settings. Their consumers read that configuration when they are built, so the domain
   rebuilds around the new models rather than reconfiguring in place.
 
-For an HTTP emitter, the method and path expressions are part of its sink definition. Replacing
+For an HTTP emitter, the method and path expressions are part of its emitter definition. Replacing
 them, the client reference, body selection, or retry mode takes `ENTITY_PAUSE`; a `FLUSH`-only
 alteration remains `DYNAMIC`. The gate keeps the admitted request with its original destination
 and prepared bytes until the old task drains. If it cannot drain, the mutation remains unapplied.
@@ -644,13 +644,21 @@ recorded stay applied.
 Node drain, the ownership move of a graceful-shutdown drain, placement consolidation, and `RELOCATE`
 are planned ownership handoffs.
 Nervix computes the complete target schedule before it engages a hold. It then fences dispatch at
-the affected subgraph boundary on every live node, stops new intake for each moved ingestor, and
-drains work already admitted to the moved unit. Ownership-handoff intake does not consult `ON
-QUIESCE`: an already admitted payload continues through its routes, while polling and endpoint
-admission stop. The drain includes relay rings, processor work, moved-ingestor ACK roots, emitter
-buffers and active publishing, and an Iceberg emitter's staged commit. Internal relays whose every
-producer moves with the same hard group remain open so admitted work can reach the group's output
-boundary.
+the affected subgraph boundary on every live node that runs part of it, stops new intake for each
+moved ingestor, and drains work already admitted to the moved unit. Ownership-handoff intake does
+not consult `ON QUIESCE`: an already admitted payload continues through its routes, while polling
+and endpoint admission stop. The drain includes relay rings, processor work, moved-ingestor ACK
+roots, emitter buffers and active publishing, and an Iceberg emitter's staged commit. Internal
+relays whose every producer moves with the same hard group remain open so admitted work can reach
+the group's output boundary.
+
+The hold's participants are the live nodes on which the current or the target schedule runs a
+moved entity, a relay the hold fences, or an entity that writes to such a relay. An ingestor that
+runs on every node counts on each node it is assigned to. Only those nodes can admit work into the
+moved unit, hold work it must drain, or run the unit once the handoff activates. The coordinator
+asks no other node to hold anything and waits for none of them, so a live node that runs none of
+the unit cannot spend the preparation deadline, however slowly the coordinator reaches it. A
+participant the coordinator cannot reach still fails the unit when that deadline passes.
 
 Before publishing the ownership freeze, each participant requests a force flush and drains its
 local affected work with the intake and boundary gates already closed. Routes and processors can
@@ -664,12 +672,18 @@ Nervix writes the new schedule only after that drain succeeds. A drain writes an
 group or independent node at a time. Placement consolidation gates all of its moved groups together
 and publishes its model and assignments in one schedule update. Only moved runtime nodes restart;
 unaffected nodes and branches keep their sessions, buffers, state, and in-flight work. The gate is
-released after the destination owners activate the published runtime revision. A fence or drain
-timeout releases the old graph without writing the candidate schedule. If activation fails after a
-schedule commit, the gate stays closed until its lease deadline rather than opening before the
-destination is ready. That holds on every node that keeps running; a node that stops ends the leases
-it holds with its runtime, as [Ownership Handoff During Shutdown](shutdown.md#ownership-handoff-during-shutdown)
-describes.
+released after the destination owners activate the published runtime revision. Before they
+activate, the hold's participants must have prepared that revision, so each of them routes by it
+once its fence opens. `DRAIN NODE`, `RELOCATE`, and placement and model changes wait longer: they
+activate the destination only once every live node has prepared the revision and is ready at it,
+the barrier [Command Completion](command-completion.md#all-live-node-barriers) defines for every
+command. The ownership move of a graceful-shutdown drain waits only for the participants, within
+the stopping node's unit deadline, so a node that runs none of the unit cannot spend that node's
+drain budget. A fence or drain timeout releases the old graph without writing the candidate
+schedule. If activation fails after a schedule commit, the gate stays closed until its lease
+deadline rather than opening before the destination is ready. That holds on every node that keeps
+running; a node that stops ends the leases it holds with its runtime, as
+[Ownership Handoff During Shutdown](shutdown.md#ownership-handoff-during-shutdown) describes.
 
 Pending `REQUIRED WAIT` materialized records cannot finish a planned drain because the dependency is
 absent. They do not block the handoff; destroying the old task negatively acknowledges their
@@ -770,7 +784,7 @@ started until the shutdown deadline and cancels whatever still runs then, and fi
 runtime, consensus, cluster membership, and the interconnect and releases the node's storage. A
 timeout reports the drain as abandoned, and teardown negatively acknowledges the remaining work: a
 source with external acknowledgements redelivers it after restart, and a `MODE NO ACK` source loses
-it. A sink that stays unavailable therefore holds the drain until its timeout. Pending
+it. A emitter that stays unavailable therefore holds the drain until its timeout. Pending
 `REQUIRED WAIT` records do not hold the drain open; every force flush retries them against the
 state that is present, and teardown negatively acknowledges whatever still waits. Payloads that
 other live nodes publish into this node's relays are admitted work as well, so an owner that keeps

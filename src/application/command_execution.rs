@@ -14,7 +14,7 @@
     )
 )]
 
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, convert::Infallible, time::Duration};
 
 use ahash::RandomState;
 use blake3::Hasher;
@@ -30,9 +30,10 @@ use nervix_consensus::{
     ConsensusError, RestoreExecution,
 };
 use nervix_models::{
-    Backup, BackupCapture, BackupResources, BackupScope, CommandExecutionReference, DomainName,
-    DomainStartPoint, DomainState, DomainStatus, Restore, RestoreArchive, Statement, Timestamp,
-    TransactionPosition, TransactionStatus, UserName,
+    Backup, BackupCapture, BackupResources, BackupScope, ClusterParameters,
+    CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Restore,
+    RestoreArchive, Setting, SettingDefinition, Statement, Timestamp, TransactionPosition,
+    TransactionStatus, UserName,
 };
 use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::{
@@ -52,9 +53,6 @@ use super::{
     transaction::is_queueable_transaction_statement,
 };
 
-const DEFAULT_COMMAND_RETRY_VALIDITY: Duration = Duration::from_secs(15 * 60);
-const DEFAULT_COMMAND_EXECUTION_CAPACITY: usize = 65_536;
-
 /// The server's capture inputs. The destination belongs exclusively to the client's download.
 #[derive(rkyv::Archive, rkyv::Serialize)]
 struct BackupExecutionParameters {
@@ -73,49 +71,92 @@ impl From<&Backup> for BackupExecutionParameters {
     }
 }
 
-#[derive(Debug, Clone, Copy, clap::Args)]
+/// How long the cluster recognizes a command reference, so a client's retry of the same command
+/// finds its first outcome instead of running it again.
+pub struct CommandRetryValidity;
+
+impl SettingDefinition for CommandRetryValidity {
+    type Class = ClusterParameters;
+    type Value = Duration;
+    type Context = ();
+    type Error = Infallible;
+
+    const NAME: &'static str = "command-retry-validity";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> Duration {
+        Duration::from_secs(15 * 60)
+    }
+
+    fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
+        Ok(())
+    }
+}
+
+/// The most command executions the cluster retains outcomes for at once.
+pub struct CommandExecutionCapacity;
+
+impl SettingDefinition for CommandExecutionCapacity {
+    type Class = ClusterParameters;
+    type Value = usize;
+    type Context = ();
+    type Error = Infallible;
+
+    const NAME: &'static str = "command-execution-capacity";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> usize {
+        65_536
+    }
+
+    fn validate(_: &usize, _: &()) -> Result<(), Report<Infallible>> {
+        Ok(())
+    }
+}
+
+/// How the cluster admits persistent session commands and how long it retains their outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandExecutionPolicy {
-    #[arg(
-        long = "command-retry-validity",
-        env = "NERVIX_COMMAND_RETRY_VALIDITY",
-        default_value = "15m",
-        value_parser = super::parse_human_duration
-    )]
-    retry_validity: Duration,
-    #[arg(
-        long = "command-execution-capacity",
-        env = "NERVIX_COMMAND_EXECUTION_CAPACITY",
-        default_value_t = DEFAULT_COMMAND_EXECUTION_CAPACITY
-    )]
-    capacity: usize,
+    retry_validity: Setting<CommandRetryValidity>,
+    capacity: Setting<CommandExecutionCapacity>,
 }
 
 impl CommandExecutionPolicy {
-    pub fn new(retry_validity: Duration, capacity: usize) -> Self {
-        Self {
-            retry_validity,
-            capacity,
-        }
+    /// Resolves each value that is not given through its definition's default.
+    pub fn resolve(
+        retry_validity: Option<Duration>,
+        capacity: Option<usize>,
+    ) -> Result<Self, Report<Infallible>> {
+        Ok(Self {
+            retry_validity: Setting::resolve(retry_validity, &())?,
+            capacity: Setting::resolve(capacity, &())?,
+        })
     }
 
-    pub(in crate::application) fn retry_validity(self) -> Duration {
-        self.retry_validity
+    pub fn new(retry_validity: Duration, capacity: usize) -> Self {
+        Self::resolve(Some(retry_validity), Some(capacity))
+            .assured("the command execution settings declare no validation")
+    }
+
+    pub fn retry_validity(self) -> Duration {
+        *self.retry_validity.value()
+    }
+
+    pub fn capacity(self) -> usize {
+        *self.capacity.value()
     }
 
     pub(in crate::application) fn admission_at(
         self,
         now: Timestamp,
     ) -> CommandExecutionAdmissionPolicy {
-        CommandExecutionAdmissionPolicy::at(now, self.retry_validity, self.capacity)
+        CommandExecutionAdmissionPolicy::at(now, self.retry_validity(), self.capacity())
     }
 }
 
 impl Default for CommandExecutionPolicy {
     fn default() -> Self {
-        Self::new(
-            DEFAULT_COMMAND_RETRY_VALIDITY,
-            DEFAULT_COMMAND_EXECUTION_CAPACITY,
-        )
+        Self::resolve(None, None).assured("the command execution defaults declare no validation")
     }
 }
 

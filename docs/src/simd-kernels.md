@@ -143,7 +143,7 @@ route errors, ACK attribution, and branch ownership.
 | Constant integer division | `UnsignedDivisor`, `SignedDivisor`, `ConstantDivision` | VM column-by-scalar `/` and `%` and fixed-unit datetime operations prepare the divisor once; measured 64-bit operations retain scalar reciprocal paths |
 | SYSLOG header and structured-data scanning | `ByteClass::first_in`, `ByteScanner` | Compiled SYSLOG fields retain names and Arrow types; byte classes find header refusals and structured-data syntax before scalar parsing at those positions |
 | Syslog TCP framing | memchr, retained read cursor, typed `FrameProgress` | The connector retains parsed octet counts and searches newly read bytes of split lines, with one compaction per read |
-| SQS XML character admission | `XmlChars::into_string` and `XmlChars::admits`, with simdutf8 | The SQS sink validates bodies and string attributes; its integration owns size limits and reporting |
+| SQS XML character admission | `XmlChars::into_string` and `XmlChars::admits`, with simdutf8 | The SQS emitter validates bodies and string attributes; its integration owns size limits and reporting |
 | OTEL trace/span identifiers | faster-hex | The OTEL connector decodes fixed-length nonzero hexadecimal IDs; `otel-hex-ids` compares every byte and each typed refusal with a per-digit scalar reference in ordinary and sanitizer execution |
 
 ### JSON Boundaries

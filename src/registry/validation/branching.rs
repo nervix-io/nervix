@@ -1119,10 +1119,10 @@ mod tests {
     use nervix_models::{
         AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, ClusterNodeName,
         CreateGenerator, CreateIngestor, CreateReingestor, CreateWireSchema, Expression,
-        FieldReference, FieldScope, FlushPolicy, GeneralErrorPolicy, IngestSource, JsonType,
-        KafkaIngestMode, KafkaOffsetMode, KafkaSource, KafkaTopicSource, MaterializedRelayState,
-        MessageErrorPolicy, ParseAsType, PlacementPolicy, ProcessorInputs, SchemaField,
-        WireSchemaField, WireSchemaName,
+        FieldReference, FieldScope, FlushPolicy, GeneralErrorPolicy, IngestorEntity, JsonType,
+        KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor,
+        MaterializedRelayState, MessageErrorPolicy, ParseAsType, PlacementPolicy, ProcessorInputs,
+        SchemaField, WireSchemaField, WireSchemaName,
     };
     use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
@@ -1514,20 +1514,22 @@ mod tests {
                         ),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
-                                    client: named("broker_in_2"),
-                                    topic: named("notifications"),
-                                    offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
-                                    instances: nonzero!(1u64),
-                                    mode: KafkaIngestMode::AckSequential {
-                                        timeout: "30s".to_string(),
-                                        retry_policy: nervix_models::RetryPolicy {
-                                            backoff: "200ms".to_string(),
-                                            max_backoff: "5s".to_string(),
+                                source: IngestorEntity::Kafka(KafkaIngestor::Topic(
+                                    KafkaTopicIngestor {
+                                        client: named("broker_in_2"),
+                                        topic: named("notifications"),
+                                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
+                                        instances: nonzero!(1u64),
+                                        mode: KafkaIngestMode::AckSequential {
+                                            timeout: "30s".to_string(),
+                                            retry_policy: nervix_models::RetryPolicy {
+                                                backoff: "200ms".to_string(),
+                                                max_backoff: "5s".to_string(),
+                                            },
                                         },
+                                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                     },
-                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                                })),
+                                )),
                                 codec: named("event_codec"),
                             },
                         ),

@@ -789,7 +789,7 @@ Feature: Relocating runtime nodes onto a named cluster node
         TO corridor_stage_two INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE JUNCTION corridor_bypass FROM corridor_stage_one UNBRANCHED
         TO corridor_stage_two INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM corridor_stage_two UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM corridor_stage_two UNBRANCHED
         TO corridor_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
@@ -797,7 +797,7 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
-      RELOCATE FROM JUNCTION corridor_source TO JUNCTION corridor_sink
+      RELOCATE FROM JUNCTION corridor_source TO JUNCTION corridor_emitter
         ONTO NODE node-2 IGNORE PREFERENCES;
       """
     Then the last command output contains
@@ -807,7 +807,7 @@ Feature: Relocating runtime nodes onto a named cluster node
     And the last command output contains
       """
       coverage:
-      - junction corridor_source -> junction corridor_sink connected=yes covered=6
+      - junction corridor_source -> junction corridor_emitter connected=yes covered=6
       """
     And the last command output contains
       """
@@ -835,19 +835,19 @@ Feature: Relocating runtime nodes onto a named cluster node
       """
     When these Plexus commands fail with "relocation covers no runtime node: no FROM/TO pair is connected"
       """
-      RELOCATE FROM JUNCTION corridor_sink TO JUNCTION corridor_source
+      RELOCATE FROM JUNCTION corridor_emitter TO JUNCTION corridor_source
         ONTO NODE node-3 IGNORE PREFERENCES;
       """
     And these Plexus commands are executed on the leader node
       """
-      DESCRIBE RELOCATION FROM JUNCTION corridor_source, JUNCTION corridor_sink
-        TO JUNCTION corridor_sink
+      DESCRIBE RELOCATION FROM JUNCTION corridor_source, JUNCTION corridor_emitter
+        TO JUNCTION corridor_emitter
         ONTO NODE node-3 IGNORE PREFERENCES;
       """
     Then the last command output contains
       """
-      - junction corridor_source -> junction corridor_sink connected=yes covered=6
-      - junction corridor_sink -> junction corridor_sink connected=no covered=0
+      - junction corridor_source -> junction corridor_emitter connected=yes covered=6
+      - junction corridor_emitter -> junction corridor_emitter connected=no covered=0
       """
 
   Scenario: A hard colocation group moves whole under either preference strategy
@@ -1555,8 +1555,8 @@ Feature: Relocating runtime nodes onto a named cluster node
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER stalled_emitter FROM abort_staged
-        TO ZEROMQ abort_sink MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE ZEROMQ PUSH EMITTER stalled_emitter FROM abort_staged
+        TO abort_sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING abort_event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

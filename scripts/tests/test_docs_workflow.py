@@ -110,6 +110,17 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertIn("    - [nervix-cli Reference](./nervix-cli-reference.md)", summary)
         self.assertFalse(Path("docs/src/nervix-cli-reference.md").exists())
 
+    def test_server_reference_is_a_generated_chapter_under_running_nervix(self) -> None:
+        summary = Path("docs/src/SUMMARY.md").read_text().splitlines()
+
+        self.assertIn("    - [nervix-server Reference](./nervix-server-reference.md)", summary)
+        self.assertFalse(Path("docs/src/nervix-server-reference.md").exists())
+
+    def test_running_page_points_at_the_generated_server_reference(self) -> None:
+        page = Path("docs/src/quickstart-running.md").read_text()
+
+        self.assertIn("(nervix-server-reference.md)", page)
+
     def test_cli_page_points_at_the_generated_reference(self) -> None:
         page = Path("docs/src/client-tools-cli.md").read_text()
 

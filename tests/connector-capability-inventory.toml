@@ -77,21 +77,21 @@ scenarios = [
 capability = "METHOD"
 entity = "HTTP REQUEST EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP emitter sends each record with its own method, path, headers, and codec body" },
+  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP REQUEST emitter sends each record with its own method, path, headers, and codec body" },
 ]
 
 [[capability]]
 capability = "MODE ACK"
 entity = "HTTP REQUEST EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP emitter sends each record with its own method, path, headers, and codec body" },
+  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP REQUEST emitter sends each record with its own method, path, headers, and codec body" },
 ]
 
 [[capability]]
 capability = "PATH"
 entity = "HTTP REQUEST EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP emitter sends each record with its own method, path, headers, and codec body" },
+  { feature = "tests/features/runtime/http_emitter.feature", scenario = "An HTTP REQUEST emitter sends each record with its own method, path, headers, and codec body" },
 ]
 
 [[capability]]
@@ -180,7 +180,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "KAFKA TOPIC EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/kafka_emission.feature", scenario = "Kafka emitter filter-map publishes message fields and headers" },
@@ -211,14 +211,14 @@ scenarios = [
 capability = "MODE NO ACK"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO_ACK executes ingestor programs once for a collected ingest group" },
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO ACK executes ingestor programs once for a collected ingest group" },
 ]
 
 [[capability]]
 capability = "OFFSET BY CONSUMER GROUP"
 entity = "KAFKA TOPIC INGESTOR"
 scenarios = [
-  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO_ACK executes ingestor programs once for a collected ingest group" },
+  { feature = "tests/features/runtime/kafka_ingestion.feature", scenario = "Kafka NO ACK executes ingestor programs once for a collected ingest group" },
 ]
 
 [[capability]]
@@ -404,10 +404,10 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "NATS SUBJECT EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/nats_emission.feature", scenario = "NATS emitter publishes JSON payloads from a relay" },
+  { feature = "tests/features/runtime/nats_emission.feature", scenario = "NATS SUBJECT emitter publishes JSON payloads from a relay" },
 ]
 
 [[capability]]
@@ -449,7 +449,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL LOGS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -491,7 +491,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -554,7 +554,7 @@ scenarios = [
 capability = "BATCH"
 entity = "OTEL TRACES EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "An OTEL export rejects a singleton larger than its encoded request limit" },
 ]
 
 [[capability]]
@@ -663,7 +663,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "PULSAR TOPIC EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/pulsar_emission.feature", scenario = "Pulsar mode controls when the input offset is committed" },
@@ -726,7 +726,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "RABBITMQ QUEUE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/emitter_batch_brokers.feature", scenario = "Every broker publishing mode carries one batch in one external message" },
@@ -777,7 +777,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "REDIS PUBSUB EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/redis_emission.feature", scenario = "Redis emitter publishes JSON payloads from a relay" },
@@ -805,10 +805,17 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "REDIS PUBSUB INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/redis_ingestion.feature", scenario = "An idle Redis subscription detects a silent connection and resubscribes" },
+]
+
+[[capability]]
 capability = "BATCH"
 entity = "SENTRY EVENT EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "Sentry accepts one event whose extra field preserves every batch member" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "Sentry accepts one event whose extra field preserves every batch member" },
 ]
 
 [[capability]]
@@ -857,14 +864,14 @@ scenarios = [
 capability = "MODE SINGLE"
 entity = "SQS QUEUE EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS emitter publishes JSON payloads from a relay" },
+  { feature = "tests/features/runtime/sqs_emission.feature", scenario = "SQS QUEUE emitter publishes JSON payloads from a relay" },
 ]
 
 [[capability]]
 capability = "STALLED PEER timeout_ms"
 entity = "SQS QUEUE EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An SQS emitter whose service stops answering is reported within timeout_ms" },
+  { feature = "tests/features/runtime/stalled_peers.feature", scenario = "An SQS QUEUE emitter whose service stops answering is reported within timeout_ms" },
 ]
 
 [[capability]]
@@ -885,11 +892,11 @@ scenarios = [
 capability = "BATCH"
 entity = "SYSLOG COLLECTOR EMITTER"
 scenarios = [
-  { feature = "tests/features/runtime/emitter_batch_fixed_sinks.feature", scenario = "A Syslog TLS receiver sees one batched RFC 5425 frame" },
+  { feature = "tests/features/runtime/emitter_batch_fixed_emitters.feature", scenario = "A Syslog TLS receiver sees one batched RFC 5425 frame" },
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "SYSLOG COLLECTOR EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/syslog_dns_resolution.feature", scenario = "Syslog UDP emitter reaches an endpoint named by the node DNS fixture" },
@@ -952,6 +959,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_bounds.feature", scenario = "A WebSocket connection reports a silent peer through idle_timeout_ms on <cluster_size> nodes" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "WEBSOCKETS ENDPOINT INGESTOR"
 scenarios = [
@@ -973,7 +987,7 @@ scenarios = [
 ]
 
 [[capability]]
-capability = "MODE NO_ACK"
+capability = "MODE NO ACK"
 entity = "ZEROMQ PUSH EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "ZeroMQ emitter publishes JSON payloads from a relay" },
@@ -1006,4 +1020,34 @@ capability = "MODE ACK"
 entity = "WEBSOCKETS ENDPOINT INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "A WebSocket endpoint acknowledges each <result> frame during and after signaling" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ NO ACK consumes automatically without prefetch or pending transport acknowledgements" },
+]
+
+[[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must reject them after its connection was lost" },
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must acknowledge them after its connection was lost" },
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected" },
+]
+
+[[capability]]
+capability = "HEADERS"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
+]
+
+[[capability]]
+capability = "metadata.frame_type"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_declaration.feature", scenario = "A WebSockets connection sends literal upgrade headers and exposes response headers and frame types" },
 ]

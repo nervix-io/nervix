@@ -1915,6 +1915,33 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(library[19], 3)
         self.assertEqual(len(collection.record["selection"]["children"]), 1)
 
+    def test_completed_build_cleanup_keeps_collected_evidence_and_the_build_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target with spaces"
+            workspace = Workspace(self.fixture, target)
+            with workspace.build_lock():
+                artifact = workspace.build() / "debug/deps/fixture.rlib"
+                artifact.parent.mkdir(parents=True)
+                artifact.write_bytes(b"compiled output")
+            attempt = workspace.new_attempt(fixture_producer("walk"), "rust-1.99.0", "complete")
+            (attempt / "lcov.info").write_text("exported report\n")
+            (attempt / "completion.json").write_text('{"verdict":"complete"}\n')
+            (attempt / "profiles/walk.profraw").write_bytes(b"retained profile")
+            collected = files(target / native_coverage.COLLECTION_DIRECTORY)
+            sources = files(self.fixture / "src")
+            result = subprocess.run(
+                ["just", "clean-ci-benchmarks"],
+                cwd=REPOSITORY,
+                env={**os.environ, "CARGO_TARGET_DIR": str(target)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(artifact.exists())
+            self.assertTrue((workspace.build() / native_coverage.LOCK).is_file())
+            self.assertEqual(files(target / native_coverage.COLLECTION_DIRECTORY), collected)
+            self.assertEqual(files(self.fixture / "src"), sources)
+
     def test_the_ordinary_coverage_cleanup_leaves_every_collection_alone(self) -> None:
         collection = self.collect("walk")
         self.assertEqual(collection.status, 0, collection.record.get("failure"))

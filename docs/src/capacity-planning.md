@@ -73,17 +73,20 @@ Each class also holds at most 1,024 jobs waiting for a worker; a job beyond that
 the work that submitted it reports the refusal as its own failure. The one exception is work the
 node already accepted and keeps: the unfolding of a payload a quiesce buffer retained waits for a
 place instead, while its payload stays counted in the buffer. So does the unfolding of a poll a
-paced source handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
-acknowledgement, and an Iceberg commit's read of the staged files its sink already accepted.
+paced ingestor handed over, and of a payload a NATS, ZeroMQ or Syslog source read without an
+acknowledgement, and an Iceberg commit's read of the staged files its emitter already accepted.
 Holding one of those source loops pushes back into its transport, so a node whose
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
-Transient memory is 275 MiB per node, divided into ceilings that cannot borrow from each other:
+Transient memory is 291 MiB per node, divided into ceilings that cannot borrow from each other:
 8 MiB for management, 24 MiB for commands and replication, 192 MiB for relay work, 32 MiB for
-bulk buffers and 19 MiB for credentials. One relay operation may hold at most 32 MiB of encoded body, 32 MiB of decoded data
-and 16 MiB of conversion scratch, and the relay budget is sized to hold two such operations at
-once so one blocked channel cannot exhaust the capacity another needs.
+bulk buffers, 16 MiB for the receive windows of bulk streams and 19 MiB for credentials. Each bulk
+stream a node opens, such as a resource, checkpoint or snapshot fetch, holds one 1 MiB receive
+window for as long as it is open, so sixteen bulk streams run at once and a seventeenth waits for
+a window within its own request deadline. One relay operation may hold at most 32 MiB of encoded
+body, 32 MiB of decoded data and 16 MiB of conversion scratch, and the relay budget is sized to hold
+two such operations at once so one blocked channel cannot exhaust the capacity another needs.
 An Iceberg commit charges the bulk budget for the staged files it reads back, only when the budget
 has room for them now, so a commit whose staged files exceed the budget reads them in groups, a
 single staged file larger than the budget waits until the whole budget is free and is charged all
@@ -91,12 +94,17 @@ of it, and a commit refused for room is retried by its emitter.
 The relay budget also carries the acknowledgement watches a relay owner keeps for rows another node
 delivered with acknowledgements: 1 KiB per row until the owner reports that row's outcome, and
 4 KiB per delivery. A delivery of 8 MiB of 164-byte rows therefore needs about 51 MiB of watches
-beside the 56 MiB its body and decoding reserve. When rows arrive faster than the owner reports
+beside the 56 MiB its grant reserves for its body and decoding until the body is decoded, when it
+keeps only its body and decoded columns. When rows arrive faster than the owner reports
 them, their watches fill the budget and the owner holds further deliveries back until reported
 rows return their share. Sustained remote delivery with acknowledgements is then bounded by how
 fast acknowledgements return to the sending node, not by the budget's size, and a source that sends
-there waits instead of failing. The budgets are fixed defaults and do not follow the node's own
-memory.
+there waits instead of failing. A grant reserves the largest decoded batch and the scratch room
+whatever the body's size, so the budget grants about three deliveries at once; a sender whose grant
+is refused for that room, and a sender whose own budget has no room to store the acknowledgements
+of the rows it sends, hold their delivery back and wait as well; see
+[Held Deliveries](./interconnect.md#held-deliveries). The budgets are fixed defaults and do not
+follow the node's own memory.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
 The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one
@@ -117,6 +125,36 @@ Two multipliers usually dominate:
 The second multiplier applies separately to every stateful node. A long deduplication horizon does
 not pay for a window's state, and a window width does not bound a correlator.
 
+## What A Node Needs To Start
+
+A node checks its memory and its database volume against its configuration before it starts, in
+its [startup preflight](node-settings.md#the-startup-preflight), and refuses to start when they
+cannot hold it:
+
+- **Memory.** The node's memory limit is `--memory-limit` (`NERVIX_MEMORY_LIMIT`) when given, and
+  otherwise the smallest memory limit of its control group and the groups above it, or its
+  physical memory when no group limit is smaller. It must hold every execution budget at once: the
+  275 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,323 MiB in all,
+  and a `--memory-high-watermark` when one is set. A container limited to 2 GiB therefore cannot
+  start a node. Size the limit above the budgets by the process memory a running graph holds, which
+  the memory-pressure watermarks govern.
+- **Volume.** The volume that holds the node's database directory must be at least as large as
+  each of its quotas. The restore-staging quota, `--restore-staging-max-bytes`, follows the volume
+  when it is not given: the node takes the smaller of 128 GiB and the volume's total size, and a
+  given value larger than the volume refuses the start. The resource quotas,
+  `--resource-max-archive-bytes` and `--resource-max-extracted-bytes`, keep their 4 GiB and 16 GiB
+  defaults whatever the volume, so a node on a smaller volume needs them set below its size: a
+  5 GiB volume might take `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES=1GiB` and
+  `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES=2GiB`. They are cluster parameters, so give every node the
+  same values. Each quota is compared with the volume's total size on its own, and what the volume
+  already holds is not subtracted, so size the volume for the log, snapshots and state the node
+  keeps beside them.
+
+A refusal names the setting, the value and the capacity it was compared with, such as
+`resource-max-extracted-bytes (16GiB) exceeds the 5GiB capacity of the volume holding the database
+directory /var/lib/nervix/db`, and a node that passes logs `the startup preflight passed` with its
+memory limit, its budgets, the size of its volumes and the restore-staging quota it resolved.
+
 ## Sizing Knobs
 
 - Branch `TTL` trades branch reuse against how long idle branch-local tasks, buffers, and state
@@ -134,7 +172,7 @@ not pay for a window's state, and a window width does not bound a correlator.
   buffers. `MAX BATCH SIZE` only clamps a batch and never grows one: the batch a route emits is
   roughly arrival rate × interval, up to the byte cap. Larger batches reduce per-batch cost only
   at boundaries that work per batch; see the [flush tuning guidance](plexus-overview.md) for which
-  sinks those are. `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
+  emitters those are. `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
 - Cluster interconnect carries each relay batch as one Arrow IPC body with a fixed 32 MiB limit.
   It reserves one unadmitted batch and one terminal outcome per active logical channel. Channels
   are concrete-branch local, so waiting work in one branch does not consume another branch's

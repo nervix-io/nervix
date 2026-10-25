@@ -21,8 +21,8 @@ Feature: Pulsar receipt bounds and finishing accepted records
       CREATE VHOST edge pulsar-{{test_id}}.example.com;
       CREATE ENDPOINT delivery_ingress ON edge PATH '/events' TYPE HTTP;
       CREATE HTTP ENDPOINT INGESTOR delivery_source
-        FROM delivery_ingress MODE NO ACK
-        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING delivery_codec
+        FROM delivery_ingress MODE ACK MAX 100 ACK TIMEOUT 60s
+        ON QUIESCE REJECT RETRY AFTER 1s DECODE USING delivery_codec
         TIMESTAMP NOW
         TO delivery_events
           INHERIT ALL
@@ -33,9 +33,9 @@ Feature: Pulsar receipt bounds and finishing accepted records
       CREATE PULSAR CLIENT pulsar_sink CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
-      CREATE EMITTER delivery_output FROM delivery_events
-        TO PULSAR pulsar_sink TOPIC delivery_out_{{test_id}}
-          MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE PULSAR TOPIC EMITTER delivery_output FROM delivery_events
+        TO pulsar_sink TOPIC 'delivery_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING delivery_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -98,8 +98,8 @@ Feature: Pulsar receipt bounds and finishing accepted records
       CREATE PULSAR CLIENT pulsar_sink CONFIG {
         'addr' = '{{pulsar_stallable_addr}}'
       };
-      CREATE EMITTER delivery_output FROM delivery_events
-        TO PULSAR pulsar_sink TOPIC delivery_out_{{test_id}}
+      CREATE PULSAR TOPIC EMITTER delivery_output FROM delivery_events
+        TO pulsar_sink TOPIC 'delivery_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING delivery_codec
         INHERIT ALL

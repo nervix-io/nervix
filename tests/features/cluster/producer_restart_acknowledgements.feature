@@ -49,15 +49,15 @@ Feature: Remote acknowledgements across a producer restart
           BRANCHED BY restart_ack_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER restart_ack_before_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER restart_ack_before_sink
         FROM restart_ack_before_records
-        TO KAFKA restart_ack_kafka TOPIC restart_ack_out_{{test_id}}
+        TO restart_ack_kafka TOPIC 'restart_ack_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING restart_ack_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER restart_ack_after_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER restart_ack_after_sink
         FROM restart_ack_after_records
-        TO KAFKA restart_ack_kafka TOPIC restart_ack_out_{{test_id}}
+        TO restart_ack_kafka TOPIC 'restart_ack_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING restart_ack_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

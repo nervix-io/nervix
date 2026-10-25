@@ -16,7 +16,7 @@ chapter owns the shared host and connector boundary; [Control Plane](./control-p
 time, binding, and recovery rules. The [HTTP emitter acceptance ledger](https://github.com/nervix-io/nervix/blob/main/tests/http-emitter-acceptance-ledger.md#http-emitter-09-qualification)
 records the public qualification evidence summarized below.
 
-## From Plexus to an active sink
+## From Plexus to an active emitter
 
 The language parses `TO HTTP` and its ordered `METHOD`, `PATH`, `MODE ACK RETRY POLICY`, and body
 selection into semantic Models. The registry validates the complete candidate against the same
@@ -26,7 +26,7 @@ plan. A running data-plane task receives that plan; it does not read a Model or 
 The server composes the HTTP connector with the emitter host. These conversions and their
 installation boundary are described in [Execution Plans](./execution-plans.md).
 
-The sink has one request/response mode, with an explicit retry policy and exactly one body choice:
+The emitter has one request/response mode, with an explicit retry policy and exactly one body choice:
 
 ```plexus,ignore
 TO HTTP <client>
@@ -37,7 +37,7 @@ TO HTTP <client>
 ```
 
 `METHOD` and `PATH` are structured expressions, not client settings. HTTP `MODE ACK` has no ACK
-window or `ACK TIMEOUT`; `NO_ACK`, parallel publication, and the optional emitter `BATCH` clause
+window or `ACK TIMEOUT`; `NO ACK`, parallel publication, and the optional emitter `BATCH` clause
 are unavailable. The emitter still requires a route-local `FLUSH` policy. `COLLECT FOR` may gather
 input records before execution, while `FLUSH` governs when prepared work is released. Neither
 merges several records into one HTTP body. The `HTTP CLIENT`'s polling `method` setting has
@@ -56,9 +56,9 @@ CREATE HTTP CLIENT api CONFIG {
   'timeout_ms' = 5000
 };
 
-CREATE ATTACHED EMITTER deliver_event
+CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
   FROM outgoing
-  TO HTTP api
+  TO api
     METHOD input.request_method
     PATH input.request_path
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -87,9 +87,9 @@ This alternative uses the same relay and client. `WITHOUT BODY` uses the source 
 It allows route `WHERE` and header invocations, but not `INHERIT`, `SET`, or `VALUES`.
 
 ```plexus
-CREATE EMITTER delete_event
+CREATE HTTP REQUEST EMITTER delete_event
   FROM outgoing WHERE input.request_method = 'DELETE'
-  TO HTTP api
+  TO api
     METHOD 'DELETE'
     PATH input.request_path
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -176,7 +176,7 @@ it does not create a row-map payload. The HTTP connector receives a typed, alrea
 request containing the validated method, normalized target, application headers, and either exact
 codec bytes or no body. It owns HTTP connection and TLS handling, transport-generated fields,
 response parsing, `Retry-After` interpretation, and per-request outcomes. It sees neither graph
-branches nor upstream ACKs. The [connector chapter's HTTP sink boundary](./connector-contract.md#sink-boundary)
+branches nor upstream ACKs. The [connector chapter's HTTP emitter boundary](./connector-contract.md#emitter-boundary)
 defines the shared contract and host loop in detail.
 
 One HTTP request is prepared for each eligible source record, even when `COLLECT FOR` or `FLUSH`
@@ -306,7 +306,7 @@ Nervix supplies no idempotency key. The application can send a stable event iden
 `Idempotency-Key` invocation above does, and arrange endpoint-side deduplication. A generated
 value is stable during a *local* retry because preparation is retained; source replay after a
 restart may evaluate it again. [ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery)
-defines the wider source/sink combinations.
+defines the wider source/emitter combinations.
 
 ## Errors and inspection
 
@@ -338,9 +338,9 @@ Method, target, headers, and response bytes are not payload bytes or metric-labe
 
 ## Replacement, drain, and recovery
 
-Changing the sink's method, path, client reference, body selection, or retry mode takes an
+Changing the emitter's method, path, client reference, body selection, or retry mode takes an
 `ENTITY_PAUSE`; a `FLUSH`-only change is `DYNAMIC`. Changing source membership or a client
-definition has its existing `DOMAIN_PAUSE` contract. `ALTER EMITTER ... SET TO HTTP` restates the
+definition has its existing `DOMAIN_PAUSE` contract. `ALTER HTTP REQUEST EMITTER ... SET TO` restates the
 complete method, path, mode, and body selection. `SET CLIENT`, `SET MODE`, and `SET ENCODE USING`
 retain their current meanings. `DROP ENCODE` cannot select no body; use `SET TO ... WITHOUT BODY`.
 The whole retained construction and error scope must validate against that selection. For
@@ -352,8 +352,8 @@ For example, this replacement changes the first emitter's method and path withou
 codec construction or header invocations:
 
 ```plexus
-ALTER EMITTER deliver_event
-  SET TO HTTP api
+ALTER HTTP REQUEST EMITTER deliver_event
+  SET TO api
     METHOD 'POST'
     PATH '/v1/events'
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -436,9 +436,9 @@ above, each on one-node and three-node clusters:
   to an address whose handshake never completes, followed by the receiver's address. The request
   reaches the receiver, and `DESCRIBE EMITTER` then shows no transient error.
 
-Paused-clock unit tests of the HTTP sink end a silent name server's lookup after its half of
+Paused-clock unit tests of the HTTP emitter end a silent name server's lookup after its half of
 `timeout_ms` and before the whole of it, and end the attempt of an only address that never
 connects with its share; each checks the transient error listed above. A third unit test delivers
 the request through the second address within one attempt when the first never connects. The
-`http-request-heads` Bolero property checks that the request head the sink writes carries every
+`http-request-heads` Bolero property checks that the request head the emitter writes carries every
 prepared field and declares the length the transport rules above require.

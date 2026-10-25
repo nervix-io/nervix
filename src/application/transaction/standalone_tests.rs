@@ -26,7 +26,7 @@ use nervix_consensus::{
 use nervix_models::{DomainName, UserName};
 use nervix_recovery::Discarded as _;
 
-use super::{super::DEFAULT_TRANSACTION_MAX_OPEN, StandaloneCommand};
+use super::{super::TransactionLimits, StandaloneCommand};
 use crate::application::{
     SessionServiceImpl,
     command_result::CommandDisposition,
@@ -447,7 +447,7 @@ async fn a_stale_open_observation_recovers_the_transaction_committed_since() {
                 service.transaction_activity(),
                 fixture.request.request_reference.clone(),
             ),
-            DEFAULT_TRANSACTION_MAX_OPEN,
+            TransactionLimits::default().max_open(),
         )
         .await
         .assured("the single-node test leader opens the command transaction");
@@ -491,7 +491,7 @@ async fn a_queue_write_refused_by_a_transaction_committing_since_recovers_it() {
                 service.transaction_activity(),
                 fixture.request.request_reference.clone(),
             ),
-            DEFAULT_TRANSACTION_MAX_OPEN,
+            TransactionLimits::default().max_open(),
         )
         .await
         .assured("the single-node test leader opens the command transaction");

@@ -1,10 +1,10 @@
-//! The vocabulary of application sessions as a source and a sink.
+//! The vocabulary of application sessions as a source and an emitter.
 //!
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The producer source Model with its acknowledgement mode, the alterations of the
-//!   ingestors that read it, the consumer sink Model, and what each entity declares.
-//! - **Depends on.** The shared source and sink declarations, the acknowledgement and retry
+//!   ingestors that read it, the consumer emitter Model, and what each entity declares.
+//! - **Depends on.** The shared source and emitter declarations, the acknowledgement and retry
 //!   vocabulary, and the schema name a body references.
 //! - **Must not know.** How a session attaches, how a batch is submitted, admitted or delivered,
 //!   or which node serves a producer or a consumer.
@@ -31,24 +31,24 @@ use super::{
         BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
         WaitBound,
     },
-    entity_union::{ALTERED_PAIR_CHECKED, connector_sinks, connector_source_kinds},
-    source::AlteredIngestorSource,
+    entity_union::{ALTERED_PAIR_CHECKED, connector_emitters, connector_ingestor_kinds},
+    ingestor::AlteredIngestorEntity,
 };
 use crate::{
     AckWindow, AcknowledgementConfirmation, AlterIngestorError, AlterIngestorOperation,
     CanonicalPlexusError, ClientName, CreateIngestor, DeclaredDelivery, DeclaredQuiesce,
-    EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm, EmitterPublishingModeKind,
-    IngestDeliveryKind, IngestQuiesceMode, IngestSourceCapabilities, IngestorAlteration,
-    IngestorEntityModel, IngestorInput, PositionClass, RetryPolicy, SchemaName, SinkBody,
-    SinkEntity, SinkReference, SinkReferenceKind, SourceEntity, SourceMetadataScope,
-    SourceReferenceKind,
+    EmitterBatchLegality, EmitterBodyForm, EmitterDeclaration, EmitterEntityBody,
+    EmitterEntityCapabilities, EmitterReference, EmitterReferenceKind, IngestDeliveryKind,
+    IngestQuiesceMode, IngestorAlteration, IngestorDeclaration, IngestorEntityCapabilities,
+    IngestorEntityModel, IngestorInput, IngestorMetadataScope, IngestorReferenceKind,
+    PositionClass, RetryPolicy, SchemaName,
 };
 
 /// Application producers submitting native Arrow batches of one internal schema.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct ClientProducerSource {
+pub struct ClientProducerIngestor {
     /// The internal schema every submitted batch matches exactly, before route construction.
     pub schema: SchemaName,
     pub mode: ClientIngestMode,
@@ -128,14 +128,14 @@ const CONSUMER_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[],
 };
 
-impl SourceEntity for ClientProducerSource {
+impl IngestorDeclaration for ClientProducerIngestor {
     /// A submitted batch carries no transport headers, so its rows expose an empty header list
     /// that no program may read.
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         headers: None,
-        metadata: SourceMetadataScope::Headers,
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Schema,
+        reference: IngestorReferenceKind::Schema,
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::ACK_SEQUENTIAL, CLIENT_ACK_PARALLEL],
@@ -146,11 +146,11 @@ impl SourceEntity for ClientProducerSource {
     };
 }
 
-connector_source_kinds! {
+connector_ingestor_kinds! {
     connector Client = "CLIENT";
     /// The entities a client source reads.
-    pub enum ClientSourceEntity {
-        Producer(ClientProducerSource) = "PRODUCER", "Client batches";
+    pub enum ClientIngestorEntity {
+        Producer(ClientProducerIngestor) = "PRODUCER", "Client batches";
     }
 }
 
@@ -160,14 +160,14 @@ connector_source_kinds! {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ClientIngestorAlteration {
-    Producer(Vec<AlterIngestorOperation<ClientProducerSource>>),
+    Producer(Vec<AlterIngestorOperation<ClientProducerIngestor>>),
 }
 
 impl ClientIngestorAlteration {
     /// The entity whose ingestors this alteration changes.
-    pub const fn entity(&self) -> ClientSourceEntity {
+    pub const fn entity(&self) -> ClientIngestorEntity {
         match self {
-            Self::Producer(_) => ClientSourceEntity::Producer,
+            Self::Producer(_) => ClientIngestorEntity::Producer,
         }
     }
 
@@ -193,21 +193,21 @@ impl ClientIngestorAlteration {
     }
 }
 
-impl From<Vec<AlterIngestorOperation<ClientProducerSource>>> for ClientIngestorAlteration {
-    fn from(operations: Vec<AlterIngestorOperation<ClientProducerSource>>) -> Self {
+impl From<Vec<AlterIngestorOperation<ClientProducerIngestor>>> for ClientIngestorAlteration {
+    fn from(operations: Vec<AlterIngestorOperation<ClientProducerIngestor>>) -> Self {
         Self::Producer(operations)
     }
 }
 
-impl From<Vec<AlterIngestorOperation<ClientProducerSource>>> for IngestorAlteration {
-    fn from(operations: Vec<AlterIngestorOperation<ClientProducerSource>>) -> Self {
+impl From<Vec<AlterIngestorOperation<ClientProducerIngestor>>> for IngestorAlteration {
+    fn from(operations: Vec<AlterIngestorOperation<ClientProducerIngestor>>) -> Self {
         Self::Client(ClientIngestorAlteration::Producer(operations))
     }
 }
 
-impl AlteredIngestorSource for ClientProducerSource {
+impl AlteredIngestorEntity for ClientProducerIngestor {
     fn set_into(&self, input: &mut IngestorInput) {
-        let source = input.client_source_mut().verified(ALTERED_PAIR_CHECKED);
+        let source = input.client_entity_mut().verified(ALTERED_PAIR_CHECKED);
         *source = self.clone();
     }
 
@@ -231,18 +231,19 @@ impl AlteredIngestorSource for ClientProducerSource {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct ClientConsumerSink {
+pub struct ClientConsumerEmitter {
+    pub mode: ClientConsumerPublishingMode,
     pub schema: SchemaName,
 }
 
-impl SinkEntity for ClientConsumerSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for ClientConsumerEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         headers: None,
-        reference: SinkReferenceKind::Schema,
+        reference: EmitterReferenceKind::Schema,
         body: EmitterBodyForm::Native,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::ClientAck],
+        publishing_modes: ClientConsumerPublishingMode::KINDS,
         locator: None,
         options: &[],
         envelope: &[],
@@ -251,9 +252,9 @@ impl SinkEntity for ClientConsumerSink {
     };
 }
 
-impl SinkBody for ClientConsumerSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Schema(&self.schema)
+impl EmitterEntityBody for ClientConsumerEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Schema(&self.schema)
     }
 
     fn client_mut(&mut self) -> Option<&mut ClientName> {
@@ -261,12 +262,20 @@ impl SinkBody for ClientConsumerSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Client = "CLIENT";
-    /// What a client sink writes.
-    pub enum ClientSink;
-    /// The entities a client sink writes.
-    pub enum ClientSinkEntity {
-        Consumer(ClientConsumerSink) = "CONSUMER";
+    /// What a client emitter writes.
+    pub enum ClientEmitter;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum ClientEmitterMode;
+    /// The entities a client emitter writes.
+    pub enum ClientEmitterEntity {
+        Consumer(ClientConsumerEmitter, ClientConsumerPublishingMode) = "CONSUMER";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum ClientConsumerPublishingMode {
+        Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => ClientAck,
     }
 }

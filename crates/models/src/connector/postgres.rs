@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The PostgreSQL client Model with its connection pool, the table sink Model with
+//! - **Owns.** The PostgreSQL client Model with its connection pool, the table emitter Model with
 //!   its conflict action, and what it declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The PostgreSQL driver, its configuration keys, or how rows are inserted.
 
 #![cfg_attr(
@@ -23,26 +23,27 @@ use super::{
         WaitBound,
     },
     configured_client::configured_client,
-    entity_union::connector_sinks,
+    entity_union::connector_emitters,
 };
 use crate::{
-    ClientName, ConnectorKind, EmitSinkCapabilities, EmitterBatchLegality, EmitterBodyForm,
-    EmitterPublishingModeKind, LocatorDeclaration, LocatorName, OptionChoice, OptionDeclaration,
-    OptionForm, OptionPresence, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkReferenceKind, SinkValueMapping, SinkValueMappings, TableName,
+    ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
+    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
+    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
 };
 
 configured_client!(Postgres: pooled, config NervixWithAddressQuery, CreateClientPostgres => PostgresConfigEntry);
 
-pub type PostgresValueMapping = SinkValueMapping;
+pub type PostgresValueMapping = EmitterValueMapping;
 
 /// One table a PostgreSQL client inserts rows into.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct PostgresTableSink {
+pub struct PostgresTableEmitter {
+    pub mode: PostgresTablePublishingMode,
     pub client: ClientName,
-    pub table: TableName,
+    pub table: PostgresTableName,
     pub values: Vec<PostgresValueMapping>,
     pub conflict_action: PostgresConflictAction,
 }
@@ -78,19 +79,17 @@ const POSTGRES_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &[],
 };
 
-impl SinkEntity for PostgresTableSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for PostgresTableEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         headers: None,
-        reference: SinkReferenceKind::Client(ConnectorKind::Postgres),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Postgres),
         body: EmitterBodyForm::Values,
         batch: EmitterBatchLegality::Required { maximum: None },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        publishing_modes: PostgresTablePublishingMode::KINDS,
         locator: Some(LocatorDeclaration {
-            keywords: "INSERT TO TABLE",
-            name: LocatorName::Unquoted {
-                label: "table_name",
-            },
+            keywords: "TABLE",
+            name: LocatorName::External(PostgresTableName::DECLARATION),
         }),
         options: &[OptionDeclaration {
             keywords: "ON CONFLICT",
@@ -114,9 +113,9 @@ impl SinkEntity for PostgresTableSink {
     };
 }
 
-impl SinkBody for PostgresTableSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for PostgresTableEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Postgres,
         })
@@ -126,17 +125,35 @@ impl SinkBody for PostgresTableSink {
         Some(&mut self.client)
     }
 
-    fn value_mappings(&self) -> SinkValueMappings<'_> {
-        SinkValueMappings::values(&self.values)
+    fn mapped_value_types(&self) -> Option<crate::MappedValueTypes> {
+        Some(crate::MappedValueTypes::Columns)
+    }
+
+    fn value_mappings(&self) -> EmitterValueMappings<'_> {
+        EmitterValueMappings::values(&self.values)
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Postgres = "POSTGRES";
-    /// What a PostgreSQL sink writes.
-    pub enum PostgresSink;
-    /// The entities a PostgreSQL sink writes.
-    pub enum PostgresSinkEntity {
-        Table(PostgresTableSink) = "TABLE";
+    /// What a PostgreSQL emitter writes.
+    pub enum PostgresEmitter;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum PostgresTableEmitterMode;
+    /// The entities a PostgreSQL emitter writes.
+    pub enum PostgresEmitterEntity {
+        Table(PostgresTableEmitter, PostgresTablePublishingMode) = "TABLE";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum PostgresTablePublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+    }
+}
+
+super::external_name::external_names! {
+    /// The case-preserving external table identifier this connector publishes to.
+    pub struct PostgresTableName => super::external_name::external_identifier,
+        label "postgres_table", example "Orders";
 }

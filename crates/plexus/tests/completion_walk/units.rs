@@ -103,6 +103,26 @@ fn the_top_level_suggestion_set_is_probed_not_empty() {
 // -- label classification and materialization --
 
 #[test]
+fn websocket_upgrade_header_completion_builds_a_literal_header_declaration() {
+    let grammar = Grammar::Client;
+    let prefix = "CREATE WEBSOCKETS CONNECTION INGESTOR nx_ingestor FROM nx_client HEADERS {";
+    assert_eq!(grammar.suggest(prefix), ["upgrade_header_name", "}"]);
+    let header = Materializer::new()
+        .materialize("upgrade_header_name", 0)
+        .expect("upgrade header names have a literal filler");
+    let statement = format!(
+        "{prefix} {} = 'fixture' }} MODE NO ACK ON QUIESCE DROP DECODE USING nx_codec TO nx_relay \
+         UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        header.text
+    );
+    assert_eq!(
+        grammar.parse(&statement),
+        ParseOutcome::Accepted,
+        "{statement}"
+    );
+}
+
+#[test]
 fn endpoint_request_window_completion_builds_both_endpoint_declarations() {
     let grammar = Grammar::Client;
     let materializer = Materializer::new();

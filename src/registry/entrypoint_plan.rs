@@ -44,21 +44,23 @@ use crate::runtime_schema::compile_schema;
 /// Why the ingestors and reingestors of a schedule cannot be planned.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum EntrypointPlanError {
+    #[error("ingestor '{ingestor}' has invalid upgrade headers")]
+    InvalidWebsocketsUpgradeHeaders { ingestor: IngestorName },
     #[error("scheduled {kind:?} '{node}' is configured as another node")]
     NodeIdentityMismatch { kind: ModelKind, node: ModelName },
     #[error("ingestor '{ingestor}' reads missing {kind:?} '{reference}'")]
-    MissingSource {
+    MissingReference {
         ingestor: IngestorName,
         kind: ModelKind,
         reference: ModelName,
     },
-    #[error("ingestor '{ingestor}' reads its source through a {resolved:?} of another kind")]
-    SourceKindMismatch {
+    #[error("ingestor '{ingestor}' reads through a {resolved:?} of another kind")]
+    InputKindMismatch {
         ingestor: IngestorName,
         resolved: ModelKind,
     },
-    #[error("ingestor '{ingestor}' reads '{expected}', but its source resolved to '{resolved}'")]
-    SourceIdentityMismatch {
+    #[error("ingestor '{ingestor}' reads '{expected}', but its input resolved to '{resolved}'")]
+    InputIdentityMismatch {
         ingestor: IngestorName,
         expected: ModelName,
         resolved: ModelName,
@@ -526,13 +528,13 @@ impl EntrypointPlans {
                             node: node.identifier.clone(),
                         }));
                     }
-                    let source_kind = ingestor.input.source_model_kind();
+                    let entity_kind = ingestor.input.source_model_kind();
                     let source_ref = ingestor.input.source_ref();
-                    let Some(source) = nodes.get(&NodeRef::new(source_kind, source_ref.clone()))
+                    let Some(source) = nodes.get(&NodeRef::new(entity_kind, source_ref.clone()))
                     else {
-                        return Err(Report::new(EntrypointPlanError::MissingSource {
+                        return Err(Report::new(EntrypointPlanError::MissingReference {
                             ingestor: ingestor.name.clone(),
-                            kind: source_kind,
+                            kind: entity_kind,
                             reference: source_ref,
                         }));
                     };

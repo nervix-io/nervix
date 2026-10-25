@@ -46,9 +46,10 @@ use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
     CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, NodeEndpoint, NodeServiceUrl, ResourceId,
-    ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion,
-    ResourceVersionStatus, Statement, TransactionImpactReport, UserName,
+    DomainStartPoint, DomainState, DomainStatus, NodeEndpoint, NodePrerequisites, NodeServiceUrl,
+    PrerequisiteMismatch, ResourceId, ResourceName, ResourceNodeStatus, ResourceUpload,
+    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, TransactionImpactReport,
+    UserName,
 };
 use nervix_primitives::{
     sync::{
@@ -90,7 +91,7 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
 mod archive_count_tests;
@@ -103,6 +104,7 @@ mod records;
 mod replication;
 mod restore;
 mod retention;
+mod settings;
 mod snapshot;
 pub use command_execution::{
     CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
@@ -119,6 +121,12 @@ pub use restore::{
     RestoredResource,
 };
 pub use retention::RaftRetentionPolicy;
+pub use settings::{
+    ELECTION_TIMEOUT_MAX_HEARTBEATS, ELECTION_TIMEOUT_MIN_HEARTBEATS, RAFT_LOG_DURABILITY,
+    RaftCoveredLogBytesRetained, RaftCoveredLogEntriesRetained, RaftHeartbeatInterval,
+    RaftRetainedLogCap, RaftRetentionBounds, RaftRetentionSettings, RaftSnapshotByteThreshold,
+    RaftSnapshotEntryThreshold, RaftTimingError, RaftTimings,
+};
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
 mod storage_fault;
@@ -869,10 +877,8 @@ pub struct ConsensusSettings {
     pub interconnect_advertise_addr: NodeEndpoint,
     pub interconnect: Transport,
     pub executor: nervix_execution::Executor,
-    pub raft_heartbeat_interval: Duration,
-    pub raft_election_timeout_min: Duration,
-    pub raft_election_timeout_max: Duration,
-    pub raft_retention: RaftRetentionPolicy,
+    pub raft_timings: RaftTimings,
+    pub raft_retention: RaftRetentionSettings,
 }
 
 /// One node as cluster discovery currently describes it.
@@ -891,6 +897,10 @@ pub struct GossipNode {
     pub console_url: Option<NodeServiceUrl>,
     /// Where peers reach this node's interconnect listener.
     pub interconnect_endpoint: Option<NodeEndpoint>,
+    /// What the node brings to the cluster, once it has published a record this build reads. The
+    /// leader admits a node to the membership only when this record is compatible with every live
+    /// voter's.
+    pub prerequisites: Option<NodePrerequisites>,
 }
 
 impl GossipNode {
@@ -1102,10 +1112,30 @@ impl MembershipSnapshot {
         &self,
         gossip: &GossipState,
         admission_fences: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
-    ) -> Vec<MembershipMutation> {
+    ) -> MembershipPlan {
+        let candidates = gossip.latest_admission_candidates();
+        let mut voter_records = BTreeMap::new();
+        for (node_id, node) in &candidates {
+            if !self.voters.contains(node_id) {
+                continue;
+            }
+            if let Some(record) = &node.prerequisites {
+                voter_records.insert(node_id.clone(), record.clone());
+            }
+        }
         let mut mutations = Vec::new();
+        let mut refusals = Vec::new();
         let mut desired_voters = self.voters.clone();
-        for node in gossip.latest_admission_candidates().into_values() {
+        for node in candidates.into_values() {
+            if !self.voters.contains(&node.node_id)
+                && let Some(reason) = AdmissionRefusalReason::of(&node, &voter_records)
+            {
+                refusals.push(AdmissionRefusal {
+                    candidate: node.identity(),
+                    reason,
+                });
+                continue;
+            }
             let Some(endpoint) = node.interconnect_endpoint else {
                 continue;
             };
@@ -1141,7 +1171,91 @@ impl MembershipSnapshot {
                 voters: desired_voters,
             });
         }
-        mutations
+        MembershipPlan {
+            mutations,
+            refusals,
+        }
+    }
+}
+
+/// The membership changes one reconciliation makes, and the candidates it leaves outside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MembershipPlan {
+    mutations: Vec<MembershipMutation>,
+    refusals: Vec<AdmissionRefusal>,
+}
+
+/// A gossip-discovered node the leader leaves outside the membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AdmissionRefusal {
+    candidate: ClusterNodeIdentity,
+    reason: AdmissionRefusalReason,
+}
+
+/// Why a candidate stays outside the membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdmissionRefusalReason {
+    /// The candidate has not published a prerequisite record this build reads.
+    Unpublished,
+    /// The candidate cannot run beside a live voter. The mismatch is seen from that voter.
+    Incompatible {
+        voter: ClusterNodeName,
+        mismatch: PrerequisiteMismatch,
+    },
+}
+
+impl AdmissionRefusalReason {
+    /// Why `candidate` cannot join beside the live voters whose records are `voter_records`, if it
+    /// cannot.
+    fn of(
+        candidate: &GossipNode,
+        voter_records: &BTreeMap<ClusterNodeName, NodePrerequisites>,
+    ) -> Option<Self> {
+        let Some(record) = &candidate.prerequisites else {
+            return Some(Self::Unpublished);
+        };
+        for (voter, voter_record) in voter_records {
+            if let Err(mismatch) = voter_record.verify_peer(record) {
+                return Some(Self::Incompatible {
+                    voter: voter.clone(),
+                    mismatch,
+                });
+            }
+        }
+        None
+    }
+}
+
+/// The admission refusals the leader has reported, so each is logged once while it holds.
+#[derive(Debug, Default)]
+struct ReportedAdmissionRefusals(BTreeMap<ClusterNodeIdentity, AdmissionRefusalReason>);
+
+impl ReportedAdmissionRefusals {
+    /// Reports every refusal that is new or whose reason changed, and forgets the candidates no
+    /// longer refused.
+    fn report(&mut self, refusals: &[AdmissionRefusal]) {
+        let mut current = BTreeMap::new();
+        for refusal in refusals {
+            let already_reported = self.0.get(&refusal.candidate) == Some(&refusal.reason);
+            if !already_reported {
+                match &refusal.reason {
+                    AdmissionRefusalReason::Unpublished => debug!(
+                        candidate = %refusal.candidate,
+                        "a gossip-discovered node waits outside the membership until it publishes \
+                         its prerequisites"
+                    ),
+                    AdmissionRefusalReason::Incompatible { voter, mismatch } => warn!(
+                        candidate = %refusal.candidate,
+                        %voter,
+                        prerequisite = %mismatch.prerequisite(),
+                        refusal = %mismatch,
+                        "refused to admit a node that cannot run beside a voter"
+                    ),
+                }
+            }
+            current.insert(refusal.candidate.clone(), refusal.reason.clone());
+        }
+        self.0 = current;
     }
 }
 
@@ -1841,7 +1955,8 @@ struct ConsensusState {
     interconnect: Transport,
     connectivity: ConnectivityFault,
     raft_retention: RaftRetentionPolicy,
-    membership_mutation: AsyncMutex<()>,
+    /// Serializes membership changes, and holds the admission refusals the leader has reported.
+    membership_mutation: AsyncMutex<ReportedAdmissionRefusals>,
     incoming_snapshots: Mutex<BTreeMap<ClusterNodeName, IncomingSnapshotTransfer>>,
     events: ConsensusEvents,
     metrics_task: Mutex<Option<JoinHandle<()>>>,
@@ -2078,28 +2193,31 @@ impl Consensus {
     where
         Recorder: AppendStreamOpenRecorder,
     {
-        let retention = settings.raft_retention;
+        let retention = settings.raft_retention.policy();
         let heartbeat_interval =
-            u64::try_from(settings.raft_heartbeat_interval.as_millis()).unwrap_or(u64::MAX);
+            u64::try_from(settings.raft_timings.heartbeat_interval().as_millis())
+                .unwrap_or(u64::MAX);
         let election_timeout_min =
-            u64::try_from(settings.raft_election_timeout_min.as_millis()).unwrap_or(u64::MAX);
+            u64::try_from(settings.raft_timings.election_timeout_min().as_millis())
+                .unwrap_or(u64::MAX);
         // A follower that acknowledged replication sent within the last heartbeat interval already
         // knows what a heartbeat would tell it, so sustained writes send none. The window never
         // takes more than half of the gap before the minimum election timeout, which keeps one
         // interval plus the window below that timeout and leaves the rest for delivery.
-        let heartbeat_min_interval = match election_timeout_min.checked_sub(heartbeat_interval) {
-            Some(election_gap) => heartbeat_interval.min(election_gap / 2),
-            // `validate` rejects an election timeout that does not exceed the heartbeat interval.
-            None => 0,
-        };
+        let election_gap = election_timeout_min
+            .checked_sub(heartbeat_interval)
+            .assured("RaftTimings keeps the minimum election timeout above the heartbeat interval");
+        let heartbeat_min_interval = heartbeat_interval.min(election_gap / 2);
         let config = StdArc::new(
             Config {
                 cluster_name: settings.cluster_name,
                 heartbeat_interval,
                 heartbeat_min_interval: Some(heartbeat_min_interval),
                 election_timeout_min,
-                election_timeout_max: u64::try_from(settings.raft_election_timeout_max.as_millis())
-                    .unwrap_or(u64::MAX),
+                election_timeout_max: u64::try_from(
+                    settings.raft_timings.election_timeout_max().as_millis(),
+                )
+                .unwrap_or(u64::MAX),
                 // A restarted voter may time out before discovery reconnects it to a healthy
                 // leader. Pre-vote lets the current quorum reject that stale candidate without
                 // advancing the term and tearing down the leader's replication streams.
@@ -2191,7 +2309,7 @@ impl Consensus {
                 interconnect: settings.interconnect,
                 connectivity,
                 raft_retention: retention,
-                membership_mutation: AsyncMutex::new(()),
+                membership_mutation: AsyncMutex::new(ReportedAdmissionRefusals::default()),
                 incoming_snapshots: Mutex::new(BTreeMap::new()),
                 events,
                 metrics_task: Mutex::new(Some(metrics_task)),
@@ -2918,6 +3036,16 @@ impl Observer {
             lines.push(line);
         }
         lines
+    }
+
+    /// The leader this node's Raft core last reported, read without waiting.
+    pub fn current_leader_now(&self) -> Option<ClusterNodeName> {
+        self.inner
+            .raft
+            .metrics()
+            .borrow_watched()
+            .current_leader
+            .clone()
     }
 
     pub async fn membership_nodes(&self) -> BTreeMap<ClusterNodeName, String> {
@@ -3844,7 +3972,7 @@ impl Administrator {
         &self,
         gossip: impl Future<Output = GossipState>,
     ) -> error_stack::Result<(), ConsensusError> {
-        let _membership_mutation = self.inner.membership_mutation.lock().await;
+        let mut reported_refusals = self.inner.membership_mutation.lock().await;
         let gossip = gossip.await;
         let leader = self.inner.raft.current_leader().await;
         if leader.as_ref() != Some(&self.inner.local_node_id) {
@@ -3854,8 +3982,9 @@ impl Administrator {
         let before = self.effective_membership();
         let state = self.inner.store.inner.state();
         let admission_fences = (&state.node_admission_fences).into();
-        let mutations = before.automatic_mutations(&gossip, &admission_fences);
-        for mutation in mutations {
+        let plan = before.automatic_mutations(&gossip, &admission_fences);
+        reported_refusals.report(&plan.refusals);
+        for mutation in plan.mutations {
             nervix_primitives::task::consume_budget().await;
             match mutation {
                 MembershipMutation::UpdateAddress { node_id, endpoint } => {
@@ -6546,12 +6675,14 @@ mod tests {
     use fjall::Database;
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        ClusterNodeIdentity, ClusterNodeIncarnation, DomainClockAuthority, DomainClockState,
-        DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
-        DomainStatus, DomainTimeRate, NodeEndpoint, ResourceId, ResourceName, ResourceNodeState,
-        ResourceNodeStatus, ResourceReplicaKey, ResourceUploadIdentity, ResourceUploadKey,
-        ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
-        Statement, Timestamp, TransactionPosition,
+        ClusterNodeIdentity, ClusterNodeIncarnation, ConsensusFloors, DomainClockAuthority,
+        DomainClockState, DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint,
+        DomainState, DomainStatus, DomainTimeRate, NodeEndpoint, NodePrerequisites,
+        PrerequisiteMismatch, PrerequisiteTimings, RaftLogDurability, ResourceId, ResourceName,
+        ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUploadIdentity,
+        ResourceUploadKey, ResourceUploadState, ResourceVersion, ResourceVersionCounter,
+        ResourceVersionStatus, Statement, Timestamp, TimingPrerequisite, TransactionPosition,
+        TrustRootFingerprint, WireContractFingerprint,
     };
     use nervix_primitives::sync::{Arc, atomic::AtomicU64};
     use openraft::{
@@ -6563,12 +6694,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
-        CommandExecutionAdmissionPolicy, CommandExecutionDisposition, CommandExecutionEffect,
-        CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
-        ConsensusCommand, ConsensusConflict, ConsensusResponse, FjallLogReader, FjallStore,
-        GossipNode, GossipState, IncomingSnapshotTransfer, LeaderTenure, MembershipMutation,
-        MembershipSnapshot, ProtocolOriginError, ResourceRecords, SnapshotChunkPart, SnapshotMeta,
+        AdmissionRefusal, AdmissionRefusalReason, AppliedEntryContext, AutomaticScheduleFence,
+        ClusterSchedule, CommandExecution, CommandExecutionAdmissionPolicy,
+        CommandExecutionDisposition, CommandExecutionEffect, CommandExecutionRequestConflict,
+        CommandExecutionResult, CommandExecutionState, ConsensusCommand, ConsensusConflict,
+        ConsensusResponse, FjallLogReader, FjallStore, GossipNode, GossipState,
+        IncomingSnapshotTransfer, LeaderTenure, MembershipMutation, MembershipSnapshot,
+        ProtocolOriginError, ResourceRecords, SnapshotChunkPart, SnapshotMeta,
         SnapshotTransferError, SnapshotTransferIds, StateMachineChanges, StateMachineData,
         StoredMembership, TransactionApplicationOutcome, TransactionCommandResult,
         TransactionCommitAdmissionFailure, TransactionMutationError, TransactionOutcome,
@@ -6843,7 +6975,8 @@ mod tests {
         ));
     }
 
-    /// One discovered node whose endpoints have not been published yet.
+    /// One discovered node whose endpoints have not been published yet, with the prerequisites
+    /// every test node shares.
     fn undiscovered_node(name: &str, incarnation: u64) -> GossipNode {
         GossipNode {
             node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
@@ -6852,6 +6985,26 @@ mod tests {
             client_url: None,
             console_url: None,
             interconnect_endpoint: None,
+            prerequisites: Some(test_prerequisites(Duration::from_millis(250))),
+        }
+    }
+
+    /// The prerequisites a test node publishes, with `heartbeat` as its Raft heartbeat.
+    fn test_prerequisites(heartbeat: Duration) -> NodePrerequisites {
+        NodePrerequisites {
+            cluster_identity: "cluster".to_string(),
+            trust_root: TrustRootFingerprint::from_digest([1; 32]),
+            wire_contract: WireContractFingerprint::from_digest([2; 32]),
+            consensus_floors: ConsensusFloors {
+                largest_command_bytes: 1 << 20,
+                largest_management_event_bytes: 64 << 10,
+            },
+            durability: RaftLogDurability::FsyncEveryAppend,
+            timings: PrerequisiteTimings {
+                raft_heartbeat_interval: heartbeat,
+                gossip_interval: Duration::from_millis(500),
+                clock_skew_tolerance: Duration::from_millis(500),
+            },
         }
     }
 
@@ -6986,7 +7139,9 @@ mod tests {
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip, &admission_fences),
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .mutations,
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
@@ -7016,6 +7171,7 @@ mod tests {
         assert!(
             membership
                 .automatic_mutations(&gossip, &admission_fences)
+                .mutations
                 .is_empty()
         );
     }
@@ -7039,7 +7195,9 @@ mod tests {
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip, &admission_fences),
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .mutations,
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
@@ -7076,7 +7234,9 @@ mod tests {
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip, &admission_fences),
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .mutations,
             vec![
                 MembershipMutation::UpdateAddress {
                     node_id: joining.clone(),
@@ -7116,7 +7276,9 @@ mod tests {
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip, &admission_fences),
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .mutations,
             vec![MembershipMutation::UpdateAddress {
                 node_id: restarted.clone(),
                 endpoint: endpoint.clone(),
@@ -7127,6 +7289,7 @@ mod tests {
         assert!(
             membership
                 .automatic_mutations(&gossip, &admission_fences)
+                .mutations
                 .is_empty()
         );
     }
@@ -7152,6 +7315,7 @@ mod tests {
         assert!(
             membership
                 .automatic_mutations(&gossip, &admission_fences)
+                .mutations
                 .is_empty()
         );
 
@@ -7162,7 +7326,9 @@ mod tests {
             .assured("the test gossip has one observed node")
             .incarnation = ClusterNodeIncarnation::new(3);
         assert_eq!(
-            membership.automatic_mutations(&restarted, &admission_fences),
+            membership
+                .automatic_mutations(&restarted, &admission_fences)
+                .mutations,
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
@@ -7198,6 +7364,151 @@ mod tests {
             ClusterNodeName::parse(raw).expect("valid node name"),
             ClusterNodeIncarnation::new(incarnation),
         )
+    }
+
+    #[test]
+    fn a_candidate_without_a_published_record_stays_outside_the_membership() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                prerequisites: None,
+                ..undiscovered_node("node-2", 2)
+            }],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first, "node-1.test:7443".to_string())]),
+        };
+
+        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+
+        assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.refusals,
+            vec![AdmissionRefusal {
+                candidate: node_identity("node-2", 2),
+                reason: AdmissionRefusalReason::Unpublished,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_candidate_incompatible_with_a_live_voter_is_refused_as_that_voter_judges_it() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-1.test:7443")),
+                    ..undiscovered_node("node-1", 1)
+                },
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                    prerequisites: Some(test_prerequisites(Duration::from_secs(1))),
+                    ..undiscovered_node("node-2", 2)
+                },
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
+        };
+
+        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+
+        assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.refusals,
+            vec![AdmissionRefusal {
+                candidate: node_identity("node-2", 2),
+                reason: AdmissionRefusalReason::Incompatible {
+                    voter: first,
+                    mismatch: PrerequisiteMismatch::Timing {
+                        prerequisite: TimingPrerequisite::RaftHeartbeatInterval,
+                        local: Duration::from_millis(250),
+                        peer: Duration::from_secs(1),
+                    },
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn a_candidate_within_the_timing_bound_of_every_live_voter_is_admitted() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-1.test:7443")),
+                    ..undiscovered_node("node-1", 1)
+                },
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                    prerequisites: Some(test_prerequisites(Duration::from_millis(400))),
+                    ..undiscovered_node("node-2", 2)
+                },
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
+        };
+
+        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+
+        assert!(plan.refusals.is_empty());
+        assert_eq!(
+            plan.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-2.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_voter_whose_record_another_voter_cannot_run_beside_is_never_refused() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let second = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-1.test:7443")),
+                    ..undiscovered_node("node-1", 1)
+                },
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                    prerequisites: Some(test_prerequisites(Duration::from_secs(1))),
+                    ..undiscovered_node("node-2", 2)
+                },
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone(), second.clone()]),
+            nodes: BTreeMap::from([
+                (first, "node-1.test:7443".to_string()),
+                (second, "node-2.test:7443".to_string()),
+            ]),
+        };
+
+        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+
+        assert!(plan.refusals.is_empty());
+        assert!(plan.mutations.is_empty());
     }
 
     #[test]

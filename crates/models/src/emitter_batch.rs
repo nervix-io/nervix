@@ -7,7 +7,7 @@
 //!   size, as a positive whole number of bytes with its canonical Plexus spelling. The same size
 //!   value bounds a polled source's response through `MAX BODY SIZE`.
 //! - **Depends on.** Serialization primitives.
-//! - **Must not know.** Which sink, source or codec a limit is declared on, how a batch is packed,
+//! - **Must not know.** Which emitter, source or codec a limit is declared on, how a batch is packed,
 //!   encoded or measured, or how a connector publishes or reads one.
 
 #![cfg_attr(
@@ -351,7 +351,7 @@ pub enum EmitterBatchLegality {
         /// The largest batch payload the destination protocol itself admits, where it fixes one.
         maximum: Option<PayloadSizeLimit>,
     },
-    /// Without the clause the sink publishes one record per message, event or frame, or keeps the
+    /// Without the clause the emitter publishes one record per message, event or frame, or keeps the
     /// request grouping it has always had.
     Optional {
         /// The largest batch payload the destination protocol itself admits, where it fixes one.

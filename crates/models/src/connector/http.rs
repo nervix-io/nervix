@@ -3,9 +3,9 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The HTTP client Model, the polled request source with its delivery mode, the source
-//!   that reads an HTTP endpoint this cluster serves, the request sink Model, and what each entity
+//!   that reads an HTTP endpoint this cluster serves, the request emitter Model, and what each entity
 //!   declares.
-//! - **Depends on.** The shared source and sink declarations, expressions, the domain clock's
+//! - **Depends on.** The shared source and emitter declarations, expressions, the domain clock's
 //!   period and the names a body references.
 //! - **Must not know.** The HTTP client library, its configuration keys, how a request is built,
 //!   sent or classified, or how an endpoint is published, routed to or served.
@@ -24,16 +24,17 @@ use super::{
         DeclaredWait, OmittedDeadline, WaitBound,
     },
     configured_client::configured_client,
-    entity_union::{connector_sinks, connector_sources},
+    entity_union::{connector_emitters, connector_ingestors},
 };
 use crate::{
     AcknowledgementConfirmation, BatchUnavailability, ClientName, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, DomainClockPeriod, EmitSinkCapabilities, EmitterBatchLegality,
-    EmitterBodyForm, EmitterPublishingModeKind, EndpointIngestMode, EndpointName, EndpointType,
+    DeclaredQuiesce, DomainClockPeriod, EmitterBatchLegality, EmitterBodyForm,
+    EmitterClientReference, EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities,
+    EmitterReference, EmitterReferenceKind, EndpointIngestMode, EndpointName, EndpointType,
     Expression, HeaderLayout, HeaderModel, IngestAcknowledgement, IngestQuiesceMode,
-    IngestSourceCapabilities, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PositionClass, SinkBody, SinkClientReference, SinkEntity, SinkReference, SinkReferenceKind,
-    SourceBody, SourceEntity, SourceMetadataScope, SourceReference, SourceReferenceKind,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope,
+    IngestorReference, IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue, PositionClass,
 };
 
 configured_client!(Http: unpooled, config Nervix, CreateClientHttp => HttpConfigEntry);
@@ -42,7 +43,7 @@ configured_client!(Http: unpooled, config Nervix, CreateClientHttp => HttpConfig
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct HttpRequestSource {
+pub struct HttpRequestIngestor {
     pub client: ClientName,
     pub every: DomainClockPeriod,
     pub mode: HttpRequestIngestMode,
@@ -50,7 +51,7 @@ pub struct HttpRequestSource {
 }
 
 /// What the connector of a HTTP REQUEST ingestor holds and how long it waits.
-const HTTP_REQUEST_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const HTTP_REQUEST_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[DeclaredBuffer {
         holds: "the response body",
         bound: BufferBound::Unbounded,
@@ -69,7 +70,7 @@ const HTTP_REQUEST_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a HTTP ENDPOINT holds and how long it waits.
-const HTTP_ENDPOINT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
+const HTTP_ENDPOINT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
             holds: "a request body",
@@ -97,7 +98,7 @@ const HTTP_ENDPOINT_SOURCE_BOUNDS: DeclaredBounds = DeclaredBounds {
 };
 
 /// What the connector of a HTTP REQUEST emitter holds and how long it waits.
-const HTTP_REQUEST_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
+const HTTP_REQUEST_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[],
     waits: &[DeclaredWait {
         wait: "a request: name resolution within half of it, each address's connection within an \
@@ -110,27 +111,27 @@ const HTTP_REQUEST_SINK_BOUNDS: DeclaredBounds = DeclaredBounds {
     driver_limits: &["A response head above 74,240 bytes or 128 fields fails the attempt."],
 };
 
-impl SourceEntity for HttpRequestSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+impl IngestorDeclaration for HttpRequestIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // An HTTP response's fields, as the client's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-        metadata: SourceMetadataScope::Headers,
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::Http),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Http),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK],
         quiesce: &[DeclaredQuiesce::SUSPEND, DeclaredQuiesce::BUFFER],
         locator: None,
         options: &[OptionDeclaration::EVERY],
-        bounds: HTTP_REQUEST_SOURCE_BOUNDS,
+        bounds: HTTP_REQUEST_INGESTOR_BOUNDS,
     };
 }
 
-impl SourceBody for HttpRequestSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for HttpRequestIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -168,33 +169,33 @@ impl HttpRequestIngestMode {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct HttpEndpointSource {
+pub struct HttpEndpointIngestor {
     pub endpoint: EndpointName,
     pub mode: EndpointIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
 
-impl SourceEntity for HttpEndpointSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
+impl IngestorDeclaration for HttpEndpointIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
         // An HTTP request's fields, as the server's header map keeps them: names in lowercase, every
         // value of a repeated field together under its name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
-        metadata: SourceMetadataScope::Headers,
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: true,
-        reference: SourceReferenceKind::Endpoint(EndpointType::Http),
+        reference: IngestorReferenceKind::Endpoint(EndpointType::Http),
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK, DeclaredDelivery::ACK_REQUEST],
         quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
         locator: None,
         options: &[],
-        bounds: HTTP_ENDPOINT_SOURCE_BOUNDS,
+        bounds: HTTP_ENDPOINT_INGESTOR_BOUNDS,
     };
 }
 
-impl SourceBody for HttpEndpointSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Endpoint(&self.endpoint)
+impl IngestorEntityBody for HttpEndpointIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Endpoint(&self.endpoint)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -210,16 +211,16 @@ impl SourceBody for HttpEndpointSource {
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Http = "HTTP";
     /// What an HTTP source reads.
-    pub enum HttpSource;
+    pub enum HttpIngestor;
     /// The alterations of the ingestors that read an HTTP entity.
-    pub enum HttpIngestorAlteration;
+    pub enum HttpRequestIngestorAlteration;
     /// The entities an HTTP source reads.
-    pub enum HttpSourceEntity {
-        Request(HttpRequestSource) = "REQUEST", "HTTP polling";
-        Endpoint(HttpEndpointSource) = "ENDPOINT", "HTTP endpoint";
+    pub enum HttpIngestorEntity {
+        Request(HttpRequestIngestor) = "REQUEST", "HTTP polling";
+        Endpoint(HttpEndpointIngestor) = "ENDPOINT", "HTTP endpoint";
     }
 }
 
@@ -228,24 +229,25 @@ connector_sources! {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct HttpRequestSink {
+pub struct HttpRequestEmitter {
+    pub mode: HttpRequestPublishingMode,
     pub client: ClientName,
     pub method: Expression,
     pub path: Expression,
 }
 
-impl SinkEntity for HttpRequestSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
+impl EmitterDeclaration for HttpRequestEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
         // A request's application fields: names in lowercase, a later write of a name replacing the
         // earlier one, written in ascending order of name.
         headers: Some(HeaderModel::lowercase(HeaderLayout::SortedByName)),
-        reference: SinkReferenceKind::Client(ConnectorKind::Http),
+        reference: EmitterReferenceKind::Client(ConnectorKind::Http),
         body: EmitterBodyForm::CodecOrWithoutBody,
         batch: EmitterBatchLegality::Unavailable {
             reason: BatchUnavailability::OneRequestPerRecord,
         },
         requires_batch_transformation: false,
-        publishing_modes: &[EmitterPublishingModeKind::RequestAck],
+        publishing_modes: HttpRequestPublishingMode::KINDS,
         locator: None,
         options: &[
             OptionDeclaration {
@@ -267,13 +269,13 @@ impl SinkEntity for HttpRequestSink {
         ],
         envelope: &[],
         properties: &[],
-        bounds: HTTP_REQUEST_SINK_BOUNDS,
+        bounds: HTTP_REQUEST_EMITTER_BOUNDS,
     };
 }
 
-impl SinkBody for HttpRequestSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for HttpRequestEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::Http,
         })
@@ -284,12 +286,20 @@ impl SinkBody for HttpRequestSink {
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector Http = "HTTP";
-    /// What an HTTP sink writes.
-    pub enum HttpSink;
-    /// The entities an HTTP sink writes.
-    pub enum HttpSinkEntity {
-        Request(HttpRequestSink) = "REQUEST";
+    /// What an HTTP emitter writes.
+    pub enum HttpEmitter;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum HttpRequestEmitterMode;
+    /// The entities an HTTP emitter writes.
+    pub enum HttpEmitterEntity {
+        Request(HttpRequestEmitter, HttpRequestPublishingMode) = "REQUEST";
+    }
+}
+
+super::publishing::emitter_modes! {
+    pub enum HttpRequestPublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
     }
 }

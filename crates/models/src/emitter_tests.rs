@@ -1,13 +1,13 @@
 use meticulous::ResultExt as _;
 
 use crate::{
-    AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, ClickHouseSink,
-    ClickHouseTableSink, CreateEmitter, EmitSink, EmitterBatchContractError, EmitterBody,
-    EmitterPublishingMode, ErrorPolicies, Expression, FlushPolicy, HttpRequestSink, HttpSink,
-    KafkaSink, KafkaTopicSink, Literal, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink,
-    MySqlConflictAction, MySqlSink, MySqlTableSink, PostgresConflictAction, PostgresSink,
-    PostgresTableSink, ProcessorInputs, RetryPolicy, SentryEventSink, SentrySink, SqsQueueSink,
-    SqsSink, ZeroMqPushSink, ZeroMqSink,
+    AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, ClickHouseEmitter,
+    ClickHouseTableEmitter, CreateEmitter, EmitterBatchContractError, EmitterBody, EmitterEntity,
+    ErrorPolicies, Expression, FlushPolicy, HttpEmitter, HttpRequestEmitter, KafkaEmitter,
+    KafkaTopicEmitter, Literal, MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter,
+    MySqlConflictAction, MySqlEmitter, MySqlTableEmitter, PostgresConflictAction, PostgresEmitter,
+    PostgresTableEmitter, ProcessorInputs, RetryPolicy, SentryEmitter, SentryEventEmitter,
+    SqsEmitter, SqsQueueEmitter, ZeroMqEmitter, ZeroMqPushEmitter,
 };
 
 fn named<N>(raw: &str) -> N
@@ -26,33 +26,36 @@ fn ack_mode_default_is_attached() {
 #[test]
 fn emitter_alter_applies_operations_in_order_and_is_atomic() {
     let mut emitter = CreateEmitter {
-        name: named("event_sink"),
+        name: named("event_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::Codec {
             codec: named("event_codec"),
         },
-        sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-            client: named("sink_a"),
-        }))),
+        connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+            ZeroMqPushEmitter {
+                mode: crate::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: named("emitter_a"),
+            },
+        ))),
         batch: None,
         flush_policy: FlushPolicy::Each {
             interval: "1s".to_string(),
             max_batch_size: "1MiB".to_string(),
         },
         error_policies: ErrorPolicies::handled_by_log(),
-        publishing_mode: EmitterPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
-            },
-        },
         mode: AckMode::Attached,
         construction: crate::RouteConstruction::default(),
         materialized_state: Vec::new(),
     };
     emitter
         .apply_alter(&AlterEmitter {
-            emitter: named("event_sink"),
+            kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
+            emitter: named("event_emitter"),
             operations: vec![
                 AlterEmitterOperation::AddFrom {
                     relay: named("backup_events"),
@@ -62,7 +65,7 @@ fn emitter_alter_applies_operations_in_order_and_is_atomic() {
                     relay: named("backup_events"),
                 },
                 AlterEmitterOperation::SetClient {
-                    client: named("sink_b"),
+                    client: named("emitter_b"),
                 },
                 AlterEmitterOperation::SetFlush {
                     flush_policy: FlushPolicy::Each {
@@ -79,7 +82,7 @@ fn emitter_alter_applies_operations_in_order_and_is_atomic() {
             ],
         })
         .expect("emitter alter should apply");
-    assert_eq!(emitter.sink.client(), Some(&named("sink_b")));
+    assert_eq!(emitter.connector.client(), Some(&named("emitter_b")));
     assert_eq!(emitter.flush_policy, FlushPolicy::Immediate);
     assert_eq!(emitter.mode, AckMode::Detached);
     assert_eq!(
@@ -91,10 +94,11 @@ fn emitter_alter_applies_operations_in_order_and_is_atomic() {
     let before = emitter.clone();
     let error = emitter
         .apply_alter(&AlterEmitter {
-            emitter: named("event_sink"),
+            kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
+            emitter: named("event_emitter"),
             operations: vec![
                 AlterEmitterOperation::SetClient {
-                    client: named("sink_c"),
+                    client: named("emitter_c"),
                 },
                 AlterEmitterOperation::DropEncode,
                 AlterEmitterOperation::DropEncode,
@@ -115,41 +119,47 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
         max_backoff: "30s".to_string(),
     };
     let mut emitter = CreateEmitter {
-        name: named("request_sink"),
+        name: named("request_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::WithoutBody,
-        sink: Box::new(EmitSink::Http(HttpSink::Request(HttpRequestSink {
-            client: named("api"),
-            method: Expression::Literal(Literal::String("DELETE".to_string())),
-            path: Expression::Literal(Literal::String("/events".to_string())),
-        }))),
+        connector: Box::new(EmitterEntity::Http(HttpEmitter::Request(
+            HttpRequestEmitter {
+                mode: crate::HttpRequestPublishingMode::Ack {
+                    retry_policy: retry_policy.clone(),
+                },
+                client: named("api"),
+                method: Expression::Literal(Literal::String("DELETE".to_string())),
+                path: Expression::Literal(Literal::String("/events".to_string())),
+            },
+        ))),
         batch: None,
         flush_policy: FlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
-        publishing_mode: EmitterPublishingMode::RequestAck {
-            retry_policy: retry_policy.clone(),
-        },
         mode: AckMode::Attached,
         construction: crate::RouteConstruction::default(),
         materialized_state: Vec::new(),
     };
     let replacement = AlterEmitter {
-        emitter: named("request_sink"),
-        operations: vec![AlterEmitterOperation::SetSink {
-            sink: Box::new(EmitSink::Http(HttpSink::Request(HttpRequestSink {
-                client: named("other_api"),
-                method: Expression::Literal(Literal::String("HEAD".to_string())),
-                path: Expression::Literal(Literal::String("/health".to_string())),
-            }))),
-            publishing_mode: EmitterPublishingMode::RequestAck { retry_policy },
-            body: Some(EmitterBody::WithoutBody),
+        kind: crate::EmitterEntityKind::Http(crate::HttpEmitterEntity::Request),
+        emitter: named("request_emitter"),
+        operations: vec![AlterEmitterOperation::SetTo {
+            destination: Box::new(EmitterEntity::Http(HttpEmitter::Request(
+                HttpRequestEmitter {
+                    mode: crate::HttpRequestPublishingMode::Ack { retry_policy },
+                    client: named("other_api"),
+                    method: Expression::Literal(Literal::String("HEAD".to_string())),
+                    path: Expression::Literal(Literal::String("/health".to_string())),
+                },
+            ))),
+            body: EmitterBody::WithoutBody,
+            construction: None,
         }],
     };
     emitter
         .apply_alter(&replacement)
         .expect("complete HTTP replacement");
     assert_eq!(emitter.body, EmitterBody::WithoutBody);
-    assert_eq!(emitter.sink.client(), Some(&named("other_api")));
+    assert_eq!(emitter.connector.client(), Some(&named("other_api")));
     let stored = serde_json::to_vec(&emitter).expect("current emitter should serialize");
     let restored: CreateEmitter =
         serde_json::from_slice(&stored).expect("current emitter should deserialize");
@@ -157,7 +167,8 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
 
     let before = emitter.clone();
     let error = emitter.apply_alter(&AlterEmitter {
-        emitter: named("request_sink"),
+        kind: crate::EmitterEntityKind::Http(crate::HttpEmitterEntity::Request),
+        emitter: named("request_emitter"),
         operations: vec![
             AlterEmitterOperation::SetClient {
                 client: named("third_api"),
@@ -169,20 +180,23 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
         error
             .expect_err("the alteration is rejected")
             .current_context(),
-        &AlterEmitterError::HttpDropEncode
+        &AlterEmitterError::BodySelectionRequired {
+            entity: crate::EmitterEntityKind::Http(crate::HttpEmitterEntity::Request),
+        }
     );
     assert_eq!(emitter, before);
 
     let error = emitter
         .apply_alter(&AlterEmitter {
-            emitter: named("request_sink"),
+            kind: crate::EmitterEntityKind::Http(crate::HttpEmitterEntity::Request),
+            emitter: named("request_emitter"),
             operations: vec![AlterEmitterOperation::SetBatch {
                 policy: batch_policy(10, "64KiB"),
             }],
         })
         .expect_err("an HTTP emitter sends one request per record");
     let unavailable = EmitterBatchContractError::Unavailable {
-        sink: "HTTP",
+        connector: "HTTP REQUEST",
         reason: crate::BatchUnavailability::OneRequestPerRecord,
     };
     assert_eq!(
@@ -191,7 +205,7 @@ fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
     );
     assert_eq!(
         error.current_context().to_string(),
-        "HTTP emitters send one request per record and do not support BATCH"
+        "HTTP REQUEST emitters send one request per record and do not support BATCH"
     );
     assert_eq!(emitter, before);
     let batched = CreateEmitter {
@@ -211,29 +225,33 @@ fn batch_policy(max_messages: u32, max_size: &str) -> crate::EmitterBatchPolicy 
     }
 }
 
-fn batching_emitter(sink: EmitSink, batch: Option<crate::EmitterBatchPolicy>) -> CreateEmitter {
+fn batching_emitter(
+    connector: EmitterEntity,
+    batch: Option<crate::EmitterBatchPolicy>,
+) -> CreateEmitter {
     CreateEmitter {
-        name: named("event_sink"),
+        name: named("event_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::Values,
-        sink: Box::new(sink),
+        connector: Box::new(connector),
         batch,
         flush_policy: FlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
-        publishing_mode: EmitterPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
-            },
-        },
+
         mode: AckMode::Attached,
         construction: crate::RouteConstruction::default(),
         materialized_state: Vec::new(),
     }
 }
 
-fn postgres_sink() -> EmitSink {
-    EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
+fn postgres_emitter() -> EmitterEntity {
+    EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+        mode: crate::PostgresTablePublishingMode::Ack {
+            retry_policy: crate::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("db"),
         table: named("events"),
         values: Vec::new(),
@@ -244,13 +262,20 @@ fn postgres_sink() -> EmitSink {
 #[test]
 fn emitter_alter_sets_replaces_and_drops_the_batch_clause() {
     let mut emitter = batching_emitter(
-        EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-            client: named("sink"),
+        EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
+            mode: crate::ZeroMqPushPublishingMode::NoAck {
+                retry_policy: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
+            client: named("emitter"),
         })),
         None,
     );
     let set = |policy| AlterEmitter {
-        emitter: named("event_sink"),
+        kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
+        emitter: named("event_emitter"),
         operations: vec![AlterEmitterOperation::SetBatch { policy }],
     };
 
@@ -264,7 +289,8 @@ fn emitter_alter_sets_replaces_and_drops_the_batch_clause() {
     assert_eq!(emitter.batch, Some(batch_policy(10, "64KiB")));
 
     let drop = AlterEmitter {
-        emitter: named("event_sink"),
+        kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
+        emitter: named("event_emitter"),
         operations: vec![AlterEmitterOperation::DropBatch],
     };
     emitter.apply_alter(&drop).expect("DROP BATCH removes it");
@@ -279,58 +305,54 @@ fn emitter_alter_sets_replaces_and_drops_the_batch_clause() {
 }
 
 #[test]
-fn emitter_alter_keeps_the_batch_clause_a_database_sink_requires() {
-    let base = batching_emitter(postgres_sink(), Some(batch_policy(500, "8MiB")));
+fn emitter_alter_keeps_the_batch_clause_a_database_emitter_requires() {
+    let base = batching_emitter(postgres_emitter(), Some(batch_policy(500, "8MiB")));
 
     let mut dropped = base.clone();
     let error = dropped
         .apply_alter(&AlterEmitter {
-            emitter: named("event_sink"),
+            kind: crate::EmitterEntityKind::Postgres(crate::PostgresEmitterEntity::Table),
+            emitter: named("event_emitter"),
             operations: vec![AlterEmitterOperation::DropBatch],
         })
         .expect_err("a Postgres emitter cannot drop its batching clause");
     assert_eq!(
         error.current_context(),
-        &AlterEmitterError::Batch(EmitterBatchContractError::Required { sink: "POSTGRES" })
+        &AlterEmitterError::Batch(EmitterBatchContractError::Required {
+            connector: "POSTGRES TABLE"
+        })
     );
     assert_eq!(dropped, base, "a failed ALTER must not partially apply");
 
-    let mut unbatched = batching_emitter(
-        EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-            client: named("sink"),
-        })),
-        None,
-    );
-    let to_postgres = |operations| AlterEmitter {
-        emitter: named("event_sink"),
-        operations,
+    let mut unbatched = batching_emitter(postgres_emitter(), None);
+    let replacement = AlterEmitterOperation::SetTo {
+        destination: Box::new(postgres_emitter()),
+        body: EmitterBody::Values,
+        construction: None,
     };
-    let sink_change = AlterEmitterOperation::SetSink {
-        sink: Box::new(postgres_sink()),
-        body: None,
-        publishing_mode: EmitterPublishingMode::RequestAck {
-            retry_policy: RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
-            },
-        },
+    let alter = |operations| AlterEmitter {
+        kind: crate::EmitterEntityKind::Postgres(crate::PostgresEmitterEntity::Table),
+        emitter: named("event_emitter"),
+        operations,
     };
     assert_eq!(
         unbatched
             .clone()
-            .apply_alter(&to_postgres(vec![sink_change.clone()]))
-            .expect_err("the alteration is rejected")
+            .apply_alter(&alter(vec![replacement.clone()]))
+            .expect_err("batch required")
             .current_context(),
-        &AlterEmitterError::Batch(EmitterBatchContractError::Required { sink: "POSTGRES" })
+        &AlterEmitterError::Batch(EmitterBatchContractError::Required {
+            connector: "POSTGRES TABLE"
+        })
     );
     unbatched
-        .apply_alter(&to_postgres(vec![
-            sink_change,
+        .apply_alter(&alter(vec![
+            replacement,
             AlterEmitterOperation::SetBatch {
                 policy: batch_policy(100, "1MiB"),
             },
         ]))
-        .expect("one ALTER may change the sink and declare its batching clause together");
+        .expect("replacement and batch are atomic");
     assert_eq!(unbatched.batch, Some(batch_policy(100, "1MiB")));
 }
 
@@ -345,9 +367,15 @@ fn batch_violation(emitter: &CreateEmitter) -> Option<EmitterBatchContractError>
 #[test]
 fn batch_size_is_bounded_by_the_largest_sqs_message() {
     let sqs = || {
-        EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+        EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+            mode: crate::SqsQueuePublishingMode::Single {
+                retry_policy: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("queue_client"),
-            queue: "events".to_string(),
+            queue: crate::SqsQueueName::parse("events").expect("valid queue"),
             fifo_group: None,
         }))
     };
@@ -358,13 +386,19 @@ fn batch_size_is_bounded_by_the_largest_sqs_message() {
     );
     assert_eq!(
         batch_violation(&batching_emitter(sqs(), Some(batch_policy(10, "262145B")))),
-        Some(EmitterBatchContractError::SizeAboveSinkMaximum {
-            sink: "SQS",
+        Some(EmitterBatchContractError::SizeAboveEmitterMaximum {
+            connector: "SQS QUEUE",
             declared: "262145B".parse().assured("a whole number of bytes"),
             maximum: "256KiB".parse().assured("a whole number of bytes"),
         })
     );
-    let kafka = EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
+    let kafka = EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
+        mode: crate::KafkaTopicPublishingMode::NoAck {
+            retry_policy: crate::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("broker"),
         topic: named("events"),
     }));
@@ -375,39 +409,63 @@ fn batch_size_is_bounded_by_the_largest_sqs_message() {
 }
 
 #[test]
-fn database_sinks_require_the_batch_clause_and_the_others_do_not() {
-    let database_sinks = [
-        EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
+fn database_emitters_require_the_batch_clause_and_the_others_do_not() {
+    let database_emitters = [
+        EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
+            mode: crate::ClickHouseTablePublishingMode::Ack {
+                retry_policy: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("db"),
             table: named("events"),
             values: Vec::new(),
         })),
-        postgres_sink(),
-        EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
+        postgres_emitter(),
+        EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
+            mode: crate::MySqlTablePublishingMode::Ack {
+                retry_policy: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("db"),
             table: named("events"),
             values: Vec::new(),
             conflict_action: MySqlConflictAction::None,
         })),
-        EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
+        EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
+            mode: crate::MongoDbCollectionPublishingMode::Ack {
+                retry_policy: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("db"),
             collection: named("events"),
             values: Vec::new(),
             conflict_action: MongoDbConflictAction::None,
         })),
     ];
-    for sink in database_sinks {
-        let label = sink.transport_label();
+    for connector in database_emitters {
+        let label = connector.transport_label();
         assert_eq!(
-            batch_violation(&batching_emitter(sink.clone(), None)),
-            Some(EmitterBatchContractError::Required { sink: label })
+            batch_violation(&batching_emitter(connector.clone(), None)),
+            Some(EmitterBatchContractError::Required { connector: label })
         );
         assert_eq!(
-            batch_violation(&batching_emitter(sink, Some(batch_policy(1, "1B")))),
+            batch_violation(&batching_emitter(connector, Some(batch_policy(1, "1B")))),
             None
         );
     }
-    let sentry = EmitSink::Sentry(SentrySink::Event(SentryEventSink {
+    let sentry = EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
+        mode: crate::SentryEventPublishingMode::Ack {
+            retry_policy: crate::RetryPolicy {
+                backoff: "250ms".to_string(),
+                max_backoff: "30s".to_string(),
+            },
+        },
         client: named("sentry"),
     }));
     assert_eq!(batch_violation(&batching_emitter(sentry, None)), None);
@@ -416,23 +474,25 @@ fn database_sinks_require_the_batch_clause_and_the_others_do_not() {
 #[test]
 fn emitter_alter_reports_name_and_commit_policy_errors() {
     let emitter = CreateEmitter {
-        name: named("event_sink"),
+        name: named("event_emitter"),
         from: ProcessorInputs::single(named("events")),
         body: EmitterBody::Codec {
             codec: named("event_codec"),
         },
-        sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-            client: named("sink"),
-        }))),
+        connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+            ZeroMqPushEmitter {
+                mode: crate::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: named("emitter"),
+            },
+        ))),
         batch: None,
         flush_policy: FlushPolicy::Immediate,
         error_policies: ErrorPolicies::handled_by_log(),
-        publishing_mode: EmitterPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
-            },
-        },
         mode: AckMode::Attached,
         construction: crate::RouteConstruction::default(),
         materialized_state: Vec::new(),
@@ -440,17 +500,19 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
     let cases = [
         (
             AlterEmitter {
+                kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
                 emitter: named("other"),
                 operations: Vec::new(),
             },
             AlterEmitterError::EmitterNameMismatch {
-                stored: named("event_sink"),
+                stored: named("event_emitter"),
                 requested: named("other"),
             },
         ),
         (
             AlterEmitter {
-                emitter: named("event_sink"),
+                kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
+                emitter: named("event_emitter"),
                 operations: vec![AlterEmitterOperation::SetCommit {
                     commit_each: "1m".to_string(),
                     max_commit_size: "1GiB".to_string(),
@@ -460,7 +522,8 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
         ),
         (
             AlterEmitter {
-                emitter: named("event_sink"),
+                kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
+                emitter: named("event_emitter"),
                 operations: vec![AlterEmitterOperation::AddFrom {
                     relay: named("events"),
                     where_clause: None,
@@ -472,7 +535,8 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
         ),
         (
             AlterEmitter {
-                emitter: named("event_sink"),
+                kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
+                emitter: named("event_emitter"),
                 operations: vec![AlterEmitterOperation::DropFrom {
                     relay: named("missing"),
                 }],
@@ -483,7 +547,8 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
         ),
         (
             AlterEmitter {
-                emitter: named("event_sink"),
+                kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
+                emitter: named("event_emitter"),
                 operations: vec![AlterEmitterOperation::DropFrom {
                     relay: named("events"),
                 }],
@@ -492,51 +557,14 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
         ),
         (
             AlterEmitter {
-                emitter: named("event_sink"),
+                kind: crate::EmitterEntityKind::ZeroMq(crate::ZeroMqEmitterEntity::Push),
+                emitter: named("event_emitter"),
                 operations: vec![AlterEmitterOperation::AlterFromDropWhere {
                     relay: named("events"),
                 }],
             },
             AlterEmitterError::InputWhereNotConfigured {
                 relay: named("events"),
-            },
-        ),
-        (
-            AlterEmitter {
-                emitter: named("event_sink"),
-                operations: vec![AlterEmitterOperation::SetPublishingMode {
-                    mode: EmitterPublishingMode::SqsSingle {
-                        retry_policy: RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
-                        },
-                    },
-                }],
-            },
-            AlterEmitterError::PublishingModeUnsupported {
-                sink: "ZEROMQ".to_string(),
-                mode: "SINGLE".to_string(),
-            },
-        ),
-        (
-            AlterEmitter {
-                emitter: named("event_sink"),
-                operations: vec![AlterEmitterOperation::SetSink {
-                    sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-                        client: named("other_sink"),
-                    }))),
-                    publishing_mode: EmitterPublishingMode::SqsSingle {
-                        retry_policy: RetryPolicy {
-                            backoff: "250ms".to_string(),
-                            max_backoff: "30s".to_string(),
-                        },
-                    },
-                    body: None,
-                }],
-            },
-            AlterEmitterError::PublishingModeUnsupported {
-                sink: "ZEROMQ".to_string(),
-                mode: "SINGLE".to_string(),
             },
         ),
     ];
@@ -551,4 +579,66 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
         );
         assert_eq!(candidate, emitter);
     }
+}
+
+#[test]
+fn emitter_alter_checks_the_header_and_complete_destination_kind_atomically() {
+    let base = batching_emitter(postgres_emitter(), Some(batch_policy(1, "1MiB")));
+    let requested = crate::EmitterEntityKind::Kafka(crate::KafkaEmitterEntity::Topic);
+    let mut candidate = base.clone();
+    let wrong_head = AlterEmitter {
+        kind: requested,
+        emitter: base.name.clone(),
+        operations: Vec::new(),
+    };
+    let error = candidate
+        .apply_alter(&wrong_head)
+        .expect_err("declared kind must match");
+    assert_eq!(
+        error.current_context(),
+        &AlterEmitterError::EmitterKindMismatch {
+            stored: base.connector.kind(),
+            requested
+        }
+    );
+    assert!(error.to_string().contains("POSTGRES TABLE"));
+    assert!(error.to_string().contains("KAFKA TOPIC"));
+    assert_eq!(candidate, base);
+    let destination = EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
+        client: named("broker"),
+        topic: named("Orders"),
+        mode: crate::KafkaTopicPublishingMode::NoAck {
+            retry_policy: RetryPolicy {
+                backoff: "1s".to_string(),
+                max_backoff: "2s".to_string(),
+            },
+        },
+    }));
+    let wrong_destination = AlterEmitter {
+        kind: base.connector.kind(),
+        emitter: base.name.clone(),
+        operations: vec![
+            AlterEmitterOperation::SetClient {
+                client: named("another_database"),
+            },
+            AlterEmitterOperation::SetTo {
+                destination: Box::new(destination),
+                body: EmitterBody::Codec {
+                    codec: named("wire"),
+                },
+                construction: None,
+            },
+        ],
+    };
+    let error = candidate
+        .apply_alter(&wrong_destination)
+        .expect_err("destination kind must match");
+    assert_eq!(
+        error.current_context(),
+        &AlterEmitterError::DestinationKindMismatch {
+            stored: base.connector.kind(),
+            requested
+        }
+    );
+    assert_eq!(candidate, base);
 }

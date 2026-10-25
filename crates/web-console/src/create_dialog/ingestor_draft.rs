@@ -23,7 +23,7 @@ use thiserror::Error;
 use super::{
     SelectedReference,
     ingestor_route_draft::{IngestRouteDraft, IngestRouteDraftError, RouteBranchDraft},
-    ingestor_source_draft::{IngestSourceDraft, IngestSourceDraftError},
+    ingestor_source_draft::{IngestorEntityDraft, IngestorEntityDraftError},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -68,7 +68,7 @@ impl TimestampDraft {
 pub(super) struct IngestorDraft {
     pub(super) name: String,
     pub(super) if_not_exists: bool,
-    pub(super) source: IngestSourceDraft,
+    pub(super) source: IngestorEntityDraft,
     pub(super) codec: Option<SelectedReference<CodecName>>,
     pub(super) timestamp: TimestampDraft,
     pub(super) filter: String,
@@ -82,7 +82,7 @@ impl Default for IngestorDraft {
         Self {
             name: String::new(),
             if_not_exists: false,
-            source: IngestSourceDraft::default(),
+            source: IngestorEntityDraft::default(),
             codec: None,
             timestamp: TimestampDraft::Unselected,
             filter: String::new(),
@@ -268,7 +268,7 @@ pub(super) enum IngestorDraftError {
     #[error("Ingestor name is invalid")]
     Name,
     #[error("{0}")]
-    Source(IngestSourceDraftError),
+    Source(IngestorEntityDraftError),
     #[error("Choose a decoding codec")]
     Codec,
     #[error("The selected codec belongs to a changed context; select it again")]
@@ -301,8 +301,8 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         BinaryOperator, CodecName, Expression, FieldName, FieldReference, FieldScope,
-        GeneralErrorPolicy, HttpSourceEntity, IngestQuiesceOverflow, IngestSourceKind, Inheritance,
-        Literal, ModelKind, ModelName, NodeRef,
+        GeneralErrorPolicy, HttpIngestorEntity, IngestQuiesceOverflow, IngestorEntityKind,
+        Inheritance, Literal, ModelKind, ModelName, NodeRef,
     };
 
     use super::{IngestorDraft, TimestampDraft};
@@ -323,7 +323,7 @@ mod tests {
         };
         draft
             .source
-            .choose_kind(IngestSourceKind::Http(HttpSourceEntity::Endpoint));
+            .choose_kind(IngestorEntityKind::Http(HttpIngestorEntity::Endpoint));
         draft
             .source
             .select_reference(&node(ModelKind::Endpoint, "edge"));

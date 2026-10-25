@@ -1119,29 +1119,30 @@ impl SessionServiceImpl {
             .await
             .change_context(BackupError::Staging)?;
         let executor = self.inner.runtime.executor().clone();
-        let mut sink = StagingSink::new(writer, executor);
+        let mut connector = StagingEmitter::new(writer, executor);
         for piece in layout.pieces() {
             nervix_primitives::task::consume_budget().await;
             match piece {
-                ArchivePiece::Bytes(bytes) => sink.write(bytes).await?,
+                ArchivePiece::Bytes(bytes) => connector.write(bytes).await?,
                 ArchivePiece::Section(entry) => {
                     let Some(source) = sources.get(&entry.path) else {
                         return Err(Report::new(BackupError::Encoding));
                     };
                     match source {
-                        SectionSource::Held(bytes) => sink.write(bytes).await?,
+                        SectionSource::Held(bytes) => connector.write(bytes).await?,
                         SectionSource::ResourceArchive(id) => {
-                            self.copy_resource_archive(id, entry, &mut sink).await?;
+                            self.copy_resource_archive(id, entry, &mut connector)
+                                .await?;
                         }
                         SectionSource::Captured(artifact) => {
-                            self.copy_captured_section(artifact, entry, &mut sink)
+                            self.copy_captured_section(artifact, entry, &mut connector)
                                 .await?;
                         }
                     }
                 }
             }
         }
-        sink.finish().await
+        connector.finish().await
     }
 
     /// Copies a resource version's original archive into the staged archive, refusing it if it
@@ -1150,7 +1151,7 @@ impl SessionServiceImpl {
         &self,
         id: &ResourceId,
         entry: &SectionEntry,
-        sink: &mut StagingSink,
+        connector: &mut StagingEmitter,
     ) -> error_stack::Result<(), BackupError> {
         let mut reader = self
             .inner
@@ -1172,7 +1173,7 @@ impl SessionServiceImpl {
             if digester.length() > entry.length {
                 return Err(resource_mismatch(id));
             }
-            sink.write_charged(chunk).await?;
+            connector.write_charged(chunk).await?;
         }
         if digester.length() != entry.length || digester.finish() != entry.digest {
             return Err(resource_mismatch(id));
@@ -1184,7 +1185,7 @@ impl SessionServiceImpl {
         &self,
         artifact: &StagedArtifact,
         entry: &SectionEntry,
-        sink: &mut StagingSink,
+        connector: &mut StagingEmitter,
     ) -> error_stack::Result<(), BackupError> {
         let mut reader = artifact
             .open_reader()
@@ -1204,7 +1205,7 @@ impl SessionServiceImpl {
             .change_context(BackupError::Staging)?
         {
             digest.update(chunk.as_ref());
-            sink.write_charged(chunk).await?;
+            connector.write_charged(chunk).await?;
         }
         if digest.length() != entry.length || digest.finish() != entry.digest {
             return Err(Report::new(BackupError::Staging));
@@ -1382,14 +1383,14 @@ fn backup_counter_delta(
 
 /// Writes an archive into its staging file in chunks of the executor's bulk size, however small
 /// the pieces it is handed.
-struct StagingSink {
+struct StagingEmitter {
     writer: StagedSnapshotWriter,
     executor: Executor,
     buffer: Vec<u8>,
     chunk_bytes: usize,
 }
 
-impl StagingSink {
+impl StagingEmitter {
     fn new(writer: StagedSnapshotWriter, executor: Executor) -> Self {
         let chunk_bytes: usize = executor.limits().bulk_chunk_bytes.as_u64().arch_into();
         let chunk_bytes = chunk_bytes.max(1);

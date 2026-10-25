@@ -418,7 +418,7 @@ mod tests {
                 "events",
                 "out",
             )),
-            with_dlq(emitter("sink", "events", "json", "broker")),
+            with_dlq(emitter("emitter", "events", "json", "broker")),
             with_dlq(parsed_model(
                 "CREATE REORDERER order_events FROM events BY input.value MAX TIME 10s UNBRANCHED \
                  TO out INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",

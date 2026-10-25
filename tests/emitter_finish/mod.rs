@@ -1,11 +1,11 @@
-//! Public proofs that STOP finishes an emitter's sink, outside the product layer order.
+//! Public proofs that STOP finishes an emitter's connector, outside the product layer order.
 //!
 //! Layer: test harness.
 //! - **Owns.** A STOP that runs while a stallable endpoint holds a broker connection paused and
 //!   resumes it after a delay, and the record and observation that a STOP completed only once the
 //!   endpoint fault beside it ended, which connector-specific faults record through it too.
 //! - **Depends on.** The scenario's cluster, its stallable endpoints and the shared command steps.
-//! - **Must not know.** Any sink's private state, its driver, or how a finish waits.
+//! - **Must not know.** Any emitter's private state, its driver, or how a finish waits.
 
 #![cfg_attr(
     nervix_lint,
@@ -33,7 +33,7 @@ impl StopTiming {
         }
     }
 
-    /// STOP completed only once the fault ended, so the records its sink's client held could leave.
+    /// STOP completed only once the fault ended, so the records its emitter's client held could leave.
     pub(crate) fn assert_stop_followed_the_fault(&self) {
         assert!(
             self.stopped_at >= self.resumed_at,
@@ -49,7 +49,7 @@ struct StoppedDomain {
 }
 
 /// Runs STOP on the leader while the stallable endpoint `name` stays paused for `delay` more, so a
-/// finish that waits for the records its sink's client holds completes only after they can leave.
+/// finish that waits for the records its emitter's client holds completes only after they can leave.
 #[when(expr = "STOP runs while the stallable endpoint {string} resumes after {string}")]
 async fn stop_while_endpoint_resumes(world: &mut ScenarioWorld, name: String, delay: String) {
     let delay = parse_duration_text(&delay).assured("the scenario declares a valid fault duration");
@@ -68,7 +68,7 @@ async fn stop_while_endpoint_resumes(world: &mut ScenarioWorld, name: String, de
     let (stopped, resumed_at) = tokio::join!(stop, resume);
     let _stopped = stopped
         .result
-        .assured("STOP must finish the records its sink's client holds");
+        .assured("STOP must finish the records its emitter's client holds");
     let resumed_at = resumed_at.assured("the proxy remains alive while the domain stops");
     world.stop_timing = Some(StopTiming::new(stopped.at, resumed_at));
 }

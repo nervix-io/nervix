@@ -881,8 +881,8 @@ leader without it.
 
 The node a session is on serves completion and choice lookups, listing and selecting domains,
 subscriptions, domain clock attachments, producers, and the reads its locally applied state can
-answer: `SHOW CLUSTER STATUS`, `SHOW TRANSACTIONS`, `SHOW CREATE`, `SHOW UDFS`, `SHOW INGESTORS`,
-`SHOW PLACEMENTS`,
+answer: `SHOW CLUSTER STATUS`, `DESCRIBE CLUSTER`, `SHOW TRANSACTIONS`, `SHOW CREATE`, `SHOW UDFS`,
+`SHOW INGESTORS`, `SHOW PLACEMENTS`,
 `SHOW RELAY MATERIALIZED STATE`, `LOOKUP`, and the `DESCRIBE` statements of domains, resources,
 endpoints, lookups, placements, UDFs, relocations, relays, ingestors, junctions, deduplicators,
 reingestors, correlators, reorderers, window processors, WASM processors, and emitters. Every other
@@ -1508,7 +1508,7 @@ contract. A large reply uses the normal bounded transfer parts. Reading the repl
 acknowledges it. The Rust client decodes a batch only when its stream declares exactly the Arrow
 schema of the fields the emitter declared at the open and holds one record batch of the member
 count, and treats any other stream as an unexpected reply. The registered
-`client-emitter-deliveries` property holds that decoder to the stream a client emitter's sink
+`client-emitter-deliveries` property holds that decoder to the stream a client emitter's connector
 writes: the declared schema, every delivered row in order, and every value and null.
 
 `SettleEmitterBatchRequest` carries the consumer, attempt reference, and `Ack`, `Retry`, or

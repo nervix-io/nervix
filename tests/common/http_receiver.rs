@@ -94,14 +94,14 @@ pub(crate) const RECEIVER_CONNECTION_STOP_BUDGET: Duration =
 pub(crate) const RECEIVER_STOP_BUDGET: Duration =
     Duration::from_secs(RECEIVER_CONNECTION_STOP_SECONDS + RECEIVER_ACCEPT_LOOP_JOIN_SECONDS);
 
-/// The application header bytes one HTTP emitter request may carry.
+/// The application header bytes one HTTP REQUEST emitter request may carry.
 const HTTP_EMITTER_HEADER_BYTES: usize = 32 * 1024;
-/// The encoded request target one HTTP emitter request may carry.
+/// The encoded request target one HTTP REQUEST emitter request may carry.
 const HTTP_EMITTER_TARGET_BYTES: usize = 8 * 1024;
-/// The application headers one HTTP emitter request may carry.
+/// The application headers one HTTP REQUEST emitter request may carry.
 const HTTP_EMITTER_HEADER_COUNT: usize = 128;
 /// The largest request head the receiver reads. A policy input: large enough that a request at
-/// every HTTP emitter limit at once, with its transport framing, is captured rather than refused.
+/// every HTTP REQUEST emitter limit at once, with its transport framing, is captured rather than refused.
 pub(crate) const MAX_REQUEST_HEAD_BYTES: usize = 256 * 1024;
 /// The most header fields one request head may carry. A policy input, with the same margin.
 pub(crate) const MAX_REQUEST_HEADERS: usize = 512;
@@ -130,11 +130,12 @@ static GENERATED_BODY_CHUNK: [u8; READ_CHUNK_BYTES] = [b'x'; READ_CHUNK_BYTES];
 
 const _: () = assert!(
     HTTP_EMITTER_HEADER_BYTES + HTTP_EMITTER_TARGET_BYTES < MAX_REQUEST_HEAD_BYTES,
-    "a request at every HTTP emitter limit at once must fit the receiver's request head"
+    "a request at every HTTP REQUEST emitter limit at once must fit the receiver's request head"
 );
 const _: () = assert!(
     HTTP_EMITTER_HEADER_COUNT < MAX_REQUEST_HEADERS,
-    "a request at the HTTP emitter header limit must leave room for transport framing fields"
+    "a request at the HTTP REQUEST emitter header limit must leave room for transport framing \
+     fields"
 );
 const _: () = assert!(
     RECEIVER_CONNECTION_STOP_BUDGET.as_nanos() < RECEIVER_STOP_BUDGET.as_nanos(),

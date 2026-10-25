@@ -42,7 +42,7 @@ Feature: RabbitMQ emission
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-        CREATE EMITTER rabbit_notifications FROM notifications TO RABBITMQ rabbit_main QUEUE notifications_out_{{test_id}} MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE RABBITMQ QUEUE EMITTER rabbit_notifications FROM notifications TO rabbit_main QUEUE 'notifications_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -117,8 +117,8 @@ Feature: RabbitMQ emission
       CREATE RABBITMQ CLIENT rabbitmq_sink CONFIG {
         'addr' = '{{rabbitmq_stallable_addr}}'
       };
-      CREATE ATTACHED EMITTER rabbitmq_boundary FROM notifications
-        TO RABBITMQ rabbitmq_sink QUEUE rabbitmq_boundary_out_{{test_id}}
+      CREATE ATTACHED RABBITMQ QUEUE EMITTER rabbitmq_boundary FROM notifications
+        TO rabbitmq_sink QUEUE 'rabbitmq_boundary_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
           ENCODE USING notification_codec

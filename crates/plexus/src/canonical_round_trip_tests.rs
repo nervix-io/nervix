@@ -17,8 +17,9 @@
 
 use nervix_arbitrary::{Arbitrary, Domain, ModelVariant, StatementVariant};
 use nervix_models::{
-    CreateStatement, CreateSubscription, DeleteSubscription, DescribeBackup, EmitSinkKind,
-    Expression, IngestSourceKind, InspectionFormat, Model, Statement, SubscriptionDeliveryBehavior,
+    CreateStatement, CreateSubscription, DeleteSubscription, DescribeBackup, EmitterEntityKind,
+    Expression, IngestorEntityKind, InspectionFormat, Model, Statement,
+    SubscriptionDeliveryBehavior,
 };
 use strum::IntoEnumIterator as _;
 
@@ -238,6 +239,47 @@ fn bolero_model_roundtrip_canonical_plexus() {
 }
 
 #[test]
+fn postgres_update_corpus_keeps_a_mapped_column_to_update() {
+    let seeds: [&[u8]; 2] = [
+        include_bytes!(
+            "__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus/\
+             postgres-update-column"
+        ),
+        include_bytes!(
+            "__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_plexus/corpus/\
+             postgres_update_covering_every_column"
+        ),
+    ];
+    for bytes in seeds {
+        let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
+        let Model::Emitter(emitter) = arbitrary.model() else {
+            panic!("current emitter seed");
+        };
+        let nervix_models::EmitterEntity::Postgres(nervix_models::PostgresEmitter::Table(
+            destination,
+        )) = emitter.connector.as_ref()
+        else {
+            panic!("current Postgres destination");
+        };
+        let nervix_models::PostgresConflictAction::DoUpdate { target } =
+            &destination.conflict_action
+        else {
+            panic!("current update policy");
+        };
+        assert!(!target.is_empty());
+        assert!(
+            destination
+                .values
+                .iter()
+                .any(|mapping| !target.contains(&mapping.column))
+        );
+        assert_statement_round_trips(&ClientStatement::Server(Statement::Create(
+            nervix_models::CreateStatement::new(Box::new(Model::Emitter(emitter)), false),
+        )));
+    }
+}
+
+#[test]
 fn statement_corpus_reaches_resumed_restore() {
     let bytes = include_bytes!(
         "__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus/\
@@ -278,13 +320,13 @@ fn every_model_family_round_trips_canonically() {
 }
 
 #[test]
-fn every_emitter_sink_round_trips_canonically() {
-    for kind in EmitSinkKind::all() {
+fn every_emitter_connector_round_trips_canonically() {
+    for kind in EmitterEntityKind::all() {
         for seed in 0..16 {
             let bytes = sweep_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Plexus);
             let emitter = arbitrary.create_emitter_to(kind);
-            assert_eq!(emitter.sink.kind(), kind);
+            assert_eq!(emitter.connector.kind(), kind);
             let model = Model::Emitter(emitter);
             let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
             assert_statement_round_trips(&ClientStatement::Server(statement));
@@ -294,12 +336,12 @@ fn every_emitter_sink_round_trips_canonically() {
 
 #[test]
 fn every_ingestor_source_round_trips_canonically() {
-    for kind in IngestSourceKind::all() {
+    for kind in IngestorEntityKind::all() {
         for seed in 0..16 {
             let bytes = sweep_bytes(seed);
             let mut arbitrary = Arbitrary::new(&bytes, Domain::Plexus);
             let ingestor = arbitrary.create_ingestor_from(kind);
-            assert_eq!(ingestor.input.source_kind(), kind);
+            assert_eq!(ingestor.input.entity_kind(), kind);
             let model = Model::Ingestor(ingestor);
             let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
             assert_statement_round_trips(&ClientStatement::Server(statement));
@@ -334,9 +376,9 @@ fn calls_and_scopes_named_like_clause_keywords_round_trip_in_every_region() {
         "CREATE REORDERER peaks_in_order FROM sensors WHERE max(input.readings) > 0 BY \
          (input.first + input.second) * 2 MAX TIME 10s UNBRANCHED TO ordered_readings INHERIT ALL \
          FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
-        "CREATE EMITTER send FROM source WHERE output.total > 0 TO HTTP api METHOD input.method \
-         PATH (input.prefix + input.tenant) * 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s \
-         WITHOUT BODY FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        "CREATE HTTP REQUEST EMITTER send FROM source WHERE output.total > 0 TO api METHOD \
+         input.method PATH (input.prefix + input.tenant) * 2 MODE ACK RETRY POLICY BACKOFF 250ms \
+         MAX 30s WITHOUT BODY FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         "CREATE JUNCTION peaks FROM sensors WHERE (max(input.readings) > 10) FILTER WHERE \
          (output.total > 0) UNBRANCHED TO alerts INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
         "CREATE DEDUPLICATOR distinct_peaks FROM sensors FILTER WHERE max(input.readings) > 0 \

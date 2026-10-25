@@ -1,10 +1,10 @@
-Feature: HTTP emitter
-  An HTTP emitter sends one request for each eligible relay record to an operator-provisioned
+Feature: HTTP REQUEST emitter
+  An HTTP REQUEST emitter sends one request for each eligible relay record to an operator-provisioned
   endpoint, with an independently configured method, path, headers, and body. See
   docs/specifications/http-emitter.md and tests/http-emitter-acceptance-ledger.md.
 
   @http_emitter_configuration
-  Scenario Outline: HTTP emitter body selections round-trip through public configuration
+  Scenario Outline: HTTP REQUEST emitter body selections round-trip through public configuration
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -23,12 +23,12 @@ Feature: HTTP emitter
         'endpoint' = 'http://127.0.0.1:19080',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER encoded FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER encoded FROM outgoing TO api
         METHOD input.request_method PATH input.request_path
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER empty FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER empty FROM outgoing TO api
         METHOD 'DELETE' PATH input.request_path
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         WITHOUT BODY INVOKE write_header('X-Event', input.event_id)
@@ -48,7 +48,7 @@ Feature: HTTP emitter
       """
       codec: event_codec
       body: codec
-      sink: HTTP client=api method=input.request_method path=input.request_path
+      to: HTTP REQUEST api METHOD input.request_method PATH input.request_path
       batch: none
       flush: FLUSH IMMEDIATE
       publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -61,21 +61,21 @@ Feature: HTTP emitter
       """
       codec: none
       body: without body
-      sink: HTTP client=api method='DELETE' path=input.request_path
+      to: HTTP REQUEST api METHOD 'DELETE' PATH input.request_path
       batch: none
       flush: FLUSH IMMEDIATE
       publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
       """
     When these Plexus commands fail with "HTTP METHOD and PATH require exact non-sensitive STRING values"
       """
-      CREATE EMITTER invalid_method FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid_method FROM outgoing TO api
         METHOD 42 PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER encoded SET CLIENT api,
+      ALTER HTTP REQUEST EMITTER encoded SET CLIENT api,
         SET MODE ACK RETRY POLICY BACKOFF 500ms MAX 30s,
         SET ENCODE USING event_codec;
       """
@@ -91,31 +91,27 @@ Feature: HTTP emitter
       """
       codec: event_codec
       body: codec
-      sink: HTTP client=api method=input.request_method path=input.request_path
+      to: HTTP REQUEST api METHOD input.request_method PATH input.request_path
       batch: none
       flush: FLUSH IMMEDIATE
       publishing mode: ACK RETRY POLICY BACKOFF 500ms MAX 30s
       """
     When these Plexus commands fail with "emitter body selection does not support the retained construction"
       """
-      ALTER EMITTER encoded SET TO HTTP api
+      ALTER HTTP REQUEST EMITTER encoded SET TO api
         METHOD 'DELETE' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY;
       """
     Then SHOW CREATE EMITTER on the leader node renders these clauses
       | emitter | clause                   |
       | encoded | ENCODE USING event_codec |
-    When these Plexus commands fail with "HTTP emitters select an absent body"
+    When these Plexus commands fail with "HTTP REQUEST emitters select an absent body"
       """
-      ALTER EMITTER empty DROP ENCODE;
-      """
-    When these Plexus commands fail with "HTTP emitters send one request per record"
-      """
-      ALTER EMITTER empty SET BATCH MAX MESSAGES 2 MAX SIZE 1MiB;
+      ALTER HTTP REQUEST EMITTER empty DROP ENCODE;
       """
     When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER empty SET TO HTTP api
+      ALTER HTTP REQUEST EMITTER empty SET TO api
         METHOD 'HEAD' PATH '/health'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY;
       """
@@ -132,7 +128,7 @@ Feature: HTTP emitter
       """
       codec: none
       body: without body
-      sink: HTTP client=api method='HEAD' path='/health'
+      to: HTTP REQUEST api METHOD 'HEAD' PATH '/health'
       batch: none
       flush: FLUSH IMMEDIATE
       publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -144,7 +140,7 @@ Feature: HTTP emitter
       | 3            |
 
   @http_emitter_configuration @http_emitter_timeout
-  Scenario Outline: HTTP emitter requires an explicit usable client timeout before activation
+  Scenario Outline: HTTP REQUEST emitter requires an explicit usable client timeout before activation
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -156,7 +152,7 @@ Feature: HTTP emitter
       """
     When these Plexus commands fail with "timeout_ms"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -168,7 +164,7 @@ Feature: HTTP emitter
       | 3            |
 
   @http_emitter_configuration @http_emitter_validation
-  Scenario Outline: HTTP emitter rejects unsafe literal request fields and implicit header leakage
+  Scenario Outline: HTTP REQUEST emitter rejects unsafe literal request fields and implicit header leakage
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
@@ -197,21 +193,21 @@ Feature: HTTP emitter
       """
     When these Plexus commands fail with "requires a HTTP client"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP other
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO other
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "no matching USING MATERIALIZED STATE declaration"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH relay_state.latest_path.path
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "header"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header('Authorization', input.secret)
@@ -219,7 +215,7 @@ Feature: HTTP emitter
       """
     When these Plexus commands fail with "sensitive"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING sensitive_body_codec
         INHERIT id, secret
@@ -227,21 +223,21 @@ Feature: HTTP emitter
       """
     When these Plexus commands fail with "publish method"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'TRACE' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "publish path"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '//other.example/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "header name"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header('Host', 'other.example')
@@ -249,7 +245,7 @@ Feature: HTTP emitter
       """
     When these Plexus commands fail with "header value"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header('X-Reason', ' bad')
@@ -257,28 +253,28 @@ Feature: HTTP emitter
       """
     When these Plexus commands fail with "STRING"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD input.attempts PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "null"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH input.optional_path
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "output"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH output.id
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "WITHOUT BODY"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'GET' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING body_codec
         INHERIT id
@@ -286,7 +282,7 @@ Feature: HTTP emitter
       """
     When these Plexus commands fail with "WITHOUT BODY"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'HEAD' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING body_codec
         INHERIT id
@@ -294,21 +290,21 @@ Feature: HTTP emitter
       """
     When these Plexus commands fail with "would store sensitive data in a non-sensitive output field"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH concat('/events/', input.secret)
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "would store sensitive data in a non-sensitive output field"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD input.secret PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "write_header name requires leak_sensitive(...)"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header(input.secret, 'value')
@@ -316,7 +312,7 @@ Feature: HTTP emitter
       """
     When these Plexus commands are executed on the leader node
       """
-      CREATE EMITTER allowed FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER allowed FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header('Authorization', leak_sensitive(input.secret))
@@ -338,45 +334,46 @@ Feature: HTTP emitter
         'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000,
         'tls_cert_file' = '/tmp/client.pem'
       };
-      CREATE EMITTER encoded FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER encoded FROM outgoing TO api
         METHOD 'POST' PATH output.id
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING body_codec
         INHERIT id
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER leaked_body FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER leaked_body FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING sensitive_body_codec
         INHERIT id SET secret = leak_sensitive(input.secret)
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER with_state FROM outgoing
+      CREATE HTTP REQUEST EMITTER with_state FROM outgoing
         USING MATERIALIZED STATE latest_path REQUIRED SKIP
-        TO HTTP api METHOD 'POST' PATH relay_state.latest_path.path
+        TO api METHOD 'POST' PATH relay_state.latest_path.path
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     When these Plexus commands fail with "origin"
       """
-      ALTER EMITTER allowed SET CLIENT unsafe_endpoint;
+      ALTER HTTP REQUEST EMITTER allowed SET CLIENT unsafe_endpoint;
       """
     When these Plexus commands fail with "timeout_ms"
       """
-      ALTER EMITTER allowed SET CLIENT zero_timeout;
+      ALTER HTTP REQUEST EMITTER allowed SET CLIENT zero_timeout;
       """
     When these Plexus commands fail with "timeout_ms"
       """
-      ALTER EMITTER allowed SET CLIENT text_timeout;
+      ALTER HTTP REQUEST EMITTER allowed SET CLIENT text_timeout;
       """
     When these Plexus commands fail with "timeout_ms"
       """
-      ALTER EMITTER allowed SET CLIENT overflow_timeout;
+      ALTER HTTP REQUEST EMITTER allowed SET CLIENT overflow_timeout;
       """
     When these Plexus commands fail with "tls_key_file"
       """
-      ALTER EMITTER allowed SET CLIENT incomplete_tls;
+      ALTER HTTP REQUEST EMITTER allowed SET CLIENT incomplete_tls;
       """
     Then SHOW CREATE EMITTER on the leader node renders these clauses
-      | emitter | clause      |
-      | allowed | TO HTTP api |
+      | emitter | clause                       |
+      | allowed | HTTP REQUEST EMITTER allowed |
+      | allowed | TO api                       |
 
     Examples:
       | cluster_size |
@@ -384,7 +381,7 @@ Feature: HTTP emitter
       | 3            |
 
   @http_emitter_requests
-  Scenario Outline: An HTTP emitter sends each record with its own method, path, headers, and codec body
+  Scenario Outline: An HTTP REQUEST emitter sends each record with its own method, path, headers, and codec body
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -437,9 +434,9 @@ Feature: HTTP emitter
           'endpoint' = '{{http_receiver.api}}',
           'timeout_ms' = 5000
         };
-      CREATE ATTACHED EMITTER deliver_event
+      CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
         FROM outgoing
-        TO HTTP api
+        TO api
           METHOD input.request_method
           PATH input.request_path
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -487,7 +484,7 @@ Feature: HTTP emitter
       | 3            |
 
   @http_emitter_requests
-  Scenario Outline: An HTTP emitter declared without a body sends zero content bytes
+  Scenario Outline: An HTTP REQUEST emitter declared without a body sends zero content bytes
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -532,9 +529,9 @@ Feature: HTTP emitter
           'endpoint' = '{{http_receiver.api}}',
           'timeout_ms' = 5000
         };
-      CREATE EMITTER delete_event
+      CREATE HTTP REQUEST EMITTER delete_event
         FROM outgoing WHERE input.request_method = 'DELETE'
-        TO HTTP api
+        TO api
           METHOD 'DELETE'
           PATH input.request_path
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -594,8 +591,8 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api
           METHOD input.request_method
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
@@ -638,7 +635,7 @@ Feature: HTTP emitter
       | 3            |
 
   @http_emitter_requests
-  Scenario Outline: HTTP emitters send constant requests, and GET and HEAD only without a body
+  Scenario Outline: HTTP REQUEST emitters send constant requests, and GET and HEAD only without a body
     Given HTTP receiver "posted" is running
     And HTTP receiver "posted" answers unscripted requests with "respond 202"
     And HTTP receiver "probed" is running
@@ -683,8 +680,8 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT computed_api CONFIG {
         'endpoint' = '{{http_receiver.computed}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER post_event FROM outgoing
-        TO HTTP posted_api
+      CREATE HTTP REQUEST EMITTER post_event FROM outgoing
+        TO posted_api
           METHOD 'POST'
           PATH '/v1/events'
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -693,8 +690,8 @@ Feature: HTTP emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER probe_event FROM outgoing
-        TO HTTP probed_api
+      CREATE HTTP REQUEST EMITTER probe_event FROM outgoing
+        TO probed_api
           METHOD input.request_method
           PATH concat('/v1/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -702,8 +699,8 @@ Feature: HTTP emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER put_event FROM outgoing
-        TO HTTP computed_api
+      CREATE HTTP REQUEST EMITTER put_event FROM outgoing
+        TO computed_api
           METHOD input.request_method
           PATH concat('/v1/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -813,8 +810,8 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER methods FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER methods FROM outgoing
+        TO api
           METHOD concat(input.request_method, repeat('X', input.padding))
           PATH concat('/methods/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -916,8 +913,8 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER shaped FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER shaped FROM outgoing
+        TO api
           METHOD 'PUT'
           PATH concat('/v1/', output.payload, '/', event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1037,9 +1034,9 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER guarded FROM outgoing
+      CREATE HTTP REQUEST EMITTER guarded FROM outgoing
         USING MATERIALIZED STATE routes REQUIRED WAIT
-        TO HTTP api
+        TO api
           METHOD 'POST'
           PATH concat(relay_state.routes.prefix, '/events/', event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1150,8 +1147,8 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT crowded_api CONFIG {
         'endpoint' = '{{http_receiver.crowded}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER headed FROM outgoing WHERE NOT input.crowd
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER headed FROM outgoing WHERE NOT input.crowd
+        TO api
           METHOD 'POST'
           PATH concat('/headers/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1171,8 +1168,8 @@ Feature: HTTP emitter
               operation_index = error.operation_index,
               affected_fields = error.fields
         ON GENERAL ERROR LOG;
-      CREATE EMITTER crowded FROM outgoing
-        TO HTTP crowded_api
+      CREATE HTTP REQUEST EMITTER crowded FROM outgoing
+        TO crowded_api
           METHOD 'POST'
           PATH concat('/crowded/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1419,8 +1416,8 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER targeted FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER targeted FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat(input.request_path, repeat('a', input.padding))
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1530,8 +1527,8 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER tenant_events FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER tenant_events FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat('/tenants/', input.tenant, input.request_path)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1641,10 +1638,10 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER tenant_events
+      CREATE HTTP REQUEST EMITTER tenant_events
         FROM source_a, source_b
         COLLECT FOR 200ms MAX BATCH SIZE 1MiB
-        TO HTTP api
+        TO api
           METHOD 'POST'
           PATH concat('/tenants/', input.tenant, '/', input.source, '/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1770,8 +1767,8 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER stamped FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER stamped FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat('/v1/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
@@ -1858,9 +1855,9 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER routed FROM outgoing
+      CREATE HTTP REQUEST EMITTER routed FROM outgoing
         USING MATERIALIZED STATE routes REQUIRED WAIT
-        TO HTTP api
+        TO api
           METHOD relay_state.routes.method
           PATH concat(relay_state.routes.prefix, input.request_path)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1957,8 +1954,8 @@ Feature: HTTP emitter
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER leaked FROM accounts
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER leaked FROM accounts
+        TO api
           METHOD leak_sensitive(input.verb)
           PATH concat('/accounts/', leak_sensitive(input.account_id))
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s

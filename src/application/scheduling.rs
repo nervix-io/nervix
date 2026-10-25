@@ -31,9 +31,9 @@ use nervix_interconnect::{
     RequestError, StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
 };
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
-    KafkaPartitionSchedule, KafkaSource, KafkaTopicSource, Model, ModelKind, ModelName, NodeRef,
-    PlacementGroupSchedule, PlacementPolicy, QuiesceLevel, ScheduledNode,
+    ClusterNodeIdentity, ClusterNodeName, DomainName, IngestorEntity, IngestorName, KafkaIngestor,
+    KafkaOffsetMode, KafkaPartitionSchedule, KafkaTopicIngestor, Model, ModelKind, ModelName,
+    NodeRef, PlacementGroupSchedule, PlacementPolicy, QuiesceLevel, ScheduledNode,
 };
 use nervix_primitives::{
     sync::CancellationToken,
@@ -48,7 +48,7 @@ use super::{
     describe_output::{format_placement_runtime_nodes, placement_group_members_equal},
     model_mutation::{command_error, command_ok, quiesce_level_message},
     ownership_handoff::{
-        AssignmentRelocation, DrainMove, format_planned_ownership_move,
+        AssignmentRelocation, DrainMove, PlannedOwnershipHandoff, format_planned_ownership_move,
         mark_complete_ownership_transitions, planned_ownership_moves,
     },
     schedule_planning::{DomainSchedulePlanningSnapshot, PreparedDomainSchedule},
@@ -59,6 +59,9 @@ use crate::{
     registry::{ActiveGraph, assign_server_listener_nodes},
     runtime::LocalGraphDrainOutcome,
 };
+
+mod settings;
+pub use settings::{ReplicaCount, SchedulingSettings};
 
 /// How long automatic scheduling waits, after this process's reconciliation starts, to observe
 /// every voter live before treating an unobserved voter as failed.
@@ -889,7 +892,10 @@ impl SessionServiceImpl {
                         handled_this_iteration = true;
                         break;
                     }
-                    if let Err(error) = self.apply_current_cluster_state().await {
+                    if let Err(error) = self
+                        .activate_drained_revision(shutdown_budget.as_ref(), None)
+                        .await
+                    {
                         failed = true;
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
@@ -1037,11 +1043,14 @@ impl SessionServiceImpl {
                 moved = moved
                     .checked_add(planned_moves.len())
                     .assured("the moves counted here are schedule entries held in memory");
-                let local_activation_error = self.apply_current_cluster_state().await.err();
+                let revision_activation_error = self
+                    .activate_drained_revision(shutdown_budget.as_ref(), handoff.as_ref())
+                    .await
+                    .err();
                 let mut handoff_activation_error = None;
                 if let Some(handoff) = handoff {
                     debug_assert_eq!(handoff.moves, planned_moves);
-                    if let Some(error) = &local_activation_error {
+                    if let Some(error) = &revision_activation_error {
                         self.defer_planned_ownership_handoff_release(&domain, handoff, error, None);
                     } else if let Err(error) = self
                         .finish_planned_ownership_handoff(&domain, handoff, None)
@@ -1050,7 +1059,7 @@ impl SessionServiceImpl {
                         handoff_activation_error = Some(format!("{error:#}"));
                     }
                 }
-                let activation_error = match local_activation_error {
+                let activation_error = match revision_activation_error {
                     Some(error) => Some(format!("{error:#}")),
                     None => handoff_activation_error,
                 };
@@ -1095,6 +1104,26 @@ impl SessionServiceImpl {
             command_error(message)
         } else {
             command_ok(message)
+        }
+    }
+
+    /// Waits for the runtime revision a drain committed to take effect where the drain needs it.
+    ///
+    /// An operator's drain is a command, so it waits until every live node has prepared the
+    /// revision and is ready at it. A stopping node's drain answers within that node's budget
+    /// instead. A unit that hands owned state over waits for its hold's participants to prepare
+    /// the revision, and a commit that moves no owner waits for nothing. Every other node
+    /// completes the revision through its own installation, so a node that prepares slowly cannot
+    /// spend the stopping node's budget.
+    async fn activate_drained_revision(
+        &self,
+        shutdown_budget: Option<&ShutdownLeaderDrainBudget>,
+        handoff: Option<&PlannedOwnershipHandoff>,
+    ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
+        match (shutdown_budget, handoff) {
+            (None, _) => self.apply_current_cluster_state().await,
+            (Some(_), Some(handoff)) => self.wait_for_ownership_handoff_participants(handoff).await,
+            (Some(_), None) => Ok(()),
         }
     }
 
@@ -2171,13 +2200,13 @@ impl SessionServiceImpl {
                 let Model::Ingestor(ingestor) = node.config.as_ref() else {
                     continue;
                 };
-                let Some(IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                     client,
                     topic,
                     offset_mode: KafkaOffsetMode::Domain,
                     instances,
                     ..
-                }))) = ingestor.input.transport_source()
+                }))) = ingestor.input.transport_entity()
                 else {
                     continue;
                 };
@@ -2234,12 +2263,12 @@ impl SessionServiceImpl {
         let Model::Ingestor(ingestor_model) = ingestor_node.config.as_ref() else {
             return Ok(());
         };
-        let Some(IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+        let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
             topic: scheduled_topic,
             offset_mode: KafkaOffsetMode::Domain,
             instances: scheduled_instances,
             ..
-        }))) = ingestor_model.input.transport_source()
+        }))) = ingestor_model.input.transport_entity()
         else {
             return Ok(());
         };
@@ -2364,6 +2393,10 @@ impl SessionServiceImpl {
                     let mut partitions =
                         match inspector.partitions(spec_for_task.topic.as_str()).await {
                             Ok(partitions) => partitions,
+                            // The ingestor's own source reports a topic the broker does not have,
+                            // so the watcher records it as a topic without partitions and
+                            // publishes the real schedule once the topic is provisioned.
+                            Err(error) if error.current_context().is_missing_topic() => Vec::new(),
                             Err(error) => {
                                 service.broadcast_error(format!(
                                     "failed to inspect Kafka partitions for ingestor '{}' in \

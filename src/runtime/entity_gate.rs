@@ -1684,10 +1684,10 @@ mod tests {
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{
         AckMode, BranchSelection, ClusterNodeName, CoordinationIdentity, CreateEmitter,
-        CreateJunction, CreateRelay, DomainSchedule, EmitSink, EmitterName, EmitterPublishingMode,
-        ErrorPolicies, IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef,
-        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName,
-        RetryPolicy, ZeroMqPushSink, ZeroMqSink,
+        CreateJunction, CreateRelay, DomainSchedule, EmitterEntity, EmitterName, ErrorPolicies,
+        IngestQuiesceMode, IngestorName, ModelKind, ModelName, NodeRef, ProcessorInputWhere,
+        ProcessorInputs, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy, ZeroMqEmitter,
+        ZeroMqPushEmitter,
     };
     use nervix_primitives::{
         sync::{
@@ -2553,7 +2553,7 @@ mod tests {
     #[test]
     fn emitter_entity_pause_gates_every_input_relay() {
         let emitter = CreateEmitter {
-            name: named("combined_sink"),
+            name: named("combined_emitter"),
             from: ProcessorInputs::new(
                 vec![named("source_b"), named("source_a")],
                 vec![ProcessorInputWhere {
@@ -2565,18 +2565,20 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-                client: named("sink"),
-            }))),
+            connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+                ZeroMqPushEmitter {
+                    mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("emitter"),
+                },
+            ))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: nervix_models::RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -2610,7 +2612,7 @@ mod tests {
                 })),
                 scheduled_model(nervix_models::Model::ClientZeroMq(
                     nervix_models::CreateClientZeroMq {
-                        name: named("sink"),
+                        name: named("emitter"),
                         mount: None,
                         config: Vec::new(),
                     },
@@ -2694,11 +2696,11 @@ mod tests {
             domain("testing"),
             vec![
                 junction("corridor_source", "inbound", "corridor_stage"),
-                junction("corridor_sink", "corridor_stage", "outbound"),
+                junction("corridor_emitter", "corridor_stage", "outbound"),
             ],
             Vec::new(),
         );
-        let affected = ["corridor_source", "corridor_sink"].map(|name| NodeRef {
+        let affected = ["corridor_source", "corridor_emitter"].map(|name| NodeRef {
             kind: ModelKind::Junction,
             identifier: named(name),
         });

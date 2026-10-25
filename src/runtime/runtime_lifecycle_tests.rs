@@ -17,7 +17,7 @@ use std::time::Duration;
 use ahash::HashMap;
 use arrow_array::{ArrayRef, Int64Array};
 use fjall::Database;
-use nervix_execution::{CpuClass, MemoryClass};
+use nervix_execution::{CpuClass, Executor, MemoryClass};
 use nervix_models::{
     DomainName, EmitterName, GeneratorName, ModelKind, NodeRef, ParseAsType, ReingestorName,
     SchemaFingerprint,
@@ -137,7 +137,7 @@ async fn a_stopping_execution_gives_each_emitter_its_finish_deadline_before_its_
             .await
             .expect("the emitter task reports what it read"),
         Some(finish_by),
-        "an emitter that the stop ends must already hold the deadline it finishes its sink by"
+        "an emitter that the stop ends must already hold the deadline it finishes its emitter by"
     );
 }
 
@@ -350,17 +350,9 @@ impl PublishedWindow {
     }
 }
 
-/// A window branch whose task was ended at its stop grace leaves its snapshot task writing what
-/// the branch published last. That task holds the runtime and its storage, so a runtime that stops
-/// waits for it: here the write waits for a bulk worker, and the runtime finishes stopping only
-/// once the worker is given back and the window is on disk.
-#[nervix_primitives::test]
-async fn a_stopping_runtime_waits_for_the_snapshot_of_a_branch_whose_task_is_gone() {
-    let window = PublishedWindow::new().await;
-    let runtime = window.runtime.clone();
-
-    // Every bulk worker is held, so encoding the published window waits for one.
-    let executor = runtime.executor().clone();
+/// Holds every bulk worker of `executor` until the returned holders are dropped, so a job that
+/// needs one, such as encoding a published window, waits for the test to give one back.
+async fn hold_every_bulk_worker(executor: &Executor) -> Vec<blocking::mpsc::Sender<()>> {
     let workers = executor.snapshot().bulk_cpu.workers;
     let mut holders = Vec::with_capacity(workers);
     for _ in 0..workers {
@@ -387,21 +379,27 @@ async fn a_stopping_runtime_waits_for_the_snapshot_of_a_branch_whose_task_is_gon
     })
     .await
     .expect("every bulk worker is held");
+    holders
+}
 
+/// Starts the snapshot task of `window`'s branch and ends that branch the way a stop grace does:
+/// its task is dropped with everything it held, without telling its snapshot task anything. With
+/// every bulk worker held, the snapshot task's last write then waits for one.
+async fn end_branch_at_its_grace(window: &PublishedWindow) {
     let (branch_stop, _) = watch::channel(false);
     let (snapshot_requests, branch_requests) = mpsc::channel(1);
-    let snapshot_task = runtime
+    let snapshot_task = window
+        .runtime
         .spawn_published_branch_state_snapshot_task(
             &branch_stop,
             PublishedBranchState::WindowProcessor(window.state.clone()),
             snapshot_requests,
         )
         .expect("a persisting runtime starts a snapshot task");
-    // A branch task ended at its stop grace is dropped with everything it held, without telling
-    // its snapshot task anything.
     drop(branch_requests);
     drop(branch_stop);
     drop(snapshot_task);
+    let executor = window.runtime.executor().clone();
     timeout(REACHED_WITHIN, async {
         while executor.snapshot().bulk_cpu.pending == 0 {
             nervix_primitives::task::yield_now().await;
@@ -409,6 +407,18 @@ async fn a_stopping_runtime_waits_for_the_snapshot_of_a_branch_whose_task_is_gon
     })
     .await
     .expect("the snapshot task's write waits for a bulk worker");
+}
+
+/// A window branch whose task was ended at its stop grace leaves its snapshot task writing what
+/// the branch published last. That task holds the runtime and its storage, so a runtime that stops
+/// waits for it: here the write waits for a bulk worker, and the runtime finishes stopping only
+/// once the worker is given back and the window is on disk.
+#[nervix_primitives::test]
+async fn a_stopping_runtime_waits_for_the_snapshot_of_a_branch_whose_task_is_gone() {
+    let window = PublishedWindow::new().await;
+    let runtime = window.runtime.clone();
+    let holders = hold_every_bulk_worker(runtime.executor()).await;
+    end_branch_at_its_grace(&window).await;
 
     let stopping = nervix_primitives::task::spawn({
         let runtime = runtime.clone();
@@ -473,4 +483,93 @@ async fn a_stopping_runtime_has_the_snapshot_task_of_a_silent_branch_write_and_e
         "the window the branch published is on disk when the runtime has stopped"
     );
     drop(branch_stop);
+}
+
+/// How long a check gives a domain's stop to finish while the write it must wait for is held. The
+/// stop must never finish while the write is held, so a longer window only strengthens the check.
+const HELD_WRITE_WINDOW: Duration = Duration::from_secs(2);
+
+/// A window branch whose task was ended at its stop grace leaves its snapshot task writing what
+/// the branch published last, and the stop of its domain waits for that write: a stopped domain's
+/// checkpoints are what a stopped backup cut reads as soon as the stop returns. Here the write
+/// waits for a bulk worker, so the domain stays stopping while every worker is held, and the window
+/// is on disk the moment its stop returns.
+#[nervix_primitives::test]
+async fn a_stopping_domain_waits_for_the_snapshot_of_a_branch_whose_task_is_gone() {
+    let window = StdArc::new(PublishedWindow::new().await);
+    let holders = hold_every_bulk_worker(window.runtime.executor()).await;
+    end_branch_at_its_grace(&window).await;
+
+    let mut stopping = nervix_primitives::task::spawn({
+        let window = window.clone();
+        async move {
+            let domain = window.placement.domain.clone();
+            let runtime = window.runtime.clone();
+            runtime
+                .stop_domain_execution(
+                    &domain,
+                    idle_execution(&domain),
+                    runtime.emitter_finish_deadline(),
+                )
+                .await;
+            window.persisted_revision()
+        }
+    });
+    assert!(
+        timeout(HELD_WRITE_WINDOW, &mut stopping).await.is_err(),
+        "the domain finished stopping while its branch's last write had no bulk worker"
+    );
+
+    drop(holders);
+    let persisted_when_stopped = timeout(REACHED_WITHIN, stopping)
+        .await
+        .expect("the domain stops once its branch's last write is done")
+        .expect("the stopping task does not panic");
+    assert_eq!(
+        persisted_when_stopped,
+        Some(1),
+        "the window the branch published is on disk when its domain's stop returns"
+    );
+}
+
+/// A domain's stop waits only for the snapshot tasks of its own branches. Another domain's branch
+/// that is still running keeps its snapshot task waiting, and the stopping domain does not wait
+/// for it.
+#[nervix_primitives::test]
+async fn a_stopping_domain_does_not_wait_for_another_domains_snapshot_task() {
+    let window = PublishedWindow::new().await;
+    let runtime = window.runtime.clone();
+    let (branch_stop, _) = watch::channel(false);
+    let (snapshot_requests, _branch_requests) = mpsc::channel(1);
+    let snapshot_task = runtime
+        .spawn_published_branch_state_snapshot_task(
+            &branch_stop,
+            PublishedBranchState::WindowProcessor(window.state.clone()),
+            snapshot_requests,
+        )
+        .expect("a persisting runtime starts a snapshot task");
+    let other = domain("other");
+
+    timeout(
+        REACHED_WITHIN,
+        runtime.stop_domain_execution(
+            &other,
+            idle_execution(&other),
+            runtime.emitter_finish_deadline(),
+        ),
+    )
+    .await
+    .expect("a domain stops while another domain's branch keeps running");
+    assert!(
+        !snapshot_task.is_finished(),
+        "the running branch's snapshot task still waits for its branch"
+    );
+    assert_eq!(window.persisted_revision(), None);
+
+    drop(branch_stop);
+    timeout(REACHED_WITHIN, snapshot_task)
+        .await
+        .expect("the snapshot task writes once its branch stops")
+        .expect("the snapshot task does not panic");
+    assert_eq!(window.persisted_revision(), Some(1));
 }

@@ -115,13 +115,13 @@ Feature: CLI public session dispatch
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "leader"
     When the CLI subscribes to relay "raw_metrics" on node "{{leader}}"
     Then the CLI subscription output eventually contains "listening for events from relay 'raw_metrics'"
-    When 270 sequential metric http payloads are posted to host "http-{{test_id}}.example.com" path "/metrics"
+    When 270 metric http payloads are posted with acknowledgement, 4 at a time, to host "http-{{test_id}}.example.com" path "/metrics"
     Then the CLI subscription output eventually contains '"value":270'
 
     Examples:

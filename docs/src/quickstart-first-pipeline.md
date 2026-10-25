@@ -149,14 +149,14 @@ Reading top to bottom:
 ## Emit To Redis
 
 An emitter drains a relay out of the graph. The Redis integration is Pub/Sub
-([Supported Emitter Sinks](emitters.md#supported-emitter-sinks)), and the same codec that decoded
+([Supported Emitter Emitters](emitters.md#supported-emitter-emitters)), and the same codec that decoded
 the input encodes it back to JSON:
 
 ```plexus
-CREATE EMITTER redis_orders
+CREATE REDIS PUBSUB EMITTER redis_orders
   FROM orders
-  TO REDIS PUBSUB redis_local CHANNEL orders_out
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_local CHANNEL 'orders_out'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -164,7 +164,7 @@ CREATE EMITTER redis_orders
   ON GENERAL ERROR LOG;
 ```
 
-Redis Pub/Sub exposes no delivery confirmation, so `MODE NO_ACK` names server acceptance as the
+Redis Pub/Sub exposes no delivery confirmation, so `MODE NO ACK` names server acceptance as the
 publish boundary. The required retry policy paces connection and other infrastructure failures;
 it does not turn subscriber presence into an acknowledgment.
 
@@ -235,10 +235,10 @@ CREATE KAFKA TOPIC INGESTOR kafka_orders
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE EMITTER redis_orders
+CREATE REDIS PUBSUB EMITTER redis_orders
   FROM orders
-  TO REDIS PUBSUB redis_local CHANNEL orders_out
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_local CHANNEL 'orders_out'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB

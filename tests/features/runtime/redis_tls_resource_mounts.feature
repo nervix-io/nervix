@@ -35,7 +35,9 @@ Feature: Redis TLS resource mounts
         MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{redis_tls_addr}}',
-          'tls_ca_file' = '{{dev_tls}}/ca.pem'
+          'tls_ca_file' = '{{dev_tls}}/ca.pem',
+          'subscription_buffer_messages' = '1024',
+          'idle_timeout_ms' = '30000'
         };
         CREATE REDIS PUBSUB INGESTOR redis_notifications
         FROM redis_tls CHANNEL 'notifications_{{test_id}}' MODE NO ACK

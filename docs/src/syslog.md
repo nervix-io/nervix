@@ -279,11 +279,11 @@ cause without quoting the frame's payload.
 
 ## Emitter
 
-The syslog sink requires a codec and supports only `NO_ACK`:
+The syslog emitter requires a codec and supports only `NO ACK`:
 
 ```plexus,ignore
 TO SYSLOG <client>
-  MODE NO_ACK RETRY POLICY BACKOFF <duration> MAX <duration>
+  MODE NO ACK RETRY POLICY BACKOFF <duration> MAX <duration>
   ENCODE USING <codec>
 ```
 

@@ -371,7 +371,7 @@ Feature: Prometheus ingestion
       """
     Then within "30s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
       """
-      transient error: failed to read from prometheus source: Prometheus query response exceeds MAX BODY SIZE 1KiB
+      transient error: failed to read from prometheus ingestor: Prometheus query response exceeds MAX BODY SIZE 1KiB
       """
     And the last command output contains
       """

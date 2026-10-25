@@ -152,12 +152,24 @@ Feature: Logical ingestion time and admission
       CREATE SUBSCRIPTION observations TO summaries;
       START AT '2000-01-01T00:00:00Z' TIME RATE <rate>;
       """
+    # Observe completion before the interleaved batch, so AT rows arrive after their deadline.
+    # One decoded payload keeps each tenant's rows together despite delays between steps.
     When http payload is posted to host "ingestion-window-{{test_id}}.example.com" path "/events"
       """
-      [{"tenant":"acme","value":10,"occurred_at":"2000-01-01T00:00:00Z"},
-       {"tenant":"beta","value":100,"occurred_at":"2000-01-01T00:00:00Z"},
-       {"tenant":"acme","value":20,"occurred_at":"2000-01-01T00:00:00Z"},
-       {"tenant":"beta","value":200,"occurred_at":"2000-01-01T00:00:00Z"}]
+      [{"tenant":"gate","value":0,"occurred_at":"2000-01-01T00:00:00Z"}]
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      "samples":1,"source_at":"2000-01-01T00:00:00+00:00","tenant":"gate","total":0
+      """
+    When http payload is posted to host "ingestion-window-{{test_id}}.example.com" path "/events"
+      """
+      [
+        {"tenant":"acme","value":10,"occurred_at":"2000-01-01T00:00:00Z"},
+        {"tenant":"beta","value":100,"occurred_at":"2000-01-01T00:00:00Z"},
+        {"tenant":"acme","value":20,"occurred_at":"2000-01-01T00:00:00Z"},
+        {"tenant":"beta","value":200,"occurred_at":"2000-01-01T00:00:00Z"}
+      ]
       """
     Then within "10s" the relay subscription receives payloads
       """

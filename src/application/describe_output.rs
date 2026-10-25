@@ -25,22 +25,16 @@ use nervix_interconnect::{
     LookupDescribeEnvelope, TransportPositionEnvelope,
 };
 use nervix_models::{
-    BranchSelection, CanonicalPlexusError, ClickHouseSink, ClickHouseTableSink, ClientConsumerSink,
-    ClientSink, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
-    CreateWindowProcessor, EmitSink, EmitterBody, FieldPath, HeaderModel, HttpRequestSink,
-    HttpSink, IcebergCatalog, IcebergSink, IcebergTableSink, IngestSource, IngestTimestampSource,
-    IngestorInput, KafkaOffsetMode, KafkaSink, KafkaSource, KafkaTopicSink, KafkaTopicSource,
-    Model, ModelKind, ModelName, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink,
-    MqttSink, MqttTopicSink, MySqlConflictAction, MySqlSink, MySqlTableSink, NatsSink,
-    NatsSubjectSink, NodeRef, OtelMetricsSink, OtelSink, PlacementName, PlacementPolicy,
-    PostgresConflictAction, PostgresSink, PostgresTableSink, ProcessorInputs, ProcessorOutputs,
-    PrometheusSource, PulsarSink, PulsarSource, PulsarTopicSink, PulsarTopicSource,
-    RabbitMqQueueSink, RabbitMqSink, RedisPubSubSink, RedisSink, RelayName,
-    RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceManifestEntry,
-    ResourceUsage, ResourceVersionEntries, ScheduledNode, SentryEventSink, SentrySink,
-    SqsQueueSink, SqsSink, SyslogCollectorSink, SyslogSink, WasmStateInspection, ZeroMqPushSink,
-    ZeroMqSink, expression_to_plexus, ingest_quiesce_to_plexus, ingestor_input_body_to_plexus,
+    BranchSelection, CanonicalPlexusError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
+    CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
+    CreateReorderer, CreateWindowProcessor, EmitterBody, FieldPath, HeaderModel,
+    IngestTimestampSource, IngestorEntity, IngestorInput, KafkaIngestor, KafkaOffsetMode,
+    KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, PlacementName, PlacementPolicy,
+    ProcessorInputs, ProcessorOutputs, PrometheusIngestor, PulsarIngestor, PulsarTopicIngestor,
+    RelayName, RequestedResourceVersion, ResourceDescription, ResourceEntryContent,
+    ResourceManifestEntry, ResourceUsage, ResourceVersionEntries, ScheduledNode,
+    WasmStateInspection, expression_to_plexus, ingest_quiesce_to_plexus,
+    ingestor_input_body_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -305,6 +299,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
     match &ingestor.input {
         IngestorInput::Transport(transport) => {
             lines.push(format!("codec: {}", transport.codec.as_str()));
+            if let nervix_models::IngestorEntity::RabbitMq(
+                nervix_models::RabbitMqIngestor::Queue(source),
+            ) = &transport.source
+            {
+                lines.push(format!("mode: {}", source.mode.to_canonical_plexus()));
+            }
         }
         IngestorInput::Client(client) => {
             lines.push(format!("schema: {}", client.schema.as_str()));
@@ -400,12 +400,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
     };
     lines.push(format!("reconnect wait: {reconnect_wait}"));
 
-    if let Some(IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+    if let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
         topic,
         offset_mode,
         instances,
         ..
-    }))) = ingestor.input.transport_source()
+    }))) = ingestor.input.transport_entity()
     {
         lines.push(format!("kafka topic: {}", topic.as_str()));
         lines.push(format!(
@@ -445,12 +445,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
                 lines.push(format!("kafka instance {instance_idx} partitions: -"));
             }
         }
-    } else if let Some(IngestSource::Pulsar(PulsarSource::Topic(PulsarTopicSource {
+    } else if let Some(IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
         topic,
         subscription,
         instances,
         ..
-    }))) = ingestor.input.transport_source()
+    }))) = ingestor.input.transport_entity()
     {
         lines.push(format!("pulsar topic: {}", topic.as_str()));
         lines.push(format!(
@@ -462,8 +462,8 @@ pub(in crate::application) fn format_ingestor_describe_output(
             subscription.ownership.keywords()
         ));
         lines.push(format!("pulsar instances: {instances}"));
-    } else if let Some(IngestSource::Prometheus(PrometheusSource::Query(source))) =
-        ingestor.input.transport_source()
+    } else if let Some(IngestorEntity::Prometheus(PrometheusIngestor::Query(source))) =
+        ingestor.input.transport_entity()
     {
         lines.push(format!(
             "prometheus max body size: {}",
@@ -472,7 +472,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
     }
     lines.push(format!(
         "headers: {}",
-        format_header_model(ingestor.input.source_kind().capabilities().headers)
+        format_header_model(ingestor.input.entity_kind().capabilities().headers)
     ));
 
     lines.join("\n")
@@ -988,7 +988,7 @@ pub(in crate::application) fn format_emitter_describe_output(
                 EmitterBody::Client => "native Arrow",
             }
         ),
-        format!("sink: {}", format_emit_sink(&emitter.sink)?),
+        format!("to: {}", emitter.connector.destination_to_plexus()?),
         match &emitter.batch {
             Some(batch) => format!("batch: {batch}"),
             None => "batch: none".to_string(),
@@ -996,7 +996,7 @@ pub(in crate::application) fn format_emitter_describe_output(
         format!("flush: {}", emitter.flush_policy.to_canonical_plexus()),
         format!(
             "publishing mode: {}",
-            emitter.publishing_mode.to_canonical_plexus()
+            emitter.connector.publishing().to_canonical_plexus()
         ),
         format!(
             "filter-map: {}",
@@ -1008,206 +1008,10 @@ pub(in crate::application) fn format_emitter_describe_output(
         ),
         format!(
             "headers: {}",
-            format_header_model(emitter.sink.capabilities().headers)
+            format_header_model(emitter.connector.capabilities().headers)
         ),
     ]);
     Ok(lines.join("\n"))
-}
-
-fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalPlexusError> {
-    Ok(match sink {
-        EmitSink::Client(ClientSink::Consumer(ClientConsumerSink { schema })) => {
-            format!("CLIENT schema={}", schema.as_str())
-        }
-        EmitSink::Http(HttpSink::Request(HttpRequestSink {
-            client,
-            method,
-            path,
-        })) => format!(
-            "HTTP client={} method={} path={}",
-            client.as_str(),
-            expression_to_plexus(method)?,
-            expression_to_plexus(path)?
-        ),
-        EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink { client, topic })) => {
-            format!("KAFKA client={} topic={}", client.as_str(), topic.as_str())
-        }
-        EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink { client, topic })) => {
-            format!("PULSAR client={} topic={}", client.as_str(), topic.as_str())
-        }
-        EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink { client, queue })) => {
-            format!(
-                "RABBITMQ client={} queue={}",
-                client.as_str(),
-                queue.as_str()
-            )
-        }
-        EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink { client, channel })) => {
-            format!(
-                "REDIS client={} channel={}",
-                client.as_str(),
-                channel.as_str()
-            )
-        }
-        EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink { client, topic })) => {
-            format!("MQTT client={} topic={}", client.as_str(), topic.as_str())
-        }
-        EmitSink::Nats(NatsSink::Subject(NatsSubjectSink { client, subject })) => {
-            format!(
-                "NATS client={} subject={}",
-                client.as_str(),
-                subject.as_str()
-            )
-        }
-        EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink { client })) => {
-            format!("ZEROMQ client={}", client.as_str())
-        }
-        EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink { client })) => {
-            format!("SYSLOG client={}", client.as_str())
-        }
-        EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
-            client,
-            queue,
-            fifo_group,
-        })) => {
-            let fifo = match fifo_group.as_ref() {
-                Some(group) => {
-                    let value = match group {
-                        nervix_models::SqsFifoGroup::FromBranch => "FROM BRANCH".to_string(),
-                        nervix_models::SqsFifoGroup::Expression(expression) => {
-                            nervix_models::expression_to_plexus(expression)
-                                .unwrap_or_else(|_| "<unrenderable expression>".to_string())
-                        }
-                    };
-                    format!(" fifo_group={value}")
-                }
-                None => String::new(),
-            };
-            format!(
-                "SQS client={} queue={}{}",
-                client.as_str(),
-                queue.as_str(),
-                fifo
-            )
-        }
-        EmitSink::Sentry(SentrySink::Event(SentryEventSink { client })) => {
-            format!("SENTRY client={}", client.as_str())
-        }
-        EmitSink::Otel(sink) => {
-            let signal = match sink {
-                OtelSink::Logs(_) => "logs".to_string(),
-                OtelSink::Traces(_) => "traces".to_string(),
-                OtelSink::Metrics(OtelMetricsSink { metric, .. }) => {
-                    format!("metric {}", metric.name)
-                }
-            };
-            format!("OTEL client={} signal={signal}", sink.client().as_str())
-        }
-        EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
-            client, table, ..
-        })) => format!(
-            "CLICKHOUSE client={} table={}",
-            client.as_str(),
-            table.as_str(),
-        ),
-        EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
-            client,
-            table,
-            conflict_action,
-            ..
-        })) => {
-            let conflict = match conflict_action {
-                PostgresConflictAction::None => String::new(),
-                PostgresConflictAction::DoNothing { target } => {
-                    let target = if target.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", target.join(","))
-                    };
-                    format!(" conflict=ON CONFLICT{target} DO NOTHING")
-                }
-                PostgresConflictAction::DoUpdate { target } => {
-                    let target = if target.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", target.join(","))
-                    };
-                    format!(" conflict=ON CONFLICT{target} DO UPDATE")
-                }
-            };
-            format!(
-                "POSTGRES client={} table={}{}",
-                client.as_str(),
-                table.as_str(),
-                conflict,
-            )
-        }
-        EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
-            client,
-            table,
-            conflict_action,
-            ..
-        })) => {
-            let conflict = match conflict_action {
-                MySqlConflictAction::None => String::new(),
-                MySqlConflictAction::DoNothing => " conflict=ON CONFLICT DO NOTHING".to_string(),
-                MySqlConflictAction::DoUpdate => " conflict=ON CONFLICT DO UPDATE".to_string(),
-            };
-            format!(
-                "MYSQL client={} table={}{}",
-                client.as_str(),
-                table.as_str(),
-                conflict,
-            )
-        }
-        EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
-            client,
-            collection,
-            conflict_action,
-            ..
-        })) => {
-            let conflict = match conflict_action {
-                MongoDbConflictAction::None => String::new(),
-                MongoDbConflictAction::DoNothing { target } => {
-                    format!(" conflict=ON CONFLICT ({}) DO NOTHING", target.join(","))
-                }
-                MongoDbConflictAction::DoUpdate { target } => {
-                    format!(" conflict=ON CONFLICT ({}) DO UPDATE", target.join(","))
-                }
-            };
-            format!(
-                "MONGODB client={} collection={}{}",
-                client.as_str(),
-                collection.as_str(),
-                conflict,
-            )
-        }
-        EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
-            backend,
-            client,
-            table,
-            values: _,
-            location,
-            catalog,
-            commit_each,
-            max_commit_size,
-        })) => {
-            let catalog = match catalog {
-                IcebergCatalog::Rest { client } => format!("rest client={}", client.as_str()),
-            };
-            format!(
-                "ICEBERG backend={} client={} table={} location={} catalog={} commit_each={} \
-                 max_commit_size={}",
-                backend.as_ref(),
-                client.as_str(),
-                table.as_str(),
-                location,
-                catalog,
-                commit_each,
-                max_commit_size
-            )
-        }
-    })
 }
 
 pub(in crate::application) fn format_window_processor_describe_output(
@@ -1897,25 +1701,25 @@ mod tests {
         let nodes = vec![
             placement_member("shared", ModelKind::Junction),
             placement_member("shared", ModelKind::Deduplicator),
-            placement_member("sink", ModelKind::Emitter),
+            placement_member("emitter", ModelKind::Emitter),
         ];
 
         assert_eq!(
             format_placement_runtime_nodes(&nodes),
-            "junction:shared, deduplicator:shared, sink"
+            "junction:shared, deduplicator:shared, emitter"
         );
         assert_eq!(
             format_placement_runtime_nodes(&[
                 placement_member("source", ModelKind::Junction),
-                placement_member("sink", ModelKind::Emitter),
+                placement_member("emitter", ModelKind::Emitter),
             ]),
-            "source, sink"
+            "source, emitter"
         );
     }
 
     #[test]
     fn a_prometheus_ingestor_describes_the_response_bound_in_effect() {
-        use nervix_models::{IngestQuiesceMode, PrometheusIngestMode, PrometheusQuerySource};
+        use nervix_models::{IngestQuiesceMode, PrometheusIngestMode, PrometheusQueryIngestor};
 
         use super::super::test_fixtures::{named, scheduled_node};
 
@@ -1949,7 +1753,7 @@ mod tests {
             let IngestorInput::Transport(input) = &mut ingestor.input else {
                 panic!("the fixture constructs a transport ingestor");
             };
-            input.source = PrometheusQuerySource {
+            input.source = PrometheusQueryIngestor {
                 client: named("prom_main"),
                 query: "up".to_owned(),
                 max_body_size,
@@ -1977,8 +1781,8 @@ mod tests {
     #[test]
     fn placement_completion_respects_every_node_ingestor_declarations() {
         use nervix_models::{
-            EndpointIngestMode, HttpEndpointSource, IngestQuiesceMode, IngestSource,
-            SyslogIngestMode, SyslogListenerSource, WebsocketsEndpointSource,
+            EndpointIngestMode, HttpEndpointIngestor, IngestQuiesceMode, IngestorEntity,
+            SyslogIngestMode, SyslogListenerIngestor, WebsocketsEndpointIngestor,
         };
 
         use super::super::test_fixtures::{named, scheduled_node};
@@ -1988,8 +1792,8 @@ mod tests {
             scheduled.config.as_ref()
         ));
 
-        let sources: [IngestSource; 3] = [
-            HttpEndpointSource {
+        let sources: [IngestorEntity; 3] = [
+            HttpEndpointIngestor {
                 endpoint: named("http_intake"),
                 mode: EndpointIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Reject {
@@ -1997,7 +1801,7 @@ mod tests {
                 },
             }
             .into(),
-            WebsocketsEndpointSource {
+            WebsocketsEndpointIngestor {
                 endpoint: named("websocket_intake"),
                 mode: EndpointIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::EndpointBuffer {
@@ -2005,7 +1809,7 @@ mod tests {
                 },
             }
             .into(),
-            SyslogListenerSource {
+            SyslogListenerIngestor {
                 client: named("syslog_listener"),
                 mode: SyslogIngestMode::NoAck,
                 quiesce: IngestQuiesceMode::Suspend,

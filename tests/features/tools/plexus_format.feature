@@ -124,16 +124,16 @@ Feature: Plexus file formatting
         };
       """
 
-  Scenario: HTTP emitters keep their attachment, request expressions and explicit body selection when formatted
+  Scenario: HTTP REQUEST emitters keep their attachment, request expressions and explicit body selection when formatted
     Given a Plexus file "http_emitters.plexus" containing
       """
-      create attached emitter deliver_event from outgoing to http api method input.request_method
+      create attached HTTP REQUEST EMITTER deliver_event from outgoing to api method input.request_method
         path input.request_path mode ack retry policy backoff 250ms max 30s
         encode using event_body_codec inherit event_id, payload
         invoke write_header('Content-Type', 'application/json'), write_header('X-Tenant', input.tenant)
         flush each 100ms max batch size 1MiB on message error log on general error log;
-      create detached emitter delete_event from outgoing where input.request_method = 'DELETE'
-        to http api method 'DELETE' path concat('/v1/events/', input.event_id)
+      create detached HTTP REQUEST EMITTER delete_event from outgoing where input.request_method = 'DELETE'
+        to api method 'DELETE' path concat('/v1/events/', input.event_id)
         mode ack retry policy backoff 250ms max 30s without body
         invoke write_header('Idempotency-Key', input.event_id)
         flush immediate on message error log on general error log;
@@ -142,9 +142,9 @@ Feature: Plexus file formatting
     Then the formatter exits with code 0
     And the Plexus file "http_emitters.plexus" contains
       """
-      CREATE ATTACHED EMITTER deliver_event
+      CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
         FROM outgoing
-        TO HTTP api METHOD input.request_method PATH input.request_path
+        TO api METHOD input.request_method PATH input.request_path
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           ENCODE USING event_body_codec
         INHERIT event_id, payload
@@ -152,9 +152,9 @@ Feature: Plexus file formatting
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED EMITTER delete_event
+      CREATE DETACHED HTTP REQUEST EMITTER delete_event
         FROM outgoing WHERE input.request_method = 'DELETE'
-        TO HTTP api METHOD 'DELETE' PATH concat('/v1/events/', input.event_id)
+        TO api METHOD 'DELETE' PATH concat('/v1/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           WITHOUT BODY
         INVOKE write_header('Idempotency-Key', input.event_id)
@@ -386,26 +386,25 @@ Feature: Plexus file formatting
       START AT '2017-01-01T00:00:00.500+00:00' TIME RATE 1;
       """
 
-  Scenario: An SQS queue longer than a name stays unquoted
+  @kinded_emitter_formatter
+  Scenario: SQS queue names retain their case and quoting
     Given a Plexus file "pipeline.plexus" containing
       """
-      create emitter order_events from orders to sqs sqs_main queue orders-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.fifo mode single retry policy backoff 1s max 5s encode using order_codec flush immediate on message error log on general error log;
+      create SQS QUEUE EMITTER order_events from orders to sqs_main queue 'Orders.fifo' FIFO GROUP 'orders' mode single retry policy backoff 1s max 5s encode using order_codec flush immediate on message error log on general error log;
       """
     When nervix-plexus-format formats the Plexus file "pipeline.plexus"
     Then the formatter exits with code 0
     And the Plexus file "pipeline.plexus" contains
       """
-      TO SQS sqs_main QUEUE orders-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.fifo
+      TO sqs_main QUEUE 'Orders.fifo' FIFO GROUP 'orders'
       """
 
   Scenario: An array in a VALUES map is one column value
     Given a Plexus file "pipeline.plexus" containing
       """
-      create emitter to_ch from notifications
-        to clickhouse clickhouse_client insert to table my_table
-        values { 'tags' = [input.first_tag, input.second_tag] }
-        mode ack retry policy backoff 250ms max 30s
-        batch max messages 500 max size 8MiB
+      create CLICKHOUSE TABLE EMITTER to_ch from notifications
+        to clickhouse_client table 'my_table'
+        mode ack retry policy backoff 250ms max 30s values { 'tags' = [input.first_tag, input.second_tag] } batch max messages 500 max size 8MiB
         flush immediate on message error log on general error log;
       """
     When nervix-plexus-format formats the Plexus file "pipeline.plexus"
@@ -517,7 +516,7 @@ Feature: Plexus file formatting
         correlate where left.to = right.match match earliest max time 5s
         on correlation timeout drop, drop unbranched to matched set to = left.to
         flush immediate on message error log;
-      create attached emitter trip_requests from routed to http api method mode path path
+      create attached HTTP REQUEST EMITTER trip_requests from routed to api method mode path path
         mode ack retry policy backoff 250ms max 30s without body
         invoke write_header('X-Trip-Mode', mode)
         flush immediate on message error log on general error log;
@@ -570,9 +569,9 @@ Feature: Plexus file formatting
           SET to = left.to
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE ATTACHED EMITTER trip_requests
+      CREATE ATTACHED HTTP REQUEST EMITTER trip_requests
         FROM routed
-        TO HTTP api METHOD mode PATH path
+        TO api METHOD mode PATH path
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           WITHOUT BODY
         INVOKE write_header('X-Trip-Mode', mode)

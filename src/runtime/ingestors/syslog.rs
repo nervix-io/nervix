@@ -1,11 +1,11 @@
-//! Syslog source runtime composition.
+//! Syslog ingestor runtime composition.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Composing the Syslog connector plan, bound to this node's listener address, with
 //!   host-owned intake.
-//! - **Depends on.** The connector source contract, the Syslog connector, and pre-resolved runtime
-//!   execution handles.
+//! - **Depends on.** The connector ingestor contract, the Syslog connector, pre-resolved runtime
+//!   execution handles, and a test-only listener fault channel supplied by the harness.
 //! - **Must not know.** Syslog socket drivers, framing, TLS configuration, Plexus parsing, registry
 //!   validation, or placement computation.
 
@@ -15,30 +15,39 @@
 )]
 
 use error_stack::ResultExt as _;
-use nervix_connector_syslog::{SyslogSource, SyslogSourcePlan};
+use nervix_connector::IngestorConnector as _;
+use nervix_connector_syslog::{SyslogListenerIngestor, SyslogListenerIngestorPlan};
 use nervix_models::IngestAcknowledgement;
 
 use super::{
     super::*,
     IngestorStartError,
-    source::{BrokerSourceStart, SourceStart},
+    connector::{BrokerIngestorStart, IngestorStart},
 };
 
-impl SyslogIngestorStartPlan {
+const _: () = assert!(matches!(
+    SyslogListenerIngestor::KIND,
+    nervix_models::IngestorEntityKind::Syslog(nervix_models::SyslogIngestorEntity::Listener)
+));
+
+impl SyslogListenerIngestorStartPlan {
     pub(super) async fn compose(
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
-        let SyslogIngestorStartPlan { client } = self;
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
+        let SyslogListenerIngestorStartPlan { client } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let connector = SyslogSourcePlan::new(resolved.entries, |configured| {
+        let connector = SyslogListenerIngestorPlan::new(resolved.entries, |configured| {
             runtime.syslog_ingestor_bind_addr(configured)
         })
         .change_context_lazy(|| ingestor.initialize_failure())?;
-        BrokerSourceStart {
+        #[cfg(feature = "testing")]
+        let connector =
+            connector.with_listener_faults(runtime.inner.fault_injection.syslog_listener_faults());
+        BrokerIngestorStart {
             connector,
             instances: NonZeroU64::MIN,
             acknowledgement: IngestAcknowledgement::Unacknowledged,
@@ -49,9 +58,8 @@ impl SyslogIngestorStartPlan {
             // queue is full.
             unacknowledged_admission: QueueAdmission::WaitForPlace,
             client_mounts: resolved.mounts.into_iter().collect(),
-            connector_label: "syslog",
         }
-        .open::<SyslogSource>(ingestor)
+        .open::<SyslogListenerIngestor>(ingestor)
         .await
     }
 }

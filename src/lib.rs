@@ -40,6 +40,7 @@ compile_error!(
 pub mod application;
 #[cfg(test)]
 mod archive_allocation_tests;
+pub mod capacity;
 #[cfg(test)]
 mod captured_logs;
 pub mod cluster;

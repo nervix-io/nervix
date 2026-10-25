@@ -347,10 +347,10 @@ Feature: Physical infrastructure deadlines under domain pacing
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER physical_ack_sink
+      CREATE KAFKA TOPIC EMITTER physical_ack_sink
         FROM physical_ack_records
-        TO KAFKA physical_ack_kafka TOPIC physical_ack_out_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO physical_ack_kafka TOPIC 'physical_ack_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING physical_ack_codec
         INHERIT ALL
         FLUSH IMMEDIATE

@@ -18,7 +18,7 @@ Feature: Interconnect relay admission
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event UNBRANCHED;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -30,8 +30,8 @@ Feature: Interconnect relay admission
         TIMESTAMP NOW
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER sink_output FROM input
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER sink_output FROM input
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
@@ -43,7 +43,7 @@ Feature: Interconnect relay admission
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event UNBRANCHED;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -55,8 +55,8 @@ Feature: Interconnect relay admission
         TIMESTAMP NOW
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER sink_output FROM input
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER sink_output FROM input
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 100.0;
@@ -112,7 +112,7 @@ Feature: Interconnect relay admission
       );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event BRANCHED BY by_tenant;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -133,8 +133,8 @@ Feature: Interconnect relay admission
         SET tenant = message.tenant
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER sink_output FROM input
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER sink_output FROM input
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -190,7 +190,7 @@ Feature: Interconnect relay admission
       );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event BRANCHED BY by_tenant;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -203,8 +203,8 @@ Feature: Interconnect relay admission
         SET tenant = message.tenant
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER sink_output FROM input
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER sink_output FROM input
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -268,7 +268,7 @@ Feature: Interconnect relay admission
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY active_events SCHEMA event BRANCHED BY by_active_tenant;
       CREATE RELAY idle_events SCHEMA event BRANCHED BY by_idle_tenant;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -289,12 +289,12 @@ Feature: Interconnect relay admission
         SET tenant = message.tenant
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER active_output FROM active_events
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER active_output FROM active_events
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER idle_output FROM idle_events
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER idle_output FROM idle_events
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -365,7 +365,7 @@ Feature: Interconnect relay admission
       );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
-      CREATE ZEROMQ CLIENT sink CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
@@ -378,8 +378,8 @@ Feature: Interconnect relay admission
         SET tenant = message.tenant
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER output FROM events
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER output FROM events
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

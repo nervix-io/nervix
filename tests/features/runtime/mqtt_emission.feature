@@ -1,5 +1,5 @@
 Feature: MQTT emission
-  Scenario Outline: MQTT emitter publishes JSON payloads from a relay
+  Scenario Outline: MQTT TOPIC emitter publishes JSON payloads from a relay
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -42,7 +42,7 @@ Feature: MQTT emission
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-emitter-{{test_id}}'
         };
-        CREATE EMITTER mqtt_notifications_out FROM notifications TO MQTT mqtt_main TOPIC notifications_out_{{test_id}} MODE QOS 1 ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE MQTT TOPIC EMITTER mqtt_notifications_out FROM notifications TO mqtt_main TOPIC 'notifications_out_{{test_id}}' MODE QOS 1 ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -123,8 +123,8 @@ Feature: MQTT emission
         'addr' = '{{mqtt_stallable_addr}}',
         'client_id' = 'nervix-mqtt-boundary-{{test_id}}'
       };
-      CREATE ATTACHED EMITTER mqtt_boundary FROM notifications
-        TO MQTT mqtt_sink TOPIC mqtt_boundary_out_{{test_id}}
+      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+        TO mqtt_sink TOPIC 'mqtt_boundary_out_{{test_id}}'
           MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
           ENCODE USING notification_codec
@@ -204,8 +204,8 @@ Feature: MQTT emission
         'addr' = '{{mqtt_filtered_addr}}',
         'client_id' = 'nervix-window-emitter-{{test_id}}'
       };
-      CREATE EMITTER window_out FROM notifications
-        TO MQTT mqtt_sink TOPIC window_out_{{test_id}}
+      CREATE MQTT TOPIC EMITTER window_out FROM notifications
+        TO mqtt_sink TOPIC 'window_out_{{test_id}}'
           MODE <mode> ACK PARALLEL MAX 8 ACK TIMEOUT 10s
             RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING notification_codec
@@ -254,7 +254,7 @@ Feature: MQTT emission
   # CONNECT, so the client still holds the record it took when STOP finishes the emitter: the finish
   # waits for the client to send it, which it can only do once the endpoint resumes.
   @mqtt_finish_at_stop @emitter_finish_at_stop @deloxide_stress
-  Scenario Outline: STOP waits for the publish a QOS 0 MQTT emitter's client holds
+  Scenario Outline: STOP waits for the publish a QOS 0 MQTT TOPIC emitter's client holds
     Given MQTT is running
     And a stallable MQTT endpoint is configured
     And drain timeout is configured as "60s"
@@ -288,8 +288,8 @@ Feature: MQTT emission
         'addr' = '{{mqtt_stallable_addr}}',
         'client_id' = 'nervix-cucumber-held-{{test_id}}'
       };
-      CREATE EMITTER held_output FROM held_events
-        TO MQTT mqtt_held TOPIC held_out_{{test_id}}
+      CREATE MQTT TOPIC EMITTER held_output FROM held_events
+        TO mqtt_held TOPIC 'held_out_{{test_id}}'
           MODE QOS 0 RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING held_codec
         INHERIT ALL

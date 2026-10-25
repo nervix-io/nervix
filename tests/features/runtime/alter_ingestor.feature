@@ -152,8 +152,8 @@ Feature: Altering ingestors
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING buffered_event_codec
         TO buffered_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER buffered_out FROM buffered_events
-        TO ZEROMQ buffered_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE ZEROMQ PUSH EMITTER buffered_out FROM buffered_events
+        TO buffered_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING buffered_event_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -276,9 +276,9 @@ Feature: Altering ingestors
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER paced_out
+      CREATE ZEROMQ PUSH EMITTER paced_out
         FROM paced_events
-        TO ZEROMQ paced_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING paced_event_codec
+        TO paced_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING paced_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

@@ -189,7 +189,9 @@ Feature: JAQ transformation
         CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
-          'addr' = '{{redis_addr}}'
+          'addr' = '{{redis_addr}}',
+          'subscription_buffer_messages' = '1024',
+          'idle_timeout_ms' = '30000'
         };
         CREATE REDIS PUBSUB INGESTOR redis_notifications
         FROM redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK

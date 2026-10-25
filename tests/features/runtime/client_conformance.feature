@@ -355,8 +355,8 @@ Feature: Cross-language client conformance
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER typed_out FROM typed_rows
-        TO CLIENT SCHEMA typed_out_row
+      CREATE CLIENT CONSUMER EMITTER typed_out FROM typed_rows
+        TO SCHEMA typed_out_row
           MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT ALL EXCEPT secret
         SET secret = leak_sensitive(input.secret), echo = input.id

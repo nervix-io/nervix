@@ -4,6 +4,7 @@
 - [Quickstart](./quickstart.md)
   - [Installation](./quickstart-installation.md)
   - [Running Nervix](./quickstart-running.md)
+    - [nervix-server Reference](./nervix-server-reference.md)
   - [Your First Pipeline: Kafka To Redis](./quickstart-first-pipeline.md)
   - [Conditional Routing](./quickstart-conditional-routing.md)
   - [Branched Processing](./quickstart-branched-processing.md)

@@ -90,7 +90,7 @@ Runtime branch rules:
 - output routes and forwarders send records to downstream relay names inside the same branch
 - stateful processors keep branch-local state for that group
 - a `REINGESTOR` may consume across a branch boundary and start new downstream branches through `BRANCHED BY <branch>`
-- an `EMITTER` consumes records across the whole input relay and terminates the branch at an external sink
+- an `EMITTER` consumes records across the whole input relay and terminates the branch at an external emitter
 
 `branch` is a reserved namespace, so a relay cannot be named `branch`. Expressions inside a
 concrete branch may read its immutable key with `branch.<key>`. Bare fields never resolve to branch
@@ -143,8 +143,10 @@ backpressure boundary, not a per-producer, per-consumer, or per-branch capacity.
 runtime consumers cannot drain the relay quickly enough, upstream dispatch waits once the owner
 buffer and the fixed dispatch slots leading to it are occupied. A producer on another node also
 waits while the owner has no relay memory left for the acknowledgement watches of the rows it
-sends, until the owner has reported enough earlier rows; see
-[Capacity Planning](./capacity-planning.md).
+sends, until the owner has reported enough earlier rows, or for the grant of its next delivery, and
+while its own node has no relay memory left to store the acknowledgements of the rows it sends; see
+[Capacity Planning](./capacity-planning.md) and
+[Held Deliveries](./interconnect.md#held-deliveries).
 
 The capacity is a positive integer, through `18446744073709551615` on native 64-bit targets.
 Creation and `ALTER RELAY ... SET CAPACITY` retain the exact accepted value in storage, replicated

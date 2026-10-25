@@ -13,7 +13,7 @@
 )]
 
 use chumsky::prelude::*;
-use nervix_models::{SyslogIngestMode, SyslogListenerSource};
+use nervix_models::{SyslogIngestMode, SyslogListenerIngestor};
 
 use super::delivery::{flexible_quiesce_clause, no_ack};
 use crate::{
@@ -23,12 +23,12 @@ use crate::{
 
 /// `FROM <client> MODE NO ACK ON QUIESCE SUSPEND|BUFFER …|DROP`.
 pub(super) fn listener_body<'src>()
--> impl Parser<'src, &'src [Token], SyslogListenerSource, extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], SyslogListenerIngestor, extra::Err<ParseError<'src>>> + Clone {
     client_ref()
         .then_ignore(kw(Identifier::Mode))
         .then(no_ack().to(SyslogIngestMode::NoAck))
         .then(flexible_quiesce_clause())
-        .map(|((client, mode), quiesce)| SyslogListenerSource {
+        .map(|((client, mode), quiesce)| SyslogListenerIngestor {
             client,
             mode,
             quiesce,

@@ -182,8 +182,8 @@ impl ModelArchive {
             ArchiveLayout::new(self.manifest.clone()).assured("the current manifest lays out");
         let mut archive = Vec::new();
         layout
-            .write_to(&mut archive, |entry, sink| {
-                sink.write_all(&self.sections[&entry.path])
+            .write_to(&mut archive, |entry, connector| {
+                connector.write_all(&self.sections[&entry.path])
             })
             .assured("canonical domains export through the public archive writer");
         let mut extracted = Extracted::default();
@@ -236,8 +236,8 @@ impl ModelArchive {
         let mut reexported = Vec::new();
         ArchiveLayout::new(manifest)
             .assured("the extracted manifest lays out")
-            .write_to(&mut reexported, |entry, sink| {
-                sink.write_all(&extracted.sections[&entry.path])
+            .write_to(&mut reexported, |entry, connector| {
+                connector.write_all(&extracted.sections[&entry.path])
             })
             .assured("restored canonical Models re-export");
         assert_eq!(reexported, archive);

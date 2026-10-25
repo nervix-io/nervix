@@ -263,13 +263,13 @@ mod tests {
     use nervix_models::{
         AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, CommandExecutionReference,
         CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateRelay, CreateVhost,
-        CreateWasmProcessor, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy,
-        GeneralErrorPolicy, HttpEndpointSource, HttpSource, IngestSource, Literal, Model,
-        ModelKind, NodeRef, OutputBranch, PlacementPolicy, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, QuiesceLevel, RelayBranching, ResolvedBranching, RetryPolicy,
-        RouteConstruction, ScheduledNode, SchemaFingerprint, VhostTlsResource, WasmProcessorLimits,
-        WasmStateResetScope, ZeroMqPushSink, ZeroMqSink,
+        CreateWasmProcessor, DomainName, DomainSchedule, DynamicModelUpdate, EmitterEntity,
+        EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy, GeneralErrorPolicy,
+        HttpEndpointIngestor, HttpIngestor, IngestorEntity, Literal, Model, ModelKind, NodeRef,
+        OutputBranch, PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        QuiesceLevel, RelayBranching, ResolvedBranching, RetryPolicy, RouteConstruction,
+        ScheduledNode, SchemaFingerprint, VhostTlsResource, WasmProcessorLimits,
+        WasmStateResetScope, ZeroMqEmitter, ZeroMqPushEmitter,
     };
     use nonzero_ext::nonzero;
 
@@ -351,8 +351,8 @@ mod tests {
                         }]),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Http(HttpSource::Endpoint(
-                                    HttpEndpointSource {
+                                source: IngestorEntity::Http(HttpIngestor::Endpoint(
+                                    HttpEndpointIngestor {
                                         endpoint: named(endpoint),
                                         mode: EndpointIngestMode::NoAck,
                                         quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
@@ -622,26 +622,28 @@ mod tests {
     #[test]
     fn emitter_flush_is_dynamic_and_client_changes_swap_despite_fingerprint_changes() {
         let emitter = CreateEmitter {
-            name: named("event_sink"),
+            name: named("event_emitter"),
             from: nervix_models::ProcessorInputs::single(named("events")),
             body: nervix_models::EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-                client: named("sink_a"),
-            }))),
+            connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+                ZeroMqPushEmitter {
+                    mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("emitter_a"),
+                },
+            ))),
             batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "30s".to_string(),
                 max_batch_size: "1MiB".to_string(),
             },
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -669,15 +671,23 @@ mod tests {
         assert_eq!(
             ScheduleDelta::classify(&existing, &dynamic),
             ScheduleDelta::Dynamic(vec![DynamicModelUpdate::Emitter {
-                emitter: named("event_sink"),
+                emitter: named("event_emitter"),
                 config: Box::new(dynamic_emitter),
             }])
         );
 
         let mut swapped_emitter = emitter;
-        swapped_emitter.sink = Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-            client: named("sink_b"),
-        })));
+        swapped_emitter.connector = Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+            ZeroMqPushEmitter {
+                mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: nervix_models::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: named("emitter_b"),
+            },
+        )));
         let mut swapped = existing.clone();
         *swapped.nodes[0].config = Model::Emitter(swapped_emitter);
         swapped.nodes[0].schema_fingerprint = SchemaFingerprint::from_digest([2; 32]);
@@ -686,7 +696,7 @@ mod tests {
             ScheduleDelta::EntitySwap {
                 entities: vec![NodeRef {
                     kind: ModelKind::Emitter,
-                    identifier: named("event_sink"),
+                    identifier: named("event_emitter"),
                 }],
                 reassignments: Vec::new(),
                 dynamic_updates: Vec::new(),

@@ -122,8 +122,8 @@ Feature: Drain node
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER stalled_emitter FROM stalled_output
-        TO ZEROMQ drain_sink MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE ZEROMQ PUSH EMITTER stalled_emitter FROM stalled_output
+        TO drain_sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING drain_event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION movable_junction FROM control_input UNBRANCHED

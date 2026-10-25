@@ -1344,26 +1344,54 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         };
-        let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                for ack in batch.acks.iter() {
-                    ack.no_ack(format!("{error:#}"));
-                }
-                return Err(Box::new(batch.clone()));
-            }
-        };
+        // The delivery's records are stored before its body is encoded, so a delivery that waits
+        // for room to store them holds no encoded body meanwhile.
+        let deadline = RemoteDispatcher::delivery_deadline();
         let forwarded = batch
             .acks
             .iter()
             .map(RemoteDispatcher::forwarded_ack)
             .collect();
-        let mut remote_acks = match dispatcher.register_pending_acks(&owner_node, forwarded) {
-            Ok(registrations) => registrations,
+        let storage = dispatcher
+            .store_pending_acks(
+                &owner_node,
+                forwarded,
+                deadline,
+                ingress_slot.cancellation().cancelled(),
+            )
+            .await;
+        let mut remote_acks = match storage {
+            Ok(RemoteAckStorage::Stored(registrations)) => registrations,
+            Ok(RemoteAckStorage::Cancelled) => {
+                for ack in &batch.acks {
+                    ack.no_ack("relay channel was retired");
+                }
+                return Err(Box::new(batch.clone()));
+            }
             Err(error) => {
+                warn!(
+                    domain = domain.as_str(),
+                    relay = relay.as_str(),
+                    scope = %BranchScope::from(&batch.key),
+                    target_node = %owner_node,
+                    error = %format_args!("{error:#}"),
+                    "failed to store the acknowledgements of a relay batch for its owner"
+                );
                 let reason = format!("{error:#}");
                 for ack in &batch.acks {
                     ack.no_ack(reason.clone());
+                }
+                return Err(Box::new(batch.clone()));
+            }
+        };
+        let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                for registration in remote_acks.registrations().iter().flatten() {
+                    dispatcher.clear_pending_ack(registration);
+                }
+                for ack in batch.acks.iter() {
+                    ack.no_ack(format!("{error:#}"));
                 }
                 return Err(Box::new(batch.clone()));
             }
@@ -1384,6 +1412,8 @@ impl RelayBoundaryServices {
                     admission: None,
                 },
                 &ingress_slot,
+                deadline,
+                GrantCapacityRefusals::Hold,
             )
             .await;
         if let Err(error) = admission_result {
@@ -1507,6 +1537,41 @@ impl RelayBoundaryServices {
                 }
                 return Err(Box::new(batch.clone()));
             };
+            let remote_batch = match consumer.mode {
+                AckMode::Attached => batch.attached(),
+                AckMode::Detached => batch.detached(),
+            };
+            // The records are stored before the body is encoded, so the first destination that
+            // waits for room to store them holds no encoded body meanwhile.
+            let deadline = RemoteDispatcher::delivery_deadline();
+            let mut registration_owner = if consumer.mode == AckMode::Attached {
+                let storage = dispatcher
+                    .store_pending_acks(
+                        &consumer.node_id,
+                        remote_batch.acks.to_vec(),
+                        deadline,
+                        outbound_slot.cancellation().cancelled(),
+                    )
+                    .await;
+                match storage {
+                    Ok(RemoteAckStorage::Stored(owner)) => Some(owner),
+                    Ok(RemoteAckStorage::Cancelled) => {
+                        for ack in batch.acks.iter() {
+                            ack.no_ack("relay channel lifetime ended");
+                        }
+                        return Err(Box::new(batch.clone()));
+                    }
+                    Err(error) => {
+                        let reason = format!("{error:#}");
+                        for ack in &remote_batch.acks {
+                            ack.no_ack(reason.clone());
+                        }
+                        return Err(Box::new(batch.clone()));
+                    }
+                }
+            } else {
+                None
+            };
             let batch_ipc = match encoded_body.clone() {
                 Some(bytes) => bytes,
                 None => match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
@@ -1515,6 +1580,11 @@ impl RelayBoundaryServices {
                         bytes
                     }
                     Err(error) => {
+                        if let Some(owner) = &registration_owner {
+                            for registration in owner.registrations().iter().flatten() {
+                                dispatcher.clear_pending_ack(registration);
+                            }
+                        }
                         if remote_runtime_consumers
                             .iter()
                             .any(|consumer| consumer.mode == AckMode::Attached)
@@ -1531,26 +1601,6 @@ impl RelayBoundaryServices {
                         return Ok(());
                     }
                 },
-            };
-            let remote_batch = match consumer.mode {
-                AckMode::Attached => batch.attached(),
-                AckMode::Detached => batch.detached(),
-            };
-            let mut registration_owner = if consumer.mode == AckMode::Attached {
-                match dispatcher
-                    .register_pending_acks(&consumer.node_id, remote_batch.acks.to_vec())
-                {
-                    Ok(owner) => Some(owner),
-                    Err(error) => {
-                        let reason = format!("{error:#}");
-                        for ack in &remote_batch.acks {
-                            ack.no_ack(reason.clone());
-                        }
-                        return Err(Box::new(batch.clone()));
-                    }
-                }
-            } else {
-                None
             };
             let remote_acks = match &registration_owner {
                 Some(owner) => owner.registrations().to_vec(),
@@ -1569,6 +1619,8 @@ impl RelayBoundaryServices {
                         acks: remote_acks.clone(),
                     }),
                     &outbound_slot,
+                    deadline,
+                    GrantCapacityRefusals::Hold,
                 )
                 .await;
 

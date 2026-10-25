@@ -349,8 +349,14 @@ installation therefore publishes nothing to an attached client.
 The observer reads a tick only while the installation is paced and of that tick's generation. It
 adds the serving node's own logical reading, taken as the tick frame is built: one snapshot of the
 installed generation, read through the same watermarked read that execution uses. The observer
-retains the progress watch's sender while the attachment lives, so removing the domain closes
-neither wait before the lifecycle publishes missing and wakes delivery to send the end frame.
+samples accepted progress before taking that reading. A process pause between the samples can
+therefore pair an earlier tick with a much later serving reading, and transport delay can deliver
+both samples later still. Their difference is not a bound on projection error or tick freshness;
+accepted progress does not bound the independently projected readable time.
+
+The observer retains the progress watch's sender while the attachment lives, so removing the
+domain closes neither wait before the lifecycle publishes missing and wakes delivery to send the
+end frame.
 
 ### Attachments And Their Delivery
 
@@ -595,6 +601,21 @@ connector-owned source timestamp, so a paced domain requires its client ingestor
 timestamp. The batch's `ACK TIMEOUT` and its producer's retry backoff are physical monotonic bounds;
 neither waits on nor stretches domain logical time.
 
+## Duration Windows
+
+A duration window retains rows by their preserved event timestamps. Its next completion deadline
+is the first retained timestamp plus `WIDTH`, and its branch task waits for that deadline on the
+domain clock. Completion emits the rows currently retained and advances by `STEP`. A later batch
+with the same event timestamp enters the state that remains after that advance; an equal timestamp
+does not reopen an emitted window.
+
+When an input batch starts an empty window bounded only by duration, its admitted rows with equal
+timestamps do not reach `WIDTH` during admission. The branch processes them before its next clock check,
+which can emit the group together even when the batch arrived after that deadline. The output
+retains the earliest source watermark and uses the emission's domain time for its high watermark.
+`TIMESTAMP NOW` assigns the ingestion snapshot to every decoded row of a batch, while
+`TIMESTAMP AT` preserves each row's explicit event time.
+
 ## Logical And Physical Deadlines
 
 A logical deadline carries its domain, lifecycle generation, and target logical timestamp. Waiting
@@ -625,8 +646,8 @@ misses multiple occurrences, the cadence returns the newest due instant once and
 to the first future boundary. Consumers that need both meanings keep the scheduled due instant
 separate from the fresh execution snapshot taken when work actually runs.
 
-[Connector Crates And The Connector Contract](./connector-contract.md#source-boundary) defines
-the paced source's host and connector responsibilities; this chapter owns the cadence's time
+[Connector Crates And The Connector Contract](./connector-contract.md#ingestor-boundary) defines
+the paced ingestor's host and connector responsibilities; this chapter owns the cadence's time
 mapping and missed-occurrence behavior.
 
 The architecture keeps four time classes distinct:

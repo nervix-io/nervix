@@ -16,8 +16,8 @@ use ahash::{HashMap, HashMapExt};
 use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
-    CreateEndpoint, DomainName, EndpointType, IngestorInput, Model, ModelIndex, ModelKind, NodeRef,
-    PrometheusApiRoot, RelayName, SourceReference, parse_duration_text,
+    CreateEndpoint, DomainName, EndpointType, IngestorInput, IngestorReference, Model, ModelIndex,
+    ModelKind, NodeRef, PrometheusApiRoot, RelayName, WebsocketsClientConfig, parse_duration_text,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::graph::DiGraph;
@@ -43,11 +43,12 @@ use crate::registry::{
         connector::{
             effective_emitter_filter_map_schema, effective_ingestor_output_filter_map_schema,
             ensure_ingestor_timestamp_source, ensure_signaling_protocol_is_valid,
-            validate_direct_values_sensitivity, validate_emitter_batch_container,
+            validate_direct_value_mappings, validate_emitter_batch_container,
             validate_emitter_publishing_contract, validate_endpoint_paths,
             validate_http_emitter_client, validate_http_literal_request_fields,
             validate_http_request_expressions, validate_ingestor_filter_where_for_internal_schemas,
-            validate_ingestor_source, validate_sqs_fifo_group_expression, validate_vhost_hostnames,
+            validate_ingestor_source, validate_kafka_client, validate_sqs_fifo_group_expression,
+            validate_vhost_hostnames,
         },
         expression::add_udf_dependency_edges,
         materialized_state::{
@@ -234,8 +235,8 @@ impl DomainState {
                 Model::WireAvroSchema(schema) => {
                     ensure_wire_schema_has_fields(domain, identifier, schema)?;
                 }
-                Model::ClientKafka(_)
-                | Model::ClientPulsar(_)
+                Model::ClientKafka(client) => validate_kafka_client(domain, identifier, client)?,
+                Model::ClientPulsar(_)
                 | Model::ClientHttp(_)
                 | Model::ClientSentry(_)
                 | Model::ClientOtel(_)
@@ -294,6 +295,16 @@ impl DomainState {
                     }
                 }
                 Model::ClientWebsockets(client) => {
+                    if let Err(report) = WebsocketsClientConfig::parse(&client.config) {
+                        let issue = report.current_context().clone();
+                        return Err(report.change_context(
+                            RegistryError::InvalidWebsocketsClientConfig {
+                                domain: domain.clone(),
+                                client: client.name.clone(),
+                                issue,
+                            },
+                        ));
+                    }
                     if let Some(signaling_protocol) = client.signaling_protocol.as_ref() {
                         let signaling_protocol = expect_kind(
                             domain,
@@ -589,7 +600,7 @@ impl DomainState {
 
                             let kind = input.source.kind();
                             match input.source.reference() {
-                                SourceReference::Client(client) => {
+                                IngestorReference::Client(client) => {
                                     let client_node = expect_kind(
                                         domain,
                                         identifier,
@@ -624,7 +635,7 @@ impl DomainState {
                                     }
                                     graph.add_edge(client_node, source, EdgeKind::RequiredBy);
                                 }
-                                SourceReference::Endpoint(endpoint) => {
+                                IngestorReference::Endpoint(endpoint) => {
                                     let endpoint_node = expect_kind(
                                         domain,
                                         identifier,
@@ -659,7 +670,7 @@ impl DomainState {
                                 }
                             }
                         }
-                        IngestorInput::Client(client_source) => {
+                        IngestorInput::Client(client_entity) => {
                             // A client source's batches carry the schema it names, so that schema
                             // is what the ingestor depends on in place of a codec and a client.
                             let schema_node = expect_kind(
@@ -667,7 +678,7 @@ impl DomainState {
                                 identifier,
                                 models,
                                 &indices,
-                                &client_source.schema,
+                                &client_entity.schema,
                                 ModelKind::Schema,
                             )?;
                             graph.add_edge(schema_node, source, EdgeKind::RequiredBy);
@@ -1385,7 +1396,7 @@ impl DomainState {
                             }));
                         }
                     }
-                    validate_direct_values_sensitivity(
+                    validate_direct_value_mappings(
                         domain,
                         identifier,
                         models,
@@ -1432,7 +1443,7 @@ impl DomainState {
                     }
 
                     let mut http_origin = None;
-                    if let Some(client_name) = emitter.sink.client() {
+                    if let Some(client_name) = emitter.connector.client() {
                         let client = expect_kind(
                             domain,
                             identifier,
@@ -1447,29 +1458,28 @@ impl DomainState {
                                 "expect_kind above resolved this client reference against the \
                                  same model set",
                             );
-                        let expected = emitter.sink.client_connector().verified(
-                            "this sink names a client, so it states the connector that client \
-                             configures",
-                        );
+                        let expected = emitter.connector.capabilities().reference;
                         let found = client_model.connector_kind().verified(
                             "this model was resolved as a client above, and every client model \
                              configures a connector",
                         );
-                        if found != expected {
+                        if !expected.admits_client(found) {
                             return Err(Report::new(RegistryError::InvalidModel {
                                 domain: domain.as_str().to_string(),
                                 identifier: identifier.as_str().to_string(),
                                 reason: format!(
                                     "{} emitter requires a {} client, found {} client '{}'",
-                                    emitter.sink.transport_label(),
-                                    expected.keyword(),
+                                    emitter.connector.transport_label(),
+                                    expected,
                                     found.keyword(),
                                     client_name.as_str(),
                                 ),
                             }));
                         }
-                        if let (nervix_models::EmitSink::Http(_), Model::ClientHttp(http_client)) =
-                            (emitter.sink.as_ref(), client_model)
+                        if let (
+                            nervix_models::EmitterEntity::Http(_),
+                            Model::ClientHttp(http_client),
+                        ) = (emitter.connector.as_ref(), client_model)
                         {
                             http_origin = Some(validate_http_emitter_client(
                                 domain,
@@ -1480,7 +1490,7 @@ impl DomainState {
                         graph.add_edge(client, source, EdgeKind::RequiredBy);
                     }
 
-                    if let Some(catalog) = emitter.sink.catalog_client() {
+                    if let Some(catalog) = emitter.connector.catalog_client() {
                         let catalog_client = expect_kind(
                             domain,
                             identifier,
@@ -1506,7 +1516,7 @@ impl DomainState {
                                 reason: format!(
                                     "{} emitter requires an {} catalog client, found {} client \
                                      '{}'",
-                                    emitter.sink.transport_label(),
+                                    emitter.connector.transport_label(),
                                     catalog.connector.keyword(),
                                     found.keyword(),
                                     catalog.client.as_str(),
@@ -1516,10 +1526,12 @@ impl DomainState {
                         graph.add_edge(catalog_client, source, EdgeKind::RequiredBy);
                     }
 
-                    let output_schema = match emitter.sink.as_ref() {
-                        nervix_models::EmitSink::Client(nervix_models::ClientSink::Consumer(
-                            nervix_models::ClientConsumerSink { schema },
-                        )) => {
+                    let output_schema = match emitter.connector.as_ref() {
+                        nervix_models::EmitterEntity::Client(
+                            nervix_models::ClientEmitter::Consumer(
+                                nervix_models::ClientConsumerEmitter { schema, .. },
+                            ),
+                        ) => {
                             let schema_node = expect_kind(
                                 domain,
                                 identifier,
@@ -1536,8 +1548,10 @@ impl DomainState {
                                 return Err(Report::new(RegistryError::InvalidModel {
                                     domain: domain.as_str().to_string(),
                                     identifier: identifier.as_str().to_string(),
-                                    reason: "CLIENT emitter output does not resolve to a schema"
-                                        .to_string(),
+                                    reason: format!(
+                                        "{} emitter output does not resolve to a schema",
+                                        emitter.connector.kind()
+                                    ),
                                 }));
                             };
                             schema

@@ -1,11 +1,11 @@
 Feature: MQTT name resolution
 
-  An MQTT source or sink resolves the host of its client's `addr` through the node's resolver every
+  An MQTT source or emitter resolves the host of its client's `addr` through the node's resolver every
   time its client connects to the broker, first and after every lost connection, dials the answers
   in order, and verifies an `mqtts` broker's certificate against that host. These scenarios point
   every node at a DNS fixture the scenario controls.
 
-  Scenario Outline: MQTT sources and sinks reach a broker named by the node DNS fixture over <scheme>
+  Scenario Outline: MQTT sources and emitters reach a broker named by the node DNS fixture over <scheme>
     Given MQTT is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
@@ -49,8 +49,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER mqtt_out FROM notifications
-      TO MQTT mqtt_out TOPIC dns_out_{{test_id}} MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -122,8 +122,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE EMITTER mqtt_out FROM notifications
-      TO MQTT mqtt_out TOPIC dns_out_{{test_id}} MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -146,7 +146,7 @@ Feature: MQTT name resolution
       | 1            |
       | 3            |
 
-  Scenario Outline: MQTT sources and sinks reconnect once their broker name resolves again after <answer>
+  Scenario Outline: MQTT sources and emitters reconnect once their broker name resolves again after <answer>
     Given MQTT is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
@@ -180,8 +180,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER mqtt_out FROM notifications
-      TO MQTT mqtt_out TOPIC dns_out_{{test_id}} MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -267,8 +267,8 @@ Feature: MQTT name resolution
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-mqtt-dns-boundary-{{test_id}}'
       };
-      CREATE ATTACHED EMITTER mqtt_boundary FROM notifications
-        TO MQTT mqtt_sink TOPIC mqtt_dns_boundary_out_{{test_id}}
+      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+        TO mqtt_sink TOPIC 'mqtt_dns_boundary_out_{{test_id}}'
           MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
           ENCODE USING notification_codec
@@ -337,8 +337,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER mqtt_out FROM notifications
-      TO MQTT mqtt_out TOPIC dns_out_{{test_id}} MODE QOS 0 RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE

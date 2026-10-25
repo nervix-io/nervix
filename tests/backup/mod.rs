@@ -27,7 +27,7 @@ use crate::common::{
 
 mod branch_keys;
 mod branch_state;
-mod console;
+pub(crate) mod console;
 mod delivery;
 mod fidelity;
 mod guest_saves;
@@ -457,8 +457,8 @@ impl SectionVisitor for ModelsCollector {
         content: &mut SectionReader<'_>,
     ) -> Result<(), error_stack::Report<nervix_backup::ArchiveReadError>> {
         if entry.content != SectionContent::Plexus {
-            let mut sink = std::io::sink();
-            std::io::copy(content, &mut sink).expect("a section can be read through");
+            let mut connector = std::io::sink();
+            std::io::copy(content, &mut connector).expect("a section can be read through");
             return Ok(());
         }
         let bytes = content.read_all(entry, MODELS_LIMIT)?;

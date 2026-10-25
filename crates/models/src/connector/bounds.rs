@@ -58,7 +58,7 @@ impl DeclaredBounds {
     /// The deadline keys the entity's waits name, each once, in the order of [`DeadlineKey`].
     ///
     /// An entity declares a handful of waits in one constant, so scanning them for each of the
-    /// two keys is bounded by the declaration.
+    /// declared keys is bounded by the declaration.
     pub fn deadline_keys(&self) -> Vec<DeadlineKey> {
         let mut keys = Vec::new();
         for key in <DeadlineKey as strum::IntoEnumIterator>::iter() {
@@ -127,6 +127,9 @@ pub enum BufferOverflow {
     /// A response that exceeds the bound fails the poll that read it: the ingestor reports the
     /// failure as its transient error, and the next poll reads again.
     FailPoll,
+    /// An incoming message or frame above the bound fails the source read and ends its
+    /// connection. The host reconnects on its declared retry policy.
+    FailRead,
 }
 
 /// One network wait a connector performs.
@@ -179,8 +182,9 @@ pub enum DeadlineKey {
     /// TLS and the protocol's own handshake included.
     #[strum(serialize = "connect_timeout_ms")]
     ConnectTimeout,
-    /// `idle_timeout_ms`: how long a connection may carry nothing while its connector waits to read
-    /// from it, after which the connector closes it.
+    /// `idle_timeout_ms`: silence while waiting for peer activity on an established connection,
+    /// including its liveness probe; expiry closes the connection. Each entity declares its
+    /// activity and whether cancellation or handoff backpressure retains the activity deadline.
     #[strum(serialize = "idle_timeout_ms")]
     IdleTimeout,
 }
@@ -199,6 +203,8 @@ pub enum OmittedDeadline {
     Required,
     /// The wait takes this deadline.
     Default(Duration),
+    /// A bound derived from another declared client value, with its omission rule.
+    Derived(&'static str),
     /// Nothing bounds the wait.
     Unbounded,
 }

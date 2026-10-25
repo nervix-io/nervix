@@ -24,7 +24,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{
     BranchName, CanonicalPlexusError, CreateBranch, CreateRelay, CreateSchema, DomainName,
-    IngestSourceKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
+    IngestorEntityKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
     RequestedResourceVersion, ResourceName, ResourceVersionStatus, SchemaField,
 };
 
@@ -48,7 +48,7 @@ pub(in crate::application) enum ConfiguredQuestion {
     RelayFields(NodeRef),
     /// Fields of the selected codec's output schema.
     CodecFields(NodeRef),
-    IngestSource(IngestSourceKind),
+    IngestorEntity(IngestorEntityKind),
     IngestCodecs,
     IngestRelays(Option<BranchName>),
     BranchFields(NodeRef),
@@ -80,7 +80,7 @@ impl<'a> ConfiguredQuery<'a> {
             };
             return Some(Self {
                 domain,
-                question: ConfiguredQuestion::IngestSource(kind),
+                question: ConfiguredQuestion::IngestorEntity(kind),
             });
         }
         let question = match request.target() {
@@ -337,7 +337,7 @@ impl ConfiguredChoices {
             | ConfiguredQuestion::WireJsonSchemas
             | ConfiguredQuestion::WireCborSchemas
             | ConfiguredQuestion::WireAvroSchemas => self.models(question, &search),
-            ConfiguredQuestion::IngestSource(_)
+            ConfiguredQuestion::IngestorEntity(_)
             | ConfiguredQuestion::IngestCodecs
             | ConfiguredQuestion::IngestRelays(_)
             | ConfiguredQuestion::ProcessorCompatibleInputRelays(_)
@@ -397,7 +397,7 @@ impl ConfiguredChoices {
                             .to_canonical_plexus(),
                     )?
                 }
-                (ConfiguredQuestion::IngestSource(kind), Model::Endpoint(endpoint))
+                (ConfiguredQuestion::IngestorEntity(kind), Model::Endpoint(endpoint))
                     if kind.capabilities().reference.admits(model) =>
                 {
                     ModelCandidate::new(
@@ -407,7 +407,7 @@ impl ConfiguredChoices {
                         model.to_canonical_plexus(),
                     )?
                 }
-                (ConfiguredQuestion::IngestSource(kind), model)
+                (ConfiguredQuestion::IngestorEntity(kind), model)
                     if model.kind() == ModelKind::Client
                         && kind.capabilities().reference.admits(model) =>
                 {
@@ -814,13 +814,13 @@ mod tests {
     use nervix_models::{
         AvroType, BranchEviction, BranchName, CodecName, CodecWireFormat, CreateBranch,
         CreateCodec, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
-        CreateWireSchema, DomainName, FieldName, HttpSourceEntity, JsonType, KafkaSourceEntity,
+        CreateWireSchema, DomainName, FieldName, HttpIngestorEntity, JsonType, KafkaIngestorEntity,
         MaterializedRelayState, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching,
         RelayName, RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
         ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceVersionCounter,
         ResourceVersionStatus, SchemaField, SchemaName, SignalingProtocolName,
         SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat, UserName, VhostName,
-        WebsocketsSourceEntity, WireSchemaField, WireSchemaName, WireSchemaStrictness,
+        WebsocketsIngestorEntity, WireSchemaField, WireSchemaName, WireSchemaStrictness,
     };
     use sorted_vec::SortedVec;
 
@@ -932,12 +932,12 @@ mod tests {
 
     #[test]
     fn ingestor_questions_keep_source_kind_branch_and_field_dependencies_typed() {
-        use nervix_models::IngestSourceKind;
+        use nervix_models::IngestorEntityKind;
 
         let in_domain = vec![ChoiceSelection {
             value: ChoiceValue::Domain(domain()),
         }];
-        for kind in IngestSourceKind::modeled() {
+        for kind in IngestorEntityKind::modeled() {
             let request = ChoiceLookupRequest::new(
                 ChoiceTarget::for_ingest_source(kind),
                 in_domain.clone(),
@@ -945,7 +945,7 @@ mod tests {
             );
             assert_eq!(
                 ConfiguredQuery::of(&request).map(|query| query.question),
-                Some(ConfiguredQuestion::IngestSource(kind)),
+                Some(ConfiguredQuestion::IngestorEntity(kind)),
             );
         }
         assert_eq!(
@@ -1100,7 +1100,7 @@ mod tests {
     fn ingestor_source_and_codec_choices_offer_only_matching_capabilities() {
         use nervix_models::{
             ClientName, CodecJaqFormat, CodecJaqTransformations, CreateClientHttp,
-            CreateClientKafka, CreateEndpoint, EndpointName, EndpointType, IngestSourceKind,
+            CreateClientKafka, CreateEndpoint, EndpointName, EndpointType, IngestorEntityKind,
         };
 
         let models = vec![
@@ -1169,26 +1169,26 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Http(
-                HttpSourceEntity::Request
-            ))),
+            labels(ConfiguredQuestion::IngestorEntity(
+                IngestorEntityKind::Http(HttpIngestorEntity::Request)
+            )),
             ["http_input"]
         );
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Kafka(
-                KafkaSourceEntity::Topic
-            ))),
+            labels(ConfiguredQuestion::IngestorEntity(
+                IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic)
+            )),
             ["kafka_input"]
         );
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Http(
-                HttpSourceEntity::Endpoint
-            ))),
+            labels(ConfiguredQuestion::IngestorEntity(
+                IngestorEntityKind::Http(HttpIngestorEntity::Endpoint)
+            )),
             ["listener"]
         );
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(
-                IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint)
+            labels(ConfiguredQuestion::IngestorEntity(
+                IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint)
             )),
             ["socket"]
         );
