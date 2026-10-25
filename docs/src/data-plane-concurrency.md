@@ -2065,6 +2065,17 @@ observations and transport waits remain outside Deloxide; the public outcomes an
 state-machine regressions cover the retention decision. No synchronization protocol or memory
 ordering changes at this boundary.
 
+The WASM reset publication workloads reach tracked transaction state and impact recording during
+initial application and recovery on one- and three-node clusters. Ordinary, order-analysis and
+stressed selections distinguish typed loss of publication leadership from a retained genuine
+failure, preserve the reset's execution identity and generation, and check sibling branch state.
+The genuine-failure control is armed before ordinary graph publications and observed pending until
+reset preparation has been aborted, so another scheduling path cannot consume it. It remains
+enabled until a known failed outcome is observed, then is cleared before exact replay verifies
+retention independently of the injected condition.
+The test fault maps, asynchronous entity gates and consensus/network waits are untracked;
+the injected refusal establishes no claim about Raft election interleavings or memory ordering.
+
 The WebSocket ingestor lifecycle workloads drop an ingestor, move its owner and recover from repeated
 peer closes. Their ordinary and stressed selections reach tracked quiesce, schedule and teardown
 locks. Socket I/O, close-handshake deadlines and reconnect timers remain outside Deloxide's

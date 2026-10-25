@@ -62,6 +62,7 @@ mod standalone_transaction;
 #[cfg(test)]
 mod syslog_tests;
 mod transaction_cleanup;
+mod wasm_reset_publication;
 
 pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
@@ -75,6 +76,7 @@ use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 pub use standalone_transaction::StandaloneTransactionBoundary;
+use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitterFaultMode {
@@ -131,6 +133,9 @@ struct FaultInjectionState {
     /// for this many of its records, and the answers for the rest are lost.
     stalled_emitter_connectors: DashMap<String, usize, RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
+    wasm_reset_publication_authority_losses:
+        DashMap<DomainName, WasmResetPublicationAuthorityLoss, RandomState>,
+    failed_wasm_reset_publications: DashMap<DomainName, WasmResetPublicationFailure, RandomState>,
     /// One-shot, domain-scoped rejections consumed before any entity gate engages.
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
     /// One-shot, domain-scoped transport failures of the next ownership-handoff gate engagement
@@ -458,6 +463,8 @@ impl Default for FaultInjection {
                 unavailable_emitter_clients: DashMap::default(),
                 stalled_emitter_connectors: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
+                wasm_reset_publication_authority_losses: DashMap::default(),
+                failed_wasm_reset_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 handoff_engagement_transport_failures: DashMap::default(),
                 lost_handoff_gate_engagements: DashMap::default(),

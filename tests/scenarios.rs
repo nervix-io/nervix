@@ -13545,6 +13545,69 @@ async fn when_next_schedule_publication_fails(world: &mut ScenarioWorld, domain:
         .fail_next_schedule_publication_on_all_nodes(&domain);
 }
 
+#[when(expr = "the next {int} WASM reset publications for domain {string} lose authority")]
+fn when_wasm_reset_publications_lose_authority(
+    world: &mut ScenarioWorld,
+    count: usize,
+    domain: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .cluster()
+        .lose_wasm_reset_publication_authority(&domain, count);
+}
+
+#[given(expr = "WASM reset generation publications for domain {string} fail")]
+#[when(expr = "WASM reset generation publications for domain {string} fail")]
+fn when_wasm_reset_generation_publication_fails(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world.cluster().fail_wasm_reset_publications(&domain);
+}
+
+#[when(expr = "the WASM reset publication failure for domain {string} is cleared")]
+fn when_wasm_reset_publication_failure_is_cleared(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    world
+        .cluster()
+        .clear_wasm_reset_publication_failure(&domain);
+}
+
+#[then(expr = "domain {string} has WASM reset publication failure state {word}")]
+fn then_wasm_reset_publication_failure_state(
+    world: &mut ScenarioWorld,
+    domain: String,
+    state: String,
+) {
+    let domain = expand_placeholders(world, &domain);
+    let expected = match state.as_str() {
+        "pending" => Some(false),
+        "delivered" => Some(true),
+        "disabled" => None,
+        _ => panic!("unknown publication failure state: {state}"),
+    };
+    assert_eq!(
+        world
+            .cluster()
+            .wasm_reset_publication_failure_delivered(&domain),
+        expected
+    );
+}
+
+#[then(expr = "domain {string} has consumed {int} WASM reset publication authority refusals")]
+fn then_wasm_reset_publication_authority_refusals(
+    world: &mut ScenarioWorld,
+    domain: String,
+    count: usize,
+) {
+    let domain = expand_placeholders(world, &domain);
+    assert_eq!(
+        world
+            .cluster()
+            .wasm_reset_publication_authority_losses(&domain),
+        Some(count)
+    );
+}
+
 #[when(expr = "emitter {string} enters fault mode")]
 async fn when_emitter_enters_fault_mode(world: &mut ScenarioWorld, emitter: String) {
     let emitter = expand_placeholders(world, &emitter);
@@ -15277,6 +15340,14 @@ fn then_last_command_request_succeeded(world: &mut ScenarioWorld) {
         world.last_command_error.is_none() && world.last_command_output.is_some(),
         "command request failed: {:?}",
         world.last_command_error
+    );
+}
+
+#[then("the last command request has a known failed outcome")]
+fn then_last_command_request_has_known_failed_outcome(world: &mut ScenarioWorld) {
+    assert_eq!(
+        world.last_command_disposition,
+        Some(nervix_client_wire::CommandDisposition::Failed)
     );
 }
 

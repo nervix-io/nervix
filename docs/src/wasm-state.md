@@ -573,12 +573,18 @@ See [Execution-Time Snapshots](./domain-clock.md#execution-time-snapshots).
 
 ### Failure And Retry
 
-A failure before `Publishing` reports an ordinary reset failure, and the previous lifetime stays
-usable. A failure after it reports that the reset was committed but its new lifetime is not usable.
-Retrying the same request reference resumes the missing initial checkpoints and `Ready` publication
-without advancing the generation again. A Plexus reset completes only at `Ready`; its transaction
+A genuine failure before `Publishing` reports an ordinary reset failure, and the previous lifetime
+stays usable. A genuine failure after it reports that the reset was committed but its new lifetime
+is not usable. Loss of Raft leadership while publishing is an interrupted application attempt,
+rather than a terminal reset failure. The durable transaction step stays applying under the same
+request reference. Recovery checks the committed schedule before preparing or publishing again:
+an unpublished preparation is aborted, and an already published generation is resumed.
+Recovery of an applying reset uses the same request reference to resume the missing initial
+checkpoints and `Ready` publication without advancing the generation again. A Plexus reset
+completes only at `Ready`; its transaction
 step is recovered with its original execution reference after a leader change, a lost reply returns
-the retained outcome, and an expired reference cannot start another reset. See [Coordinated WASM
+the retained outcome, and an expired reference cannot start another reset. A definitive failure is
+also retained: replaying that command returns its failure. See [Coordinated WASM
 Reset Publications](./consensus-storage-and-replication.md#coordinated-wasm-reset-publications),
 [Command Completion](./command-completion.md#lifecycle-and-ownership), and [Coordinated WASM
 Guest-State Reset](./control-plane.md#coordinated-wasm-guest-state-reset).

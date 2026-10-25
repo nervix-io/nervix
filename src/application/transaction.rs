@@ -2313,6 +2313,14 @@ impl SessionServiceImpl {
                     .apply_transaction_wasm_state_reset(&advanced, reset, request)
                     .await
             {
+                if matches!(
+                    error.downcast_ref::<ConsensusError>(),
+                    Some(ConsensusError::LeadershipLost { .. })
+                ) {
+                    // The reset step is durable. Its next attempt rechecks leadership and uses
+                    // the same request to resume the committed generation, if any.
+                    return Ok(advanced);
+                }
                 application_failure = Some(format!(
                     "transaction '{}' committed the WASM state reset, but it did not become \
                      usable: {error:#}",

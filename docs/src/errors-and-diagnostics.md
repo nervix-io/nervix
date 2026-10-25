@@ -388,6 +388,12 @@ runtime caller can still distinguish a resource limit, invalid emission, and a s
 without classifying a rendered string. Callback and checkpoint acknowledgement decisions stay the
 same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
 
+The reset coordinator preserves the typed `ConsensusError::LeadershipLost` beneath its publication
+error. Transaction application inspects that cause before rendering a diagnostic: authority loss
+leaves the durable reset step applying in both its first attempt and recovery. Other preparation,
+storage and publication failures keep their terminal failure behavior. A rendered message is not
+used to decide whether a reset can resume.
+
 A guest export answers the host with an integer, and the SDK renders a guest report only there. A
 guest's own failure puts the rendered chain on the global-error channel, latches the instance's
 error state and returns the error-state code; a panic latches the same state with the panic's

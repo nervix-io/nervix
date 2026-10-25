@@ -284,6 +284,12 @@ durable completion boundary; [Errors And Diagnostics](./errors-and-diagnostics.m
 failure propagation and public diagnostic rendering.
 
 A new leader resumes a `COMMITTING` transaction from its recorded applying step and frozen plan.
+
+For a WASM reset step, typed loss of publication leadership leaves that same step applying in both
+its initial attempt and recovery. Its reset coordinator releases the attempt's entity gates, and
+the next attempt uses the retained reset reference and committed generation; a genuine reset
+failure still becomes the step's failed outcome.
+
 Before recording application completion, the coordinator resolves every engaged domain pause in
 that step's actual report under the transaction's mutation lease. A resume refusal leaves the step
 applying, including when its effect has a definitive failure to report. Recovery releases the pause

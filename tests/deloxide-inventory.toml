@@ -106,6 +106,8 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@wasm_reset_authority_recovery",
+  "@wasm_reset_publication_failure",
   "@client_wire_pause_leadership",
   "@client_wire_pause_lapsed_publication",
   "@client_wire_standalone_preparation",
@@ -2676,6 +2678,10 @@ workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 [[owner]]
 path = "src/application/transaction.rs"
 workloads = [
+  "scenario.wasm-reset-authority-recovery",
+  "stress.wasm-reset-authority-recovery",
+  "scenario.wasm-reset-publication-failure",
+  "stress.wasm-reset-publication-failure",
   "scenario.command-transaction-retention",
   "stress.command-transaction-retention",
   "scenario.command-transaction-retention-recovery",
@@ -3320,4 +3326,44 @@ id = "stress.rabbitmq-individual-settlement"
 invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
 invocation = "stress-scenarios"
 scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Tracked transaction state and impact recording during branch reset application and recovery. Async gates, consensus/network waits and the test-owned fault maps are untracked."
+examples = 2
+feature = "tests/features/runtime/wasm_state_reset.feature"
+id = "scenario.wasm-reset-authority-recovery"
+invariant = "Typed publication authority refusals leave the same reset applying until READY; replay advances no additional generation and sibling state survives."
+invocation = "scenarios"
+scenario = "A branch reset survives authority refusals in both application attempts"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Tracked transaction state and impact recording during branch reset application and recovery. Async gates, consensus/network waits and the test-owned fault maps are untracked."
+examples = 2
+feature = "tests/features/runtime/wasm_state_reset.feature"
+id = "stress.wasm-reset-authority-recovery"
+invariant = "Typed publication authority refusals leave the same reset applying until READY; replay advances no additional generation and sibling state survives."
+invocation = "stress-scenarios"
+scenario = "A branch reset survives authority refusals in both application attempts"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Tracked transaction state and impact recording during branch reset application and recovery. Async gates, consensus/network waits and the test-owned fault maps are untracked."
+examples = 2
+feature = "tests/features/runtime/wasm_state_reset.feature"
+id = "scenario.wasm-reset-publication-failure"
+invariant = "Ordinary graph publications leave the reset fault pending; its delivered genuine failure remains retained after the condition is cleared and replayed exactly, and both branch lifetimes continue."
+invocation = "scenarios"
+scenario = "A genuine reset publication failure retains its failed command outcome"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: Tracked transaction state and impact recording during branch reset application and recovery. Async gates, consensus/network waits and the test-owned fault maps are untracked."
+examples = 2
+feature = "tests/features/runtime/wasm_state_reset.feature"
+id = "stress.wasm-reset-publication-failure"
+invariant = "Ordinary graph publications leave the reset fault pending; its delivered genuine failure remains retained after the condition is cleared and replayed exactly, and both branch lifetimes continue."
+invocation = "stress-scenarios"
+scenario = "A genuine reset publication failure retains its failed command outcome"
 selections = ["deloxide-stress"]
