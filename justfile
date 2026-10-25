@@ -105,6 +105,20 @@ validate-bolero-workflow: (validate-workflows ".github/workflows/bolero.yaml")
 validate-workflows *workflows:
     go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 {{ workflows }}
 
+# Exercise deployment identity, rollout observations, failure cleanup and the publication gate.
+test-operator-deployment:
+    python3 -m unittest scripts.tests.test_operator_deployment
+
+# Deploy the shipped operator/chart against one immutable server image, then remove the test cluster.
+operator-deployment-check image revision architecture operator_source output:
+    python3 -m scripts.operator_deployment --image {{ quote(image) }} --revision {{ quote(revision) }} --architecture {{ quote(architecture) }} --operator-source {{ quote(operator_source) }} --output {{ quote(output) }}
+
+# Keep the deployment controller's ordinary Python counters beside the other tooling reports.
+coverage-operator-deployment:
+    mkdir -p "{{ cargo_target_dir }}/operator-deployment-coverage"
+    uvx --from coverage==7.11.0 coverage run --data-file "{{ cargo_target_dir }}/operator-deployment-coverage/python.coverage" --branch --source=scripts.operator_deployment,scripts.tests.test_operator_deployment -m unittest scripts.tests.test_operator_deployment
+    uvx --from coverage==7.11.0 coverage lcov --data-file "{{ cargo_target_dir }}/operator-deployment-coverage/python.coverage" -o "{{ cargo_target_dir }}/operator-deployment-coverage/python.lcov"
+
 # Exercise exact-source CI selection and strict property gates, including validation-only reruns.
 test-ci-selection:
     python3 -m unittest scripts.tests.test_ci_test_selection scripts.tests.test_bolero_coverage

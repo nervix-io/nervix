@@ -1465,6 +1465,9 @@ jobs:
       - name: Release evidence gate
         run: just coverage-release-evidence
 
+      - name: Kubernetes deployment controller
+        run: just coverage-operator-deployment
+
       - name: Kache remote contract
         run: just coverage-kache-ci
 
@@ -1575,6 +1578,7 @@ jobs:
             target/coverage-full/python.lcov
             target/paced-simulation/python.lcov
             target/release-evidence-coverage/python.lcov
+            target/operator-deployment-coverage/python.lcov
             target/kache-ci/python.lcov
             target/connector-matrix/python.lcov
             target/coverage-source-root.txt

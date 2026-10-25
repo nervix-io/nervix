@@ -85,6 +85,7 @@ class InventoryTests(unittest.TestCase):
             {
                 "ordinary": None,
                 "release-images": None,
+                "operator-deployment": None,
                 "bolero": "fuzz",
                 "loom": "loom",
                 "shuttle": "shuttle",
@@ -117,6 +118,13 @@ class InventoryTests(unittest.TestCase):
         builds = [f"build-{image}-{arch}" for image, arch in zip(images, arches)]
         self.assertEqual(sorted(methods["release-images"].checks), sorted(builds))
         names.update(builds)
+        deployment = workflow_job(workflows["docker-build.yaml"], "operator-deployment")
+        deployment_arches = re.findall(r"^\s+- arch: (\S+)$", deployment, re.M)
+        self.assertEqual(sorted(deployment_arches), sorted(set(arches)))
+        self.assertIn("operator-deployment-${{ matrix.arch }}", names)
+        deployment_checks = [f"operator-deployment-{arch}" for arch in deployment_arches]
+        self.assertEqual(sorted(methods["operator-deployment"].checks), sorted(deployment_checks))
+        names.update(deployment_checks)
         deloxide = workflow_job(workflows["check.yaml"], "deloxide")
         selections = re.search(r"^\s+selection: \[(.+)\]$", deloxide, re.M)
         self.assertIsNotNone(selections)
