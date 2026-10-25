@@ -116,7 +116,7 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
     )
     .await
     .assured("the workload client connects");
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         let outcome = client
             .execute(command.clone())
             .await
@@ -134,7 +134,7 @@ async fn when_large_branch_state_workload_is_created(world: &mut ScenarioWorld) 
 #[when(expr = "the large branch state subscription is opened on the leader node")]
 async fn when_large_branch_state_subscription_is_opened(world: &mut ScenarioWorld) {
     let leader = current_leader_node(world).await;
-    let session = crate::execute_nspl_commands_on_node(
+    let session = crate::execute_plexus_commands_on_node(
         world,
         &leader,
         "CREATE SUBSCRIPTION large_keys TO unique_keys;

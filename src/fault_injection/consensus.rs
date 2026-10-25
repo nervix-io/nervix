@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** Read-only per-peer append setup counts from a running node's consensus probe.
 //! - **Depends on.** The harness's shared probe registry and vocabulary node identities.
-//! - **Must not know.** NSPL, graph placement, runtime state or Raft retry policy.
+//! - **Must not know.** Plexus, graph placement, runtime state or Raft retry policy.
 
 use meticulous::OptionExt as _;
 use nervix_models::ClusterNodeName;

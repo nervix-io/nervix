@@ -256,13 +256,13 @@ mkdir -p "${recorded}/mixed" "${recorded}/fixtures"
 cp "${tmp_dir}/valid.json" "${recorded}/mixed/plan.json"
 jq -nc --arg run_id recorded --argjson count 1500 -f "${chaos_dir}/fixtures/generate-baseline.jq" \
     >"${recorded}/fixtures/input.ndjson"
-cp "${chaos_dir}/fixtures/baseline.nspl" "${recorded}/fixtures/baseline.nspl"
+cp "${chaos_dir}/fixtures/baseline.plexus" "${recorded}/fixtures/baseline.plexus"
 sha() {
     openssl dgst -sha256 -r "$1" | awk '{ print $1 }'
 }
 probe_id="$(docker image inspect --format '{{.Id}}' "${chaos_probe_image}")"
 jq -n --arg plan "$(sha "${recorded}/mixed/plan.json")" --arg input "$(sha "${recorded}/fixtures/input.ndjson")" \
-    --arg graph "$(sha "${recorded}/fixtures/baseline.nspl")" --arg probe "${chaos_probe_image}" \
+    --arg graph "$(sha "${recorded}/fixtures/baseline.plexus")" --arg probe "${chaos_probe_image}" \
     --arg probe_id "${probe_id}" '
     {run_id: "recorded", scenario: "mixed-instability", status: "failed", exit_code: 1, final_phase: "mixed",
      requested_image: "fixture", resolved_image_id: ("sha256:" + ("0" * 64)), resolved_repo_digests: "",
@@ -283,7 +283,7 @@ cp -R "${recorded}" "${tmp_dir}/incomplete"
 jq 'del(.tool_images.pumba) | del(.mixed.deployment.load_interval_ms) | del(.fixtures.graph)' \
     "${recorded}/manifest.json" >"${tmp_dir}/incomplete/manifest.json"
 expect_setup_rejection 'an incomplete trace of the experiment' \
-    'does not record the pumba image, the load interval, the NSPL graph' \
+    'does not record the pumba image, the load interval, the Plexus graph' \
     "${chaos_dir}/chaos.sh" replay "${tmp_dir}/incomplete"
 cp -R "${recorded}" "${tmp_dir}/tampered"
 jq '.steps[0].actions[0].hold_seconds = 31' "${recorded}/mixed/plan.json" >"${tmp_dir}/tampered/mixed/plan.json"

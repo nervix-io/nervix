@@ -1,7 +1,9 @@
 # Backup And Restore
 
+*Plexus, the Nervix graph definition language.*
+
 A backup writes a whole cluster, or one domain, into one archive file on the
-machine of the client that ran it. The archive holds each domain's committed models as NSPL, each
+machine of the client that ran it. The archive holds each domain's committed models as Plexus, each
 domain's lifecycle and clock, its resource catalog with the original bytes of every resource
 version, and, for a cluster backup, every user. The archive is a public format: a tar stream whose
 sections standard tools can list and extract, and whose records every reader validates before it
@@ -28,7 +30,7 @@ guarantee.
 
 ## Backing Up
 
-```nspl
+```plexus
 BACKUP CLUSTER TO '/var/backups/nervix/cluster.nvxb';
 BACKUP DOMAIN payments TO './payments.nvxb';
 BACKUP DOMAIN TO './current-domain.nvxb' WITHOUT RESOURCES;
@@ -92,7 +94,7 @@ failed backup reports those counts and resumes the domain. A leader change durin
 that cut. The next leader resumes the domain and runs the backup again under the same execution
 reference, so a client that retries the reference receives the archive of that new cut.
 
-The server renders each domain's models as NSPL, parses the rendered text back, and refuses the
+The server renders each domain's models as Plexus, parses the rendered text back, and refuses the
 backup unless it yields exactly the committed models. A resource version's bytes are read from the
 leader's resource store and checked against the size the catalog records.
 
@@ -129,7 +131,7 @@ nervix-cli backup cluster --output cluster.nvxb --format json
 | `--without-state` | Captures configuration only. |
 | `--without-pause` | Captures published runtime state without quiescing a running domain. |
 | `--timeout DURATION` | Bounds the normal quiesced capture of each running domain. |
-| `--backup-wait-timeout DURATION` | Bounds the overall command wait across all cuts, redirects and reconnects. Defaults to `10m`; also applies to NSPL through `--command` and the REPL. |
+| `--backup-wait-timeout DURATION` | Bounds the overall command wait across all cuts, redirects and reconnects. Defaults to `10m`; also applies to Plexus through `--command` and the REPL. |
 | `--execution-reference REFERENCE` | Recovers the same backup under its durable reference, with the original selected domain, scope, resources and capture options. The output destination may change. |
 | `--format text` or `--format json` | How the report is printed. Text is the default. |
 
@@ -257,14 +259,14 @@ call, which the web console reaches through a console WebSocket of its own;
 
 ## Inspecting An Archive
 
-```nspl
+```plexus
 DESCRIBE BACKUP './cluster.nvxb';
 DESCRIBE BACKUP './cluster.nvxb' FORMAT JSON;
 ```
 
 `DESCRIBE BACKUP` runs in `nervix-cli` against a file on its own machine and contacts no server. It
 reads the whole archive and verifies every section's length and digest before it prints anything.
-The description names the archive format, the Nervix and NSPL releases that wrote it, the cluster,
+The description names the archive format, the Nervix and Plexus releases that wrote it, the cluster,
 the capture time, the scope, whether resource bytes are included, and the users of a cluster
 archive. For each domain it names the revision and Raft log entry the domain was read at, its
 status, pace and start count, its latest start point, the clock mapping and logical frontier when
@@ -310,7 +312,7 @@ check concerns one section, that section. The JSON form prints `{"error": {"code
 
 ## Restoring
 
-```nspl
+```plexus
 RESTORE CLUSTER FROM '/var/backups/nervix/cluster.nvxb' ON EXISTING USER SKIP;
 RESTORE DOMAIN payments FROM './payments.nvxb';
 RESTORE DOMAIN payments FROM './payments.nvxb' RESUME;
@@ -545,7 +547,7 @@ have finished:
 1. **Receive.** The client streams the archive to the leader, which stages it in its staging area
    and checks that it is exactly the size and BLAKE3 digest the client declared.
 2. **Verify.** The leader reads the whole archive and verifies its manifest, every section's length
-   and digest, and every record. It parses the `models.nspl` of every domain the archive holds,
+   and digest, and every record. It parses the `models.plexus` of every domain the archive holds,
    which must hold one `CREATE` of a model per statement.
 3. **Plan.** The leader resolves every archived user under the user policy, checks that no
    restored domain name exists, checks each imported resource version's bytes against the
@@ -772,7 +774,7 @@ arrives.
 | `manifest.rkyv` | The manifest record | Always |
 | `users.rkyv` | The users record | Cluster archives |
 | `domains/<domain>/domain.rkyv` | The domain record | Every domain |
-| `domains/<domain>/models.nspl` | The domain's models as NSPL | Every domain |
+| `domains/<domain>/models.plexus` | The domain's models as Plexus | Every domain |
 | `domains/<domain>/resources/<resource>/<version>/version.rkyv` | One resource version record | Every resource version |
 | `domains/<domain>/resources/<resource>/<version>/archive.tar` | The version's original upload | Published versions, unless `WITHOUT RESOURCES` |
 | `domains/<domain>/state/wasm_processor/<processor>/<branch>/descriptor.rkyv` | Typed WASM checkpoint identity, schema fingerprint, generation and revision | Saved WASM branches unless `WITHOUT STATE` |
@@ -816,7 +818,7 @@ its format version, each a little-endian 16-bit integer. The rest is an
 
 | Kind | Tag | Format version | Holds |
 | --- | --- | --- | --- |
-| Manifest | 1 | 2 | Archive format major version, producer and NSPL releases, cluster id, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
+| Manifest | 1 | 2 | Archive format major version, producer and Plexus releases, cluster id, capture time, scope, whether resource bytes are included, each domain's revision, Raft log entry and cut kind, with a quiesced cut's engagement and release times and quiesce counters, and each section's path, content kind, length and BLAKE3 digest |
 | Users | 2 | 1 | Every user's name and password hash as a PHC string |
 | Domain | 3 | 1 | Pace, default placement policy, lifecycle status, start count, the point the latest start began from, the committed clock mapping, the logical instant the clock had reached, and each declared resource with its next version number |
 | Resource version | 4 | 1 | The version's domain, resource and number, its upload state, and for a published version its checksums, file count, sizes, creation time and creating node |
@@ -836,7 +838,7 @@ or an unsupported state record version, produces a restore warning and is skippe
 it owns. [The Archive Contract](./backup-and-restore-architecture.md#the-archive-contract) defines
 these rules.
 
-`models.nspl` holds one `CREATE` statement per model, separated by blank lines, in an order that
+`models.plexus` holds one `CREATE` statement per model, separated by blank lines, in an order that
 creates every model after each model its configuration names. Resource bindings name explicit
 versions.
 
@@ -866,7 +868,7 @@ that compare restored and re-exported state.
 | Kafka offset or branch lifecycle section capture | One checkpoint at a time per owner: `restore_metadata` holds twice the stored checkpoint plus 64 KiB for the whole section, beside serializer scratch of one resolver per entry; a 64 KiB bulk buffer streams the record |
 | One Kafka offset or branch lifecycle section | The 64 MiB record limit |
 | Native conversion I/O, checkpoint installation, complete generation publication and each maintenance sweep | Fixed 2 MiB bulk working-memory reservation per job; 64 KiB buffers and checkpoint chunks |
-| Retained archive metadata and preparation per node | 2 GiB default independent admission class; 16 times record bytes plus 64 times NSPL bytes plus 2 MiB |
+| Retained archive metadata and preparation per node | 2 GiB default independent admission class; 16 times record bytes plus 64 times Plexus bytes plus 2 MiB |
 | Native conversion serializer scratch | Fixed-capacity entry resolvers plus the largest entry's nested resolvers, covered by the retained preparation charge |
 | Materialized identity group / Arrow group | 1 MiB / 8 MiB |
 | Materialized capture metadata / typed uniqueness metadata / native row views | 8 MiB each, independently admitted |
@@ -926,7 +928,7 @@ A failed backup reports `backup failed:` and the reason, and its message never i
 contents. The reasons are:
 
 - the named domain does not exist, or no domain is selected for `BACKUP DOMAIN`
-- a domain's committed models do not form a valid graph, do not render as NSPL, or do not parse
+- a domain's committed models do not form a valid graph, do not render as Plexus, or do not parse
   back to themselves
 - a domain's clock mapping cannot be read at the capture time
 - a resource version's bytes are not installed on the leader, or do not match their catalog entry
@@ -971,7 +973,7 @@ reason, and changed nothing. The reasons are:
 
 - the archive could not be read on the leader, or is not a valid backup archive: the check that
   failed is named
-- a restored domain's `models.nspl` does not parse, naming the domain and the line, or holds a
+- a restored domain's `models.plexus` does not parse, naming the domain and the line, or holds a
   statement that creates no model, naming the domain, the statement's number and its line
 - `RESTORE CLUSTER` was given a domain archive, or `RESTORE DOMAIN` names a domain the archive does
   not hold

@@ -6,7 +6,7 @@
 //!   the readiness publication after the fresh initial checkpoint is durable.
 //! - **Depends on.** Consensus schedules, entity gates, the interconnect, and the runtime command
 //!   that replaces branch-local guest instances.
-//! - **Must not know.** Guest memory layout, checkpoint bytes, relay queues, or NSPL syntax.
+//! - **Must not know.** Guest memory layout, checkpoint bytes, relay queues, or Plexus syntax.
 
 #![cfg_attr(
     nervix_lint,

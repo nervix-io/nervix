@@ -397,10 +397,10 @@ mod tests {
                 each: "100ms".parse().assured("the cadence is positive"),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                     relay: named("generated"),
-                    construction: nervix_nspl::parse_route_construction(
+                    construction: nervix_plexus::parse_route_construction(
                         "SET value = relay_state.latest.value",
                     )
-                    .assured("the route is valid NSPL"),
+                    .assured("the route is valid Plexus"),
                     flush_policy: Some(FlushPolicy::Immediate),
                     message_error_policy: MessageErrorPolicy::Log,
                     branch: None,
@@ -533,7 +533,7 @@ mod tests {
             unreachable!("the fourth fixture model is the generator");
         };
         generator.output_routes.routes[0].construction =
-            nervix_nspl::parse_route_construction("INHERIT ALL")
+            nervix_plexus::parse_route_construction("INHERIT ALL")
                 .assured("inheritance is valid syntax for a transforming route");
         let error = plan_result(transforming)
             .expect_err("a generator route cannot inherit an input record");

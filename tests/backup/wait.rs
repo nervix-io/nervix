@@ -202,8 +202,8 @@ async fn then_cli_recovers_archive_to_stdout(world: &mut ScenarioWorld) {
     assert_eq!(report["output"], "-");
 }
 
-#[when(expr = "an NSPL cluster backup crosses two delayed cuts into {string}")]
-async fn when_nspl_cluster_backup_crosses_delayed_cuts(world: &mut ScenarioWorld, file: String) {
+#[when(expr = "a Plexus cluster backup crosses two delayed cuts into {string}")]
+async fn when_plexus_cluster_backup_crosses_delayed_cuts(world: &mut ScenarioWorld, file: String) {
     let archive = archive_path(world, &file);
     let leader = current_leader_node(world).await;
     let uri = world
@@ -273,7 +273,7 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld, first_c
                 timeout: Some(Duration::from_secs(30)),
             },
         };
-        let execution = client.prepare_execution(backup.to_canonical_nspl()).await;
+        let execution = client.prepare_execution(backup.to_canonical_plexus()).await;
         let expected = execution.reference().clone();
         let wait_deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(12);
         let initial_wait = observe_off_the_runner(async move {

@@ -94,7 +94,7 @@ fn assert_names_each_once(phrases: &[&'static str]) {
 }
 
 #[test]
-fn every_connector_kind_is_spelled_as_nspl_spells_it() {
+fn every_connector_kind_is_spelled_as_plexus_spells_it() {
     let keywords = ConnectorKind::iter()
         .map(ConnectorKind::keyword)
         .collect::<Vec<_>>();

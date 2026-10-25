@@ -6,20 +6,20 @@ Feature: Redis name resolution
     And a <cluster_size> node nervix cluster is started
     And the Redis endpoints are published under fixture DNS name "redis.nervix.test"
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Redis channel "dns_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -70,19 +70,19 @@ Feature: Redis name resolution
     And a <cluster_size> node nervix cluster is started
     And the Redis endpoints are published under fixture DNS name "redis.unlisted.test"
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -120,12 +120,12 @@ Feature: Redis name resolution
     And a <cluster_size> node nervix cluster is started
     And Redis is forwarded as "redis.nervix.test" from the fixture addresses "127.0.5.1,127.0.5.2"
     And the DNS fixture answers "redis.nervix.test" with addresses "127.0.5.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Redis channel "dns_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);

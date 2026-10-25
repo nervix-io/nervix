@@ -15,11 +15,11 @@ Feature: Process termination signals
 
   Scenario Outline: A repeated termination signal forces termination while graceful shutdown is stalled
     Given a nervix-server process is started with drain timeout "45s"
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE SCHEMA held_event ( sequence I64 );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );

@@ -14,7 +14,7 @@ A branch names its key schema and a TTL. When a branch instance goes idle for th
 branch-local relay and processor state is dropped as a whole ([TTL](relay.md#ttl)). In an unpaced
 domain the TTL uses wall clock time.
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE SCHEMA customer_branch (
@@ -34,7 +34,7 @@ Only ingestors and reingestors construct branch keys. Since `orders` is already 
 [reingestor](processors.md#reingestor) — a branch-boundary node — re-partitions it without
 touching the existing graph:
 
-```nspl
+```plexus
 CREATE REINGESTOR partition_orders
   FROM orders
   TO orders_by_customer
@@ -54,7 +54,7 @@ processor downstream that declares `BRANCHED BY by_customer` runs per customer
 A [deduplicator](processors.md#deduplicator) drops records whose key it has already seen within a
 time window. Declared `BRANCHED BY by_customer`, its history is branch-local:
 
-```nspl
+```plexus
 CREATE DEDUPLICATOR dedupe_orders
   FROM orders_by_customer
   DEDUPLICATE ON input.order_id
@@ -71,7 +71,7 @@ CREATE DEDUPLICATOR dedupe_orders
 An emitter consumes every concrete branch and collapses branch identity at the external boundary
 ([Branch Semantics](emitters.md#branch-semantics)) — the Redis channel receives all customers:
 
-```nspl
+```plexus
 CREATE REDIS PUBSUB EMITTER redis_deduped
   FROM orders_deduped
   TO redis_local CHANNEL 'orders_deduped_out'

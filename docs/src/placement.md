@@ -1,5 +1,7 @@
 # Placement Policies
 
+*Plexus, the Nervix graph definition language.*
+
 Placement policies control where a domain's schedulable work executes. Use them to keep a
 latency-sensitive processing corridor on one machine, prefer locality without forcing it, or bias
 expensive stages across machines.
@@ -14,7 +16,7 @@ A named placement rule marks the directed paths between existing runtime nodes. 
 rule keeps `feature_normalizer`, `risk_scorer`, and every runtime node on a path between them on
 one cluster node:
 
-```nspl
+```plexus
 CREATE PLACEMENT scoring_local
   FROM feature_normalizer
   TO risk_scorer
@@ -51,7 +53,7 @@ it does not randomize placement or disable the scheduler's normal heuristics.
 
 Every domain has a fallback placement policy. Declare it when creating the domain:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] UNPACED DOMAIN <domain_name>
   [PLACEMENT <policy>];
 
@@ -63,7 +65,7 @@ CREATE [IF NOT EXISTS] PACED DOMAIN <domain_name>
 `CREATE DOMAIN` remains the short spelling for `CREATE UNPACED DOMAIN` and accepts the same
 placement clause. Omitting `PLACEMENT` selects `NEUTRAL`.
 
-```nspl
+```plexus
 CREATE UNPACED DOMAIN realtime
   PLACEMENT PREFER COLOCATION;
 ```
@@ -80,7 +82,7 @@ hops. The default is deliberately per hop:
 
 Change the default for the session's active domain with the nameless `ALTER DOMAIN` statement:
 
-```nspl
+```plexus
 ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
 ```
 
@@ -93,7 +95,7 @@ migrate existing assignments.
 Create a named rule after every referenced member exists in the active domain. Placements are
 domain-owned and cannot span domains:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] PLACEMENT <placement_name>
   FROM <runtime_node> [, <runtime_node> ...]
   TO <runtime_node> [, <runtime_node> ...]
@@ -197,7 +199,7 @@ effective `REQUIRE COLOCATION` chain still connects it.
 
 For example, first declare a scheduler-managed archive corridor:
 
-```nspl
+```plexus
 CREATE PLACEMENT archive_scheduler_managed
   FROM archiver
   TO cold_sink
@@ -207,7 +209,7 @@ CREATE PLACEMENT archive_scheduler_managed
 
 Then make hard colocation the domain fallback:
 
-```nspl
+```plexus
 ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
 ```
 
@@ -272,7 +274,7 @@ Placement rules constrain where the scheduler puts work. `RELOCATE` moves chosen
 cluster node you name, and `DESCRIBE RELOCATION` shows the plan a statement would execute without
 executing it:
 
-```nspl,ignore
+```plexus,ignore
 RELOCATE <selection>
   ONTO NODE <node_id>
   FOLLOW PREFERENCES | IGNORE PREFERENCES
@@ -292,11 +294,11 @@ inspected and then executed by changing one word.
 A selection is either an explicit list or a directed corridor, using the same path-gated coverage
 named placement rules use:
 
-```nspl
+```plexus
 RELOCATE JUNCTION risk_scorer ONTO NODE node-2 FOLLOW PREFERENCES;
 ```
 
-```nspl
+```plexus
 RELOCATE FROM JUNCTION feature_normalizer TO JUNCTION risk_scorer
   ONTO NODE node-2
   FOLLOW PREFERENCES
@@ -430,7 +432,7 @@ unsatisfied, because Nervix never moves an existing assignment to improve a pref
 
 `ALTER PLACEMENT` accepts one or more comma-separated operations:
 
-```nspl,ignore
+```plexus,ignore
 ALTER PLACEMENT <placement>
     SET POLICY <policy>
   | SET RANK <positive_integer>
@@ -446,7 +448,7 @@ Operations execute in written order, and the complete statement is applied atomi
 ... TO ...` replaces both member lists. This makes it possible to change policy, precedence,
 membership, and name in one statement:
 
-```nspl
+```plexus
 ALTER PLACEMENT scoring_local
   SET POLICY PREFER COLOCATION,
   SET RANK 2,
@@ -468,23 +470,23 @@ transaction and quiesce behavior.
 
 Use the placement commands in the active domain:
 
-```nspl
+```plexus
 SHOW CREATE PLACEMENT scoring_local;
 ```
 
-```nspl
+```plexus
 SHOW PLACEMENTS;
 ```
 
-```nspl
+```plexus
 DESCRIBE PLACEMENT scoring_local;
 ```
 
-```nspl
+```plexus
 DESCRIBE DOMAIN;
 ```
 
-`SHOW CREATE PLACEMENT` renders the normalized stored rule as canonical NSPL and omits the
+`SHOW CREATE PLACEMENT` renders the normalized stored rule as canonical Plexus and omits the
 creation-time `IF NOT EXISTS` modifier. `SHOW PLACEMENTS` lists each rule's policy, rank, and one
 of these coverage states:
 
@@ -527,7 +529,7 @@ server-listener ingestor, an empty side, and `RANK 0`.
 
 Keep a latency-critical corridor on one cluster node:
 
-```nspl
+```plexus
 CREATE PLACEMENT fraud_scoring_local
   FROM normalize_transaction
   TO fraud_scorer
@@ -538,7 +540,7 @@ CREATE PLACEMENT fraud_scoring_local
 Keep a materialized-state owner with a reader. Here `customer_state` is a materialized relay and
 `fraud_scorer` declares `USING MATERIALIZED STATE customer_state`:
 
-```nspl
+```plexus
 CREATE PLACEMENT state_read_local
   FROM customer_state
   TO fraud_scorer
@@ -548,7 +550,7 @@ CREATE PLACEMENT state_read_local
 
 Bias a heavy archive corridor across cluster nodes without guaranteeing isolation:
 
-```nspl
+```plexus
 CREATE PLACEMENT spread_archive
   FROM archive_transform
   TO archive_emitter
@@ -557,7 +559,7 @@ CREATE PLACEMENT spread_archive
 
 Prefer locality for a corridor while retaining scheduler flexibility:
 
-```nspl
+```plexus
 CREATE PLACEMENT prefer_enrichment_local
   FROM decode_events
   TO enrich_events

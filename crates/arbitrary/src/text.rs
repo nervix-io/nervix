@@ -1,4 +1,4 @@
-//! Names, string literals, durations and byte sizes as NSPL and the vocabulary hold them.
+//! Names, string literals, durations and byte sizes as Plexus and the vocabulary hold them.
 
 use std::{fmt::Debug, num::NonZeroU64, str::FromStr};
 
@@ -44,8 +44,8 @@ const DELIMITER_NAMES: [&str; 12] = [
     "9-",
 ];
 
-/// Every keyword NSPL reads, statement and expression keywords alike, spelled as a name spells it:
-/// in lower case. `nervix-nspl` checks this list against the one lexer's keyword set, so a keyword
+/// Every keyword Plexus reads, statement and expression keywords alike, spelled as a name spells it:
+/// in lower case. `nervix-plexus` checks this list against the one lexer's keyword set, so a keyword
 /// the language adds is generated as a name as soon as it exists.
 pub const KEYWORDS: [&str; 369] = [
     "headers",
@@ -419,21 +419,21 @@ pub const KEYWORDS: [&str; 369] = [
     "roto_0_13",
 ];
 
-/// The words NSPL reserves wherever it reads a relay, so a relay is never named by one.
+/// The words Plexus reserves wherever it reads a relay, so a relay is never named by one.
 const RESERVED_RELAY_WORDS: [&str; 2] = ["message", "branch"];
 
-/// A kind of name the generators build, and the keyword spellings NSPL refuses for that kind.
+/// A kind of name the generators build, and the keyword spellings Plexus refuses for that kind.
 pub trait GeneratedName: FromStr<Err: Debug> {
-    /// The keywords NSPL refuses as a name of this kind. A name in the NSPL domain never spells one;
+    /// The keywords Plexus refuses as a name of this kind. A name in the Plexus domain never spells one;
     /// the vocabulary holds them, and so does the vocabulary domain. Every such list holds at most
     /// a handful of words.
-    const REFUSED_IN_NSPL: &'static [&'static str] = &[];
+    const REFUSED_IN_PLEXUS: &'static [&'static str] = &[];
 
     /// Whether this kind of name may hold a dot, as the vocabulary declares it.
     const DOTS: DotPolicy;
 }
 
-/// Declares name kinds NSPL writes in every spelling a generated name takes, keywords included.
+/// Declares name kinds Plexus writes in every spelling a generated name takes, keywords included.
 macro_rules! spelled_like_any_word {
     ($($name:ident),+ $(,)?) => {
         $(impl GeneratedName for $name {
@@ -475,15 +475,15 @@ spelled_like_any_word!(
     WireSchemaName,
 );
 
-/// NSPL reads `message` and `branch` as the keywords of its scopes and clauses wherever it reads a
+/// Plexus reads `message` and `branch` as the keywords of its scopes and clauses wherever it reads a
 /// relay, so it refuses them as a relay's name.
 impl GeneratedName for RelayName {
-    const REFUSED_IN_NSPL: &'static [&'static str] = &RESERVED_RELAY_WORDS;
+    const REFUSED_IN_PLEXUS: &'static [&'static str] = &RESERVED_RELAY_WORDS;
     const DOTS: DotPolicy = RelayName::DOTS;
 }
 
 /// Pieces a generated string is assembled from. Beside plain text they hold every character the
-/// NSPL lexer treats specially: both quote styles, the dollar-quote delimiters a renderer picks
+/// Plexus lexer treats specially: both quote styles, the dollar-quote delimiters a renderer picks
 /// and prefixes of them, backslashes and the escapes they could start, line breaks, a comma and
 /// braces that separate configuration entries, and text outside ASCII, including a combining mark
 /// and characters Unicode classes as whitespace.
@@ -493,7 +493,7 @@ const STRING_PIECES: [&str; 40] = [
     "{", "}", "=", ";", "//", "é", "中文", "🎉", "e\u{301}", "\u{2028}",
 ];
 
-/// Units a duration is written with, as NSPL keeps the spelling it was given.
+/// Units a duration is written with, as Plexus keeps the spelling it was given.
 const DURATION_UNITS: [&str; 14] = [
     "ns", "us", "ms", "s", "sec", "m", "min", "h", "hr", "d", "days", "w", "M", "y",
 ];
@@ -502,13 +502,13 @@ const DURATION_UNITS: [&str; 14] = [
 const BYTE_SIZE_UNITS: [&str; 9] = ["B", "KB", "KiB", "MB", "MiB", "GB", "GiB", "TB", "TiB"];
 
 impl Arbitrary<'_> {
-    /// A name of kind `N`: one lower-case ASCII identifier, which may spell any NSPL keyword. In the
-    /// NSPL domain it never spells a keyword NSPL refuses for that kind of name.
+    /// A name of kind `N`: one lower-case ASCII identifier, which may spell any Plexus keyword. In the
+    /// Plexus domain it never spells a keyword Plexus refuses for that kind of name.
     pub fn name<N: GeneratedName>(&mut self) -> N {
-        self.name_refusing(N::REFUSED_IN_NSPL)
+        self.name_refusing(N::REFUSED_IN_PLEXUS)
     }
 
-    /// A name of kind `N` that, in the NSPL domain, spells none of `refused` either, for a position
+    /// A name of kind `N` that, in the Plexus domain, spells none of `refused` either, for a position
     /// that refuses more words than the kind does. `refused` holds at most a handful of words.
     pub fn name_refusing<N: GeneratedName>(&mut self, refused: &[&str]) -> N {
         let text = self.name_text_refusing::<N>(refused);
@@ -519,8 +519,8 @@ impl Arbitrary<'_> {
     /// underscore, which no keyword ends with.
     pub(crate) fn name_text_refusing<N: GeneratedName>(&mut self, refused: &[&str]) -> String {
         let mut text = self.name_text();
-        if self.domain == Domain::Nspl
-            && (refused.contains(&text.as_str()) || N::REFUSED_IN_NSPL.contains(&text.as_str()))
+        if self.domain == Domain::Plexus
+            && (refused.contains(&text.as_str()) || N::REFUSED_IN_PLEXUS.contains(&text.as_str()))
         {
             text.push('_');
         }
@@ -563,7 +563,7 @@ impl Arbitrary<'_> {
         text
     }
 
-    /// The text of a name [`Self::name`] would build: an NSPL keyword, one letter, a letter and an
+    /// The text of a name [`Self::name`] would build: a Plexus keyword, one letter, a letter and an
     /// underscore followed by more, or an underscore followed by more, so the length reaches the
     /// vocabulary's bound.
     ///
@@ -607,7 +607,7 @@ impl Arbitrary<'_> {
         text
     }
 
-    /// A name of kind `N` drawn from the whole name rule rather than only the identifiers NSPL
+    /// A name of kind `N` drawn from the whole name rule rather than only the identifiers Plexus
     /// writes bare: besides any name [`Self::name`] builds, 1 through 128 bytes of lower-case
     /// letters, digits, `-`, `_` and `~`, with a `.` where `N` admits one, or a whole name made of
     /// delimiters. Stored keys and resource directories hold a name as its text, so these are the
@@ -693,14 +693,14 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// A duration as NSPL keeps it: a whole number and a unit, spelled as written.
+    /// A duration as Plexus keeps it: a whole number and a unit, spelled as written.
     pub fn duration(&mut self) -> String {
         let count = self.entropy.boundary_biased(0..=u64::from(u32::MAX));
         let unit = self.entropy.pick(DURATION_UNITS);
         format!("{count}{unit}")
     }
 
-    /// A byte size as NSPL keeps it: a whole number and a unit, spelled as written.
+    /// A byte size as Plexus keeps it: a whole number and a unit, spelled as written.
     pub fn byte_size(&mut self) -> String {
         let count = self.entropy.boundary_biased(0..=u64::from(u16::MAX));
         let unit = self.entropy.pick(BYTE_SIZE_UNITS);

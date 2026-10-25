@@ -20,7 +20,7 @@ use nervix_models::{
     JunctionName, MaterializedStateDependency, MaterializedStatePolicy, ModelKind, NodeRef,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName,
 };
-use nervix_nspl::parse_expression;
+use nervix_plexus::parse_expression;
 use thiserror::Error;
 
 use super::{
@@ -609,7 +609,7 @@ mod tests {
         FieldScope, Literal, MaterializedStatePolicy, Model, ModelName, OutputBranch,
         RequestedResourceVersion, Statement,
     };
-    use nervix_nspl::statement::parse_statement;
+    use nervix_plexus::statement::parse_statement;
 
     use super::*;
     use crate::create_dialog::ingestor_route_draft::{
@@ -770,7 +770,7 @@ mod tests {
             Box::new(Model::<RequestedResourceVersion>::Junction(built)),
             false,
         ));
-        let canonical = statement.to_canonical_nspl().assured("junction renders");
+        let canonical = statement.to_canonical_plexus().assured("junction renders");
         assert_eq!(
             parse_statement(&canonical).assured("canonical junction parses"),
             statement

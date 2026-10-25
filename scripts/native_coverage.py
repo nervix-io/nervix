@@ -6,8 +6,8 @@
 executes Nervix code natively in its declared mode: `test-typed-ratchet` qualifies compiler-resolved
 source diagnostics, generated reports, semantic fixtures and paired API doctests with the pinned
 compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body once,
-`test-primitives` runs the primitive boundary's conformance checks, and `nspl-completion-walk`
-walks the NSPL completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
+`test-primitives` runs the primitive boundary's conformance checks, and `plexus-completion-walk`
+walks the Plexus completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
 `test-turmoil` collects the canonical simulation suite, including its fresh-process attempts,
 `test-deadlock-evidence-order` executes diagnostic owners and disposable-process probes,
 `test-deadlock-report` exercises the ordinary local report command in its own build, and
@@ -249,10 +249,10 @@ PRODUCERS: tuple[Producer, ...] = (
         for mode in ("shuttle", "loom", "turmoil", "deloxide")
     ),
     Producer(
-        name="nspl-completion-walk",
+        name="plexus-completion-walk",
         mode="ordinary",
         prepare=(),
-        instrumented="nspl-completion-walk",
+        instrumented="plexus-completion-walk",
         finish=(),
     ),
     Producer(

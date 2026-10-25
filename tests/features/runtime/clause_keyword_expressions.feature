@@ -2,18 +2,18 @@ Feature: Clause keywords written inside expressions
 
   A statement reads each expression it embeds up to the keyword that begins its next clause. A
   keyword written as the name of a call belongs to the expression instead, so a processor may call
-  `max`, `right` or `replace` in any expression, and SHOW CREATE writes NSPL that creates the same
+  `max`, `right` or `replace` in any expression, and SHOW CREATE writes Plexus that creates the same
   processor again.
 
   @clause_keyword_calls_show_create_roundtrip
-  Scenario Outline: SHOW CREATE writes parenthesized calls named like clause keywords as NSPL that recreates them
+  Scenario Outline: SHOW CREATE writes parenthesized calls named like clause keywords as Plexus that recreates them
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading ( id I64, name STRING, readings <readings_type> );
       CREATE RELAY sensors SCHEMA reading UNBRANCHED;
@@ -46,7 +46,7 @@ Feature: Clause keywords written inside expressions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE CORRELATOR suffix_matches;
       """
@@ -67,7 +67,7 @@ Feature: Clause keywords written inside expressions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DROP JUNCTION peak_readings;
       DROP CORRELATOR suffix_matches;
@@ -108,11 +108,11 @@ Feature: Clause keywords written inside expressions
   Scenario Outline: Calls named like clause keywords are read wherever a processor holds an expression
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading ( id I64, name STRING, readings <readings_type> );
       CREATE RELAY sensors SCHEMA reading UNBRANCHED;
@@ -150,7 +150,7 @@ Feature: Clause keywords written inside expressions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE REORDERER peaks_in_order;
       """
@@ -166,7 +166,7 @@ Feature: Clause keywords written inside expressions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER JUNCTION peak_readings
         SET FILTER WHERE concat(input.name, replace(input.name, 'a', 'b')) != '',

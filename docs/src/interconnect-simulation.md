@@ -1,5 +1,7 @@
 # Deterministic Interconnect Simulation
 
+*Plexus, the Nervix graph definition language.*
+
 The interconnect has a seeded network simulation built on [Turmoil](https://docs.rs/turmoil/0.7.2).
 Each Nervix transport runs on a simulated host with its own Tokio runtime, virtual clock, TCP stack,
 and DNS name. The hosts talk over simulated links that the test can delay, partition, hold, and
@@ -39,7 +41,7 @@ them substitutes for another.
 | Ordinary unit tests | `just test-interconnect`, `just test-execution` | Real Tokio runtime, paused or real time | Local logic of one owner: framing, codecs, quotas, identities | Behavior across a lossy network or between real processes |
 | Shuttle checks | `just test-shuttle` | Shuttle's scheduler over wrapped primitives; no elapsed time | That in-process protocols hold their invariant under every explored interleaving | Sockets, elapsed deadlines, or anything across hosts. See [Deterministic Concurrency Verification](./data-plane-concurrency.md#deterministic-concurrency-verification) |
 | Turmoil simulation | `just test-turmoil` | One Turmoil scheduler owns every host; each host has a paused Tokio clock that advances with simulated time | That the production transport keeps its deadlines, reconciliation, fencing, and resource bounds when links are delayed, partitioned, held, repaired, or a host restarts, and that the same seed replays the same decisions | Instruction-level races inside one job, kernel TCP behavior, durability, and whole-node behavior |
-| Cucumber scenarios | `just test-scenarios --input <feature>` | Real nodes, real sockets, real time | Public behavior through NSPL, HTTP, the CLI, and cluster state, including real-process SIGKILL recovery | Exhaustive fault timing; failures are observed, not scheduled |
+| Cucumber scenarios | `just test-scenarios --input <feature>` | Real nodes, real sockets, real time | Public behavior through Plexus, HTTP, the CLI, and cluster state, including real-process SIGKILL recovery | Exhaustive fault timing; failures are observed, not scheduled |
 
 ## Code Ownership
 
@@ -114,7 +116,7 @@ Validation keeps the modes apart:
   `loom`, `shuttle`, `turmoil` and `deloxide` modes and with all four, and `nervix-interconnect` with Shuttle
   while its execution dependency selects Turmoil, and requires the diagnostic naming the modes in
   each. It builds each mode for the browser's target and requires the boundary's own diagnostic
-  first, and builds the NSPL formatter, a product binary, with each mode and requires the
+  first, and builds the Plexus formatter, a product binary, with each mode and requires the
   diagnostic that a modeled build is a test artifact.
 - `just lint` runs Clippy over every target of both packages with the `turmoil` feature, beside the
   production and Shuttle lints.

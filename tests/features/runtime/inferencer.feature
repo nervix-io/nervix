@@ -3,7 +3,7 @@ Feature: Inferencer resources
   Scenario Outline: Inferencer model inspection refuses a full bulk queue and recovers
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE inference;
@@ -15,7 +15,7 @@ Feature: Inferencer resources
       """
     Then the current leader node is saved as placeholder "inspection_leader"
     When bulk execution on node "{{inspection_leader}}" is saturated
-    And these NSPL commands fail with "the node's bounded execution did not take the inspection"
+    And these Plexus commands fail with "the node's bounded execution did not take the inspection"
       """
       CREATE INFERENCER score_model FROM features
         USING RESOURCE inference VERSION 1
@@ -29,7 +29,7 @@ Feature: Inferencer resources
         ON MESSAGE ERROR LOG;
       """
     And bulk execution on node "{{inspection_leader}}" is released
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE INFERENCER score_model FROM features
         USING RESOURCE inference VERSION 1
@@ -60,11 +60,11 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE fraud_model;
       UPLOAD RESOURCE fraud_model VERSION '{{onnx_model}}';
@@ -125,11 +125,11 @@ Feature: Inferencer resources
   Scenario Outline: Inferencer creation names why its ONNX model cannot be inspected
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model" with "models/not_a_model.onnx" copied from fixture "not_a_model.txt"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "failed to inspect ONNX model 'models/not_a_model.onnx' for inferencer 'score_model': "
+    When these Plexus commands fail with "failed to inspect ONNX model 'models/not_a_model.onnx' for inferencer 'score_model': "
       """
       CREATE RESOURCE fraud_model;
       UPLOAD RESOURCE fraud_model VERSION '{{onnx_model}}';
@@ -164,11 +164,11 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "<expected_error>"
+    When these Plexus commands fail with "<expected_error>"
       """
       CREATE RESOURCE fraud_model;
       UPLOAD RESOURCE fraud_model VERSION '{{onnx_model}}';
@@ -229,11 +229,11 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "<expected_error>"
+    When these Plexus commands fail with "<expected_error>"
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
@@ -264,11 +264,11 @@ Feature: Inferencer resources
   Scenario Outline: Inferencer syntax rejects unsupported ONNX value schemas
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE INFERENCER unsupported_schema FROM features
         USING RESOURCE inference VERSION 1
@@ -291,11 +291,11 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "missing INPUTS binding for ONNX input tensor 'mask'"
+    When these Plexus commands fail with "missing INPUTS binding for ONNX input tensor 'mask'"
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
@@ -327,11 +327,11 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
@@ -367,16 +367,16 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA inference_value (
         value F32,
@@ -442,11 +442,11 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
@@ -478,7 +478,7 @@ Feature: Inferencer resources
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION transformed_matrices_subscription TO transformed_matrices;
       START;
@@ -501,11 +501,11 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
@@ -537,7 +537,7 @@ Feature: Inferencer resources
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_sequences_subscription TO scored_sequences;
       START;
@@ -560,13 +560,13 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     # Each length-one vector row is 24B and the length-two row is 40B under runtime Arrow
     # payload accounting. Their 24B + 40B + 24B total reaches the 88B boundary only at row 3.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
@@ -598,7 +598,7 @@ Feature: Inferencer resources
         FLUSH EACH 1h MAX BATCH SIZE 88B
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_sequences_subscription TO scored_sequences;
       START;
@@ -647,11 +647,11 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
@@ -689,7 +689,7 @@ Feature: Inferencer resources
         FLUSH EACH 500ms MAX BATCH SIZE 16mb
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_subscription TO scored;
       CREATE SUBSCRIPTION audited_subscription TO audited;
@@ -726,13 +726,13 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     # Each row has two fixed-size F32 pairs and accounts for 16B. Three rows reach the 48B
     # boundary exactly, so neither of the first two inputs can start inference early.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
@@ -770,7 +770,7 @@ Feature: Inferencer resources
         FLUSH EACH 1h MAX BATCH SIZE 48B
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_subscription TO scored;
       START;
@@ -820,13 +820,13 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     # Arrow 58.4 accounts this one-row input as 284B: 260B for padding Utf8, 8B for tenant
     # Utf8, and 8B for each fixed-size F32 pair. Two batches total 568B and cross 512B.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
@@ -871,7 +871,7 @@ Feature: Inferencer resources
         FLUSH EACH 1h MAX BATCH SIZE 512B
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_subscription TO scored;
       START;
@@ -918,11 +918,11 @@ Feature: Inferencer resources
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
@@ -959,7 +959,7 @@ Feature: Inferencer resources
         FLUSH EACH 500ms MAX BATCH SIZE 16mb
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_subscription TO scored;
       START;

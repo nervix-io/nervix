@@ -87,7 +87,7 @@ impl OpenClientError {
     }
 }
 
-/// Configuration keys and address parameters that would size a pool behind NSPL's back.
+/// Configuration keys and address parameters that would size a pool behind Plexus's back.
 ///
 /// Each driver reads at least one of these: `mysql_async` takes `pool_min`/`pool_max` from its URL
 /// and the MongoDB driver takes `minPoolSize`/`maxPoolSize` from its own. Whichever won would be a

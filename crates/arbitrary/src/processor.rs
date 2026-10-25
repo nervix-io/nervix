@@ -109,11 +109,11 @@ impl Arbitrary<'_> {
         }
     }
 
-    /// A correlator's filter. NSPL declares none for a correlator, whose inputs filter each side
+    /// A correlator's filter. Plexus declares none for a correlator, whose inputs filter each side
     /// on their own; only the vocabulary can hold one.
     fn correlator_filter(&mut self) -> Option<Expression> {
         match self.domain {
-            Domain::Nspl => None,
+            Domain::Plexus => None,
             Domain::Vocabulary => self.optional_expression(),
         }
     }

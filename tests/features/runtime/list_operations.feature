@@ -2,7 +2,7 @@ Feature: List operations
   Scenario Outline: HTTP ingestor filter-map evaluates list operation builtins
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """

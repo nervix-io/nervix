@@ -2,11 +2,11 @@ Feature: Practical string search and normalization
   Scenario Outline: Practical string search and normalization work across a cluster
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA source_text (id STRING, raw STRING, pattern STRING);
       CREATE SCHEMA searched_text (

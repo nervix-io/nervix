@@ -4,7 +4,7 @@ Feature: Web console visual junction and reingestor creation
   Scenario: A processor draft requires selected relays again after its domain changes
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE UNPACED DOMAIN {{domain}}_other;
@@ -44,7 +44,7 @@ Feature: Web console visual junction and reingestor creation
   Scenario: A selected junction draft submits after the console follows a new leader
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_reconnect_event (message STRING);
@@ -83,7 +83,7 @@ Feature: Web console visual junction and reingestor creation
   Scenario: A junction keeps route order and selects compatible relays staged in its transaction
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_order_event (message STRING);
@@ -170,7 +170,7 @@ Feature: Web console visual junction and reingestor creation
   Scenario Outline: A visually created junction transforms records from its selected input
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_route_event (message STRING, result STRING OPTIONAL);
@@ -207,7 +207,7 @@ Feature: Web console visual junction and reingestor creation
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION visual_route_subscription TO visual_route_output;
       START;
@@ -230,7 +230,7 @@ Feature: Web console visual junction and reingestor creation
   Scenario Outline: A visually created reingestor repartitions interleaved records
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_partition_event (tenant STRING, message STRING);
@@ -272,7 +272,7 @@ Feature: Web console visual junction and reingestor creation
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION visual_partition_subscription TO visual_partition_output;
       START;
@@ -305,7 +305,7 @@ Feature: Web console visual junction and reingestor creation
   Scenario: A visual junction explicitly leaks one sensitive inherited field
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_sensitive_input (message STRING, secret STRING SENSITIVE);
@@ -343,7 +343,7 @@ Feature: Web console visual junction and reingestor creation
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION visual_sensitive_subscription TO visual_sensitive_out;
       START;

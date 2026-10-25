@@ -1,7 +1,7 @@
 Feature: A backup cut reaches every scheduled state owner
 
   Background:
-    Given these NSPL commands are saved as placeholder "owner_models"
+    Given these Plexus commands are saved as placeholder "owner_models"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA payment ( tenant STRING, transaction_id STRING, amount I64 );

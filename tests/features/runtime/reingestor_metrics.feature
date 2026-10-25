@@ -3,11 +3,11 @@ Feature: Reingestor metrics
   Scenario Outline: DESCRIBE REINGESTOR and Prometheus report reingestor traffic metrics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -71,7 +71,7 @@ Feature: Reingestor metrics
       "tenant":"acme","user_id":42
       "tenant":"acme","user_id":43
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE REINGESTOR reingestor_metrics_node;
       """

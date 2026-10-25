@@ -149,7 +149,7 @@ impl Client {
             total_bytes,
             digest: ArchiveDigest::from_bytes(measured.digest),
         };
-        let statement = restore.to_canonical_nspl();
+        let statement = restore.to_canonical_plexus();
         let frame_timeout = self.inner.connector.request_timeout();
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             nervix_primitives::task::consume_budget().await;

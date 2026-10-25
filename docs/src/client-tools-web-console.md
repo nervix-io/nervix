@@ -1,9 +1,11 @@
 # Web Console
 
-Every Nervix node serves a browser console. It combines a live drawing of the running execution
-graph with an NSPL command line, so the same session can be used to read a graph and to change it.
+*Plexus, the Nervix graph definition language.*
 
-![The Nervix web console: entity sidebar, live execution graph, and NSPL REPL](images/console-overview.png)
+Every Nervix node serves a browser console. It combines a live drawing of the running execution
+graph with a Plexus command line, so the same session can be used to read a graph and to change it.
+
+![The Nervix web console: entity sidebar, live execution graph, and Plexus REPL](images/console-overview.png)
 
 ## Opening The Console
 
@@ -98,7 +100,7 @@ catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, hash
 relays, branches, ingestors, junctions, reingestors, and subscriptions. The resource group in the
 sidebar also provides a contextual create action. A form keeps its unfinished draft when it closes,
 restores focus to the action that opened it, reports validation and server failures inline, and
-shows the canonical NSPL statement before submission. An expression typed into a form, such as a
+shows the canonical Plexus statement before submission. An expression typed into a form, such as a
 filter, a `WHERE` predicate, an assigned value or an invocation argument, reads exactly as it does
 in a typed statement: its [string literals](filter-map-functions.md#literals) are verbatim, so a
 backslash is an ordinary character.
@@ -165,7 +167,7 @@ format, even when wire schemas of different formats share a name. JAQ-native and
 choose ingestion (decode), emitting (encode), or both, and may add an emitting-batch program after
 an emitting program. These are program editors: their contents remain jaq source in the current
 codec Model, including quotes and whitespace. RFC3339 field encoding rules can be added in order
-where the format supports them. The preview renders the complete codec Model as canonical NSPL.
+where the format supports them. The preview renders the complete codec Model as canonical Plexus.
 
 The Protobuf controls select an existing resource and one of its completed versions, including
 `LATEST`, then accept an optional `.proto` file and include root, additional compiler
@@ -223,7 +225,7 @@ keeps the entered path and selections for inspection. A successful hash map can 
 A Roto UDF form keeps arguments in declaration order, with exact scalar, vector, and fixed-array
 types and separate optional flags. The result has the same type controls. The current language is
 `ROTO_0_13`, with an explicit volatility control. The source editor preserves its complete text,
-including quotes, whitespace, the named function body, and Roto `test` blocks; canonical NSPL
+including quotes, whitespace, the named function body, and Roto `test` blocks; canonical Plexus
 chooses a safe dollar-quote delimiter around it. The server checks the declared signature exactly
 and runs the Roto tests before **Completed** appears. Compilation, type, or test failure keeps the
 signature and source editable. A completed function is available to `udf::` calls in later
@@ -248,7 +250,7 @@ branch declaration. Routes can be added, removed, and moved in order. They edit 
 ordered output assignments and function invocations, an optional `WHERE` expression, branch key
 assignments, an explicit flush policy, and a route-local message error policy. An ingestor error
 route selects an unbranched relay and its own field assignments. The node-wide general error
-policy is also required. The draft retains incomplete values and shows the canonical NSPL preview
+policy is also required. The draft retains incomplete values and shows the canonical Plexus preview
 only when every required choice and expression is valid. It submits through the usual durable
 command path, including attached transactions and reconnect recovery.
 
@@ -333,7 +335,7 @@ Clicking any node or relay opens its action menu. Each action types the correspo
 into the REPL and runs it, so the console never does anything you could not have typed:
 
 - **DESCRIBE** — the runtime view of the item, where the item has a `DESCRIBE` form
-- **SHOW CREATE** — the NSPL that declares it
+- **SHOW CREATE** — the Plexus that declares it
 - **SUBSCRIBE** — relays only; opens the subscription form described below for that relay, whose
   tab runs the same `CREATE SUBSCRIPTION` the REPL accepts
 
@@ -393,11 +395,11 @@ Closing the tab ends the subscription; closing an ended tab only removes it, bec
 already ended its subscription. Subscriptions are read-only views: they cannot construct, inherit,
 or produce side effects. See [Sessions](sessions.md).
 
-## The NSPL REPL
+## The Plexus REPL
 
 ![The REPL with server-driven completions offered for a partial statement](images/console-repl.png)
 
-The REPL accepts the same NSPL as the command line client, including the client-local statements
+The REPL accepts the same Plexus as the command line client, including the client-local statements
 `USE`, `LIST DOMAINS`, `BEGIN`, `COMMIT`, `REVERT`, and the subscription statements. A typed
 `CREATE SUBSCRIPTION` opens a tab in the selected domain exactly as the subscription form does, and
 `DELETE SUBSCRIPTION <name>` closes the open tab of that name. The prompt shows the active domain,
@@ -433,7 +435,7 @@ console follows the transaction's domain, so attaching switches the domain selec
 `DESCRIBE TRANSACTION` prints the open transaction's impact report between queued statements, and
 with an id it reads another transaction of the same user while the prompt, domain selector, and
 attached transaction stay as they were. See
-[NSPL Overview](nspl-overview.md) for its forms and output.
+[Plexus Overview](plexus-overview.md) for its forms and output.
 
 Every persistent command keeps one execution reference while the browser waits, reconnects, or
 follows leadership. The transaction id and status are replicated. If the WebSocket closes
@@ -446,7 +448,7 @@ The Create form then leaves **Queued until reconnect** with a completed or faile
 second session can attach the same owner's transaction and take it over; the displaced console
 then gets an explicit takeover error. A clean console session close reverts an open transaction,
 while an accepted commit continues on the leader without the browser. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and
+[Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions) and
 [Client Session Protocol](client-session-protocol.md).
 
 `Tab` cycles through completions offered by the server for the current cursor position. `ArrowUp`
@@ -544,7 +546,7 @@ how nodes consume them are covered in [Resources](resources.md).
 The top bar's **Backups** button opens a dialog with two forms, **Back up** and **Restore**. They
 run the same `BACKUP` and `RESTORE` statements as `nervix-cli`, on the console's own session: they
 follow its leader redirect, and a statement typed in the REPL runs through the same dialog. Each
-form is bound to the statement's options and shows the canonical NSPL it sends before you submit
+form is bound to the statement's options and shows the canonical Plexus it sends before you submit
 it. [Backup And Restore](backup-and-restore.md) describes what the statements capture and restore.
 
 ### Taking A Backup

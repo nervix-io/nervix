@@ -3,11 +3,11 @@ Feature: Ingestors name their connector and entity in the statement head
   @kinded_ingestor_show_create
   Scenario Outline: SHOW CREATE INGESTOR renders the kinded head of every connector and entity
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -106,7 +106,7 @@ Feature: Ingestors name their connector and entity in the statement head
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR http_request_source;
       """
@@ -116,7 +116,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM http_main EVERY 1s MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR http_endpoint_source;
       """
@@ -126,7 +126,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR ws_endpoint_source;
       """
@@ -136,7 +136,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM ws_ingress MODE NO ACK ON QUIESCE REJECT RETRY AFTER 5s
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR ws_connection_source;
       """
@@ -146,7 +146,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM ws_main MODE NO ACK ON QUIESCE DROP
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR kafka_source;
       """
@@ -156,7 +156,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR pulsar_source;
       """
@@ -166,7 +166,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM pulsar_main TOPIC 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' OWNED BY INGESTOR MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR rabbitmq_source;
       """
@@ -176,7 +176,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM rabbit_main QUEUE 'Orders' MODE ACK SEQUENTIAL ACK TIMEOUT 20s RETRY POLICY BACKOFF 1s MAX 30s ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR redis_source;
       """
@@ -186,7 +186,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM redis_main CHANNEL 'Orders' MODE NO ACK ON QUIESCE DROP
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR mqtt_source;
       """
@@ -196,7 +196,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM mqtt_main TOPIC 'devices/+/Orders' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR nats_source;
       """
@@ -206,7 +206,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM nats_main SUBJECT 'orders.*' QUEUE GROUP 'Readers' INSTANCES 1 MODE NO ACK ON QUIESCE DROP
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR sqs_source;
       """
@@ -216,7 +216,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM sqs_main QUEUE 'Orders.fifo' MODE ACK SEQUENTIAL ACK TIMEOUT 45s RETRY POLICY BACKOFF 2s MAX 1m ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR zeromq_source;
       """
@@ -226,7 +226,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM zmq_main MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR syslog_source;
       """
@@ -236,7 +236,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM syslog_main MODE NO ACK ON QUIESCE DROP
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR prometheus_source;
       """
@@ -246,7 +246,7 @@ Feature: Ingestors name their connector and entity in the statement head
         FROM prom_main QUERY 'up' EVERY 15s MODE NO ACK ON QUIESCE SUSPEND
         DECODE USING event_codec
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR client_source;
       """
@@ -265,11 +265,11 @@ Feature: Ingestors name their connector and entity in the statement head
   @kinded_ingestor_describe
   Scenario Outline: DESCRIBE INGESTOR and SHOW INGESTORS name the connector and entity an ingestor reads
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -293,7 +293,7 @@ Feature: Ingestors name their connector and entity in the statement head
       """
       from: KAFKA TOPIC kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' MODE NO ACK ON QUIESCE SUSPEND
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE INGESTOR client_source;
       """
@@ -301,7 +301,7 @@ Feature: Ingestors name their connector and entity in the statement head
       """
       from: CLIENT PRODUCER SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW INGESTORS;
       """
@@ -322,11 +322,11 @@ Feature: Ingestors name their connector and entity in the statement head
   @kinded_ingestor_alter_kind
   Scenario Outline: ALTER INGESTOR applies only under the head of the stored connector and entity
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -340,11 +340,11 @@ Feature: Ingestors name their connector and entity in the statement head
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "the stored ingestor reads HTTP ENDPOINT, so ALTER KAFKA TOPIC INGESTOR cannot alter it"
+    When these Plexus commands fail with "the stored ingestor reads HTTP ENDPOINT, so ALTER KAFKA TOPIC INGESTOR cannot alter it"
       """
       ALTER KAFKA TOPIC INGESTOR web_source SET GENERAL ERROR IGNORE;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER HTTP ENDPOINT INGESTOR web_source
         SET FROM ingress_b MODE NO ACK ON QUIESCE REJECT RETRY AFTER 3s,
@@ -369,11 +369,11 @@ Feature: Ingestors name their connector and entity in the statement head
   @kinded_ingestor_reference_kind
   Scenario Outline: An ingestor refuses an endpoint or a client the connector and entity of its head cannot read
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -384,21 +384,21 @@ Feature: Ingestors name their connector and entity in the statement head
       CREATE ENDPOINT ws_ingress ON edge PATH '/stream' TYPE WEBSOCKETS;
       CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 4 CONFIG { 'addr' = 'redis://127.0.0.1:6379', 'subscription_buffer_messages' = '1024', 'idle_timeout_ms' = '30000' };
       """
-    When these NSPL commands fail with "HTTP ENDPOINT ingestor 'web_source' in domain '{{domain}}' requires a TYPE HTTP endpoint, but endpoint 'ws_ingress' is TYPE WEBSOCKETS"
+    When these Plexus commands fail with "HTTP ENDPOINT ingestor 'web_source' in domain '{{domain}}' requires a TYPE HTTP endpoint, but endpoint 'ws_ingress' is TYPE WEBSOCKETS"
       """
       CREATE HTTP ENDPOINT INGESTOR web_source
         FROM ws_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "WEBSOCKETS ENDPOINT ingestor 'stream_source' in domain '{{domain}}' requires a TYPE WEBSOCKETS endpoint, but endpoint 'http_ingress' is TYPE HTTP"
+    When these Plexus commands fail with "WEBSOCKETS ENDPOINT ingestor 'stream_source' in domain '{{domain}}' requires a TYPE WEBSOCKETS endpoint, but endpoint 'http_ingress' is TYPE HTTP"
       """
       CREATE WEBSOCKETS ENDPOINT INGESTOR stream_source
         FROM http_ingress MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "KAFKA TOPIC ingestor 'kafka_source' in domain '{{domain}}' requires a KAFKA client, but client 'redis_main' is a REDIS client"
+    When these Plexus commands fail with "KAFKA TOPIC ingestor 'kafka_source' in domain '{{domain}}' requires a KAFKA client, but client 'redis_main' is a REDIS client"
       """
       CREATE KAFKA TOPIC INGESTOR kafka_source
         FROM redis_main TOPIC 'orders' OFFSET BY DOMAIN
@@ -415,11 +415,11 @@ Feature: Ingestors name their connector and entity in the statement head
   @kinded_ingestor_completion
   Scenario Outline: Completion offers the kinded heads and then only references of that kind
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE VHOST edge http-{{test_id}}-kinded-completion.example.com;
       CREATE ENDPOINT http_ingress ON edge PATH '/events' TYPE HTTP;
@@ -449,12 +449,12 @@ Feature: Ingestors name their connector and entity in the statement head
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "Orders_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );

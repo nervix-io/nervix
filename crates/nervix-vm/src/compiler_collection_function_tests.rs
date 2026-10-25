@@ -34,7 +34,7 @@ fn compile_assignment(
     result_type: DataType,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
     let program = parse_program(&format!("SET result = {expression}"))
-        .verified("each case is syntactically valid NSPL");
+        .verified("each case is syntactically valid Plexus");
     let input = source_schema();
     let mut fields = input
         .fields()

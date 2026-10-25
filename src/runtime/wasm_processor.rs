@@ -4,7 +4,7 @@
 //! - **Owns.** WASM invocation, guest output routing, branch-local timeout handling, and the
 //!   lifecycle stage and diagnostic identity of every WASM processor failure.
 //! - **Depends on.** Compiled WASM processors, Arrow batches and explicit execution contexts.
-//! - **Must not know.** NSPL parsing, placement policy or external connector clients.
+//! - **Must not know.** Plexus parsing, placement policy or external connector clients.
 
 #![cfg_attr(
     nervix_lint,

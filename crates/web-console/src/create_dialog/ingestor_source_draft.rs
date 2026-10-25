@@ -660,7 +660,7 @@ mod tests {
         PulsarIngestorEntity, PulsarSubscriptionOwnership, RedisIngestorEntity,
         RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
     };
-    use nervix_nspl::statement::parse_statement;
+    use nervix_plexus::statement::parse_statement;
 
     use super::{DeliveryChoice, IngestorEntityDraft, OffsetChoice, QuiesceChoice};
     use crate::create_dialog::{
@@ -754,7 +754,7 @@ mod tests {
                 )),
                 false,
             ));
-            let canonical = statement.to_canonical_nspl().assured("ingestor renders");
+            let canonical = statement.to_canonical_plexus().assured("ingestor renders");
             assert_eq!(
                 parse_statement(&canonical).assured("canonical ingestor parses"),
                 statement,

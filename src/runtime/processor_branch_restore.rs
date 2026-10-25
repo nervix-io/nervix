@@ -7,7 +7,7 @@
 //!   installed, and the backoff between attempts while a restore stays pending.
 //! - **Depends on.** Planned processor templates, processor branch startup, the runtime's
 //!   restorable branch lifecycle and the runtime's retry backoff.
-//! - **Must not know.** NSPL text, control-plane transactions, consensus, or connector protocols.
+//! - **Must not know.** Plexus text, control-plane transactions, consensus, or connector protocols.
 
 #![cfg_attr(
     nervix_lint,

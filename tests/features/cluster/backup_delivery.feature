@@ -10,7 +10,7 @@ Feature: Final delivery of a downloaded backup archive to standard output
   Scenario Outline: A closed standard output keeps the verified archive under its execution reference
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       START;
@@ -34,7 +34,7 @@ Feature: Final delivery of a downloaded backup archive to standard output
   Scenario Outline: A standard output that would discard the archive fails before a backup is taken
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       START;

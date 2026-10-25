@@ -2,7 +2,7 @@
 Feature: Web console transaction inspector
   Scenario: Inspecting an attached transaction shows its steps and preserves its commit basis
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -55,7 +55,7 @@ Feature: Web console transaction inspector
   Scenario: A stale browser preview is refused before effects and refresh supplies a usable basis
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -71,7 +71,7 @@ Feature: Web console transaction inspector
     When selector ".transaction-indicator" is pressed with "Enter"
     Then selector ".transaction-inspector .inspector-summary" contains "1 accepted"
     And selector ".transaction-inspector .inspector-summary" contains "CURRENT"
-    When client "contender" executes these NSPL commands
+    When client "contender" executes these Plexus commands
       """
       CREATE SCHEMA unrelated_event ( value I64 );
       """
@@ -79,7 +79,7 @@ Feature: Web console transaction inspector
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".transaction-inspector .inspector-error" contains "Preview is stale"
     And selector ".transaction-inspector .inspector-summary" contains "STALE"
-    When client "contender" fails to execute these NSPL commands
+    When client "contender" fails to execute these Plexus commands
       """
       SHOW CREATE SCHEMA staged_event;
       """
@@ -93,7 +93,7 @@ Feature: Web console transaction inspector
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "COMMIT;"
     And selector ".transaction-inspector .inspector-summary" contains "COMMITTED"
-    When client "contender" executes these NSPL commands
+    When client "contender" executes these Plexus commands
       """
       SHOW CREATE SCHEMA staged_event;
       """
@@ -107,7 +107,7 @@ Feature: Web console transaction inspector
   Scenario: Inspecting another discovered transaction leaves the attached commit basis intact
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -123,7 +123,7 @@ Feature: Web console transaction inspector
     When selector ".transaction-indicator" is pressed with "Enter"
     Then selector ".transaction-inspector .inspector-summary" contains "1 accepted"
     And selector ".transaction-inspector .inspector-summary" contains "CURRENT"
-    When client "other_owner_session" executes these NSPL commands
+    When client "other_owner_session" executes these Plexus commands
       """
       BEGIN;
       CREATE SCHEMA other_event ( value I64 );
@@ -142,7 +142,7 @@ Feature: Web console transaction inspector
     Then selector ".terminal" contains "COMMIT;"
     And selector ".transaction-indicator" eventually disappears
     And client "other_owner_session" transaction state is "OPEN"
-    When client "other_owner_session" executes these NSPL commands
+    When client "other_owner_session" executes these Plexus commands
       """
       REVERT;
       """
@@ -151,12 +151,12 @@ Feature: Web console transaction inspector
   Scenario: A DESCRIBE result opens retained inspection without attaching its transaction
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Given client "owner" is connected to the leader node
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       CREATE SCHEMA observed_event ( value I64 );
@@ -170,7 +170,7 @@ Feature: Web console transaction inspector
     And selector ".transaction-inspector" contains "observed_event"
     And selector ".transaction-indicator" does not exist
     And client "owner" transaction state is "OPEN"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       COMMIT;
       """
@@ -184,7 +184,7 @@ Feature: Web console transaction inspector
     Then selector ".transaction-inspector .inspector-scope" contains "Actual"
     When the inspector geometry is remembered
     Given client "graph_changer" is connected to the leader node
-    When client "graph_changer" executes these NSPL commands
+    When client "graph_changer" executes these Plexus commands
       """
       CREATE SCHEMA unrelated_live_graph_change (value I64);
       """
@@ -192,7 +192,7 @@ Feature: Web console transaction inspector
 
   Scenario: A running schema change frames the whole domain pause
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event_v1 ( seq I64 );
@@ -218,7 +218,7 @@ Feature: Web console transaction inspector
 
   Scenario: A dropped relay and its disconnected relations remain inspectable
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event_v1 ( seq I64 );
@@ -245,7 +245,7 @@ Feature: Web console transaction inspector
 
   Scenario: Parallel data and materialized-state relations keep separate routes and keyboard detail
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA reading_record (sensor STRING, value I64);
@@ -312,7 +312,7 @@ Feature: Web console transaction inspector
 
   Scenario: A branched affected graph names its exact branch group
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA branch_event (value I64);
@@ -367,12 +367,12 @@ Feature: Web console transaction inspector
   Scenario: A retained inspection shows an applying prefix and final actual outcomes
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Given client "owner" is connected to node "node-1"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       CREATE RESOURCE prefix_bundle;
@@ -386,7 +386,7 @@ Feature: Web console transaction inspector
     Then selector ".transaction-inspector .inspector-summary" contains "2 accepted"
     And selector ".transaction-inspector .inspector-item[data-kind='RESOURCE'][data-name='prefix_bundle']" contains "prefix_bundle"
     Given transaction commit on node "node-1" pauses after 2 statement
-    When client "owner" begins executing these NSPL commands in the background
+    When client "owner" begins executing these Plexus commands in the background
       """
       COMMIT;
       """
@@ -396,7 +396,7 @@ Feature: Web console transaction inspector
     Then selector ".transaction-inspector .inspector-summary" contains "COMMITTING"
     And selector ".transaction-inspector .inspector-summary" contains "1 applied, 1 pending"
     When the transaction commit pause on node "node-1" after 2 statement is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     When selector ".transaction-inspector .inspector-toolbar button:has-text('Refresh')" is pressed with "Enter"
     Then selector ".transaction-inspector .inspector-summary" contains "COMMITTED"
     And selector ".transaction-inspector .inspector-summary" contains "2 accepted, 2 applied"
@@ -404,7 +404,7 @@ Feature: Web console transaction inspector
 
   Scenario: An incomplete report cannot supply a commit basis until later admission resolves it
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -438,7 +438,7 @@ Feature: Web console transaction inspector
 
   Scenario: A shared intake gate is drawn once with both contributing operations
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA gated_event (value I64);
