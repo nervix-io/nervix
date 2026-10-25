@@ -593,7 +593,7 @@ jobs:
       - name: Install minikube
         uses: medyagh/setup-minikube@v0.0.21
         with:
-          minikube-version: v1.39.0
+          minikube-version: 1.39.0
           start: false
 
       - name: Login to GHCR
