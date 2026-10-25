@@ -171,7 +171,7 @@ coverage-bolero-restore duration="30": build-web-console
 
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
-tests-deps: build-deps build-nspl-format build-test-cli build-paced-simulation build-deadlock-report
+tests-deps: build-deps build-plexus-format build-test-cli build-paced-simulation build-deadlock-report
 
 build-deadlock-report:
     CARGO_TARGET_DIR={{ cargo_target_dir }} cargo build --package nervix-deadlock --features report-tool --bin nervix-deadlock-report
@@ -1112,16 +1112,16 @@ test-expiry-map-miri:
 test-expiry-map-mutants:
     cargo mutants --package nervix-expiry-map --timeout 120
 
-# Walk the NSPL completion graph and fail on any branch that cannot be completed by accepting the
+# Walk the Plexus completion graph and fail on any branch that cannot be completed by accepting the
 # suggestions the parser itself offers. Kept out of `just test` because it saturates every core for
 # tens of seconds; CI runs it once the main tests have passed.
-nspl-completion-walk *args:
-    cargo test -p nervix-nspl --test completion_walk -- {{ args }}
+plexus-completion-walk *args:
+    cargo test -p nervix-plexus --test completion_walk -- {{ args }}
 
 # The same walk with deduplication relaxed, reaching branches the gating budget stops short of.
 # Reports without failing: this is for finding new ones, not for gating.
-nspl-completion-walk-deep *args:
-    cargo test -p nervix-nspl --test completion_walk -- \
+plexus-completion-walk-deep *args:
+    cargo test -p nervix-plexus --test completion_walk -- \
       --report-only --signature-window 8 --max-states 1000000 {{ args }}
 
 test-coverage: tests-deps
@@ -1182,8 +1182,8 @@ test-scenarios-coverage: tests-deps
     just coverage-paced-simulation-binaries
     export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
     collection_dir="$(mktemp -d {{ quote(cargo_target_dir + "/paced-simulation-coverage.XXXXXX") }})"
     export COVERAGE_FILE="${collection_dir}/python.coverage"
     export PYTHONPATH="{{ justfile_directory() }}/scripts/paced_simulation_coverage${PYTHONPATH:+:${PYTHONPATH}}"
@@ -1360,8 +1360,8 @@ test-coverage-feature +features: tests-deps
     just coverage-deadlock-report-binary
     export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     for feature in {{ features }}; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
@@ -1380,7 +1380,7 @@ test-coverage-client-packages:
 # Add focused backup, wire, state, and primitive tests to a backup feature's coverage profile.
 test-coverage-backup-packages:
     cargo llvm-cov --no-report --lib \
-        --package nervix-backup --package nervix-nspl --package nervix-models \
+        --package nervix-backup --package nervix-plexus --package nervix-models \
         --package nervix-client-wire --package nervix-consensus --package nervix-interconnect \
         --package nervix-wasm-protocol --package nervix-wasm-sdk --package nervix-primitives
 
@@ -1411,12 +1411,12 @@ test-coverage-clients: tests-deps
     just coverage-deadlock-report-binary
     export NERVIX_DEADLOCK_REPORT_TOOL={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-deadlock-report") }}
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     for feature in \
         tests/features/web-console/connection_status.feature \
-        tests/features/web-console/nspl_repl.feature \
+        tests/features/web-console/plexus_repl.feature \
         tests/features/web-console/domain_clock.feature \
         tests/features/tools/cli_session.feature; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
@@ -1474,7 +1474,7 @@ coverage-visual-create output="target/visual-create.lcov": tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --lib \
-        --package nervix-models --package nervix-client-wire --package nervix-nspl
+        --package nervix-models --package nervix-client-wire --package nervix-plexus
     cargo llvm-cov --no-report --bin nervix-web-console --package nervix-web-console
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     for feature in visual_create_schema visual_create_relay visual_create_codec visual_create_client_endpoint visual_create_lookup_udf visual_create_ingestor visual_create_processors; do
@@ -1488,11 +1488,11 @@ coverage-visual-create output="target/visual-create.lcov": tests-deps
 # visual create forms span.
 coverage-visual-create-report output="target/visual-create.lcov":
     cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
-        --package nervix-models --package nervix-client-wire --package nervix-nspl \
+        --package nervix-models --package nervix-client-wire --package nervix-plexus \
         --package nervix-web-console --package nervix-server
 
 # Write the line coverage of the unit tests of the packages named in `args`, such as
-# `--package nervix-vm --package nervix-nspl`, as LCOV to `output`. It checks the patch coverage of
+# `--package nervix-vm --package nervix-plexus`, as LCOV to `output`. It checks the patch coverage of
 # a change to those packages without the scenario suite that `test-coverage` runs.
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
@@ -1506,7 +1506,7 @@ coverage-backup-archives output="target/backup-archives.lcov": tests-deps
     just coverage-cli-binary
     export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     cargo llvm-cov --no-report --lib --package nervix-backup
-    cargo llvm-cov --no-report --lib --package nervix-nspl -- backup
+    cargo llvm-cov --no-report --lib --package nervix-plexus -- backup
     cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
         --input tests/features/cluster/backup.feature \
         --name 'A quiesced backup restores two WASM branches and Kafka domain offsets' \
@@ -1519,7 +1519,7 @@ coverage-backup-archives output="target/backup-archives.lcov": tests-deps
         --name 'A resumed materialized cut preserves interleaved branches and generators through restart|Materialized generations larger than the bulk budget resume on every assigned owner and replica' \
         --concurrency 2 --retry 0
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
-        --package nervix-backup --package nervix-nspl --package nervix-server
+        --package nervix-backup --package nervix-plexus --package nervix-server
 
 # Deduplicator and window archive coverage: their records and Arrow groups, capture, restore
 # conversion into staged pieces and installation, segmented persistence of large windows, the
@@ -1554,7 +1554,7 @@ coverage-backup-archives-state-append output="target/backup-archives.lcov":
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- backup
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- runtime::state_store::checkpoint_reader
     cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} \
-        --package nervix-backup --package nervix-nspl --package nervix-server
+        --package nervix-backup --package nervix-plexus --package nervix-server
 
 # Ordinary representation coverage includes the protocol's integration-test target and the
 # native host, SDK, archive descriptors and current checkpoint storage codecs.
@@ -1584,7 +1584,7 @@ coverage-archive-counts output="target/archive-counts.lcov": tests-deps
     cargo llvm-cov --no-report --package nervix-models --test representations
     cargo llvm-cov --no-report --package nervix-consensus --lib
     cargo llvm-cov --no-report --package nervix-interconnect --lib
-    cargo llvm-cov --no-report --package nervix-nspl --lib -- bolero_
+    cargo llvm-cov --no-report --package nervix-plexus --lib -- bolero_
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- \
         registry::storage::tests
     cargo llvm-cov --no-report --features testing --package nervix-server --lib -- \
@@ -1650,8 +1650,8 @@ coverage-scenarios output *args: tests-deps
     just coverage-paced-simulation-binaries
     export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
     cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Add selected scenarios to the current coverage profiles without rebuilding unchanged artifacts.
@@ -1666,8 +1666,8 @@ coverage-scenarios-append output *args: tests-deps
     just coverage-paced-simulation-binaries
     export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
     export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
     cargo llvm-cov --no-clean --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
 # Measure both published paced drivers through their public scenarios, including Python threads
@@ -1688,8 +1688,8 @@ coverage-paced-simulation output="target/paced-simulation.lcov" scenario_binary=
             export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/debug/nervix-cli") }}
             export NERVIX_PACED_SIMULATION_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-paced-simulation") }}
             export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/llvm-cov-target/debug/libnervix_client_ffi.so") }}
-            install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
-                {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+            install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-plexus-format") }} \
+                {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-plexus-format") }}
             uv run --no-project --with coverage==7.11.0 just test-scenarios-binary {{ quote(scenario_binary) }} \
                 --input tests/features/runtime/paced_simulation.feature {{ args }}
         )
@@ -1847,7 +1847,7 @@ coverage-cli-process output="target/cli-process.lcov":
     rm -f "$coverage_dir"/cli-*.profraw
     LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
         NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
-        just test-scenarios --input tests/features/runtime/nspl_transactions.feature --name CLI
+        just test-scenarios --input tests/features/runtime/plexus_transactions.feature --name CLI
     LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
         NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
         just test-scenarios --input tests/features/tools/cli_session.feature --name clock
@@ -2147,7 +2147,7 @@ taplo-format:
     git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format
 
 [parallel]
-fmt: cargo-fmt fmt-typed-ratchet taplo-format dockerfmt gherkin-fmt nspl-fmt autoinherit
+fmt: cargo-fmt fmt-typed-ratchet taplo-format dockerfmt gherkin-fmt plexus-fmt autoinherit
 
 cargo-fmt-check:
     cargo +nightly fmt --check
@@ -2156,7 +2156,7 @@ taplo-format-check:
     git ls-files -z --cached --others --exclude-standard '*.toml' | xargs -0 -r taplo format --check
 
 [parallel]
-fmt-check: cargo-fmt-check fmt-check-typed-ratchet taplo-format-check dockerfmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
+fmt-check: cargo-fmt-check fmt-check-typed-ratchet taplo-format-check dockerfmt-check gherkin-fmt-check plexus-fmt-check autoinherit-check
 
 gherkin-fmt:
     ghokin fmt replace tests/features
@@ -2164,16 +2164,16 @@ gherkin-fmt:
 gherkin-fmt-check:
     ghokin check tests/features
 
-# Format every NSPL file in the repository.
-nspl-fmt:
-    cargo run -q --package nervix-nspl-format -- .
+# Format every Plexus file in the repository.
+plexus-fmt:
+    cargo run -q --package nervix-plexus-format -- .
 
-# Report every NSPL file in the repository that is not formatted.
-nspl-fmt-check:
-    cargo run -q --package nervix-nspl-format -- --check .
+# Report every Plexus file in the repository that is not formatted.
+plexus-fmt-check:
+    cargo run -q --package nervix-plexus-format -- --check .
 
-build-nspl-format:
-    cargo build --package nervix-nspl-format
+build-plexus-format:
+    cargo build --package nervix-plexus-format
 
 autoinherit:
     cargo autoinherit
@@ -2205,8 +2205,8 @@ clippy_all_features_packages := [
     "nervix-expiry-map",
     "nervix-jaq",
     "nervix-models",
-    "nervix-nspl",
-    "nervix-nspl-format",
+    "nervix-plexus",
+    "nervix-plexus-format",
     "nervix-primitives-macros",
     "nervix-recovery",
     "nervix-roto",
@@ -2281,7 +2281,7 @@ ordinary-clippy-targets: \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "native"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "native test-util"]) \
     (clippy-target "nervix-deadlock" ["--all-targets", "--features", "report-tool"]) \
-    *(clippy-target *["nervix-cli", "nervix-server", "nervix-nspl-format", "nervix-web-console"] ["--all-targets"]) \
+    *(clippy-target *["nervix-cli", "nervix-server", "nervix-plexus-format", "nervix-web-console"] ["--all-targets"]) \
     (clippy-target "nervix-client-wire" ["--target", "wasm32-unknown-unknown"])
 
 # Lint every Shuttle build: each library under the mode, the primitive boundary, and each
@@ -2506,7 +2506,7 @@ coverage-typed-ratchet-python: typed-ratchet-source-build install-cargo-crap tes
 validate jobs=default_jobs: (run-with-jobs "validate-targets" jobs)
 
 [private]
-validate-targets: fmt lint-targets validate-skill validate-nspl-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
+validate-targets: fmt lint-targets validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Check each connector as a consumer root. Cargo tree limits feature unification to that root;
 # the full workspace build alone can hide a missing resolver feature in a leaf connector.
@@ -2607,7 +2607,7 @@ validate-dns-dependencies:
 validate-ci jobs=default_jobs: (run-with-jobs "validate-ci-targets" jobs)
 
 [private]
-validate-ci-targets: fmt-check lint-targets validate-skill validate-nspl-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
+validate-ci-targets: fmt-check lint-targets validate-skill validate-plexus-docs validate-connector-capabilities validate-connector-matrix validate-clock-boundaries validate-typed-errors validate-primitive-boundary validate-execution-mode-dependencies validate-execution-mode-conflicts validate-dns-dependencies ratchet validate-deloxide-applicability test-go-ci-tool
 
 # Hold every governed primitive to nervix-primitives and every mode feature to its owner. The check
 # rejects a direct, renamed, grouped, qualified, glob, alias or macro path to another backend's
@@ -2729,17 +2729,17 @@ validate-execution-mode-conflicts:
     expect_first_error "nervix-primitives with native for the browser" \
         'the `native` capability provides operating-system threads'
     for mode in loom shuttle turmoil; do
-        expect_failure "nervix-nspl-format with ${mode}" \
-            cargo check --package nervix-nspl-format --bin nervix-nspl-format \
+        expect_failure "nervix-plexus-format with ${mode}" \
+            cargo check --package nervix-plexus-format --bin nervix-plexus-format \
                 --features "nervix-primitives/${mode}"
-        expect_first_error "nervix-nspl-format with ${mode}" \
-            "nervix-nspl-format is a product binary and builds only for ordinary execution; a build that selects the \`${mode}\` execution mode is a test artifact"
+        expect_first_error "nervix-plexus-format with ${mode}" \
+            "nervix-plexus-format is a product binary and builds only for ordinary execution; a build that selects the \`${mode}\` execution mode is a test artifact"
     done
-    expect_failure "nervix-nspl-format with deloxide" \
-        cargo check --package nervix-nspl-format --bin nervix-nspl-format \
+    expect_failure "nervix-plexus-format with deloxide" \
+        cargo check --package nervix-plexus-format --bin nervix-plexus-format \
             --features 'nervix-primitives/deloxide nervix-primitives/native'
-    expect_first_error "nervix-nspl-format with deloxide" \
-        "nervix-nspl-format is a product binary without a diagnostic form; a build that selects the \`deloxide\` diagnostic mode builds only a binary that declares one"
+    expect_first_error "nervix-plexus-format with deloxide" \
+        "nervix-plexus-format is a product binary without a diagnostic form; a build that selects the \`deloxide\` diagnostic mode builds only a binary that declares one"
     echo "every mode conflict, browser-target request, diagnostic mode without its capability and product binary without its form fails with its diagnostic"
 
 validate-clock-boundaries:
@@ -2754,19 +2754,19 @@ toolchains-install:
     rustup toolchain install
     rustup toolchain install nightly-2026-09-17 --profile minimal --component rustc-dev --component rust-src --component rustfmt --component clippy --component llvm-tools --target wasm32-unknown-unknown
 
-# Run every test target of the NSPL language and its formatter: unit, integration, completion-walk
-# unit and documentation tests. The walk itself is a separate gate, `nspl-completion-walk`.
-test-nspl *args:
-    cargo test --package nervix-nspl --package nervix-nspl-format --all-targets -- {{ args }}
+# Run every test target of the Plexus language and its formatter: unit, integration, completion-walk
+# unit and documentation tests. The walk itself is a separate gate, `plexus-completion-walk`.
+test-plexus *args:
+    cargo test --package nervix-plexus --package nervix-plexus-format --all-targets -- {{ args }}
 
 # Verify the backup and restore completion clauses and their public suggestion ordering.
-test-nspl-backup-completion:
-    cargo test --package nervix-nspl --lib backup::tests::completion_offers_each_
+test-plexus-backup-completion:
+    cargo test --package nervix-plexus --lib backup::tests::completion_offers_each_
 
-# Parse every runnable NSPL block in the documentation directly through the parser crate. Syntax
-# synopses and statement fragments remain NSPL-labelled but opt out explicitly with `nspl,ignore`.
-validate-nspl-docs:
-    cargo test -p nervix-nspl --test documentation -- --nocapture
+# Parse every runnable Plexus block in the documentation directly through the parser crate. Syntax
+# synopses and statement fragments remain Plexus-labelled but opt out explicitly with `plexus,ignore`.
+validate-plexus-docs:
+    cargo test -p nervix-plexus --test documentation -- --nocapture
 
 # Hold tests/connector-capability-inventory.toml to the connector entities' declarations and the
 # scenario suite: every capability an entity declares names a scenario that observes it at run
@@ -3352,7 +3352,7 @@ test-onnxruntime-docker:
     fixture_context="$(mktemp -d "${PWD}/target/onnxruntime-docker.XXXXXX")"
     trap 'rm -rf "${fixture_context}"' EXIT
     mkdir -p "${fixture_context}/artifacts/nervix-server.bundle"
-    for binary in nervix-server nervix-cli nervix-nspl-format; do
+    for binary in nervix-server nervix-cli nervix-plexus-format; do
         cat > "${fixture_context}/artifacts/${binary}" <<'SH'
     #!/bin/sh
     basename "$0"

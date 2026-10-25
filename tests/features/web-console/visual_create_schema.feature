@@ -4,7 +4,7 @@ Feature: Web console visual schema and branch creation
   Scenario Outline: A schema and branch created from ordered controls are usable downstream
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """
@@ -49,7 +49,7 @@ Feature: Web console visual schema and branch creation
   Scenario Outline: Each declared wire format has a complete visual create form
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """
@@ -81,7 +81,7 @@ Feature: Web console visual schema and branch creation
   Scenario: Wire formats retain separate identities when their names coincide
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE WIRE JSON SCHEMA same_name MODE STRICT (payload string);
@@ -112,7 +112,7 @@ Feature: Web console visual schema and branch creation
   Scenario: A branch form sees a schema staged earlier in its attached transaction
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """
@@ -155,7 +155,7 @@ Feature: Web console visual schema and branch creation
   Scenario: Duplicate fields remain editable and invalid branch keys report the registry reason
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA byte_key (payload BYTES);
@@ -190,7 +190,7 @@ Feature: Web console visual schema and branch creation
   Scenario: Nested sensitive fields and bounded branches preserve their exact visual choices
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA tenant_key (tenant U32);
@@ -235,7 +235,7 @@ Feature: Web console visual schema and branch creation
   Scenario: Changing a branch draft's domain retains and invalidates its selected schema
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE DOMAIN {{domain}}_other;
@@ -267,7 +267,7 @@ Feature: Web console visual schema and branch creation
   Scenario: A selected branch schema remains usable after leader reconnection
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA reconnect_key (tenant U32);

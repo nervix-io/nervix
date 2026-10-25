@@ -448,7 +448,7 @@ mod tests {
     use nervix_models::{
         CreateStatement, Model, ModelKind, ModelName, NodeRef, RequestedResourceVersion, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{
         CodecDraft, CodecDraftError, CodecFormatDraft, CodecFormatKind, EncodingRuleDraft,
@@ -478,7 +478,7 @@ mod tests {
             draft.if_not_exists,
         ));
         let source = statement
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .assured("the completed codec renders");
         assert_eq!(
             parse_client_statement(&source).assured("canonical codec must parse"),

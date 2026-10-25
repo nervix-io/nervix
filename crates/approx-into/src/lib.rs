@@ -1,7 +1,7 @@
 //! Conversions between exact integers and floating point, for the pairs `From` and `TryFrom`
 //! cannot express.
 //!
-//! Nervix converts between integers and floating point at three boundaries: NSPL numeric builtins
+//! Nervix converts between integers and floating point at three boundaries: Plexus numeric builtins
 //! evaluate in `f64`, metric protocols carry every sample as `f64`, and layout arithmetic works in
 //! `f64` before it addresses a bucket, a rank, or a pixel. The standard library covers the pairs
 //! that are exact — `f64::from(u32)`, `f32::from(u16)` — and stops there, because the rest either

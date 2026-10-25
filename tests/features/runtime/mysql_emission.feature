@@ -5,12 +5,12 @@ Feature: MySQL emission
     And MySQL is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     And MySQL table "notifications_mysql_out_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -84,12 +84,12 @@ Feature: MySQL emission
     And MySQL is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MySQL table "notifications_mysql_conflict_{{test_id}}" with primary key exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -132,7 +132,7 @@ Feature: MySQL emission
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       SHOW CLUSTER STATUS;
       """
@@ -184,12 +184,12 @@ Feature: MySQL emission
     And MySQL is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MySQL table "batch_mysql_{{test_id}}" recording insert commands exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );

@@ -78,7 +78,7 @@ use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, DomainName, TransactionInspectionRequest, UserName,
 };
-use nervix_nspl::client_statement::{
+use nervix_plexus::client_statement::{
     ClientStatement, ParsedClientStatement, parse_client_statement_sources,
 };
 use nervix_primitives::{

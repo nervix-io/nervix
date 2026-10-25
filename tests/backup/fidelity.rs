@@ -312,7 +312,7 @@ impl ArchiveValues {
         for (path, section) in self.sections {
             let target_path = match section.content {
                 SectionContent::Record(_) => continue,
-                SectionContent::Nspl => SectionPath::domain_models(target),
+                SectionContent::Plexus => SectionPath::domain_models(target),
                 SectionContent::ResourceArchive
                 | SectionContent::WasmGuestBlob
                 | SectionContent::MaterializedColumns

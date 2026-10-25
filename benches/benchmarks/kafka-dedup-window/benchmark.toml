@@ -33,7 +33,7 @@ window_messages = 500
 
 [implementations.nervix]
 kind = "nervix"
-template = "nervix.nspl.upon"
+template = "nervix.plexus.upon"
 
 [implementations.vector]
 command = ["--config", "/etc/vector/vector.yaml"]

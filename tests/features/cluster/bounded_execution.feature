@@ -4,7 +4,7 @@ Feature: Bounded execution and transient memory
     Given a <cluster_size> node nervix cluster is started
     When bulk execution on node "<node_id>" is occupied
     Then node "<node_id>" observability path "/readyz" eventually responds with 200 and "ready"
-    And within "10s" these NSPL commands complete on node "<node_id>"
+    And within "10s" these Plexus commands complete on node "<node_id>"
       """
       CREATE DOMAIN bounded_execution;
       """
@@ -18,7 +18,7 @@ Feature: Bounded execution and transient memory
 
   Scenario Outline: Credentials a node cannot verify now are answered as unavailable
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE USER busy_user WITH PASSWORD 'busy-password';
       """
@@ -43,12 +43,12 @@ Feature: Bounded execution and transient memory
   Scenario Outline: An emitter keeps its rows while no node can take their transformed encoding
     Given Kafka is running
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "transformed_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
@@ -103,7 +103,7 @@ Feature: Bounded execution and transient memory
   @retained_unfolding_waits_for_extension_room
   Scenario Outline: A retained endpoint body waits for the extension workers when it drains
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA retained_event ( seq I64 );
@@ -123,7 +123,7 @@ Feature: Bounded execution and transient memory
       START;
       """
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       ALTER HTTP ENDPOINT INGESTOR retained_source SET DECODE USING delivery_codec;
       """
@@ -144,7 +144,7 @@ Feature: Bounded execution and transient memory
     Then within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "nervix_ingestor_quiesce_buffered_records: 3"
     When extension execution is saturated on every node
     And the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "status: running"
     And within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "nervix_ingestor_quiesce_buffered_records: 3"
     When extension execution is released on every node
@@ -165,7 +165,7 @@ Feature: Bounded execution and transient memory
   Scenario Outline: A polled payload waits for the extension workers when the node cannot unfold it
     Given the HTTP mock server is running
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA polled_event ( user_id I64 );
@@ -185,7 +185,7 @@ Feature: Bounded execution and transient memory
       CREATE SUBSCRIPTION polled_subscription TO polled_events;
       """
     When extension execution is saturated on every node
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -208,13 +208,13 @@ Feature: Bounded execution and transient memory
   Scenario Outline: An unacknowledged <source> payload waits for the extension workers when the node cannot unfold it
     Given unacknowledged source "<source>" is running
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     When the unacknowledged source "<source>" ingestor is created
     And extension execution is saturated on every node
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -245,13 +245,13 @@ Feature: Bounded execution and transient memory
   Scenario Outline: An unacknowledged <source> payload the node cannot unfold is refused and counted
     Given unacknowledged source "<source>" is running
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     When the unacknowledged source "<source>" ingestor is created
     And extension execution is saturated on every node
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """

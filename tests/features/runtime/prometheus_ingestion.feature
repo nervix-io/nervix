@@ -5,11 +5,11 @@ Feature: Prometheus ingestion
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the Prometheus endpoint is published under fixture DNS
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA sample (
         source STRING,
@@ -62,12 +62,12 @@ Feature: Prometheus ingestion
     Given Prometheus is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     When ingestor "prom_samples" enters fault mode
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA sample (
         source STRING,
@@ -126,11 +126,11 @@ Feature: Prometheus ingestion
     Given Prometheus is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 30s SKEW 100000h;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA sample (
         source STRING,
@@ -166,7 +166,7 @@ Feature: Prometheus ingestion
         ON GENERAL ERROR LOG;
         CREATE SUBSCRIPTION samples_subscription TO samples;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2026-04-07T00:00:00Z' TIME RATE 4.0;
       """

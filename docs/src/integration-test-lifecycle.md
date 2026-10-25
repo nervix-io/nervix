@@ -1,5 +1,7 @@
 # Integration Test Lifecycle
 
+*Plexus, the Nervix graph definition language.*
+
 ## Paced Interconnect Fixture
 
 The rate-limited follower catch-up scenario starts a TCP byte pacer before restarting a stopped
@@ -223,6 +225,12 @@ checks.
 
 The `@restarted_voter_observation` scenario runs in both selections, reaching whole-cluster teardown, reopening each node's store, and automatic scheduling after the first relayed voter heartbeat. Its watch-channel barrier and concurrent fault map are untracked; the diagnostic evidence covers blocking locks reached by restart and scheduling. The native metadata restore scenario also runs in both selections after its Kafka replication stream and acknowledgement boundaries are repaired, retaining complete primary and replica metadata comparisons and distributed placement checks.
 
+The WASM/Kafka restore outline checks Commands-memory headroom on the restored leader after its
+source becomes ready. The cluster fixture reads the public capacity and reserved-byte metrics,
+then polls within the step's single deadline until the class can admit the 176-byte source control
+call. It reports both last observations on timeout and allows the retirement reservation of a live
+Kafka consumer. This assertion preserves the source's existing readiness and error deadlines.
+
 The measured restore and backup steps sample each node's public bulk and restore-metadata
 executor gauges every 20 milliseconds while the ordinary CLI runs. They also record the harness
 process's jemalloc allocated and resident bytes. The executor measurements separate the fixed
@@ -419,10 +427,10 @@ The generator cadence assertion groups equal logical timestamps across concrete 
 checks increasing timestamps within each branch. It allows records from separate branch tasks to
 arrive in either order, as their delivery has no shared ordering contract.
 
-`tests-deps` builds the CLI, the NSPL formatter, the paced simulation's Rust driver and the shared
+`tests-deps` builds the CLI, the Plexus formatter, the paced simulation's Rust driver and the shared
 C binding its Python driver loads in the normal target directory. The full and focused
 client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
-and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
+and place the normal Plexus formatter there. The scenario runner selects the covered CLI through
 `NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV
 report as the CLI's binary unit tests and the server's public scenarios. The general
 `coverage-scenarios` and `coverage-scenarios-append` recipes provision the same instrumented CLI
@@ -777,7 +785,7 @@ seconds. The former 30-second catch-up bound held only on a lightly loaded runne
 
 The harness keeps these boundaries explicit.
 
-- **Ordinary commands.** The NSPL commands a scenario runs go through the production Rust client,
+- **Ordinary commands.** The Plexus commands a scenario runs go through the production Rust client,
   with its execution identity, redirects, and reconnects. This includes the transaction qualification
   graph's setup commands, which retain each execution reference if leadership changes while setup
   is applying. When a command document has server statements after a subscription, the harness
@@ -982,7 +990,7 @@ second module runs the operation, it is named after the owner.
 | Stopping the test dependencies after the run | `suite_watchdog.rs` | 2 minutes | The containers are left to the runner |
 | Dropping the runtime after the run | `suite_watchdog.rs`, run by `tests/scenarios.rs` | 60 seconds | Blocking tasks still running are abandoned |
 
-Everything else a scenario's body does, including its NSPL commands, broker and metric waits, and
+Everything else a scenario's body does, including its Plexus commands, broker and metric waits, and
 assertions, keeps whatever bound its step declares. Some of those steps check their bound only
 between requests, so a request that never returns outlasts it; the suite budget bounds them in every
 case. It is also the only bound on the time a scenario spends queued for its concurrency permits and
@@ -2304,7 +2312,7 @@ and their nested execution guards; a missing completion is reported as incomplet
 | Extra checks | 56m32s complete in 39656928785 | Retain 120 minutes, beyond 1.5 times that duration plus exports |
 | Ordinary tests | 22 minutes in 39649567371 | Retain 60 minutes |
 | Loom and qualification shards | 20m43s and at most 49m37s in 39649567371 | Retain 60 and 120 minutes |
-| Shuttle | Interrupted after 58m34s in 39649567371 | Retain 120 minutes; no completed duration is inferred from cancellation |
+| Shuttle | Run 40014913908 reached the 120-minute job guard after 389 check/mode executions completed; two exhaustive ACK explorations took about 64 minutes | 240-minute outer job guard covers preparation, full exploration, nondeterminism rechecks, replay and coverage export; model schedule counts and exploration bounds retain their declared values |
 | Turmoil and client conformance | 14m49s and 18m42s in 39649567371 | Retain 30 and 60 minutes, including the runners' own post-build bounds |
 | Book build | 24m30s in Docker Build 39534273321 | Retain 60 minutes |
 | Ordinary and diagnostic Chaos smoke | 15m15s and 15m22s in Docker Build 39531575177 | Retain the inventory-derived 45-minute step and 66-minute job; soak bounds remain derived from their declared timelines, teardown and CI reserves |
@@ -2676,7 +2684,7 @@ artifact carries `tests/logs`.
 | --- | --- | --- |
 | Cucumber report | Standard output | Every scenario and step result in order, the world of a failed step, the summary, and every failed scenario repeated at the end |
 | Harness transitions | Standard error | Node startup transitions and outcomes, the stops scenarios waited for, and a suite timeout's diagnostic and cleanup |
-| Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, cluster start requests and failures, the NSPL commands scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
+| Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, cluster start requests and failures, the Plexus commands scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
 | Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, wait time by reason, retries, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
 | Runner load | `runner-load-tests` and `runner-load-scenarios` artifacts | Five-second CPU utilization and steal-time samples and their mean and peak |
 | Node traces | `tests/logs/scenarios.log` | The trace output of every in-process node of the run |

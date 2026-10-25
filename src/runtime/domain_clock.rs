@@ -5,7 +5,7 @@
 //! - **Owns.** Installing committed mappings, observing progress, following installations for
 //!   client attachments, and adapting clock arithmetic to runtime lifecycle decisions.
 //! - **Depends on.** Vocabulary clock models and branch-local runtime state.
-//! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
+//! - **Must not know.** Plexus parsing, consensus decisions or clock-authority selection.
 
 #![cfg_attr(
     nervix_lint,

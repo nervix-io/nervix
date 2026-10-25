@@ -23,7 +23,7 @@ use tokio::{
 use super::*;
 
 /// The published example graph every scenario of the drivers loads.
-const EXAMPLE_GRAPH: &str = "examples/paced-simulation/paced_simulation.nspl";
+const EXAMPLE_GRAPH: &str = "examples/paced-simulation/paced_simulation.plexus";
 
 /// The Python driver, run from its published source.
 const PYTHON_DRIVER: &str = "examples/paced-simulation/python/paced_simulation.py";
@@ -621,11 +621,11 @@ async fn given_the_leader_node_is_configured_with_the_example_graph(world: &mut 
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
     // `USE` is client-local: a client selects the domain itself and sends the rest. The harness's
     // session runs in the scenario's active domain, so the graph must select that same domain.
-    let statements = nervix_nspl::client_statement::parse_client_statement_sources(&source)
+    let statements = nervix_plexus::client_statement::parse_client_statement_sources(&source)
         .unwrap_or_else(|error| panic!("the example graph does not parse: {error:?}"));
     let mut commands = String::new();
     for statement in &statements {
-        if let nervix_nspl::client_statement::ClientStatement::UseDomain(domain) =
+        if let nervix_plexus::client_statement::ClientStatement::UseDomain(domain) =
             &statement.statement
         {
             assert_eq!(
@@ -656,7 +656,7 @@ async fn given_the_leader_node_is_configured_with_the_example_graph(world: &mut 
     .unwrap_or_else(|error| panic!("the example graph client did not connect: {error}"));
     // One native client retains BEGIN/COMMIT state and each command's execution reference across
     // a leader change. A raw wire probe deliberately exposes OutcomeUnknown to its caller.
-    for command in nspl_statements(&commands) {
+    for command in plexus_statements(&commands) {
         append_cucumber_log_line(&format!("paced example graph command: {command}"));
         let outcome = client
             .execute(command)

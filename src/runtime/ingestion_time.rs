@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Selecting external or logical delivery time and enforcing its admission window.
 //! - **Depends on.** Installed domain clocks, vocabulary and Arrow row views.
-//! - **Must not know.** NSPL parsing, transport intake or progress notification history.
+//! - **Must not know.** Plexus parsing, transport intake or progress notification history.
 
 #![cfg_attr(
     nervix_lint,

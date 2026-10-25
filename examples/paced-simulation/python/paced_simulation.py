@@ -411,7 +411,7 @@ def parse_rfc3339(value):
 
 
 def duration_text(nanos):
-    """A duration the way NSPL writes it, in the largest unit that divides it."""
+    """A duration the way Plexus writes it, in the largest unit that divides it."""
     if nanos % 1_000_000_000 == 0:
         return f"{nanos // 1_000_000_000}s"
     if nanos % 1_000_000 == 0:

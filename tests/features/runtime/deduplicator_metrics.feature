@@ -3,11 +3,11 @@ Feature: Deduplicator metrics
   Scenario Outline: Batched deduplication preserves sparse output rows and processor traffic metrics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA transaction (
         tenant STRING,
@@ -60,7 +60,7 @@ Feature: Deduplicator metrics
       {"amount":10,"tenant":"acme","transaction_id":"txn-1"}
       {"amount":30,"tenant":"acme","transaction_id":"txn-2"}
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE DEDUPLICATOR dedup_metrics_node;
       """

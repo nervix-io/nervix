@@ -187,7 +187,7 @@ async function seedGraph(cliBinary, ports) {
   }
 
   await run(cliBinary, [...credentials, "--command", `CREATE UNPACED DOMAIN ${DOMAIN};`]);
-  const graph = await readFile(join(HERE, "quickstart.nspl"), "utf8");
+  const graph = await readFile(join(HERE, "quickstart.plexus"), "utf8");
   await run(cliBinary, [...credentials, "--domain", DOMAIN, "--command", graph]);
 }
 

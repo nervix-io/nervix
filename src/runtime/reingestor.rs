@@ -4,7 +4,7 @@
 //! - **Owns.** Reingestor input evaluation, branch construction and route-local buffering.
 //! - **Depends on.** Decision-layer reingestor plans, their bound programs, Arrow batches,
 //!   materialized state and bound clocks.
-//! - **Must not know.** NSPL parsing, placement selection or source transport lifecycle.
+//! - **Must not know.** Plexus parsing, placement selection or source transport lifecycle.
 
 #![cfg_attr(
     nervix_lint,

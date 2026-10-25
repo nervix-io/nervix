@@ -1,5 +1,7 @@
 #  Rust Client Library
 
+*Plexus, the Nervix graph definition language.*
+
 The workspace includes `nervix-client-core`, a native Rust client library built on the same session
 gRPC API used by `nervix-cli`. It is the reference implementation of the [Client Implementation
 Manual](./client-implementation-manual.md), and [Client Session
@@ -111,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .dropping()
         .with_batch_sample_rate("0.1")
         .with_where_clause(
-            nervix_nspl::parse_expression("input.tenant = \"acme\"")?
+            nervix_plexus::parse_expression("input.tenant = \"acme\"")?
         );
     client.subscribe(&request).await?;
 
@@ -174,7 +176,7 @@ For recovery from another process, `Client::prepare_backup_with_reference(backup
 creates a handle for `execute_prepared` with that durable reference. Select the original domain
 and retain the scope, resources and capture options; the destination file may change. The server
 enforces the semantic binding and retry validity. Each explicit wait attempt is bounded again by
-`backup_wait_timeout`, and does not renew archive retention. `TIMEOUT` in NSPL remains a separate
+`backup_wait_timeout`, and does not renew archive retention. `TIMEOUT` in Plexus remains a separate
 budget for each running domain's cut, so a cluster capture may validly exceed that duration.
 
 `execute` refuses `DESCRIBE BACKUP`, which `nervix-cli` serves from a local file without a server;

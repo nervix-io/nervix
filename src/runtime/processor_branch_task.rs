@@ -6,7 +6,7 @@
 //!   handoff, and eviction.
 //! - **Depends on.** Planned processor templates, concrete branch runtimes, runtime persistence,
 //!   and relay boundaries.
-//! - **Must not know.** NSPL text, control-plane transactions, consensus, or connector protocols.
+//! - **Must not know.** Plexus text, control-plane transactions, consensus, or connector protocols.
 
 #![cfg_attr(
     nervix_lint,

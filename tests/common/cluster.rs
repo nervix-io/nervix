@@ -48,7 +48,7 @@ use nervix_interconnect::{
     Transport, TransportClock, TransportIdentity, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, NodeEndpoint, TrustRootFingerprint};
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
 use nervix_primitives::{
     runtime::Handle,
     sync::{
@@ -3081,6 +3081,53 @@ impl Cluster {
             message.push_str(&format!("\nlast error: {err}"));
         }
         Err(io::Error::other(message))
+    }
+
+    /// A live connector may retain its retirement envelope. Check room for a control operation
+    /// rather than requiring an otherwise idle Commands class to contain no live allocations.
+    pub(crate) async fn wait_for_commands_memory_headroom(
+        &self,
+        node_id: &str,
+        bytes: u64,
+        wait: Duration,
+    ) -> io::Result<()> {
+        let labels = ["class=\"commands\"".to_string()];
+        let mut last_capacity = None;
+        let mut last_reserved = None;
+        let observed = timeout(wait, async {
+            let capacity = self
+                .read_observability_metric(
+                    node_id,
+                    "nervix_execution_memory_capacity_bytes",
+                    &labels,
+                )
+                .await?;
+            last_capacity = Some(capacity);
+            let requested: f64 = bytes.approx_into();
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let reserved = self
+                    .read_observability_metric(
+                        node_id,
+                        "nervix_execution_memory_reserved_bytes",
+                        &labels,
+                    )
+                    .await?;
+                last_reserved = Some(reserved);
+                if reserved + requested <= capacity {
+                    return Ok(());
+                }
+                sleep(POLL_INTERVAL).await;
+            }
+        })
+        .await;
+        match observed {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::other(format!(
+                "node '{node_id}' did not leave {bytes} Commands bytes available within {wait:?}; \
+                 last capacity={last_capacity:?}, reserved={last_reserved:?}"
+            ))),
+        }
     }
 
     pub(crate) async fn wait_for_observability_metric_value(

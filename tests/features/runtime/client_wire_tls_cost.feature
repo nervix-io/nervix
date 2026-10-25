@@ -4,7 +4,7 @@ Feature: Client wire command transport cost
     Given client grpc transport is configured with mode "<mode>"
     And a 1 node nervix cluster is started
     And the active domain is "wire_tls"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN wire_tls;
       """

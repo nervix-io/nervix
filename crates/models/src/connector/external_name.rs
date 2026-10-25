@@ -8,12 +8,12 @@
 //!   form, and the typed reasons a text is not a name of one kind.
 //! - **Depends on.** Nothing in Nervix.
 //! - **Must not know.** Which connector or entity a name belongs to, how a connector sends it, or
-//!   how NSPL quotes it. Each connector's module declares its names with `external_names!` and
+//!   how Plexus quotes it. Each connector's module declares its names with `external_names!` and
 //!   writes the rule each one follows.
 //!
 //! An external name is not a Nervix name. A Nervix name is an identifier Nervix normalises to lower
 //! case; an external name is whatever the external system calls the entity, case and punctuation
-//! included, so NSPL writes it as a string literal and a connector sends exactly that text.
+//! included, so Plexus writes it as a string literal and a connector sends exactly that text.
 //!
 //! Decoding is construction too: the serde and archived forms hold the text as written, and their
 //! decoders refuse text the rule refuses rather than producing a name no rule ever checked.
@@ -75,7 +75,7 @@ pub enum ExternalNameError {
 }
 
 /// The characters most rules refuse: control characters, which no external system expects in a
-/// name and no NSPL string literal shows legibly.
+/// name and no Plexus string literal shows legibly.
 pub(crate) fn refuse_control_characters(text: &str) -> Result<(), ExternalNameError> {
     match text.chars().find(|ch| ch.is_control()) {
         Some(ch) => Err(ExternalNameError::InvalidChar { ch }),

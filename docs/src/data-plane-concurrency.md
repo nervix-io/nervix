@@ -1,5 +1,7 @@
 # Data-Plane Concurrency
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix keeps the paths that carry records, batches, remote relay frames, and acknowledgements free
 from shared coordination that is unrelated to the record being processed. This is the
 contentionless data-plane rule. It applies after a runtime task has started and its graph, routing,
@@ -2322,7 +2324,7 @@ both random and PCT schedules, and the failing schedule replays.
 Shuttle explores sequentially consistent schedules. It cannot prove that a chosen `Relaxed`,
 `Acquire`, or `Release` ordering is sufficient on weak-memory hardware; a claim that depends on one
 is a Loom model, described under [Memory-ordering models](#memory-ordering-models). Cucumber
-remains the public behavior test: when a scheduling defect affects an NSPL operation, runtime
+remains the public behavior test: when a scheduling defect affects a Plexus operation, runtime
 output, or process outcome, its Shuttle regression is paired with a scenario through that
 interface. A scenario cannot exhaust the interleavings of an in-process protocol, and neither a
 Shuttle check nor a Loom model can verify the whole cluster, socket, disk, or browser path.
@@ -2392,6 +2394,17 @@ fully qualified test names contain colons, which the artifact uploader rejects a
 command recipes in [Developing Nervix](./developing-nervix.md).
 
 ### Protocols and their checks
+
+The consensus log chunk owner releases its iterator allocation and Commands reservation in the
+same transition that hands out its final entry. Its Shuttle check races that transition with
+another reader's reservation and leaves the first consumer parked: the other reader and a small
+source control reservation must finish without another poll of the exhausted chunk. This is a
+control-plane memory-lifetime check, with no memory-ordering claim. The real-storage owner tests
+also check that a partially consumed chunk retains its charge, and the public WASM/Kafka restore
+outline checks source readiness and Commands-memory headroom after restoring onto a fresh cluster,
+allowing the retirement reservations that live Kafka consumers retain.
+The semaphore waits are asynchronous and outside Deloxide's tracked-lock detection; the diagnostic
+restore workloads exercise the surrounding storage and restore lifecycle.
 
 The checks below hold the scheduler-visible parts of each protocol to their invariants. Test
 names are given relative to their owning module; the `shuttle` feature selects the modeled build.

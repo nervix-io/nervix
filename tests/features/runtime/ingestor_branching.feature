@@ -1,7 +1,7 @@
 Feature: Ingestor branching
   Scenario Outline: UNBRANCHED ingestors round-trip without synthetic branch schema
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
@@ -37,7 +37,7 @@ Feature: Ingestor branching
 
   Scenario Outline: Message is reserved and cannot be used as a relay name
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "expected relay_name"
+    When these Plexus commands fail with "expected relay_name"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
@@ -52,11 +52,11 @@ Feature: Ingestor branching
   Scenario Outline: A branch key that fails for one row sends only that row to its route's error relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         id STRING,

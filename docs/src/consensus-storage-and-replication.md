@@ -1,5 +1,7 @@
 # Consensus Storage And Replication
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix uses Raft to replicate the control-plane state described in the
 [Control Plane](./control-plane.md). Each node keeps its own durable log, applied state, votes,
 membership, and snapshots. This chapter defines when those records are durable, how a leader paces
@@ -145,7 +147,7 @@ metrics.
 
 ### Coordinated WASM Reset Publications
 
-An NSPL reset first records a typed ordered transaction step with its captured planning inputs,
+A Plexus reset first records a typed ordered transaction step with its captured planning inputs,
 statement identity, and reset scope. That record changes no processor Model or schedule by itself;
 the coordinator uses its retained execution reference for the `Publishing` and `Ready` mutations.
 If the leader stops after recording the step, transaction recovery resumes that same reference.
@@ -296,6 +298,11 @@ Committed-range application, startup replay, and leader-bounded replication stre
 successive admitted chunks. A chunk targets 1 MiB or 1,024 entries, whichever is reached first, and
 one oversized first entry travels alone. The reader releases the ordered storage worker between
 chunks and retains the chunk's memory charge until its entries have been handed to the consumer.
+Handing out the final entry releases the exhausted iterator allocation and its charge before that
+poll returns. A consumer that parks with its final entry therefore holds no empty chunk that could
+keep another reader or a source control call out of the Commands class. The reader retains an
+explicit exhausted boundary, without the allocation, so a subsequent chunk still yields before
+requesting the ordered storage worker.
 
 There is no range-size failure at 2 MiB or at any other aggregate backlog size. A committed range
 and a startup backlog may span any number of chunks. The state-machine worker applies the entries

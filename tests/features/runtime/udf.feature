@@ -1,12 +1,12 @@
 Feature: Roto user-defined functions
-  Scenario Outline: Roto UDFs compose with NSPL expressions over Arrow batches
+  Scenario Outline: Roto UDFs compose with Plexus expressions over Arrow batches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UDF add_one
         WITH ROTO_0_13
@@ -80,11 +80,11 @@ Feature: Roto user-defined functions
   Scenario Outline: A Roto UDF uses the per-element escape hatch for Luhn validation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UDF luhn_valid
         WITH ROTO_0_13
@@ -197,12 +197,12 @@ Feature: Roto user-defined functions
 
   Scenario Outline: Non-volatile UDFs cannot access non-deterministic functions
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands fail with "now() requires VOLATILE"
+    When these Plexus commands fail with "now() requires VOLATILE"
       """
       CREATE UDF invalid_clock
         WITH ROTO_0_13
@@ -223,12 +223,12 @@ Feature: Roto user-defined functions
   Scenario Outline: A failing in-source Roto test rejects UDF creation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands fail with "Roto test block failed"
+    When these Plexus commands fail with "Roto test block failed"
       """
       CREATE UDF broken_increment
         WITH ROTO_0_13
@@ -252,7 +252,7 @@ Feature: Roto user-defined functions
           }
         $roto$;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW UDFS;
       """

@@ -1087,7 +1087,7 @@ struct ReportedField {
     bool nullable;
     bool sensitive;
 
-    // The type in NSPL's spelling, with nested fixed-size lists as dimensions.
+    // The type in Plexus's spelling, with nested fixed-size lists as dimensions.
     static std::string type_text(const std::vector<Level> &levels, size_t from) {
         if (levels[from].type == NX_TYPE_LIST) {
             return "VEC<" + type_text(levels, from + 1) + ">";

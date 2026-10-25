@@ -604,7 +604,7 @@ pub(in crate::registry) fn wasm_processor(name: &str, from_relay: &str, into_rel
         output_routes: {
             let mut outputs = ProcessorOutputs::single(named(into_relay));
             outputs.routes[0].construction =
-                nervix_nspl::parse_route_construction("SET value = value")
+                nervix_plexus::parse_route_construction("SET value = value")
                     .expect("generated route construction must parse");
             outputs
         },
@@ -649,7 +649,7 @@ pub(in crate::registry) fn unbranched_correlator(
             max_batch_size: "1MiB".to_string(),
         });
     output_routes.routes[0].construction =
-        nervix_nspl::parse_route_construction("SET value = left.value")
+        nervix_plexus::parse_route_construction("SET value = left.value")
             .expect("route construction must parse");
     Model::Correlator(CreateCorrelator {
         name: named(name),
@@ -657,7 +657,7 @@ pub(in crate::registry) fn unbranched_correlator(
         right: ProcessorInputs::single(named(right_relay)),
         output_routes,
         branched_by: BranchSelection::unbranched(),
-        correlate_where: nervix_nspl::parse_expression("left.value = right.value")
+        correlate_where: nervix_plexus::parse_expression("left.value = right.value")
             .expect("correlator expression must parse"),
         match_policy: CorrelatorMatchPolicy::Earliest,
         max_time: "5s".to_string(),
@@ -679,7 +679,7 @@ pub(in crate::registry) fn window_processor(
 ) -> Model {
     let mut output_routes =
         ProcessorOutputs::single(RelayName::parse(into_relay).expect("valid identifier"));
-    output_routes.routes[0].construction = nervix_nspl::parse_route_construction(construction)
+    output_routes.routes[0].construction = nervix_plexus::parse_route_construction(construction)
         .expect("window route construction must parse");
     Model::WindowProcessor(CreateWindowProcessor {
         name: WindowProcessorName::parse(name).expect("valid identifier"),
@@ -748,7 +748,7 @@ pub(in crate::registry) fn deduplicator(
         }),
         branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
         deduplicate_on: vec![
-            nervix_nspl::parse_expression(&field.replace(&format!("{from_relay}."), "input."))
+            nervix_plexus::parse_expression(&field.replace(&format!("{from_relay}."), "input."))
                 .expect("deduplicate expression must parse"),
         ],
         max_time: max_time.to_string(),
@@ -920,34 +920,36 @@ pub(in crate::registry) fn example_graph_models(
     name: &str,
     source: &str,
 ) -> (DomainName, Vec<nervix_models::Model>) {
-    let statements = nervix_nspl::client_statement::parse_client_statement_sources(source)
+    let statements = nervix_plexus::client_statement::parse_client_statement_sources(source)
         .unwrap_or_else(|error| panic!("{name} example should parse: {error:?}"));
     let mut domain = DomainName::parse("default").expect("valid domain");
     let mut models = Vec::new();
 
     for parsed in statements {
         match parsed.statement {
-            nervix_nspl::client_statement::ClientStatement::UseDomain(next) => {
+            nervix_plexus::client_statement::ClientStatement::UseDomain(next) => {
                 domain = next;
             }
-            nervix_nspl::client_statement::ClientStatement::UploadResource(_)
-            | nervix_nspl::client_statement::ClientStatement::BeginTransaction
-            | nervix_nspl::client_statement::ClientStatement::CommitTransaction
-            | nervix_nspl::client_statement::ClientStatement::RevertTransaction
-            | nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
-            | nervix_nspl::client_statement::ClientStatement::DeleteSubscription(_) => {}
-            nervix_nspl::client_statement::ClientStatement::Server(statement) => match statement {
-                nervix_models::Statement::CreateDomain(create) => {
-                    domain = create.body.id;
+            nervix_plexus::client_statement::ClientStatement::UploadResource(_)
+            | nervix_plexus::client_statement::ClientStatement::BeginTransaction
+            | nervix_plexus::client_statement::ClientStatement::CommitTransaction
+            | nervix_plexus::client_statement::ClientStatement::RevertTransaction
+            | nervix_plexus::client_statement::ClientStatement::CreateSubscription(_)
+            | nervix_plexus::client_statement::ClientStatement::DeleteSubscription(_) => {}
+            nervix_plexus::client_statement::ClientStatement::Server(statement) => {
+                match statement {
+                    nervix_models::Statement::CreateDomain(create) => {
+                        domain = create.body.id;
+                    }
+                    nervix_models::Statement::Create(create) => {
+                        models.push(pinned_test_model(*create.body));
+                    }
+                    nervix_models::Statement::CreateResource(_)
+                    | nervix_models::Statement::UploadResource(_)
+                    | nervix_models::Statement::StartDomain(_) => {}
+                    other => panic!("unexpected {name} example statement: {other:?}"),
                 }
-                nervix_models::Statement::Create(create) => {
-                    models.push(pinned_test_model(*create.body));
-                }
-                nervix_models::Statement::CreateResource(_)
-                | nervix_models::Statement::UploadResource(_)
-                | nervix_models::Statement::StartDomain(_) => {}
-                other => panic!("unexpected {name} example statement: {other:?}"),
-            },
+            }
             other => panic!("unexpected {name} example client statement: {other:?}"),
         }
     }

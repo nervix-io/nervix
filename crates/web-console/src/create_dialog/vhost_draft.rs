@@ -113,7 +113,7 @@ mod tests {
     use nervix_models::{
         CreateStatement, Model, RequestedResourceVersion, ResourceName, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{VhostDraft, VhostDraftError};
 
@@ -142,7 +142,7 @@ mod tests {
         let vhost = draft.build().assured("the TLS pin is complete");
         let statement =
             Statement::Create(CreateStatement::new(Box::new(Model::Vhost(vhost)), false));
-        let source = statement.to_canonical_nspl().assured("VHOST renders");
+        let source = statement.to_canonical_plexus().assured("VHOST renders");
         assert!(source.contains("api.example.com, ws.example.com"));
         assert!(source.contains("WITH TLS tls_bundle VERSION 3"));
         assert_eq!(

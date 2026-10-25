@@ -1,5 +1,7 @@
 # Domains And Time
 
+*Plexus, the Nervix graph definition language.*
+
 Every runtime graph in Nervix runs inside a domain.
 
 This chapter describes the public language and runtime behavior. See
@@ -15,7 +17,7 @@ Nervix currently supports:
 
 Domain creation is never transaction content. A transaction is bound to one already-existing
 domain, so `CREATE DOMAIN` runs on its own before `BEGIN`; queueing it is rejected. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
+[Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions).
 
 ## Paced Domains
 
@@ -23,7 +25,7 @@ Paced domains maintain a domain clock.
 
 `PERIOD` must be positive and no larger than `18446744073709551615ns`. `SKEW` may be zero but must
 fit in that same 64-bit nanosecond duration range. Invalid durations are rejected before the domain
-is stored. Duration text anywhere in NSPL whose spans could add up to 18446744073709551615 seconds,
+is stored. Duration text anywhere in Plexus whose spans could add up to 18446744073709551615 seconds,
 however they are written, is rejected: a duration literal when the statement is parsed, and a
 duration string argument, such as the delay of `PERCENTILE_LINEAR_HISTOGRAM`, when the statement is
 validated.
@@ -81,7 +83,7 @@ producer-to-relay edge and a relay-to-consumer edge each receive the default ind
 clause is optional on every domain-creation form, and omission means `NEUTRAL` so ordinary
 scheduler heuristics remain active:
 
-```nspl
+```plexus
 CREATE PACED DOMAIN production
   WITH PERIOD 1s SKEW 100ms
   PLACEMENT REQUIRE COLOCATION;
@@ -92,7 +94,7 @@ CREATE UNPACED DOMAIN archive
 
 Change the default for the session's active domain with the nameless domain alteration:
 
-```nspl
+```plexus
 ALTER DOMAIN SET PLACEMENT PREFER COLOCATION;
 ```
 
@@ -237,7 +239,7 @@ maximum batch size releases a buffer that has reached it as soon as no retry is 
 
 A client session can follow the active domain's clock instead of inferring it from the domain list:
 
-```nspl
+```plexus
 ATTACH DOMAIN CLOCK;
 DETACH DOMAIN CLOCK;
 ```
@@ -293,7 +295,7 @@ physical monotonic wait.
 Nervix derives a quiesce level from the complete validated model diff. `ALTER SCHEMA`,
 `ALTER WIRE ... SCHEMA`, relay schema changes, and relay branching changes use an internal paused
 lifecycle state when their domain is running. Dynamic changes such as relay capacity do not pause
-the domain. There is no NSPL `PAUSE` or `RESUME` statement.
+the domain. There is no Plexus `PAUSE` or `RESUME` statement.
 
 Before changing the live graph, the leader validates the complete candidate graph without writing
 it while holding the domain's exclusive ALTER lock. For an entity-pause alteration, Nervix gates

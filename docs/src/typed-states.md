@@ -1,5 +1,7 @@
 # Typed States And Validation Boundaries
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
 stand for a missing value or a different state. The owner of each state decides when a value is
@@ -187,6 +189,12 @@ the adapter returns an empty answer stream and opens no transport. `Some` carrie
 append request, retained exactly once while setup runs. A membership, admission or transport error
 after obtaining that request remains a failure naming its peer; it is not inferred from ended
 input. The caller's retry and cancellation gate runs before this distinction is resolved.
+
+**Consensus log chunks.** An unread chunk, a buffered chunk owning decoded entries and their
+reservation, and an exhausted chunk boundary are distinct states. Taking the last entry replaces
+the buffered state with the exhausted boundary and drops both its iterator allocation and charge
+before returning. The exhausted state carries the need to yield before the next read without
+retaining memory on behalf of an empty chunk. A consumer need not poll again to release that memory.
 
 **Runtime checkpoint exchange.** A state synchronization answer uses `None` only when the
 requester already holds the owner's current revision. `Some` carries a typed revision, byte length
@@ -638,7 +646,7 @@ past its step limit, a minimum above its maximum, or a size that is not a whole 
 such data fails to decode with a typed error and is never normalized into a valid value. A timestamp
 is its signed Unix nanoseconds, and every conversion into one goes through them, so two spellings of
 one instant, such as an offset and its UTC equivalent, or a leap second and the second after it, are
-one timestamp. Every duration Nervix reads from text, whether an NSPL literal, a domain-clock period
+one timestamp. Every duration Nervix reads from text, whether a Plexus literal, a domain-clock period
 or skew, a Model's timeout, interval, retention or TTL, a window aggregate's delay, or a node's
 command-line option, is read by one guarded parser in the vocabulary. It refuses text whose spans
 could add up to the most seconds a duration holds with a typed error; the grammar library it wraps

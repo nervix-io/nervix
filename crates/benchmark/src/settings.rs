@@ -289,7 +289,7 @@ mod tests {
             implementations: BTreeMap::from([(
                 "nervix".to_string(),
                 Implementation::Nervix(NervixImplementation {
-                    template: "graph.nspl".into(),
+                    template: "graph.plexus".into(),
                     nodes: 1,
                     after_start: None,
                 }),

@@ -7,7 +7,7 @@
 //! Nervix reads is far shorter, so text is refused as too long, before `humantime` reads it, whenever
 //! an upper bound on what it names reaches that second.
 //!
-//! [`parse_duration_text`] is the only reader of duration text in Nervix: NSPL literals, Model
+//! [`parse_duration_text`] is the only reader of duration text in Nervix: Plexus literals, Model
 //! settings, node command-line values and harness inputs all go through it. Clippy rejects a direct
 //! call to `humantime::parse_duration` and every use of `humantime::Duration`, whose `FromStr`
 //! reads through the same unguarded parser.

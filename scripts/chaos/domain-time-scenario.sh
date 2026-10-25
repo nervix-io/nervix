@@ -16,7 +16,7 @@ domain_time_entities=(
     'EMITTER chaos_paced_emitter'
 )
 # The paced domain runs at four times physical time with a one-second period; its windows are
-# eight logical seconds wide. These match fixtures/paced.nspl and its START statement.
+# eight logical seconds wide. These match fixtures/paced.plexus and its START statement.
 domain_time_rate=4
 domain_time_period_ms=1000
 domain_time_width_ms=8000

@@ -1,5 +1,7 @@
 # Optional emitter batching
 
+*Plexus, the Nervix graph definition language.*
+
 Status: specified, with implementation progressing by task. This document defines the complete
 contract for combining several records into one externally observable batch, for every emitter kind
 and every wire format.
@@ -71,13 +73,13 @@ exists, so it fails to load with an error naming it and is recreated rather than
 
 ### Grammar
 
-```nspl,ignore
+```plexus,ignore
 BATCH MAX MESSAGES <n> MAX SIZE <bytes>
 ```
 
 The clause sits between the complete `TO` emitter clause and the `FLUSH` policy:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] [ATTACHED | DETACHED] EMITTER <name>
   FROM <relay> [WHERE <expr>] [, ...] [COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]]
   [WITH MATERIALIZED STATE ...]
@@ -126,7 +128,7 @@ A statement is rejected, naming the emitter and the offending value, when:
 
 `ALTER <CONNECTOR> <ENTITY> EMITTER` gains two operations:
 
-```nspl,ignore
+```plexus,ignore
 ALTER <CONNECTOR> <ENTITY> EMITTER <emitter>
     SET BATCH MAX MESSAGES <n> MAX SIZE <bytes>
   | DROP BATCH
@@ -330,7 +332,7 @@ therefore names it.
 
 ### Protobuf batch messages
 
-```nspl,ignore
+```plexus,ignore
 CREATE CODEC <name>
   FROM PROTOBUF
   USING RESOURCE <resource> VERSION <n> | LATEST
@@ -371,7 +373,7 @@ batches them into the same message.
 
 A JAQ-backed codec — JAQ-native or protobuf — may declare a third transformation:
 
-```nspl,ignore
+```plexus,ignore
 WITH JAQ TRANSFORMATIONS
   [ON INGESTION '<program>']
   [ON EMITTING '<program>']
@@ -399,7 +401,7 @@ The default container is what the format's row of the [container table](#contain
 names. A batch transformation replaces it, and both an array mapping and an envelope are ordinary
 uses:
 
-```nspl,ignore
+```plexus,ignore
 ON EMITTING BATCH '{schema_version: 2, records: .}'
 ON EMITTING BATCH 'map({id: .user_id, at: .created_at})'
 ON EMITTING BATCH '{count: length, records: .}'
@@ -640,7 +642,7 @@ or `trace` detail and carry no payload values.
 
 ### A broker emitter, with and without the clause
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS KAFKA TOPIC EMITTER kafka_notifications
   FROM notifications
   TO kafka_main TOPIC 'notifications_out'
@@ -663,7 +665,7 @@ Three records in one flush produce three Kafka records:
 
 Adding one clause produces one Kafka record:
 
-```nspl,ignore
+```plexus,ignore
   BATCH MAX MESSAGES 500 MAX SIZE 1MiB
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
 ```
@@ -677,7 +679,7 @@ batch shape does not depend on how many records were available.
 
 ### An envelope instead of an array
 
-```nspl,ignore
+```plexus,ignore
 CREATE IF NOT EXISTS CODEC notification_envelope
   FROM JSON
   TO SCHEMA notification
@@ -711,7 +713,7 @@ message Notification { uint32 user_id = 1; string action = 2; }
 message NotificationBatch { repeated Notification notifications = 1; }
 ```
 
-```nspl,ignore
+```plexus,ignore
 CREATE CODEC notification_proto
   FROM PROTOBUF
   USING RESOURCE proto_bundle VERSION 1
@@ -752,7 +754,7 @@ the next one.
 
 ### Sentry
 
-```nspl,ignore
+```plexus,ignore
 CREATE CODEC sentry_batch_codec
   FROM JSON
   TO SCHEMA error_event
@@ -768,7 +770,7 @@ per record declares no batching clause, which is the default.
 
 ### A database emitter
 
-```nspl,ignore
+```plexus,ignore
 CREATE POSTGRES TABLE EMITTER to_pg FROM notifications
   TO postgres_client TABLE 'my_table'
   MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -783,7 +785,7 @@ receives the same rows it receives today; no column holds an array and no schema
 
 ### OTEL and Iceberg
 
-```nspl,ignore
+```plexus,ignore
   BATCH MAX MESSAGES 1000 MAX SIZE 3MiB
 ```
 
@@ -791,7 +793,7 @@ on an OTEL emitter bounds each export request at a thousand data points and thre
 megabytes, below a receiver's four-megabyte default, instead of exporting whatever one buffered
 batch happened to hold.
 
-```nspl,ignore
+```plexus,ignore
   BATCH MAX MESSAGES 250000 MAX SIZE 128MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ...
@@ -811,7 +813,7 @@ existing emission scenarios already provision.
 
 | Area | Must be demonstrated | Observed through |
 | --- | --- | --- |
-| NSPL, Models and execution plans | The clause parses, completes, renders in `SHOW CREATE` and `DESCRIBE`, validates its limits, is required for the four database emitters, and reaches the runtime as a typed plan; `WITH MAX BATCH` no longer exists | NSPL statements and `DESCRIBE EMITTER` |
+| Plexus, Models and execution plans | The clause parses, completes, renders in `SHOW CREATE` and `DESCRIBE`, validates its limits, is required for the four database emitters, and reaches the runtime as a typed plan; `WITH MAX BATCH` no longer exists | Plexus statements and `DESCRIBE EMITTER` |
 | Wire-size upper bounds and bounded encoders | Encoding stops at `MAX SIZE`, the measured size is exact for every format, subdivision halves and re-measures without assuming monotonicity, and a singleton is rejected only after a bounded encoding of it alone | Consumed payload bytes and `ON MESSAGE ERROR` records |
 | Batch-aware jaq and format-native containers | Every container in the [container table](#containers-by-format), the protobuf batch message with and without a transformation, and the zero-output, multiple-output, evaluation-failure and unwritable-value failures | Kafka, and a protobuf consumer for the batch message |
 | Bounded payload assembly | Packing order across Arrow carriers, compatibility on source relay, exact branch, key, headers and ordering group, singleton shape, nothing for an empty carrier, partial batches, and no batch cadence of its own | Kafka and SQS, with interleaved records from at least two branches and source relays |
