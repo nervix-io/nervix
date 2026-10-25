@@ -133,6 +133,12 @@ Every source body declares its delivery mode with `MODE`, polled and listener so
 
 Each entity accepts only the modes it can honor, and completion offers only those:
 
+`CREATE` and `ALTER` validate the complete delivery policy before accepting it. Durations must be
+readable and fit the schedulable deadline bound of 9,223,372,036,854,775,807 nanoseconds. ACK timeouts
+and both retry durations must be positive, and `RETRY POLICY MAX` must be at least `BACKOFF`.
+`BATCH TIMEOUT 0s` is allowed and gathers available messages without waiting. A refused alteration
+keeps the ingestor's accepted policy.
+
 | Entity | `MODE` forms |
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC` | `NO ACK`, `ACK SEQUENTIAL ...`, `ACK PARALLEL ...` |

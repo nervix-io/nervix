@@ -39,8 +39,8 @@ use nervix_vm::{
 
 use crate::registry::{
     error::{
-        NervixOwnedConfigKey, OtelMappingIssue, OtelMappingSection, OtelMappingSignal,
-        RegistryError,
+        ConnectorDeclarationIssue, ConnectorDurationSetting, NervixOwnedConfigKey,
+        OtelMappingIssue, OtelMappingSection, OtelMappingSignal, RegistryError,
     },
     validation::{
         branching::relay_declared_branch,
@@ -121,6 +121,88 @@ pub(in crate::registry) fn validate_ingestor_source(
     if let IngestorInput::Client(source) = &ingestor.input {
         validate_client_ingest_mode(&source.mode, invalid)?;
     }
+    if let Some(acknowledgement) = ingestor.input.transport_acknowledgement() {
+        validate_transport_delivery(domain, identifier, acknowledgement)?;
+    }
+    Ok(())
+}
+
+impl ConnectorDurationSetting {
+    /// Checks a duration without reading a clock: the shared deadline bound fits every
+    /// monotonic timer Nervix schedules, including the first batch's gather deadline.
+    fn parse(
+        self,
+        value: &str,
+        domain: &DomainName,
+        node: &nervix_models::NodeRef,
+    ) -> error_stack::Result<std::time::Duration, RegistryError> {
+        let invalid = |issue| RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: node.clone(),
+            issue,
+        };
+        let duration = parse_duration_text(value).change_context_lazy(|| {
+            invalid(ConnectorDeclarationIssue::InvalidDuration {
+                setting: self,
+                value: value.to_string(),
+            })
+        })?;
+        if duration.is_zero() && self != Self::BatchTimeout {
+            return Err(Report::new(invalid(
+                ConnectorDeclarationIssue::ZeroDuration { setting: self },
+            )));
+        }
+        if duration > ClientDeadline::LONGEST {
+            return Err(Report::new(invalid(
+                ConnectorDeclarationIssue::UnschedulableDuration { setting: self },
+            )));
+        }
+        Ok(duration)
+    }
+}
+
+/// The acknowledgement view is shared by every transport entity, so no connector-specific
+/// mode table or duration parser is needed at the registry boundary.
+fn validate_transport_delivery(
+    domain: &DomainName,
+    identifier: &ModelName,
+    acknowledgement: nervix_models::IngestAcknowledgement<'_>,
+) -> error_stack::Result<(), RegistryError> {
+    use nervix_models::IngestAcknowledgement;
+
+    let node = nervix_models::NodeRef::new(nervix_models::ModelKind::Ingestor, identifier.clone());
+
+    let retry = match acknowledgement {
+        IngestAcknowledgement::Unacknowledged => return Ok(()),
+        IngestAcknowledgement::Request { timeout, .. } => {
+            ConnectorDurationSetting::AckTimeout.parse(timeout, domain, &node)?;
+            return Ok(());
+        }
+        IngestAcknowledgement::Sequential { timeout, retry } => {
+            ConnectorDurationSetting::AckTimeout.parse(timeout, domain, &node)?;
+            retry
+        }
+        IngestAcknowledgement::Parallel {
+            batch_timeout,
+            timeout,
+            retry,
+            ..
+        } => {
+            ConnectorDurationSetting::BatchTimeout.parse(batch_timeout, domain, &node)?;
+            ConnectorDurationSetting::AckTimeout.parse(timeout, domain, &node)?;
+            retry
+        }
+    };
+    let backoff = ConnectorDurationSetting::RetryBackoff.parse(&retry.backoff, domain, &node)?;
+    let maximum =
+        ConnectorDurationSetting::RetryMaximum.parse(&retry.max_backoff, domain, &node)?;
+    if maximum < backoff {
+        return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: node.clone(),
+            issue: ConnectorDeclarationIssue::InvertedRetry,
+        }));
+    }
     Ok(())
 }
 
@@ -170,49 +252,19 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         })
     };
 
-    match (emitter.connector.as_ref(), &emitter.body) {
-        (EmitterEntity::Client(_), nervix_models::EmitterBody::Client) => {}
-        (EmitterEntity::Client(_), _) => {
-            return Err(invalid(format!(
-                "{} emitter requires native Arrow output",
-                emitter.connector.kind()
-            )));
-        }
-        (_, nervix_models::EmitterBody::Client) => {
-            return Err(invalid(
-                "native CLIENT output requires a CLIENT CONSUMER emitter".to_string(),
-            ));
-        }
-        (
-            EmitterEntity::Http(_),
-            nervix_models::EmitterBody::Codec { .. } | nervix_models::EmitterBody::WithoutBody,
-        ) => {}
-        (EmitterEntity::Http(_), nervix_models::EmitterBody::Values) => {
-            return Err(invalid(format!(
-                "{} emitter requires ENCODE USING or WITHOUT BODY",
-                emitter.connector.kind()
-            )));
-        }
-        (_, nervix_models::EmitterBody::Codec { .. }) if emitter.connector.requires_codec() => {}
-        (_, nervix_models::EmitterBody::Values) if !emitter.connector.requires_codec() => {}
-        (_, nervix_models::EmitterBody::WithoutBody) => {
-            return Err(invalid(format!(
-                "WITHOUT BODY is only supported by {} emitters",
-                <nervix_models::HttpRequestEmitter as nervix_models::EmitterEntityModel>::KIND
-            )));
-        }
-        (_, nervix_models::EmitterBody::Values) => {
-            return Err(invalid(format!(
-                "{} emitter requires ENCODE USING",
-                emitter.connector.transport_label()
-            )));
-        }
-        (_, nervix_models::EmitterBody::Codec { .. }) => {
-            return Err(invalid(format!(
-                "{} emitter does not support ENCODE USING",
-                emitter.connector.transport_label()
-            )));
-        }
+    let expected = emitter.connector.capabilities().body;
+    if !expected.admits(&emitter.body) {
+        return Err(Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Emitter,
+                identifier.clone(),
+            ),
+            issue: ConnectorDeclarationIssue::Body {
+                entity: emitter.connector.kind(),
+                expected,
+            },
+        }));
     }
 
     emitter
@@ -308,10 +360,46 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         | EmitterEntity::MongoDb(_) => {}
     }
 
+    validate_emitter_value_keys(domain, identifier, emitter)?;
     Ok(())
 }
 
-pub(in crate::registry) fn validate_direct_values_sensitivity(
+/// Each declared direct-value body names at least one distinct destination column. Protocol
+/// entities validate their named fields before this common column rule.
+fn validate_emitter_value_keys(
+    domain: &DomainName,
+    identifier: &ModelName,
+    emitter: &CreateEmitter,
+) -> error_stack::Result<(), RegistryError> {
+    if emitter.connector.mapped_value_types().is_none() {
+        return Ok(());
+    }
+    let mappings = emitter.connector.value_mappings();
+    let invalid = |issue| {
+        Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Emitter,
+                identifier.clone(),
+            ),
+            issue,
+        })
+    };
+    if mappings.values.is_empty() {
+        return Err(invalid(ConnectorDeclarationIssue::EmptyValues));
+    }
+    let mut keys = HashSet::default();
+    for mapping in mappings.values {
+        if !keys.insert(&mapping.column) {
+            return Err(invalid(ConnectorDeclarationIssue::DuplicateValue {
+                key: mapping.column.clone(),
+            }));
+        }
+    }
+    Ok(())
+}
+
+pub(in crate::registry) fn validate_direct_value_mappings(
     domain: &DomainName,
     identifier: &ModelName,
     models: &ModelIndex,
@@ -320,7 +408,8 @@ pub(in crate::registry) fn validate_direct_values_sensitivity(
 ) -> Result<(), Report<RegistryError>> {
     let mappings = emitter
         .connector
-        .direct_value_mappings()
+        .value_mappings()
+        .declared()
         .collect::<Vec<_>>();
     if mappings.is_empty() {
         return Ok(());
@@ -334,7 +423,7 @@ pub(in crate::registry) fn validate_direct_values_sensitivity(
                 .assured("c followed by decimal digits is a valid generated field name");
             Assignment {
                 target: AssignmentTarget::bare(field),
-                value: mapping.expression.clone(),
+                value: mapping.mapping.expression.clone(),
             }
         })
         .collect();
@@ -377,19 +466,49 @@ pub(in crate::registry) fn validate_direct_values_sensitivity(
             }),
         }
     }?;
+    let invalid = |issue| {
+        Report::new(RegistryError::InvalidConnectorDeclaration {
+            domain: domain.clone(),
+            node: nervix_models::NodeRef::new(
+                nervix_models::ModelKind::Emitter,
+                identifier.clone(),
+            ),
+            issue,
+        })
+    };
+    let types = emitter.connector.mapped_value_types().ok_or_else(|| {
+        invalid(ConnectorDeclarationIssue::MissingMappedValueContract {
+            entity: emitter.connector.kind(),
+        })
+    })?;
     for (index, field) in inferred.iter().enumerate() {
-        if !field.sensitive {
-            continue;
-        }
         let mapping = mappings
             .get(index)
             .assured("one unique generated field is inferred for each VALUES mapping");
-        return Err(Report::new(RegistryError::SensitiveEmitterValue {
-            domain: domain.clone(),
-            emitter: identifier.clone(),
-            connector: emitter.connector.transport_label(),
-            target: mapping.column.clone(),
-        }));
+        let expected = types
+            .value_type(mapping.section, &mapping.mapping.column)
+            .ok_or_else(|| {
+                invalid(ConnectorDeclarationIssue::UnsupportedMappedKey {
+                    section: mapping.section,
+                    key: mapping.mapping.column.clone(),
+                })
+            })?;
+        if !expected.admits(&field.data_type) {
+            return Err(invalid(ConnectorDeclarationIssue::MappedType {
+                section: mapping.section,
+                key: mapping.mapping.column.clone(),
+                expected,
+                actual: field.data_type.clone(),
+            }));
+        }
+        if field.sensitive {
+            return Err(Report::new(RegistryError::SensitiveEmitterValue {
+                domain: domain.clone(),
+                emitter: identifier.clone(),
+                connector: emitter.connector.transport_label(),
+                target: mapping.mapping.column.clone(),
+            }));
+        }
     }
     Ok(())
 }
@@ -440,71 +559,38 @@ fn validate_otel_mapping_contract(
     /// whether delta temporality adds `start_time` to the required keys.
     struct SignalContract {
         signal: OtelMappingSignal,
-        allowed: &'static [&'static str],
         required: &'static [&'static str],
         delta: bool,
     }
 
     let SignalContract {
         signal,
-        allowed,
         required,
         delta,
     } = match connector {
         OtelEmitter::Logs(_) => SignalContract {
             signal: OtelMappingSignal::Logs,
-            allowed: &[
-                "time",
-                "severity_text",
-                "severity_number",
-                "body",
-                "trace_id",
-                "span_id",
-            ],
             required: &["time", "body"],
             delta: false,
         },
         OtelEmitter::Traces(_) => SignalContract {
             signal: OtelMappingSignal::Traces,
-            allowed: &[
-                "trace_id",
-                "span_id",
-                "parent_span_id",
-                "name",
-                "kind",
-                "start_time",
-                "end_time",
-                "status_code",
-                "status_message",
-            ],
             required: &["trace_id", "span_id", "name", "start_time", "end_time"],
             delta: false,
         },
         OtelEmitter::Metrics(OtelMetricsEmitter { metric, .. }) => match metric.kind {
             OtelMetricKind::Gauge => SignalContract {
                 signal: OtelMappingSignal::MetricGauge,
-                allowed: &["time", "start_time", "value"],
                 required: &["time", "value"],
                 delta: false,
             },
             OtelMetricKind::Sum { temporality, .. } => SignalContract {
                 signal: OtelMappingSignal::MetricSum,
-                allowed: &["time", "start_time", "value"],
                 required: &["time", "value"],
                 delta: temporality == OtelAggregationTemporality::Delta,
             },
             OtelMetricKind::Histogram { temporality } => SignalContract {
                 signal: OtelMappingSignal::MetricHistogram,
-                allowed: &[
-                    "time",
-                    "start_time",
-                    "count",
-                    "sum",
-                    "bucket_counts",
-                    "explicit_bounds",
-                    "min",
-                    "max",
-                ],
                 required: &["time", "count", "bucket_counts", "explicit_bounds"],
                 delta: temporality == OtelAggregationTemporality::Delta,
             },
@@ -525,9 +611,14 @@ fn validate_otel_mapping_contract(
         resource,
         scope: _,
     } = connector.mappings();
+    let types = nervix_models::EmitterEntityBody::mapped_value_types(connector)
+        .verified("every OTEL signal declares its mapped field types");
     let mut value_keys = HashSet::default();
     for mapping in values {
-        if !allowed.contains(&mapping.column.as_str()) {
+        if types
+            .value_type(nervix_models::MappedValueSection::Values, &mapping.column)
+            .is_none()
+        {
             return Err(invalid(OtelMappingIssue::UnsupportedValue {
                 signal,
                 key: mapping.column.clone(),

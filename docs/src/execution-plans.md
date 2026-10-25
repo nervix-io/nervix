@@ -89,6 +89,12 @@ plan into connector configuration without normalization. Iceberg resolves its co
 client into the S3, GCS or Azure Blob backend while constructing this plan; the runtime receives
 that resolved backend and never infers it from the statement or location.
 
+The registry establishes batching legality and direct-mapping key and type contracts from each
+entity's vocabulary declaration before planning. A emitter that requires `BATCH` therefore receives
+the already-validated batch configuration; planning does not maintain another required-batching
+table. Transport-ingestor ACK, batch and retry durations are likewise validated before admission,
+including the shared schedulable bound, so an unusable policy cannot reach source installation.
+
 Connector plans preserve the vocabulary's connector/entity nesting. The ingestor planner emits,
 for example, `IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(...))`; the emitter planner
 emits `EmitterConnectorPlan::Otel(OtelEmitterPlan::{Logs, Traces, Metrics}(...))`. Each entity has

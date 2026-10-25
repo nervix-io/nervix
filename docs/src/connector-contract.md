@@ -51,6 +51,24 @@ it resolves through the node's resolver, as the sections below describe, and a d
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
 
+### Declaration validation
+
+Each ingestor and emitter entity declares its accepted modes, quiesce forms, client kinds, payload
+form, codec and header support, and batching legality in the vocabulary. Direct-value entities
+also declare their mapped-value types there: destination columns accept the current Plexus scalar,
+array and vector types, while OTEL protocol fields require their declared exact types. The OTEL
+connector uses that same type table when checking its prepared input schema.
+
+The registry checks these declarations against the candidate graph before accepting `CREATE` or
+`ALTER`. It rejects duplicate `VALUES` keys, unsupported or wrongly typed mappings, and invalid
+transport-ingestor delivery durations before any ingestor or emitter opens. ACK timeouts and retry
+durations must be positive; a zero batch timeout gathers without waiting. Every duration must fit
+the shared schedulable deadline bound, and retry maximum must be at least its initial backoff.
+OTEL `RESOURCE` mappings remain literal-only. Required batching is established by validation, so
+planning consumes that guarantee rather than discovering a missing `BATCH` when an emitter starts.
+An invalid alteration leaves the accepted graph intact. Driver configuration checks and external
+availability retain their own boundaries; these declaration checks perform no transport I/O.
+
 ### Entity implementations and composition
 
 The vocabulary owns `IngestorEntityKind` and `EmitterEntityKind`. Each connector crate exposes one

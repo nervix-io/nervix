@@ -131,8 +131,6 @@ pub(super) enum EmitterStartPlanError {
     RetryMaxBackoffBelowBackoff,
     #[error("ack timeout must be greater than zero")]
     ZeroAckTimeout,
-    #[error("{connector} emitter declares no BATCH MAX MESSAGES <n> MAX SIZE <bytes>")]
-    BatchRequired { connector: &'static str },
     #[error("{} emitter batch maximum {bytes} bytes exceeds the 32 MiB consumer window", <ClientConsumerEmitter as nervix_models::EmitterEntityModel>::KIND)]
     ClientBatchTooLarge { bytes: u64 },
     #[error("{} emitter client '{client}' declares no http or https origin endpoint", <HttpRequestEmitter as nervix_models::EmitterEntityModel>::KIND)]
@@ -874,7 +872,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             if ack_timeout.is_zero() {
                 return Err(Report::new(EmitterStartPlanError::ZeroAckTimeout));
             }
-            let batch = Self::require_batch(connector, emitter.batch)?;
+            let batch = emitter
+                .batch
+                .verified("the registry checked this entity's required BATCH declaration");
             if batch.max_size.bytes().get() > CLIENT_CONSUMER_SESSION_BYTES {
                 return Err(Report::new(EmitterStartPlanError::ClientBatchTooLarge {
                     bytes: batch.max_size.bytes().get(),
@@ -1162,7 +1162,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 Model::ClientClickHouse(client),
             ) => EmitterConnectorPlan::ClickHouse(ClickHouseEmitterPlan::Table(
                 ClickHouseTableEmitterPlan {
-                    batch: Self::require_batch(connector, emitter.batch)?,
+                    batch: emitter
+                        .batch
+                        .verified("the registry checked this entity's required BATCH declaration"),
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -1189,7 +1191,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 Model::ClientPostgres(client),
             ) => EmitterConnectorPlan::Postgres(PostgresEmitterPlan::Table(
                 PostgresTableEmitterPlan {
-                    batch: Self::require_batch(connector, emitter.batch)?,
+                    batch: emitter
+                        .batch
+                        .verified("the registry checked this entity's required BATCH declaration"),
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -1217,7 +1221,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 })),
                 Model::ClientMySql(client),
             ) => EmitterConnectorPlan::MySql(MySqlEmitterPlan::Table(MySqlTableEmitterPlan {
-                batch: Self::require_batch(connector, emitter.batch)?,
+                batch: emitter
+                    .batch
+                    .verified("the registry checked this entity's required BATCH declaration"),
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -1240,7 +1246,9 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 Model::ClientMongoDb(client),
             ) => EmitterConnectorPlan::MongoDb(MongoDbEmitterPlan::Collection(
                 MongoDbCollectionEmitterPlan {
-                    batch: Self::require_batch(connector, emitter.batch)?,
+                    batch: emitter
+                        .batch
+                        .verified("the registry checked this entity's required BATCH declaration"),
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -1321,18 +1329,6 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             label: self.label,
             retry_policy: self.retry_policy,
             connector,
-        })
-    }
-
-    /// The batching clause of an emitter that has no unbounded write, which the registry requires.
-    fn require_batch(
-        connector: &EmitterEntity,
-        batch: Option<EmitterBatchPolicy>,
-    ) -> Result<EmitterBatchPolicy, Report<EmitterStartPlanError>> {
-        batch.ok_or_else(|| {
-            Report::new(EmitterStartPlanError::BatchRequired {
-                connector: connector.transport_label(),
-            })
         })
     }
 
@@ -2406,24 +2402,18 @@ mod tests {
     }
 
     #[test]
-    fn a_database_emitter_without_its_batch_clause_is_not_planned() {
+    fn a_database_emitter_requires_the_batch_its_entity_declares() {
         let case = EmitterKind::MongoDb.case();
         let mut emitter = case.emitter();
         emitter.batch = None;
-
-        let error = EmitterStartPlan::decide(
-            &emitter,
-            EmitterClientModels {
-                client: Some(&case.client),
-                catalog_client: None,
-            },
-        )
-        .expect_err("a MongoDB emitter has no unbounded write");
+        let error = emitter
+            .validate_batch()
+            .expect_err("this entity requires a batch");
         assert_eq!(
-            *error.current_context(),
-            EmitterStartPlanError::BatchRequired {
-                connector: "MONGODB COLLECTION"
-            }
+            error.current_context(),
+            &nervix_models::EmitterBatchContractError::Required {
+                connector: emitter.connector.kind().phrase()
+            },
         );
     }
 

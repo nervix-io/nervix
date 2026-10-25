@@ -28,13 +28,46 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
     EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
-    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, OptionChoice,
-    OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, MappedValueField,
+    MappedValueType, MappedValueTypes, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue,
 };
 
 configured_client!(Otel: unpooled, config Nervix, CreateClientOtel => OtelConfigEntry);
 
 pub type OtelValueMapping = EmitterValueMapping;
+
+macro_rules! value_types {
+    ($($key:literal => $kind:ident),+ $(,)?) => {
+        MappedValueTypes::Fields {
+            values: &[$(MappedValueField { key: $key, value_type: MappedValueType::$kind },)+],
+            attributes: MappedValueType::Attribute,
+            resource: MappedValueType::Literal,
+        }
+    };
+}
+
+/// The exact fields and mapped types of this OTEL signal shape.
+pub const OTEL_LOG_VALUE_TYPES: MappedValueTypes = value_types! {
+    "time" => Datetime, "severity_text" => String, "severity_number" => I32,
+    "body" => String, "trace_id" => String, "span_id" => String,
+};
+/// The exact fields and mapped types of this OTEL signal shape.
+pub const OTEL_TRACE_VALUE_TYPES: MappedValueTypes = value_types! {
+    "trace_id" => String, "span_id" => String, "parent_span_id" => String,
+    "name" => String, "kind" => String, "start_time" => Datetime, "end_time" => Datetime,
+    "status_code" => String, "status_message" => String,
+};
+/// The exact fields and mapped types of this OTEL signal shape.
+pub const OTEL_NUMBER_VALUE_TYPES: MappedValueTypes = value_types! {
+    "time" => Datetime, "start_time" => Datetime, "value" => Number,
+};
+/// The exact fields and mapped types of this OTEL signal shape.
+pub const OTEL_HISTOGRAM_VALUE_TYPES: MappedValueTypes = value_types! {
+    "time" => Datetime, "start_time" => Datetime, "count" => Integer,
+    "sum" => Number, "bucket_counts" => IntegerSequence, "explicit_bounds" => FloatSequence,
+    "min" => Number, "max" => Number,
+};
 
 /// What every OTEL emitter maps a record to, whichever signal it exports: the signal's own fields,
 /// its attributes, the attributes of the resource that produced it, and the instrumentation scope.
@@ -95,6 +128,27 @@ pub struct OtelMetricsEmitter {
     pub client: ClientName,
     pub metric: OtelMetric,
     pub mappings: OtelMappings,
+}
+
+impl OtelLogsEmitter {
+    fn declared_value_types(&self) -> MappedValueTypes {
+        OTEL_LOG_VALUE_TYPES
+    }
+}
+
+impl OtelTracesEmitter {
+    fn declared_value_types(&self) -> MappedValueTypes {
+        OTEL_TRACE_VALUE_TYPES
+    }
+}
+
+impl OtelMetricsEmitter {
+    fn declared_value_types(&self) -> MappedValueTypes {
+        match self.metric.kind {
+            OtelMetricKind::Gauge | OtelMetricKind::Sum { .. } => OTEL_NUMBER_VALUE_TYPES,
+            OtelMetricKind::Histogram { .. } => OTEL_HISTOGRAM_VALUE_TYPES,
+        }
+    }
 }
 
 #[derive(
@@ -252,6 +306,10 @@ macro_rules! otel_emitter_declarations {
 
                 fn value_mappings(&self) -> EmitterValueMappings<'_> {
                     self.mappings.value_mappings()
+                }
+
+                fn mapped_value_types(&self) -> Option<MappedValueTypes> {
+                    Some(self.declared_value_types())
                 }
             }
         )+

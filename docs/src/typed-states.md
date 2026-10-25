@@ -312,6 +312,13 @@ configures as a typed kind, so a source or an emitter is matched with its client
 rather than labels. A session producer's source is no transport, so the transport union holds no
 Model of it; the kind union still names it, because capability decisions ask about every source.
 
+Direct-value entities declare their mapped field types in the same vocabulary. Codec and native
+bodies have no direct-mapping contract; column mappings and named protocol fields have distinct
+contracts. The registry infers each mapping's type and checks it without coercion before accepting
+the candidate graph. It also establishes required batching and schedulable transport delivery
+durations there. Planning consumes those guarantees, including the presence of a required batch,
+and an invalid alteration leaves the accepted configuration intact.
+
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch
 timeout; both acknowledged variants own an ACK timeout and retry policy. Zero cannot accidentally
