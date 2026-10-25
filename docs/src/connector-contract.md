@@ -667,6 +667,11 @@ read it, generated conformance tests hold the grammar and completion to it, and 
 the scenario suite to its runtime capabilities. Each example a declaration carries is a complete
 clause the grammar accepts, so documentation can show it and generated statements write it.
 
+A capability joins its entity's declaration in the same change as its grammar and executable
+behavior. That change also supplies its generated conformance and runtime scenario registration.
+The declaration describes the product a user can execute; plans for additional connector clauses
+remain in their owning work records until that delivery.
+
 | Side | What the entity declares |
 | --- | --- |
 | Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |

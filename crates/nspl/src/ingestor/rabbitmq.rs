@@ -86,11 +86,18 @@ pub(super) fn queue_body<'src>()
 mod tests {
     use std::num::NonZeroU16;
 
-    use meticulous::OptionExt as _;
-    use nervix_models::{IngestorEntity, IngestorInput, Model, RabbitMqIngestor, RetryPolicy};
+    use meticulous::ResultExt as _;
+    use nervix_models::{
+        IngestAcknowledgement, IngestQuiesceMode, IngestorEntity, IngestorEntityBody,
+        IngestorInput, Model, RabbitMqIngestor, RetryPolicy, Statement,
+    };
+    use rstest::rstest;
 
     use super::*;
-    use crate::conformance_support::{assert_offers_exactly, created_model, refused};
+    use crate::{
+        conformance_support::{assert_offers_exactly, refused},
+        statement::parse_statement,
+    };
 
     fn statement(mode: &str) -> String {
         format!(
@@ -128,8 +135,19 @@ mod tests {
             ),
         ];
         for (text, expected) in cases {
-            let model = created_model(&statement(&text)).assured("each complete mode is supported");
-            let Model::Ingestor(ingestor) = model else {
+            let parsed =
+                parse_statement(&statement(&text)).assured("each complete mode is supported");
+            let canonical = parsed
+                .to_canonical_nspl()
+                .assured("each consumer mode has a canonical Plexus representation");
+            assert_eq!(
+                parse_statement(&canonical).assured("canonical Plexus reparses"),
+                parsed
+            );
+            let Statement::Create(create) = parsed else {
+                panic!("the statement creates an ingestor")
+            };
+            let Model::Ingestor(ingestor) = *create.body else {
                 panic!("the statement creates an ingestor")
             };
             let IngestorInput::Transport(input) = ingestor.input else {
@@ -163,5 +181,76 @@ mod tests {
         assert_offers_exactly(&format!("{prefix}ACK "), &["SEQUENTIAL", "PARALLEL"]);
         assert_offers_exactly(&format!("{prefix}ACK PARALLEL "), &["MAX"]);
         assert_offers_exactly(&format!("{prefix}NO ACK "), &["ON QUIESCE"]);
+    }
+
+    fn queue_statement(queue: &str, instances: &str) -> String {
+        format!(
+            "CREATE RABBITMQ QUEUE INGESTOR incoming FROM broker QUEUE '{queue}' {instances} MODE \
+             ACK SEQUENTIAL ACK TIMEOUT 7s RETRY POLICY BACKOFF 200ms MAX 3s ON QUIESCE SUSPEND \
+             DECODE USING events_codec TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON \
+             MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        )
+    }
+
+    #[rstest]
+    #[case::default_instances("Orders.Mixed-01".to_owned(), "", 1)]
+    #[case::explicit_instances("Orders.Mixed-01".to_owned(), "INSTANCES 2", 2)]
+    #[case::ascii_limit("Q".repeat(255), "", 1)]
+    #[case::utf8_limit(format!("{}Z", "é".repeat(127)), "", 1)]
+    fn queue_ingestor_preserves_its_locator_policy_and_canonical_model(
+        #[case] queue: String,
+        #[case] instances: &str,
+        #[case] expected_instances: u64,
+    ) {
+        let text = queue_statement(&queue, instances);
+        let statement = parse_statement(&text).assured("the current RabbitMQ declaration parses");
+        let canonical = statement
+            .to_canonical_nspl()
+            .assured("the complete statement has a canonical Plexus representation");
+        assert_eq!(
+            parse_statement(&canonical).assured("canonical Plexus reparses"),
+            statement
+        );
+        let Statement::Create(create) = statement else {
+            panic!("the statement creates an ingestor");
+        };
+        let Model::Ingestor(ingestor) = *create.body else {
+            panic!("the statement creates an ingestor");
+        };
+        let Some(IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(source))) =
+            ingestor.input.transport_entity()
+        else {
+            panic!("the composed head selects the RabbitMQ queue ingestor");
+        };
+        assert_eq!(source.queue.as_str(), queue);
+        assert_eq!(source.client.as_str(), "broker");
+        assert_eq!(source.instances.get(), expected_instances);
+        assert_eq!(source.quiesce(), &IngestQuiesceMode::Suspend);
+        let IngestAcknowledgement::Sequential { timeout, retry } = source.acknowledgement() else {
+            panic!("the ingestor carries its sequential acknowledgement policy");
+        };
+        assert_eq!(timeout, "7s");
+        assert_eq!(retry.backoff, "200ms");
+        assert_eq!(retry.max_backoff, "3s");
+    }
+
+    #[rstest]
+    #[case::empty(String::new())]
+    #[case::ascii_over_limit("Q".repeat(256))]
+    #[case::utf8_over_limit("é".repeat(128))]
+    fn queue_ingestor_refuses_names_outside_the_byte_contract(#[case] queue: String) {
+        assert!(parse_statement(&queue_statement(&queue, "")).is_err());
+    }
+
+    #[test]
+    fn queue_ingestor_completion_uses_its_external_name_and_instance_contract() {
+        assert_offers_exactly(
+            "CREATE RABBITMQ QUEUE INGESTOR incoming FROM broker QUEUE ",
+            &["rabbitmq_queue"],
+        );
+        assert_offers_exactly(
+            "CREATE RABBITMQ QUEUE INGESTOR incoming FROM broker QUEUE 'Orders' ",
+            &["INSTANCES", "MODE"],
+        );
     }
 }
