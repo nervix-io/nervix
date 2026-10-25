@@ -1009,7 +1009,8 @@ Offset modes:
 
 Kafka client configuration is passed through to librdkafka. Nervix does not override
 `auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
-read records that may already exist.
+read records that may already exist. Under `OFFSET BY DOMAIN` in an unpaced domain the same
+setting places a partition that has no domain offset yet.
 
 A Kafka ingestor never creates the topic it reads. Every consumer Nervix runs for it sets
 `allow.auto.create.topics` to `false`, whatever the broker allows, and `CREATE KAFKA CLIENT` refuses a
@@ -1018,14 +1019,20 @@ exists, `DESCRIBE INGESTOR` reports `transient error: Kafka topic '<topic>' does
 ingestor starts reading once the topic is created.
 
 In an ACK mode, Nervix commits a Kafka position only after its downstream acknowledgement
-completes. If downstream work rejects a record, the ingestor seeks back to it. A consumer-group
-rebalance can move the record's partition to another group member while its batch is in flight.
-The ingestor then does not seek: whichever member is assigned the partition next, this ingestor
-included, resumes it from the committed offset, which never passes a rejected record. If Kafka
-cannot seek back on a partition the ingestor still holds, the ingestor stops polling, refreshes
-its assignment, and retries that seek. It cannot commit a later offset while the rejected
-position remains unresolved. Replays after a crash or assignment change may repeat records whose
-output was already written.
+completes. If downstream work rejects a record, the ingestor seeks back to it. If Kafka cannot
+seek back on a partition the ingestor still holds, the ingestor stops polling, refreshes its
+assignment, and retries that seek. It cannot commit a later offset while the rejected position
+remains unresolved. Under `OFFSET BY CONSUMER GROUP` the group can take the partition away before
+the rejected record is read again: a rebalance can move it to another member while its batch is
+in flight, refreshing the assignment leaves and rejoins the group, and a broker outage that
+outlasts the group session revokes it. Whenever the group assigns the partition to the ingestor
+again, the ingestor starts it at its earliest rejected record, until a commit passes that record,
+rather than at the group's committed offset or, for a group that committed nothing, where
+`auto.offset.reset` would start it. Another member that takes the partition resumes it from the
+committed offset, which never passes a rejected record; where the group has committed nothing for
+the partition, that member's `auto.offset.reset` decides, and `latest` skips the rejected
+records. Replays after a crash or assignment change may repeat records whose output was already
+written.
 
 Under `OFFSET BY CONSUMER GROUP` in an ACK mode, the ingestor commits each acknowledged batch's
 positions and reports progress for the batch only once the group's coordinator answered the commit.
@@ -1056,6 +1063,11 @@ their downstream work completed. Suspending or stopping the ingestor commits the
 read since the last of those commits, and waits for the broker's answer before the consumer leaves
 its group.
 
+`MODE NO ACK` declares no retry policy, so a Kafka ingestor in that mode that fails to resume or to
+read reconnects on the host's reconnect cadence: it waits 250 ms after its first failure and
+doubles the wait after each further one, up to 30 seconds, until a batch is read again.
+`DESCRIBE INGESTOR` shows the current wait as its reconnect backoff.
+
 `OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
 
 A commit or start-point reset waits for its replica acknowledgements within the native checkpoint
@@ -1066,7 +1078,8 @@ disk staging and transfer chunks, so checkpoint length is independent of the Bul
 Offset recovery details:
 
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
-- if a partition appears later and has no stored domain offset yet, unpaced domains start from the normal default behavior, while paced domains seek from the domain's current logical time
+- a partition without a stored domain offset, such as one added to the topic or any partition on a domain's first `START`, starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
+- the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
 
 Quiescing leaves a consumer group, or unassigns domain-owned partitions, and resume continues from
 committed offsets. Topic time and size retention continue during the pause. For consumer-group

@@ -2459,6 +2459,13 @@ path = "crates/client-core/src/subscriptions.rs"
 workloads = ["scenario.diagnostic-nodes", "stress.diagnostic-nodes"]
 
 [[owner]]
+path = "crates/connectors/kafka/src/topic/ingestor_rejection.rs"
+workloads = [
+  "scenario.shutdown-kafka-refused-commit",
+  "stress.shutdown-kafka-refused-commit",
+]
+
+[[owner]]
 path = "crates/consensus/src/lib.rs"
 workloads = [
   "scenario.command-transaction-retention",
