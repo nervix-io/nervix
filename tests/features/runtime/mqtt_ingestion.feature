@@ -289,16 +289,13 @@ Feature: MQTT ingestion
       | 1            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: MQTT start failures do not leave a silently stopped ingestor
-    Given MQTT is running
+  Scenario Outline: MQTT ingestor ACK timeout is validated at CREATE
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
-      """
-    When these NSPL commands fail with "invalid ack timeout 'oops'"
-      """
+
       CREATE SCHEMA notification (
         user_id I64
       );
@@ -315,11 +312,13 @@ Feature: MQTT ingestion
 
       CREATE MQTT CLIENT mqtt_main
         CONFIG {
-          'addr' = '{{mqtt_addr}}'
+          'addr' = '127.0.0.1:1883'
         };
-
+      """
+    When these Plexus statements fail with "invalid ACK TIMEOUT duration 'oops'"
+      """
       CREATE MQTT TOPIC INGESTOR mqtt_notifications
-        FROM mqtt_main TOPIC 'notifications_start_failure_{{test_id}}' INSTANCES 1 SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT oops RETRY POLICY BACKOFF 100ms MAX 200ms
+        FROM mqtt_main TOPIC 'notifications_{{test_id}}' INSTANCES 1 SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT oops RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -327,28 +326,14 @@ Feature: MQTT ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-
-      START;
       """
     Then the last command error contains
       """
-      invalid ack timeout 'oops'
+      model preflight
       """
-    When these NSPL commands are executed
+    And the last command error contains
       """
-      DESCRIBE INGESTOR mqtt_notifications;
-      """
-    Then the last command output contains
-      """
-      status: stopped
-      """
-    And the last command output contains
-      """
-      transient error: failed to initialize ingestor 'mqtt_notifications'
-      """
-    And the last command output contains
-      """
-      invalid ack timeout 'oops'
+      ingestor 'mqtt_notifications'
       """
 
     Examples:
