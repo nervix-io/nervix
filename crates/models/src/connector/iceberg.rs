@@ -211,6 +211,10 @@ impl EmitterEntityBody for IcebergTableEmitter {
         Some(self.catalog.client_reference())
     }
 
+    fn mapped_value_types(&self) -> Option<crate::MappedValueTypes> {
+        Some(crate::MappedValueTypes::Columns)
+    }
+
     fn value_mappings(&self) -> EmitterValueMappings<'_> {
         EmitterValueMappings::values(&self.values)
     }

@@ -51,6 +51,24 @@ it resolves through the node's resolver, as the sections below describe, and a d
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
 
+### Declaration validation
+
+Each ingestor and emitter entity declares its accepted modes, quiesce forms, client kinds, payload
+form, codec and header support, and batching legality in the vocabulary. Direct-value entities
+also declare their mapped-value types there: destination columns accept the current Plexus scalar,
+array and vector types, while OTEL protocol fields require their declared exact types. The OTEL
+connector uses that same type table when checking its prepared input schema.
+
+The registry checks these declarations against the candidate graph before accepting `CREATE` or
+`ALTER`. It rejects duplicate `VALUES` keys, unsupported or wrongly typed mappings, and invalid
+transport-ingestor delivery durations before any ingestor or emitter opens. ACK timeouts and retry
+durations must be positive; a zero batch timeout gathers without waiting. Every duration must fit
+the shared schedulable deadline bound, and retry maximum must be at least its initial backoff.
+OTEL `RESOURCE` mappings remain literal-only. Required batching is established by validation, so
+planning consumes that guarantee rather than discovering a missing `BATCH` when an emitter starts.
+An invalid alteration leaves the accepted graph intact. Driver configuration checks and external
+availability retain their own boundaries; these declaration checks perform no transport I/O.
+
 ### Entity implementations and composition
 
 The vocabulary owns `IngestorEntityKind` and `EmitterEntityKind`. Each connector crate exposes one
@@ -1071,18 +1089,18 @@ its connection until the connection ends or the source drops it. The task is the
 client's event loop and polls it without pause, so the client writes the acknowledgements the
 source requests and the keep-alive pings its broker expects whatever the host does meanwhile,
 including waiting on a batch's acknowledgement trees for as long as a downstream emitter holds
-them. The task hands every publish the event loop reads to the source through a bounded
-read-ahead, in the order it read them.
+them. The task classifies each decoded publish before decoding another, then hands admitted
+publishes or compact discard acknowledgements to the source through a bounded read-ahead, in
+packet order. Admitted topic, payload and correlation bytes are copied out of the raw framing
+allocation, so a small admitted slice cannot retain an oversized neighbouring frame.
 
 In an `ACK` mode every `CONNECT` advertises the mode's acknowledgement window and 64 more as its
 Receive Maximum: 65 under `ACK SEQUENTIAL`, and `ACK PARALLEL MAX` plus 64 up to MQTT's largest
 Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 while that many wait on
 their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
-gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. A broker that discards a
-publish above the advertised Maximum Packet Size may keep counting it against the Receive Maximum,
-waiting for an acknowledgement the source never sends, as EMQX does; the 64 let the window fill
-around that many such publishes instead of one of them holding back every later publish. The
-broker holds back no publish at QoS 0, which a subscription at QoS 1 receives from a publisher
+gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. The extra capacity lets the
+connection keep reading while the host holds a batch. The broker holds back no publish at QoS 0,
+which a subscription at QoS 1 receives from a publisher
 that sends at QoS 0, and under `NO ACK`, where the client acknowledges every publish on receipt,
 it holds back none. The read-ahead holds as many publishes as the Receive Maximum admits, or 64
 under `NO ACK`. Once it is full, the task holds the next publish and polls nothing until the
@@ -1106,11 +1124,29 @@ rejects the positions, a rejection fails once its publishes' connection is gone,
 delivers again every publish the lost connection did not acknowledge once the source resumes; see
 [Confirmed acknowledgements](#confirmed-acknowledgements).
 
-A failed poll ends the connection. The task has handed over every publish it read, so the source
-reads the read-ahead empty, and its next read then reports the lost connection: beneath
-`MqttTopicIngestorError::Receive`, or as `MqttTopicIngestorError::PacketTooLarge` for a packet above the
-advertised Maximum Packet Size. Suspension, close and every failure drop the connection, which
-aborts its task and closes the broker connection.
+Every `CONNECT` advertises MQTT's full framing limit, 268,435,460 bytes: the maximum Remaining
+Length plus its fixed header. This transport bound is separate from the 10 KiB admission bound
+for each complete publish, including its topic and properties. Local admission drops an oversized
+publish's bytes before read-ahead and retains only its prepared acknowledgement, if required.
+At QoS 1 or 2 under manual acknowledgement the ingestor queues its `PUBACK` or `PUBREC` through the
+same request owner as ordinary acknowledgements and waits for its write before returning
+`IngestorBatch::Oversized`. Automatic acknowledgement remains the client's responsibility; QoS 0
+requires none. Thus an oversized publish releases its broker inflight slot without depending on
+the broker's handling of a subscriber's smaller Maximum Packet Size.
+
+A cancelled read retains the discard's queue state, confirmation target and original keep-alive
+deadline in its connection. The next read resumes that same acknowledgement and reports the size
+rejection once. If a partial batch already holds ordinary messages, it returns them first and
+retains the unstarted discard for the following read. MQTT requires acknowledgements in receive
+order, so the host settles that ordinary prefix before the next read starts the discard's
+acknowledgement and its physical deadline. An acknowledgement failure on this read path preserves
+the same typed cause as an ordinary acknowledgement failure and drops the connection. No oversized
+payload reaches the codec or the host's acknowledgement trees.
+
+A failed poll ends the connection. The task has handed over every packet outcome it read, so the
+ingestor reads the read-ahead empty, and its next read then reports the lost connection beneath
+`MqttTopicIngestorError::Receive`. Suspension, close and every connection-ending failure abort the driver
+and close the broker connection.
 
 ### Oversized payloads
 
@@ -1119,8 +1155,9 @@ drops a payload larger than its client's message size bound and returns `Ingesto
 with how many it dropped. The host counts them in `nervix_ingestor_oversized_payloads_total`, which
 `DESCRIBE INGESTOR` renders, and reads again at once; the drop is neither a read failure nor a
 decode rejection, because the payload never reached the codec. A `SYSLOG LISTENER` does this for a
-UDP datagram larger than `max_message_size`. A stream transport cannot find the frame after an
-oversized one, so its source closes that connection instead and counts nothing.
+UDP datagram larger than `max_message_size`; an `MQTT TOPIC` does it for a complete publish above
+its 10 KiB admission bound, after acknowledging it when required. A stream source that cannot
+identify the next frame closes that connection instead and counts nothing.
 
 ### MQTT session retirement
 

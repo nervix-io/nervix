@@ -695,7 +695,11 @@ which keeps it beneath `MqttTopicIngestorError::Acknowledge`; a task that fails 
 publish for room in a full read-ahead fails as `MqttTopicIngestorError::ReadAheadFull`, naming the
 read-ahead's capacity, because nothing would write it before the host reads again, and one whose
 connection wrote nothing for a keep-alive interval fails as
-`MqttTopicIngestorError::AcknowledgementDeadline`, naming the keep-alive. A emitter's event
+`MqttTopicIngestorError::AcknowledgementDeadline`, naming the keep-alive. The same causes apply when an
+ingestor read acknowledges an oversized publish: they remain beneath `IngestorError::Read`, and the
+ingestor drops the connection. A successfully acknowledged oversized publish is an ordinary
+`IngestorBatch::Oversized` outcome, counted by the host without a diagnostic or codec rejection.
+An emitter's event
 loop records the connection error's message as the emitter's transient error, which
 `DESCRIBE EMITTER` shows, and reconnects on the emitter's retry policy. None rejects a record or
 acknowledges input. A QoS 1 or 2 publish keeps the driver's `ClientError` when the client refuses
@@ -954,6 +958,14 @@ sequenceDiagram
 ```
 
 ### Registry Validation And Planning
+
+Connector declaration failures carry `RegistryError::InvalidConnectorDeclaration` with the domain,
+typed node identity, and a `ConnectorDeclarationIssue` naming the refused clause or mapping key.
+Duration failures retain the duration reader's typed cause; an unschedulable duration and an
+inverted retry range are distinct issues. A mapped-value type failure reports the declared type
+and the expression's inferred Arrow type, such as `VALUES key 'severity_number' requires I32,
+found Int64`. These are command refusals before publication, including during `ALTER`, rather
+than retried source or sink initialization failures. They never include a record's values.
 
 Registry validation and planning refuse invalid models before graph activation. Validation names the
 owning node, the route when the rule is route-local, the operation, and relevant fields or

@@ -26,7 +26,7 @@ meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
-nervix-models = { workspace = true }
+nervix-models = { workspace = true, features = ["arrow"] }
 nervix-primitives = { workspace = true, features = ["native"] }
 opentelemetry-proto = { workspace = true, features = [
   "gen-tonic",

@@ -63,6 +63,32 @@ pub struct EmitterValueMappings<'a> {
 }
 
 impl<'a> EmitterValueMappings<'a> {
+    /// Every mapping and its group, in the same order as the projected columns.
+    pub fn declared(self) -> impl Iterator<Item = crate::DeclaredValueMapping<'a>> {
+        self.values
+            .iter()
+            .map(|mapping| crate::DeclaredValueMapping {
+                section: crate::MappedValueSection::Values,
+                mapping,
+            })
+            .chain(
+                self.attributes
+                    .iter()
+                    .map(|mapping| crate::DeclaredValueMapping {
+                        section: crate::MappedValueSection::Attributes,
+                        mapping,
+                    }),
+            )
+            .chain(
+                self.resource
+                    .iter()
+                    .map(|mapping| crate::DeclaredValueMapping {
+                        section: crate::MappedValueSection::Resource,
+                        mapping,
+                    }),
+            )
+    }
+
     /// The mappings of an emitter whose payload a codec encodes, which writes no direct value.
     pub const fn none() -> Self {
         Self {
@@ -152,20 +178,37 @@ impl Display for EmitterReferenceKind {
 
 /// How an emitter's body is formed: what follows its publishing mode, or what its destination
 /// writes in place of a codec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub enum EmitterBodyForm {
     /// `ENCODE USING <codec>`: a codec encodes every payload.
+    #[strum(serialize = "ENCODE USING")]
     Codec,
     /// `ENCODE USING <codec>` or `WITHOUT BODY`: a request carries an encoded payload or none.
+    #[strum(serialize = "ENCODE USING or WITHOUT BODY")]
     CodecOrWithoutBody,
     /// `VALUES { … }` in the destination: the emitter writes the mapped values directly.
+    #[strum(serialize = "VALUES")]
     Values,
     /// The output the emitter constructs against the destination's schema, delivered as native
     /// batches.
+    #[strum(serialize = "native Arrow output")]
     Native,
 }
 
 impl EmitterBodyForm {
+    /// Whether a configured body is one of the forms this entity declares.
+    pub const fn admits(self, body: &crate::EmitterBody) -> bool {
+        matches!(
+            (self, body),
+            (
+                Self::Codec | Self::CodecOrWithoutBody,
+                crate::EmitterBody::Codec { .. }
+            ) | (Self::CodecOrWithoutBody, crate::EmitterBody::WithoutBody)
+                | (Self::Values, crate::EmitterBody::Values)
+                | (Self::Native, crate::EmitterBody::Client)
+        )
+    }
+
     /// Whether every emitter of this form names a codec.
     pub const fn requires_codec(self) -> bool {
         match self {
@@ -280,6 +323,11 @@ pub trait EmitterEntityBody: EmitterPublication {
     /// The expressions the body sends across its external boundary directly, without a codec.
     fn value_mappings(&self) -> EmitterValueMappings<'_> {
         EmitterValueMappings::none()
+    }
+
+    /// The exact types direct mappings may compute. Codec and native bodies have none.
+    fn mapped_value_types(&self) -> Option<crate::MappedValueTypes> {
+        None
     }
 
     /// The commit cadence and maximum commit size as written, for a body that stages what it
@@ -419,6 +467,11 @@ impl EmitterEntity {
     /// The expressions a direct `VALUES` emitter sends across its external boundary, in written order.
     pub fn value_mappings(&self) -> EmitterValueMappings<'_> {
         self.body().value_mappings()
+    }
+
+    /// The exact mapped types declared by this configured entity.
+    pub fn mapped_value_types(&self) -> Option<crate::MappedValueTypes> {
+        self.body().mapped_value_types()
     }
 
     pub fn direct_value_mappings(&self) -> impl Iterator<Item = &EmitterValueMapping> {

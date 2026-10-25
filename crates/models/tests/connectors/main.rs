@@ -704,6 +704,11 @@ fn an_emitter_states_what_its_pair_declares() {
             assert_eq!(entity.requires_codec(), declared.body.requires_codec());
             assert_eq!(entity.batch_legality(), declared.batch);
             assert_eq!(
+                entity.mapped_value_types().is_some(),
+                declared.body == nervix_models::EmitterBodyForm::Values,
+                "{kind} declares direct mapping types exactly when it has a VALUES body",
+            );
+            assert_eq!(
                 entity.requires_batch_transformation(),
                 declared.requires_batch_transformation
             );

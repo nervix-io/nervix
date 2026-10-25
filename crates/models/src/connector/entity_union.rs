@@ -427,6 +427,12 @@ macro_rules! connector_emitters {
                 }
             }
 
+            fn mapped_value_types(&self) -> Option<$crate::MappedValueTypes> {
+                match self {
+                    $(Self::$Variant(connector) => $crate::EmitterEntityBody::mapped_value_types(connector),)+
+                }
+            }
+
             fn commit_policy(&self) -> Option<(&str, &str)> {
                 match self {
                     $(Self::$Variant(connector) => $crate::EmitterEntityBody::commit_policy(connector),)+

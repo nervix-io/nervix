@@ -39,6 +39,7 @@ mod iceberg;
 mod ingestor;
 mod ingestor_metadata;
 mod kafka;
+mod mapped_values;
 mod mongodb;
 mod mqtt;
 mod mysql;
@@ -61,9 +62,9 @@ use strum::{AsRefStr, Display, EnumIter, IntoStaticStr};
 pub use self::{
     bounds::*, clickhouse::*, client::*, configured_client::*, deadline::*, declaration::*,
     emitter::*, external_name::ExternalNameError, header_model::*, http::*, iceberg::*,
-    ingestor::*, ingestor_metadata::*, kafka::*, mongodb::*, mqtt::*, mysql::*, nats::*, otel::*,
-    postgres::*, prometheus::*, pulsar::*, rabbitmq::*, redis::*, sentry::*, sqs::*, syslog::*,
-    websockets::*, zeromq::*,
+    ingestor::*, ingestor_metadata::*, kafka::*, mapped_values::*, mongodb::*, mqtt::*, mysql::*,
+    nats::*, otel::*, postgres::*, prometheus::*, pulsar::*, rabbitmq::*, redis::*, sentry::*,
+    sqs::*, syslog::*, websockets::*, zeromq::*,
 };
 pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, ingestor::AlteredIngestorEntity};
 

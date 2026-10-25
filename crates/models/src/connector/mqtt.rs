@@ -103,20 +103,28 @@ pub struct MqttTopicIngestor {
     pub quiesce: IngestQuiesceMode,
 }
 
-/// The largest packet an MQTT TOPIC ingestor's client receives, in bytes, which every `CONNECT` it
-/// sends advertises as its Maximum Packet Size, so MQTT 5 obliges the broker to discard a larger
-/// publish for this subscriber instead of sending it.
-///
-/// A policy input: the ten KiB the driver applied, unannounced, before Nervix declared the bound,
-/// so declaring it refuses nothing an ingestor received before.
+/// The largest publish an MQTT TOPIC ingestor admits, including its MQTT packet headers.
+/// Larger publishes are acknowledged and counted as oversized before decoding their payloads.
 pub const MQTT_SOURCE_MAXIMUM_PACKET_BYTES: u64 = 10 * 1024;
+
+/// MQTT's largest packet: a 28-bit Remaining Length plus the five-byte fixed header.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "MQTT 5 encodes Remaining Length in at most four seven-bit groups and its fixed \
+                  header in at most five bytes"
+    )
+)]
+pub const MQTT_MAXIMUM_PACKET_BYTES: u64 = (1 << 28) + 4;
 
 /// The largest value MQTT's Four Byte Integer, which carries the Maximum Packet Size, can hold.
 const MQTT_FOUR_BYTE_INTEGER_MAX: u64 = 0xFFFF_FFFF;
 
 const _: () = assert!(
     MQTT_SOURCE_MAXIMUM_PACKET_BYTES > 0
-        && MQTT_SOURCE_MAXIMUM_PACKET_BYTES <= MQTT_FOUR_BYTE_INTEGER_MAX,
+        && MQTT_SOURCE_MAXIMUM_PACKET_BYTES <= MQTT_MAXIMUM_PACKET_BYTES
+        && MQTT_MAXIMUM_PACKET_BYTES <= MQTT_FOUR_BYTE_INTEGER_MAX,
     "MQTT forbids a Maximum Packet Size of zero, and carries it as a Four Byte Integer"
 );
 
@@ -124,20 +132,48 @@ const _: () = assert!(
 const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
     buffers: &[
         DeclaredBuffer {
-            holds: "each incoming packet, whose bound every CONNECT advertises as its Maximum \
-                    Packet Size",
+            holds: "each raw MQTT frame, whose protocol bound every CONNECT advertises as its \
+                    Maximum Packet Size; one packet is decoded before admission",
             bound: BufferBound::Bounded {
-                capacity: BufferCapacity::Bytes(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
+                capacity: BufferCapacity::Bytes(MQTT_MAXIMUM_PACKET_BYTES),
                 overflow: BufferOverflow::PeerDiscards,
             },
         },
         DeclaredBuffer {
-            holds: "publishes the connection reads ahead of the host",
+            holds: "each admitted publish including its packet headers, copied out of raw framing",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Bytes(MQTT_SOURCE_MAXIMUM_PACKET_BYTES),
+                overflow: BufferOverflow::DropAndCount,
+            },
+        },
+        DeclaredBuffer {
+            holds: "admitted publishes or compact discard acknowledgements the connection reads \
+                    ahead of the host",
             bound: BufferBound::Bounded {
                 capacity: BufferCapacity::Setting(
                     "the Receive Maximum every CONNECT advertises, ACK PARALLEL MAX or 1 under \
                      ACK SEQUENTIAL plus 64 up to 65,535, or 64 publishes under NO ACK",
                 ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "the next classified packet outcome held for room in read-ahead",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1,
+                    unit: "outcome",
+                },
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "a deferred or in-progress size rejection retained across reads",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 1,
+                    unit: "discard",
+                },
                 overflow: BufferOverflow::Backpressure,
             },
         },
@@ -159,7 +195,7 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Unbounded,
         },
         DeclaredWait {
-            wait: "an acknowledgement's PUBACKs written to the connection",
+            wait: "ordinary and oversized-discard acknowledgements written to the connection",
             bound: WaitBound::Driver("one keep-alive interval of 60 s, or the broker's"),
         },
         DeclaredWait {
@@ -168,8 +204,9 @@ const MQTT_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
         },
     ],
     driver_limits: &[
-        "A packet above the advertised Maximum Packet Size that a broker sends anyway ends the \
-         connection with DISCONNECT Packet too large.",
+        "A publish above the admission bound is acknowledged before it is counted as oversized; \
+         its topic, payload and properties never enter read-ahead. The raw framing bound is \
+         MQTT's protocol maximum, separate from the admission bound.",
     ],
 };
 

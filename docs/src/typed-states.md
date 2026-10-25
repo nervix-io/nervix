@@ -156,6 +156,15 @@ identifier access and verifies offsets and counts before constructing owned valu
 
 ## Absence And Distinct States
 
+**MQTT size admission.** A source packet is either an admitted publish with independently owned
+bytes or an oversized outcome with an optional prepared acknowledgement. Absence means that QoS
+requires none or the client acknowledges automatically. A discard is explicitly deferred for
+its ordinary prefix, unrequested with its deadline, or requested with its confirmation target.
+The following read starts its optional keep-alive deadline after the host acknowledges the
+ordinary prefix; that original deadline then survives cancellation. The connection retains at
+most one discard and clears it only when it returns the size outcome after confirmation. See
+[MQTT source connections](./connector-contract.md#mqtt-source-connections).
+
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
 is unchanged creates no retirement. A connector session catalog has a private constructor that
@@ -302,6 +311,13 @@ requires batching and which publishing modes it accepts. A client Model names th
 configures as a typed kind, so a source or an emitter is matched with its client by comparing kinds
 rather than labels. A session producer's source is no transport, so the transport union holds no
 Model of it; the kind union still names it, because capability decisions ask about every source.
+
+Direct-value entities declare their mapped field types in the same vocabulary. Codec and native
+bodies have no direct-mapping contract; column mappings and named protocol fields have distinct
+contracts. The registry infers each mapping's type and checks it without coercion before accepting
+the candidate graph. It also establishes required batching and schedulable transport delivery
+durations there. Planning consumes those guarantees, including the presence of a required batch,
+and an invalid alteration leaves the accepted configuration intact.
 
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch

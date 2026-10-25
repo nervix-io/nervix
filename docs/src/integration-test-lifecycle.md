@@ -565,7 +565,10 @@ must not be mistaken for a measurement including the final sync.
 
 Raw tool reports, wall time and process CPU time are retained separately. Sysbench invocations
 have three-second process-group guards and fio a four-second guard, all within a ten-second
-calibration allowance. Completed tool reports survive a later timeout; the supervisor kills the
+calibration allowance. The timeout-retention regression synchronizes on a child-ready signal
+after its measurement is flushed, then applies the same short timeout to the stalled child;
+it does not assume process startup finishes within that timeout. Completed tool reports survive
+a later timeout; the supervisor kills the
 tool's process group and removes its temporary directory. Missing tools and unsupported direct
 I/O retain their actual error, with no buffered-read substitute and no global cache drops.
 

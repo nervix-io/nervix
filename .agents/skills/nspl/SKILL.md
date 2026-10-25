@@ -20,6 +20,10 @@ literal name is refused when the statement is validated.
 For outbound WebSockets, read the `WEBSOCKETS CONNECTION` section of Ingestors for literal upgrade
 headers, response-header reads, frame metadata and the closed client CONFIG key set.
 
+For delivery durations and direct-value mappings, follow the Ingestors delivery-mode and Emitters
+direct-value sections. Nervix validates the entity's declared limits and exact mapping types at
+`CREATE` and `ALTER`; correct a refused declaration before starting the domain.
+
 For RabbitMQ consumption choose `MODE NO ACK`, `MODE ACK SEQUENTIAL`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
 Parallel `MAX` is 1 through 65,535 and is the broker prefetch per instance. Each delivery settles
