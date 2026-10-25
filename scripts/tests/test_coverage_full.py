@@ -409,6 +409,21 @@ class UnionTests(unittest.TestCase):
 
 
 class SelectionTests(unittest.TestCase):
+    def test_non_pr_events_keep_the_deliberate_fuzz_skip_even_with_a_fuzz_label(self) -> None:
+        for event in ("push", "schedule", "workflow_dispatch"):
+            with self.subTest(event=event):
+                run = Run(self)
+                run.complete()
+                run.selection(("fuzz",), event=event)
+                path = run.inputs / "bolero-selection/selection.json"
+                content = json.loads(path.read_text())
+                content.update(event=event, labels=["fuzz"])
+                path.write_text(json.dumps(content))
+                status, record, _, _ = run.union()
+                self.assertEqual(status, 0, problems(record))
+                self.assertFalse(record["selection"]["fuzz_requested"])
+                self.assertNotIn("bolero-fuzz", [item["producer"] for item in record["contributions"]])
+
     def test_missing_label_enabled_producers_fail_naming_their_job_and_artifact(self) -> None:
         run = Run(self)
         run.complete(("shuttle",))
@@ -684,6 +699,30 @@ class ValidationTests(unittest.TestCase):
 
 
 class CampaignTests(unittest.TestCase):
+    def test_a_newly_registered_target_joins_the_required_campaign_automatically(self) -> None:
+        run = Run(self)
+        inventory = INVENTORY + '\n[[target]]\nid = "gamma-values"\n'
+        run.write("tests/bolero-targets.toml", inventory)
+        run.git("add", "tests/bolero-targets.toml")
+        run.git("commit", "--quiet", "-m", "test: register another property")
+        run.revision = run.git("rev-parse", "HEAD").strip()
+        run.complete(("fuzz",))
+        path = run.inputs / "coverage-bolero-fuzz/completion.json"
+        content = json.loads(path.read_text())
+        content["inventory"]["sha256"] = hashlib.sha256(inventory.encode()).hexdigest()
+        path.write_text(json.dumps(content))
+        status, record, _, _ = run.union()
+        self.assertEqual(status, 1)
+        self.assertIn("not the 3 targets of the tested inventory", problems(record))
+        self.assertFalse((run.directory / coverage_full.REPORT).exists())
+
+        content["selection"] = [*TARGETS, "gamma-values"]
+        content["counts"] = {key: 3 for key in ("discovered", "selected", "executed", "completed")}
+        path.write_text(json.dumps(content))
+        status, record, _, _ = run.union()
+        self.assertEqual(status, 0, problems(record))
+        self.assertEqual(record["fuzz"]["targets"], 3)
+
     def failing(self, expected: str, **changes: object) -> None:
         run = Run(self)
         run.complete(("fuzz",))
@@ -1058,9 +1097,23 @@ class WorkflowTests(unittest.TestCase):
         job = job_section(self.workflow, "coverage-full")
         needs = re.search(r"needs: \[(.*)\]", job)[1].split(", ")
         self.assertEqual(sorted(needs), sorted(["test-selection", *JOBS]))
-        self.assertIn("if: ${{ !cancelled() && needs.test-selection.outputs.tests-required == 'true' }}", job)
+        self.assertIn(
+            "if: ${{ !cancelled() && (needs.test-selection.result != 'success' || "
+            "needs.test-selection.outputs.tests-required == 'true') }}", job,
+        )
         self.assertNotIn("cargo", job)
         self.assertNotIn("pull-requests: write", job)
+
+    def test_missing_artifacts_reach_the_union_with_the_run_selection_preserved(self) -> None:
+        job = job_section(self.workflow, "coverage-full")
+        selection = job.index("      - name: Record the event, labels and producer results")
+        download = job.index("uses: actions/download-artifact")
+        self.assertLess(selection, download)
+        for step in job.split("\n      - name: "):
+            if "uses: actions/download-artifact" in step:
+                self.assertRegex(step, r"\n          pattern: \S+")
+        combine = step_section(job, "Combine coverage")
+        self.assertIn("if: ${{ !cancelled() }}", combine)
 
     def test_the_union_job_downloads_every_artifact_the_requirements_name(self) -> None:
         job = job_section(self.workflow, "coverage-full")
@@ -1155,6 +1208,37 @@ class WorkflowTests(unittest.TestCase):
         extras = job_section(self.workflow, "extra-tests")
         self.assertIn("run: just coverage-full-runner\n", extras)
         self.assertIn("            target/coverage-full/python.lcov\n", step_section(extras, "Upload native extra coverage"))
+
+    def test_every_producer_job_retains_the_load_of_its_runner(self) -> None:
+        # The ordinary report's producer jobs, every job of this workflow a requirement names, and
+        # the qualification jobs whose budgets the same measurements size.
+        coverage = job_section(self.workflow, "coverage")
+        jobs = set(re.search(r"needs: \[(.*)\]", coverage)[1].split(", "))
+        for requirement in REQUIREMENTS:
+            if requirement.job not in ("coverage", "bolero"):
+                jobs.add(requirement.job)
+        jobs.update(("loom-qualification", "client-conformance"))
+        artifacts = []
+        for name in sorted(jobs):
+            with self.subTest(job=name):
+                job = job_section(self.workflow, name)
+                if "python3 scripts/record_runner_load.py" in job:
+                    self.assertIn("name: runner-load-${{ github.job }}\n", job)
+                    artifacts.append(f"runner-load-{name}")
+                    continue
+                start = step_section(job, "Start recording runner load")
+                self.assertIn("uses: ./.github/actions/runner-load\n", start)
+                self.assertIn("phase: start\n", start)
+                finish = step_section(job, "Publish runner load")
+                self.assertIn("if: always()\n", finish)
+                self.assertIn("phase: finish\n", finish)
+                self.assertLess(job.index(start), job.index(finish))
+                artifact = re.search(r"artifact-name: (.+)\n", finish)[1]
+                self.assertTrue(artifact.startswith("runner-load-"), artifact)
+                if "\n      matrix:\n" in job:
+                    self.assertIn("${{ matrix.", artifact)
+                artifacts.append(artifact)
+        self.assertEqual(len(artifacts), len(set(artifacts)), artifacts)
 
     def test_every_required_native_producer_is_collected_in_its_declared_mode(self) -> None:
         for requirement in REQUIREMENTS:
