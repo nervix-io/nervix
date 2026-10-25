@@ -1004,6 +1004,65 @@ async fn complete_log_reads_return_every_entry_in_a_large_range() -> TestResult 
 }
 
 #[nervix_primitives::test]
+async fn log_chunks_keep_their_charge_only_while_they_hold_entries() -> TestResult {
+    let mut harness = Harness::new().await?;
+    harness.append(2).await?;
+    let mut entries = LogEntryStream::new(harness.store.inner.clone(), .., None);
+
+    let first = entries.next().await?.verified("two entries were appended");
+    assert_eq!(first.log_id.index, 1);
+    assert_eq!(
+        harness.executor.snapshot().commands_memory.reserved_bytes,
+        harness
+            .executor
+            .limits()
+            .command_state_storage_working_bytes()
+            .verified("the default command storage working set is addressable"),
+        "a chunk with an unread entry keeps its complete allocation charged"
+    );
+    let second = entries.next().await?.verified("one stored entry remains");
+    assert_eq!(second.log_id.index, 2);
+    assert_eq!(
+        harness.executor.snapshot().commands_memory.reserved_bytes,
+        0
+    );
+    assert!(entries.next().await?.is_none());
+    Ok(())
+}
+
+#[nervix_primitives::test]
+async fn exhausted_log_chunks_leave_room_for_another_reader_and_source_control() -> TestResult {
+    let mut harness = Harness::new().await?;
+    harness.append(1).await?;
+    let mut first = LogEntryStream::new(harness.store.inner.clone(), .., None);
+    let mut second = LogEntryStream::new(harness.store.inner.clone(), .., None);
+
+    let first_entry = first.next().await?.verified("one entry was appended");
+    assert_eq!(first_entry.log_id.index, 1);
+    // The consumer has taken the complete chunk but has not polled its stream again. A second
+    // reader must not consume the remaining budget while waiting for that empty chunk to release.
+    let second_read = second.next();
+    tokio::pin!(second_read);
+    let second_ready = second_read.as_mut().now_or_never();
+    let control = harness
+        .executor
+        .try_reserve(MemoryClass::Commands, 176)
+        .assured("an exhausted log chunk leaves room for a source control call");
+    let second_entry = match second_ready {
+        Some(result) => result?,
+        None => second_read.await?,
+    }
+    .verified("the second reader sees the same stored entry");
+    assert_eq!(second_entry.log_id.index, 1);
+    drop(control);
+    assert_eq!(
+        harness.executor.snapshot().commands_memory.reserved_bytes,
+        0
+    );
+    Ok(())
+}
+
+#[nervix_primitives::test]
 async fn log_entry_stream_reads_a_large_range_in_separate_chunks() -> TestResult {
     const ENTRY_BYTES: usize = 768 * 1024;
     const ENTRY_COUNT: u64 = 3;

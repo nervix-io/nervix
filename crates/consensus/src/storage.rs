@@ -1535,6 +1535,37 @@ struct LogEntryChunk {
     _reservation: Reservation,
 }
 
+/// The read boundary survives exhaustion without retaining the chunk's allocation or charge.
+enum LogChunkState {
+    Unread,
+    Buffered(LogEntryChunk),
+    Exhausted,
+}
+
+impl LogChunkState {
+    fn next_entry(&mut self) -> Option<EntryOf<TypeConfig>> {
+        let Self::Buffered(chunk) = self else {
+            return None;
+        };
+        let entry = chunk.entries.next();
+        if chunk.entries.as_slice().is_empty() {
+            // A consumer may park after taking this entry. Free the allocation and its permits
+            // now, rather than making another read or source control call wait for its next poll.
+            *self = Self::Exhausted;
+        }
+        entry
+    }
+
+    fn begin_read(&mut self) -> bool {
+        let crossed_boundary = matches!(self, Self::Exhausted);
+        *self = Self::Unread;
+        crossed_boundary
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+mod chunk_shuttle_tests;
+
 enum LogChunkRead {
     Entries {
         chunk: Option<LogEntryChunk>,
@@ -1573,7 +1604,7 @@ struct LogEntryStream {
     inner: StoreInner,
     start: Bound<Vec<u8>>,
     end: Bound<Vec<u8>>,
-    chunk: Option<LogEntryChunk>,
+    chunk: LogChunkState,
     complete: bool,
     expected_leader: Option<LeaderIdOf<TypeConfig>>,
 }
@@ -1589,19 +1620,17 @@ impl LogEntryStream {
             inner,
             start,
             end,
-            chunk: None,
+            chunk: LogChunkState::Unread,
             complete: false,
             expected_leader,
         }
     }
 
     async fn next(&mut self) -> Result<Option<EntryOf<TypeConfig>>, Report<LogEntryStreamError>> {
-        if let Some(chunk) = &mut self.chunk
-            && let Some(entry) = chunk.entries.next()
-        {
+        if let Some(entry) = self.chunk.next_entry() {
             return Ok(Some(entry));
         }
-        let crossed_chunk_boundary = self.chunk.take().is_some();
+        let crossed_chunk_boundary = self.chunk.begin_read();
         if self.complete {
             return Ok(None);
         }
@@ -1637,14 +1666,14 @@ impl LogEntryStream {
             Some(start) => self.start = start,
             None => self.complete = true,
         }
-        let Some(mut chunk) = chunk else {
+        let Some(chunk) = chunk else {
             return Ok(None);
         };
-        let entry = chunk
-            .entries
-            .next()
+        self.chunk = LogChunkState::Buffered(chunk);
+        let entry = self
+            .chunk
+            .next_entry()
             .verified("a present log chunk contains at least one decoded entry");
-        self.chunk = Some(chunk);
         Ok(Some(entry))
     }
 }

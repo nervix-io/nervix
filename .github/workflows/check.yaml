@@ -1612,7 +1612,7 @@ jobs:
     name: shuttle
     if: contains(github.event.pull_request.labels.*.name, 'shuttle')
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: read
     env:
