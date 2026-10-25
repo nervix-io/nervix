@@ -261,7 +261,7 @@ fn window_state_schemas(
         .change_context_lazy(|| RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: "the window processor does not render as canonical NSPL".to_string(),
+            reason: "the window processor does not render as canonical Plexus".to_string(),
         })?;
     Ok(WindowStateSchemas {
         model,

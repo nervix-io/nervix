@@ -2,7 +2,7 @@ Feature: Client wire full-process restart
   @client_wire_process_restart
   Scenario: A SIGKILL restart preserves a command admitted before the crash
     Given a nervix-server process is started
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA durable_after_kill (
@@ -12,7 +12,7 @@ Feature: Client wire full-process restart
     When the server process receives SIGKILL
     Then the server process exits because of SIGKILL
     When the server process is restarted
-    And these NSPL commands are executed on the server process
+    And these Plexus commands are executed on the server process
       """
       SHOW CREATE SCHEMA durable_after_kill;
       """
@@ -26,7 +26,7 @@ Feature: Client wire full-process restart
   @client_wire_inactivity_restart
   Scenario: Physical inactivity while every node is stopped expires an open transaction
     Given a nervix-server process is started with transaction idle timeout "1s" and tombstone retention "5m"
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100000h;
       START AT '2000-01-01T00:00:00Z' TIME RATE 1000000.0;
@@ -42,16 +42,16 @@ Feature: Client wire full-process restart
   Scenario: Every killed process recovers retained commands and expires an overdue open transaction
     Given a 3 node nervix-server process cluster is started with transaction idle timeout "10s" and tombstone retention "5m"
     And the active domain is "{{domain}}"
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When this NSPL command request with execution reference "process-retained-{{test_id}}" is executed on the server process cluster
+    When this Plexus command request with execution reference "process-retained-{{test_id}}" is executed on the server process cluster
       """
       CREATE SCHEMA process_retained (value STRING);
       """
     And an open transaction is held on the server process cluster as placeholder "overdue_transaction"
-    And the held server process cluster transaction queues these NSPL commands
+    And the held server process cluster transaction queues these Plexus commands
       """
       CREATE SCHEMA process_pending (value STRING);
       """
@@ -61,7 +61,7 @@ Feature: Client wire full-process restart
     And all server processes restart from their existing databases
     Then server process cluster transaction "{{overdue_transaction}}" eventually has state "EXPIRED"
     And the server process cluster has no schema "process_pending"
-    When this NSPL command request with execution reference "process-retained-{{test_id}}" is executed on the server process cluster
+    When this Plexus command request with execution reference "process-retained-{{test_id}}" is executed on the server process cluster
       """
       CREATE SCHEMA process_retained (value STRING);
       """

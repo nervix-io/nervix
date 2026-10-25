@@ -1,8 +1,8 @@
 //! What an archive holds, read and verified from a stream.
 //!
 //! A description decodes supported records, verifies every section, and keeps the place, size and digest
-//! of the NSPL and resource archive sections without their bytes, so describing an archive of any
-//! size holds only its records in memory. The contents a restore reads add each domain's NSPL,
+//! of the Plexus and resource archive sections without their bytes, so describing an archive of any
+//! size holds only its records in memory. The contents a restore reads add each domain's Plexus,
 //! which configuration size keeps small, and leave resource archives where they are, to be read
 //! again by their place.
 
@@ -45,7 +45,7 @@ pub struct ArchiveDescription {
 pub struct DescribedDomain {
     pub capture: DomainCapture,
     pub record: DomainRecord,
-    /// The domain's `models.nspl`.
+    /// The domain's `models.plexus`.
     pub models: DescribedSection,
     /// Every resource version, in archive order.
     pub resource_versions: Vec<DescribedResourceVersion>,
@@ -151,15 +151,15 @@ impl DescribedSection {
 }
 
 /// Everything a restore reads from an archive before it changes anything, verified: the
-/// description, and the text of every domain's `models.nspl`.
+/// description, and the text of every domain's `models.plexus`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveContents {
     pub description: ArchiveDescription,
-    /// Each domain's models as NSPL, keyed by the domain's name in the archive.
+    /// Each domain's models as Plexus, keyed by the domain's name in the archive.
     pub models: BTreeMap<DomainName, String>,
 }
 
-/// The largest `models.nspl` a reader holds in memory.
+/// The largest `models.plexus` a reader holds in memory.
 const MAX_MODELS_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Reads and verifies the archive `reader` streams, and describes what it holds.
@@ -188,7 +188,7 @@ pub fn read_archive_contents<R: Read>(
     })
 }
 
-/// A description being assembled, and the NSPL text of the domains read so far.
+/// A description being assembled, and the Plexus text of the domains read so far.
 struct ContentsReader {
     describer: Describer,
     models: BTreeMap<DomainName, String>,
@@ -204,7 +204,7 @@ impl SectionVisitor for ContentsReader {
         entry: &SectionEntry,
         content: &mut SectionReader<'_>,
     ) -> Result<(), Report<ArchiveReadError>> {
-        let SectionContent::Nspl = entry.content else {
+        let SectionContent::Plexus = entry.content else {
             return self.describer.section(entry, content);
         };
         let bytes = content.read_all(entry, MAX_MODELS_BYTES)?;
@@ -227,7 +227,7 @@ impl SectionVisitor for ContentsReader {
 struct Describer {
     users: Option<UsersRecord>,
     domains: BTreeMap<DomainName, AssembledDomain>,
-    /// Where each domain's `models.nspl` belongs, from the domains the manifest names.
+    /// Where each domain's `models.plexus` belongs, from the domains the manifest names.
     models_paths: BTreeMap<SectionPath, DomainName>,
     /// Where the archive of each resource version already read belongs.
     archive_paths: BTreeMap<SectionPath, VersionSlot>,
@@ -404,7 +404,7 @@ impl SectionVisitor for Describer {
                 self.window_group(entry, content, WindowGroupSection::Arguments)
             }
             SectionContent::Record(RecordKind::Manifest) => Err(misplaced(entry)),
-            SectionContent::Nspl => self.models(entry, content),
+            SectionContent::Plexus => self.models(entry, content),
             SectionContent::ResourceArchive => self.resource_archive(entry, content),
             SectionContent::WasmGuestBlob => self.wasm_guest_blob(entry, content),
         }
@@ -1036,7 +1036,7 @@ impl Describer {
                 return Err(incomplete(&capture.domain, "domain record"));
             };
             let Some(models) = assembled.models else {
-                return Err(incomplete(&capture.domain, "models.nspl"));
+                return Err(incomplete(&capture.domain, "models.plexus"));
             };
             domains.push(DescribedDomain {
                 capture: assembled.capture,

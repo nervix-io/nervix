@@ -8,7 +8,7 @@ Feature: Cluster peer name resolution
   Scenario Outline: Nodes form a cluster through <addressing>
     Given cluster peers are addressed by "<addressing>"
     And a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -70,7 +70,7 @@ Feature: Cluster peer name resolution
   Scenario: A stopped leader rejoins through its advertised name
     Given cluster peers are addressed by "DNS names"
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -94,7 +94,7 @@ Feature: Cluster peer name resolution
     And node "node-2" is started without waiting for it to catch up
     Then node "node-2" eventually observes a stable leader
     And node "node-3" eventually observes a stable leader
-    When these NSPL commands are executed on node "node-3"
+    When these Plexus commands are executed on node "node-3"
       """
       CREATE UNPACED DOMAIN {{domain}};
       """

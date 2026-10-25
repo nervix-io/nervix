@@ -65,7 +65,7 @@ pub enum ImpactItemId {
 }
 
 impl ImpactItemId {
-    /// The name the item carries in NSPL.
+    /// The name the item carries in Plexus.
     pub fn name(&self) -> &str {
         match self {
             Self::Node(node) => node.identifier.as_str(),
@@ -73,7 +73,7 @@ impl ImpactItemId {
         }
     }
 
-    /// The kind the item is, as NSPL spells it.
+    /// The kind the item is, as Plexus spells it.
     pub fn caption(&self) -> &'static str {
         match self {
             Self::Node(node) => node.kind.keyword_phrase(),

@@ -6,7 +6,7 @@ Feature: Archived branch keys checked against the restored branch declarations
   the field.
 
   Background:
-    Given these NSPL commands are saved as placeholder "branch_key_models"
+    Given these Plexus commands are saved as placeholder "branch_key_models"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event ( tenant STRING, shard I32, order_id STRING, amount I64 );
@@ -36,7 +36,7 @@ Feature: Archived branch keys checked against the restored branch declarations
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       {{branch_key_models}}
       CREATE SUBSCRIPTION source_orders TO unique_orders;
@@ -90,7 +90,7 @@ Feature: Archived branch keys checked against the restored branch declarations
     Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "/descriptor.rkyv' does not belong to the branching of deduplicator 'unique_order_filter' in domain '{{domain}}': it is not a key of branch 'by_tenant_shard': field 'shard' does not hold a value of its declared type: expected I32, found STRING"
     When the CLI restores "domain {{domain}} --resume" from "identities.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "materialized state of relay 'orders' in domain '{{domain}}' could not be prepared: the branch key of record identity 1 in archive section 'domains/{{domain}}/state/materialized_relay/orders/groups/0000000000/identities.rkyv' does not belong to the relay's branching: it is not a key of branch 'by_tenant_shard': field 'shard' does not hold a value of its declared type: expected I32, found STRING"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -106,7 +106,7 @@ Feature: Archived branch keys checked against the restored branch declarations
       """
       {"tenant":"probe","shard":9,"order_id":"o-probe","amount":0}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restored_orders TO unique_orders;
       """

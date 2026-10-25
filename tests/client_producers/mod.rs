@@ -5,7 +5,7 @@
 //! - **Owns.** The producers a scenario opened by name, the batches they submitted with the
 //!   outcome and the instant each was answered with, the raw WebSocket sessions producers are
 //!   opened on, and the Arrow batches built from step tables.
-//! - **Depends on.** The Rust client's producers, the harness's raw producer session, the NSPL
+//! - **Depends on.** The Rust client's producers, the harness's raw producer session, the Plexus
 //!   parser for the fields a producer expects, and the scenario cluster.
 //! - **Must not know.** How the server admits, forwards or acknowledges a batch.
 //!
@@ -206,10 +206,10 @@ pub(crate) fn scenario_domain(world: &ScenarioWorld) -> DomainName {
 /// The fields a producer expects, written as the column list of `CREATE SCHEMA`.
 pub(crate) fn expected_fields(text: &str) -> Vec<SchemaField> {
     let source = format!("CREATE SCHEMA expected_by_producer ({text});");
-    let parsed = nervix_nspl::client_statement::parse_client_statement_sources(&source)
+    let parsed = nervix_plexus::client_statement::parse_client_statement_sources(&source)
         .unwrap_or_else(|error| panic!("'{text}' is not a schema column list: {error:?}"));
     for statement in parsed {
-        let nervix_nspl::client_statement::ClientStatement::Server(
+        let nervix_plexus::client_statement::ClientStatement::Server(
             nervix_models::Statement::Create(create),
         ) = statement.statement
         else {

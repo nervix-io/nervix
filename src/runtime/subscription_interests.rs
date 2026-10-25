@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** The live subscriber index, incarnation/version selection and immutable reads.
 //! - **Depends on.** Vocabulary identities and ordinary collections.
-//! - **Must not know.** Gossip drivers, cluster coordination, NSPL or session framing.
+//! - **Must not know.** Gossip drivers, cluster coordination, Plexus or session framing.
 
 #![cfg_attr(
     nervix_lint,

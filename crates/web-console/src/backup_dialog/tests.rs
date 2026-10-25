@@ -23,7 +23,7 @@ use nervix_models::{
     RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, Statement, Timestamp,
     TransactionImpactReport, TransactionPosition,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
 use super::{
     BackupCommand, BackupOutcomeEffect, BackupProgress, RestoreConclusion, RestoreProgress,
@@ -102,7 +102,7 @@ fn command(attempt: u64) -> BackupCommand {
     }
 }
 
-/// The Model `statement` parses into, which a draft's canonical NSPL must reproduce.
+/// The Model `statement` parses into, which a draft's canonical Plexus must reproduce.
 fn parsed(statement: &str) -> Statement {
     match parse_client_statement(statement) {
         Ok(ClientStatement::Server(statement)) => statement,
@@ -125,11 +125,11 @@ fn a_backup_draft_lowers_to_the_backup_model_its_canonical_statement_parses_into
         }
     );
     assert_eq!(
-        backup.to_canonical_nspl(),
+        backup.to_canonical_plexus(),
         "BACKUP DOMAIN tenant TO 'nervix-backup.nvxb';"
     );
     assert_eq!(
-        parsed(&backup.to_canonical_nspl()),
+        parsed(&backup.to_canonical_plexus()),
         Statement::Backup(backup.clone())
     );
 
@@ -143,11 +143,11 @@ fn a_backup_draft_lowers_to_the_backup_model_its_canonical_statement_parses_into
     };
     let backup = cluster.model().assured("a cluster draft lowers");
     assert_eq!(
-        backup.to_canonical_nspl(),
+        backup.to_canonical_plexus(),
         "BACKUP CLUSTER TO 'cluster.nvxb' WITHOUT RESOURCES TIMEOUT 30s;"
     );
     assert_eq!(
-        parsed(&backup.to_canonical_nspl()),
+        parsed(&backup.to_canonical_plexus()),
         Statement::Backup(backup.clone())
     );
     for (capture, clause) in [
@@ -162,9 +162,9 @@ fn a_backup_draft_lowers_to_the_backup_model_its_canonical_statement_parses_into
         let backup = draft
             .model()
             .assured("a live or configuration-only draft ignores the quiesce timeout");
-        assert!(backup.to_canonical_nspl().ends_with(clause));
+        assert!(backup.to_canonical_plexus().ends_with(clause));
         assert_eq!(
-            parsed(&backup.to_canonical_nspl()),
+            parsed(&backup.to_canonical_plexus()),
             Statement::Backup(backup.clone())
         );
     }
@@ -234,19 +234,19 @@ fn a_restore_draft_lowers_to_the_restore_model_of_the_archive_it_names() {
         .model(Some("tenant.nvxb"), RestoreMode::DryRun)
         .assured("a domain draft with its archive lowers");
     assert_eq!(
-        dry_run.to_canonical_nspl(),
+        dry_run.to_canonical_plexus(),
         "RESTORE DOMAIN tenant AS tenant_copy FROM 'tenant.nvxb' DRY RUN;"
     );
     let apply = draft
         .model(Some("tenant.nvxb"), RestoreMode::Apply)
         .assured("the same draft lowers to the restore itself");
     assert_eq!(
-        apply.to_canonical_nspl(),
+        apply.to_canonical_plexus(),
         "RESTORE DOMAIN tenant AS tenant_copy FROM 'tenant.nvxb';"
     );
     for restore in [dry_run, apply] {
         assert_eq!(
-            parsed(&restore.to_canonical_nspl()),
+            parsed(&restore.to_canonical_plexus()),
             Statement::Restore(restore.clone())
         );
     }
@@ -262,12 +262,12 @@ fn a_restore_draft_lowers_to_the_restore_model_of_the_archive_it_names() {
         .model(Some("cluster.nvxb"), RestoreMode::Apply)
         .assured("a cluster draft needs no domain");
     assert_eq!(
-        restore.to_canonical_nspl(),
+        restore.to_canonical_plexus(),
         "RESTORE CLUSTER FROM 'cluster.nvxb' RESUME ON EXISTING USER REPLACE WITHOUT SOURCE \
          OFFSETS;"
     );
     assert_eq!(
-        parsed(&restore.to_canonical_nspl()),
+        parsed(&restore.to_canonical_plexus()),
         Statement::Restore(restore.clone())
     );
 }

@@ -5,7 +5,7 @@
 //! - **Owns.** Encoding, decoding, hashing and UTF-8 conversion of binary columns, including
 //!   per-row failures and Arrow offset bounds.
 //! - **Depends on.** Arrow columns, VM row errors and SIMD-backed encoding kernels.
-//! - **Must not know.** NSPL syntax, routes, schemas or connectors.
+//! - **Must not know.** Plexus syntax, routes, schemas or connectors.
 
 #![cfg_attr(
     nervix_lint,

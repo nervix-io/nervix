@@ -4,7 +4,7 @@
 has one primary owner. Only that owner instantiates the relay buffer, concrete branch presence,
 relay metrics, subscription fan-out, and optional materialized state.
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS RELAY notifications
   SCHEMA notification
   UNBRANCHED
@@ -37,7 +37,7 @@ stored relay's canonical declaration, which always states its capacity. See
 
 Relays select an explicit branch or declare unbranched execution:
 
-```nspl
+```plexus
 CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant_user;
 CREATE RELAY global_notifications SCHEMA notification UNBRANCHED;
 ```
@@ -47,7 +47,7 @@ CREATE RELAY global_notifications SCHEMA notification UNBRANCHED;
 `ALTER RELAY` accepts one or more comma-separated operations. Operations execute in written order,
 so later operations may replace values set earlier in the same statement:
 
-```nspl
+```plexus
 ALTER RELAY notifications
   SET CAPACITY 8,
   SET SCHEMA notification_v2,
@@ -164,7 +164,7 @@ These fixed slots do not scale with the number of runtime consumers or subscript
 
 The capacity can be changed after creation:
 
-```nspl
+```plexus
 ALTER RELAY notifications SET CAPACITY 5;
 ```
 
@@ -222,7 +222,7 @@ the TTL in real time without changing the scan interval.
 
 Materialized relay state is enabled with:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS RELAY notifications
   SCHEMA notification
   UNBRANCHED

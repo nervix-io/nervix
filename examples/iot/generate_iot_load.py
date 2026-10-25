@@ -62,7 +62,7 @@ class DeviceRef:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Publish streaming MQTT load for examples/iot/iot.nspl."
+        description="Publish streaming MQTT load for examples/iot/iot.plexus."
     )
     parser.add_argument("--broker", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=1883)

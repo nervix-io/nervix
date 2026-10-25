@@ -5,7 +5,7 @@
 //!   and binding the dependencies every ingestor start reads.
 //! - **Depends on.** Installed ingestor plans, installed domain capabilities and the source start
 //!   path.
-//! - **Must not know.** NSPL parsing, registry validation, placement selection, or which connector
+//! - **Must not know.** Plexus parsing, registry validation, placement selection, or which connector
 //!   a source runs on.
 
 #![cfg_attr(

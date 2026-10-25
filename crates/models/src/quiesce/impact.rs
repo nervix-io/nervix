@@ -987,7 +987,7 @@ fn ensure_same_impact_domain(
     }))
 }
 
-/// The non-sensitive identity of one accepted NSPL operation.
+/// The non-sensitive identity of one accepted Plexus operation.
 #[derive(
     Debug,
     Clone,

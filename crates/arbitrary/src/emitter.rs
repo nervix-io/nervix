@@ -37,7 +37,7 @@ impl Arbitrary<'_> {
         // form must carry back, so its domain may draw one.
         let batch = match connector.batch_legality() {
             EmitterBatchLegality::Required { .. } => Some(self.batch_policy()),
-            EmitterBatchLegality::Unavailable { .. } if self.domain == Domain::Nspl => None,
+            EmitterBatchLegality::Unavailable { .. } if self.domain == Domain::Plexus => None,
             EmitterBatchLegality::Optional { .. } | EmitterBatchLegality::Unavailable { .. } => {
                 if self.entropy.flag() {
                     Some(self.batch_policy())
@@ -424,7 +424,7 @@ impl Arbitrary<'_> {
     /// A Postgres conflict action. `DO NOTHING` may name no conflict target; `DO UPDATE` needs the
     /// one it updates.
     ///
-    /// NSPL reads a `DO UPDATE` only while a mapped column stays outside its target to be updated,
+    /// Plexus reads a `DO UPDATE` only while a mapped column stays outside its target to be updated,
     /// so there the target leaves the first mapped column out. The vocabulary holds any target.
     fn postgres_conflict_action(
         &mut self,
@@ -437,7 +437,7 @@ impl Arbitrary<'_> {
             },
             _ => {
                 let mut target = self.conflict_target(1);
-                if self.domain == Domain::Nspl {
+                if self.domain == Domain::Plexus {
                     let updated = &values
                         .first()
                         .assured("the VALUES map declares at least one column")

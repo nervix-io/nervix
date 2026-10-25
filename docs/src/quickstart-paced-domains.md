@@ -11,7 +11,7 @@ This page builds a small replay domain next to `quickstart`.
 
 ## A Second Domain
 
-```nspl
+```plexus
 CREATE PACED DOMAIN quickstart_replay WITH PERIOD 200ms SKEW 100000h;
 
 USE quickstart_replay;
@@ -28,7 +28,7 @@ Paced ingestion needs an event time, so this schema finally carries a `DATETIME`
 the promised demonstration of the codec's datetime encoding: the wire field is a string, and
 `ENCODE ... AS RFC3339` bridges it ([Codecs](schemas-and-codecs.md#codecs)).
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE SCHEMA order_event (
@@ -75,7 +75,7 @@ declare a timestamp source (`TIMESTAMP NOW` or `TIMESTAMP AT <field>`), or inges
 
 To make the clock visible, add a generator whose cadence is declared in **logical** seconds:
 
-```nspl
+```plexus
 CREATE SCHEMA replay_heartbeat (
   order_id STRING,
   amount I64
@@ -102,7 +102,7 @@ A stopped paced domain has no ticks, so nothing is admitted — try POSTing now 
 fails. Then start the clock at a historical instant, running ten times faster than wall clock
 ([Start And Stop](domains-and-time.md#start-and-stop)):
 
-```nspl
+```plexus
 START AT '2026-01-01T00:00:00Z' TIME RATE 10.0;
 ```
 

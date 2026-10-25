@@ -41,7 +41,7 @@ use crate::{
 /// The most items a generated operation list, member list or binding list holds.
 const ITEMS: usize = 3;
 
-/// The kinds NSPL's `DROP` names. It has no `DROP` for a branch, generator, lookup, signaling
+/// The kinds Plexus's `DROP` names. It has no `DROP` for a branch, generator, lookup, signaling
 /// protocol, WASM processor or window processor, which the vocabulary's `DropModel` still holds.
 const DROPPABLE_KINDS: [ModelKind; 19] = [
     ModelKind::Schema,
@@ -740,11 +740,11 @@ impl Arbitrary<'_> {
         NodeRef::new(kind, self.model_name_of(kind))
     }
 
-    /// The name of a Model of `kind`. NSPL reads a relay's name wherever it names a relay, so in
-    /// the NSPL domain the name of a relay avoids the words NSPL refuses for one.
+    /// The name of a Model of `kind`. Plexus reads a relay's name wherever it names a relay, so in
+    /// the Plexus domain the name of a relay avoids the words Plexus refuses for one.
     fn model_name_of(&mut self, kind: ModelKind) -> ModelName {
         match kind {
-            ModelKind::Relay => self.name_refusing::<ModelName>(RelayName::REFUSED_IN_NSPL),
+            ModelKind::Relay => self.name_refusing::<ModelName>(RelayName::REFUSED_IN_PLEXUS),
             _ => self.name(),
         }
     }
@@ -763,10 +763,10 @@ impl Arbitrary<'_> {
         RelocationMember::new(kind, self.model_name_of(kind))
     }
 
-    /// The kind a `DROP` names: one NSPL spells, or in the vocabulary domain any kind at all.
+    /// The kind a `DROP` names: one Plexus spells, or in the vocabulary domain any kind at all.
     fn drop_kind(&mut self) -> ModelKind {
         match self.domain {
-            Domain::Nspl => self.entropy.pick(DROPPABLE_KINDS),
+            Domain::Plexus => self.entropy.pick(DROPPABLE_KINDS),
             Domain::Vocabulary => {
                 let kinds = ModelKind::iter().collect::<Vec<_>>();
                 let count = NonZeroUsize::new(kinds.len()).assured("ModelKind has variants");

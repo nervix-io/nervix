@@ -2,11 +2,11 @@ Feature: Window statistics
   Scenario Outline: Constant finite readings keep zero variance when their run sum overflows
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA overflow_reading (tenant STRING, value F64 OPTIONAL, companion F64 OPTIONAL);
       CREATE SCHEMA overflow_summary (tenant STRING, mean F64 OPTIONAL, variance F64 OPTIONAL, covariance F64 OPTIONAL, companion_mean F64 OPTIONAL);
@@ -80,11 +80,11 @@ Feature: Window statistics
   Scenario Outline: Typed run admission preserves exact aggregates and centered variance across branches
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA run_reading (tenant STRING, amount I64 OPTIONAL, reading F64 OPTIONAL, healthy BOOL OPTIONAL, unsafe_text STRING OPTIONAL);
       CREATE SCHEMA run_summary (tenant STRING, total I64 OPTIONAL, samples I64, healthy_samples I64, lowest I64 OPTIONAL, highest I64 OPTIONAL, mean_reading F64 OPTIONAL, variance F64 OPTIONAL, median_bucket F64 OPTIONAL, nan_probe F64 OPTIONAL);
@@ -139,11 +139,11 @@ Feature: Window statistics
   Scenario Outline: Sliding windows compute exact statistics per branch and retract stepped rows
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         tenant STRING,
@@ -273,11 +273,11 @@ Feature: Window statistics
   Scenario Outline: Tumbling windows skip null arguments and emit typed nulls
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA sparse_reading (
         tenant STRING,
@@ -407,11 +407,11 @@ Feature: Window statistics
   Scenario Outline: An outlier that leaves a sliding window leaves no residue in later statistics
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA measurement (
         tenant STRING,
@@ -496,11 +496,11 @@ Feature: Window statistics
   Scenario Outline: Window statistic contracts are enforced when the processor is applied
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA tagged_reading (
         tenant STRING,
@@ -521,7 +521,7 @@ Feature: Window statistics
       CREATE RELAY tagged_readings SCHEMA tagged_reading BRANCHED BY by_contract_tenant;
       CREATE RELAY contract_summaries SCHEMA contract_summary BRANCHED BY by_contract_tenant;
       """
-    When these NSPL commands fail with "<error>"
+    When these Plexus commands fail with "<error>"
       """
       CREATE WINDOW PROCESSOR invalid_statistics FROM tagged_readings
         WIDTH 3 MESSAGES
@@ -549,11 +549,11 @@ Feature: Window statistics
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         tenant STRING,
@@ -625,7 +625,7 @@ Feature: Window statistics
     Then within "5s" DESCRIBE DOMAIN section "processed" metric "messages_total" "received" relay "readings" across physical nodes totals 4
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION reading_summaries_subscription TO reading_summaries;
       """
@@ -653,11 +653,11 @@ Feature: Window statistics
   Scenario Outline: Describe window processor reports shared statistic structures
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         tenant STRING,

@@ -489,7 +489,7 @@ mod tests {
     /// for it, as the registry resolves it for every relay and processor.
     fn schedule(text: &str, branchings: &[(&str, ResolvedBranching)]) -> DomainSchedule {
         let models = super::super::parse_models(&domain(), text)
-            .assured("the test models are canonical NSPL");
+            .assured("the test models are canonical Plexus");
         let mut nodes = Vec::with_capacity(models.len());
         for model in models {
             let model = model

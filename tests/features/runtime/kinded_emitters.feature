@@ -3,11 +3,11 @@ Feature: Emitters name their connector and entity in the Plexus statement head
   @kinded_emitter_head
   Scenario Outline: SHOW CREATE EMITTER preserves the declared entity and external name
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -36,11 +36,11 @@ Feature: Emitters name their connector and entity in the Plexus statement head
   @kinded_emitter_head
   Scenario Outline: ALTER checks the emitter entity and replaces its complete destination body
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -52,11 +52,11 @@ Feature: Emitters name their connector and entity in the Plexus statement head
         MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    And these NSPL commands fail with "ALTER NATS SUBJECT EMITTER targets an emitter declared as KAFKA TOPIC"
+    And these Plexus commands fail with "ALTER NATS SUBJECT EMITTER targets an emitter declared as KAFKA TOPIC"
       """
       ALTER NATS SUBJECT EMITTER outgoing SET DETACHED;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       ALTER KAFKA TOPIC EMITTER outgoing SET TO broker TOPIC 'Orders.Audit'
         MODE ACK PARALLEL MAX 4 ACK TIMEOUT 2s RETRY POLICY BACKOFF 10ms MAX 1s
@@ -78,11 +78,11 @@ Feature: Emitters name their connector and entity in the Plexus statement head
   @kinded_emitter_head
   Scenario Outline: DESCRIBE exposes the declared connector and entity with the exact external name
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -107,11 +107,11 @@ Feature: Emitters name their connector and entity in the Plexus statement head
   @kinded_emitter_head
   Scenario Outline: OTEL entity heads retain their signal and payload through SHOW CREATE
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA telemetry ( event_ts DATETIME, body STRING, trace_id STRING, span_id STRING, value F64 );
       CREATE RELAY events SCHEMA telemetry UNBRANCHED;
@@ -138,11 +138,11 @@ Feature: Emitters name their connector and entity in the Plexus statement head
   @kinded_emitter_head
   Scenario Outline: Iceberg destinations resolve each declared storage client kind
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE RELAY events SCHEMA event UNBRANCHED;
@@ -171,18 +171,18 @@ Feature: Emitters name their connector and entity in the Plexus statement head
   @kinded_emitter_head
   Scenario Outline: Iceberg refuses a client outside its declared object stores
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE KAFKA CLIENT broker CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE ICEBERG_REST CLIENT catalog CONFIG { 'uri' = 'http://127.0.0.1:8181', 'warehouse' = 'warehouse' };
       """
-    And these NSPL commands fail with "ICEBERG TABLE emitter requires a S3 or GCS or AZURE_BLOB client, found KAFKA"
+    And these Plexus commands fail with "ICEBERG TABLE emitter requires a S3 or GCS or AZURE_BLOB client, found KAFKA"
       """
       CREATE ICEBERG TABLE EMITTER outgoing FROM events TO broker TABLE 'Orders'
         LOCATION 's3://warehouse/Orders' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB
@@ -198,11 +198,11 @@ Feature: Emitters name their connector and entity in the Plexus statement head
   @kinded_emitter_head
   Scenario Outline: Database entity locators preserve external case in SHOW CREATE
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE RELAY events SCHEMA event UNBRANCHED;

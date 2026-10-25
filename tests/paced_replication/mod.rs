@@ -1,4 +1,4 @@
-//! Public NSPL catch-up through an opaque rate-limited interconnect.
+//! Public Plexus catch-up through an opaque rate-limited interconnect.
 //!
 //! Outside the layer order: a Cucumber harness.
 //! - **Owns.** The paced follower's applied-domain assertion and catch-up observations.

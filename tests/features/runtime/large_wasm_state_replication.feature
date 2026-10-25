@@ -50,11 +50,11 @@ Feature: Large WASM guest saves across the replication message limit
     And node "node-1" has state-counting WASM reset fixture with 3 MiB saves in resource directory "wasm_processor"
     And a branched state-counting WASM reset graph is running
     # Keep the HTTP source on a surviving node while the WASM owner is lost.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE WASM PROCESSOR counting_guest ONTO NODE node-2 IGNORE PREFERENCES;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -72,7 +72,7 @@ Feature: Large WASM guest saves across the replication message limit
     When node "{{former_owner}}" is stopped
     Then node "{{promoted_replica}}" eventually observes a stable leader
     And within "60s" node "{{promoted_replica}}" eventually reports scheduled "wasm_processor" "counting_guest" owner equals placeholder "promoted_replica"
-    When these NSPL commands are executed on node "{{promoted_replica}}"
+    When these Plexus commands are executed on node "{{promoted_replica}}"
       """
       CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
       """
@@ -108,22 +108,22 @@ Feature: Large WASM guest saves across the replication message limit
       {"tenant":"beta","sequence":1}
       """
     Then within "60s" the 2 branches of WASM PROCESSOR "counting_guest" have committed revision 1 with 1 confirmed replicas
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "wasm_processor" "counting_guest" is saved as placeholder "former_owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DRAIN NODE {{former_owner}};
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "wasm_processor" "counting_guest" is saved as placeholder "successor"
     And within "60s" node "{{successor}}" eventually reports scheduled "wasm_processor" "counting_guest" owner different from placeholder "former_owner"
-    When these NSPL commands are executed on node "{{successor}}"
+    When these Plexus commands are executed on node "{{successor}}"
       """
       CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
       """

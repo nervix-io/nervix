@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** VM input projection, filter evaluation and route-local output construction.
 //! - **Depends on.** Compiled programs, Arrow batches and explicit execution timestamps.
-//! - **Must not know.** NSPL source, scheduling decisions or connector I/O.
+//! - **Must not know.** Plexus source, scheduling decisions or connector I/O.
 
 #![cfg_attr(
     nervix_lint,

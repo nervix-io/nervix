@@ -31,7 +31,7 @@ Feature: Deduplicator keyspaces and windows larger than the bulk budget in backu
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
     Given the active domain is "{{source_domain}}_large_failure"
     When the cluster is restarted
-    And these NSPL commands fail with "restore state installation is incomplete"
+    And these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """

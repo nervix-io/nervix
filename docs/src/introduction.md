@@ -1,10 +1,12 @@
 # Introduction
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix is experimental software in active development. It is intended for evaluation, local testing, and design exploration. It is not suitable for real production workloads.
 
 Nervix is a realtime stream processing system with a robust declarative DSL for defining data-flow graphs.
 
-Nervix stream processing Language (NSPL) is used to declare the schemas, connections, runtime nodes, and external integrations that make up a Nervix graph:
+Plexus declares the schemas, connections, runtime nodes, and external integrations that make up a Nervix graph:
 
 - schemas
 - wire schemas
@@ -17,10 +19,10 @@ Nervix stream processing Language (NSPL) is used to declare the schemas, connect
 - vhosts
 - endpoints
 
-NSPL has reached alpha. Its period of rapid, broad experimentation is over, so large
+Plexus has reached alpha. Its period of rapid, broad experimentation is over, so large
 backward-incompatible language changes are no longer expected. The language will continue to
 evolve, however, and focused breaking changes may still occur. See
-[Language Stability](./nspl-overview.md#language-stability) for the current compatibility policy.
+[Language Stability](./plexus-overview.md#language-stability) for the current compatibility policy.
 
 The core runtime model is a graph of connected nodes:
 
@@ -60,6 +62,6 @@ This book is split into six sections:
 
 Start with the quickstart if you are new to Nervix, and with the manual unless you are
 specifically trying to understand internals. Agents can start with the portable
-[NSPL Agent Skill](./nspl-agent-skill.md).
+[Plexus Agent Skill](./plexus-agent-skill.md).
 
 Nervix is licensed under the Fair Core License (FCL). See [License](./license.md).

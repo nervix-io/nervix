@@ -4,7 +4,7 @@
 //! - **Owns.** Turning one failed record into the typed error context and executing its prepared
 //!   route program without recursively handling a failure in that handler.
 //! - **Depends on.** Bound error-route plans, Arrow batches, the VM and relay delivery.
-//! - **Must not know.** Scheduled Models, NSPL parsing or route selection from declarations.
+//! - **Must not know.** Scheduled Models, Plexus parsing or route selection from declarations.
 
 #![cfg_attr(
     nervix_lint,

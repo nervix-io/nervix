@@ -6,7 +6,7 @@ Feature: Whole-cluster restart keeps scheduled work in place
   Scenario: A voter restarted beside a peer slow to report ready keeps its ownership after cluster restart
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA restart_event ( id I64 );
@@ -20,7 +20,7 @@ Feature: Whole-cluster restart keeps scheduled work in place
       kind=relay name=restart_events owner=node-3
       """
     When the cluster restarts while node "node-2" reports ready only after the restarted leader's startup voter observation ends
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """

@@ -14,11 +14,11 @@ Feature: HTTP REQUEST emitter lifecycle
     And HTTP receiver "second" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (event_id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
@@ -47,14 +47,14 @@ Feature: HTTP REQUEST emitter lifecycle
       [{"event_id":"1"}]
       """
     Then HTTP receiver "first" eventually receives at least 1 requests
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.event_id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
     And HTTP receiver "first" releases its held responses with "respond 204"
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And the last command output contains
       """
       quiesce level: ENTITY_PAUSE
@@ -92,11 +92,11 @@ Feature: HTTP REQUEST emitter lifecycle
     And HTTP receiver "second" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (event_id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
@@ -126,13 +126,13 @@ Feature: HTTP REQUEST emitter lifecycle
       """
     Then HTTP receiver "first" eventually receives at least 1 requests
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
-    When these NSPL commands fail with "timed out draining domain"
+    When these Plexus commands fail with "timed out draining domain"
       """
       ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.event_id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER published;
       """
@@ -163,11 +163,11 @@ Feature: HTTP REQUEST emitter lifecycle
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
@@ -222,13 +222,13 @@ Feature: HTTP REQUEST emitter lifecycle
 
       {"id":"1"}
       """
-    When these NSPL commands fail with "emitter body selection does not support the retained construction"
+    When these Plexus commands fail with "emitter body selection does not support the retained construction"
       """
       ALTER HTTP REQUEST EMITTER published SET TO api_client
         METHOD 'DELETE' PATH '/empty'
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER published;
       """
@@ -240,13 +240,13 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       INHERIT id
       """
-    When these NSPL commands fail with "emitter body selection does not support the retained construction"
+    When these Plexus commands fail with "emitter body selection does not support the retained construction"
       """
       ALTER HTTP REQUEST EMITTER set_body SET TO api_client
         METHOD 'DELETE' PATH '/empty'
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
-    When these NSPL commands fail with "partial_output"
+    When these Plexus commands fail with "partial_output"
       """
       ALTER HTTP REQUEST EMITTER scoped SET TO api_client
         METHOD 'DELETE' PATH '/empty'
@@ -260,7 +260,7 @@ Feature: HTTP REQUEST emitter lifecycle
     # replacement cannot support its request fields or its construction fails, and the active
     # emitter keeps delivering as it was.
     Given client "owner" is connected to the leader node
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       DROP EMITTER published;
@@ -277,7 +277,7 @@ Feature: HTTP REQUEST emitter lifecycle
       GET and HEAD require WITHOUT BODY
       """
     And transaction "{{refused_request_transaction}}" eventually has state "FAILED"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       DROP EMITTER published;
@@ -305,7 +305,7 @@ Feature: HTTP REQUEST emitter lifecycle
 
       {"id":"kept"}
       """
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       DROP EMITTER published;
@@ -316,7 +316,7 @@ Feature: HTTP REQUEST emitter lifecycle
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       COMMIT;
       """
@@ -325,7 +325,7 @@ Feature: HTTP REQUEST emitter lifecycle
       quiesce level: ENTITY_PAUSE
       """
     And transaction "{{transaction_id}}" report step 1 eventually records planned quiesce "ENTITY_PAUSE", actual quiesce "ENTITY_PAUSE", execution "APPLIED", and outcomes "REQUESTED,CONFIRMED,RELEASED"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER HTTP REQUEST EMITTER published SET TO api_client
         METHOD 'DELETE' PATH '/empty'
@@ -358,11 +358,11 @@ Feature: HTTP REQUEST emitter lifecycle
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
@@ -388,7 +388,7 @@ Feature: HTTP REQUEST emitter lifecycle
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER HTTP REQUEST EMITTER published SET MODE ACK RETRY POLICY BACKOFF 200ms MAX 200ms;
       """
@@ -396,7 +396,7 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER HTTP REQUEST EMITTER published SET CLIENT second_api;
       """
@@ -408,7 +408,7 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       [{"id":"1"}]
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER HTTP REQUEST EMITTER published SET FLUSH IMMEDIATE;
       """
@@ -421,7 +421,7 @@ Feature: HTTP REQUEST emitter lifecycle
       """
       POST /first
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER HTTP REQUEST EMITTER published ADD FROM backup;
       """
@@ -430,7 +430,7 @@ Feature: HTTP REQUEST emitter lifecycle
       quiesce level: DOMAIN_PAUSE
       """
     Given client "owner" is connected to the leader node
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       DROP CLIENT second_api;
@@ -438,7 +438,7 @@ Feature: HTTP REQUEST emitter lifecycle
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 6000
       };
       """
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       COMMIT;
       """
@@ -468,11 +468,11 @@ Feature: HTTP REQUEST emitter lifecycle
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And Kafka topic "http_recovery_{{test_id}}" exists with 1 partitions
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       <cordon>
       CREATE SCHEMA event (id STRING);
@@ -530,11 +530,11 @@ Feature: HTTP REQUEST emitter lifecycle
     And the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       <cordon>
       CREATE SCHEMA event (id STRING);
@@ -586,11 +586,11 @@ Feature: HTTP REQUEST emitter lifecycle
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And Kafka topic "http_stop_{{test_id}}" exists with 1 partitions
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
@@ -626,7 +626,7 @@ Feature: HTTP REQUEST emitter lifecycle
     Then HTTP receiver "first" eventually receives at least 1 request
     # The first destination never answers, so a live alteration cannot drain the admitted request.
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
-    When these NSPL commands fail with "timed out draining domain"
+    When these Plexus commands fail with "timed out draining domain"
       """
       ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.id)
@@ -634,7 +634,7 @@ Feature: HTTP REQUEST emitter lifecycle
       """
     # Stopping the domain ends the request instead: its connection is released and its record stays
     # unacknowledged at the attached source.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
@@ -642,7 +642,7 @@ Feature: HTTP REQUEST emitter lifecycle
     And within "2s" Kafka consumer group "http_stop_group_{{test_id}}" next offset for topic "http_stop_{{test_id}}" partition 0 is "below 1"
     # While the domain is stopped, the replacement needs no drain, and the restarted source
     # redelivers the record, which the replacement sends to the second destination.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.id)

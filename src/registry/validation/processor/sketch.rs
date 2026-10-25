@@ -204,7 +204,7 @@ mod tests {
                 None,
             ),
         ] {
-            let nspl = format!(
+            let plexus = format!(
                 r#"
                 CREATE SCHEMA sketch_input (value I64);
                 CREATE SCHEMA sketch_output (distinct_values I64);
@@ -216,7 +216,7 @@ mod tests {
                     ON MESSAGE ERROR LOG;
             "#
             );
-            let (domain, models) = example_graph_models("sketch window state budget", &nspl);
+            let (domain, models) = example_graph_models("sketch window state budget", &plexus);
             let path = temp_db_path();
             let registry = Registry::open(&path)
                 .assured("the test fixture supplies a writable temporary registry path");

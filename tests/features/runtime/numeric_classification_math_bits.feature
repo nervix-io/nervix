@@ -2,11 +2,11 @@ Feature: Numeric classification, math and bit functions
   Scenario Outline: Float classification, sign, truncation, precision rounding and trigonometry fail only the messages whose results are not finite
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         id STRING,
@@ -96,11 +96,11 @@ Feature: Numeric classification, math and bit functions
   Scenario Outline: Integer bit operations, shifts and rounding to tens fail only the messages whose counts or results do not fit
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA register_sample (
         id STRING,
@@ -187,7 +187,7 @@ Feature: Numeric classification, math and bit functions
 
   Scenario Outline: Numeric classification and bit functions reject operands outside their signatures when the statement is applied
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "<message>"
+    When these Plexus commands fail with "<message>"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA register_sample (

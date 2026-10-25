@@ -2,11 +2,11 @@ Feature: Websocket signaling protocols
   Scenario Outline: Websocket endpoint signaling matches out-of-order acknowledgements with JAQ despite extra dynamic fields
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         seq I64
@@ -74,11 +74,11 @@ Feature: Websocket signaling protocols
   Scenario Outline: Websocket endpoint signaling rejects the session when a FAIL JAQ matcher fires
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         seq I64
@@ -138,11 +138,11 @@ Feature: Websocket signaling protocols
   Scenario Outline: Websocket endpoint signaling exchanges RAW text frames
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         seq I64
@@ -212,19 +212,19 @@ Feature: Websocket signaling protocols
         "signaling.proto": "syntax = \"proto3\";\npackage nervix.test;\n\nmessage Subscribe {\n  uint32 id = 1;\n}\n\nmessage Ack {\n  uint32 id = 1;\n}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE proto_bundle;
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         seq I64
@@ -295,19 +295,19 @@ Feature: Websocket signaling protocols
         "levels.proto": "syntax = \"proto3\";\npackage nervix.test;\n\nmessage Offer {\n  double level = 1;\n}\n\nmessage Accept {\n  double level = 1;\n}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE proto_bundle;
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         seq I64
@@ -372,11 +372,11 @@ Feature: Websocket signaling protocols
   Scenario Outline: Websocket endpoint signaling carries captured state into a later phase
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         seq I64
@@ -442,11 +442,11 @@ Feature: Websocket signaling protocols
   Scenario Outline: Websocket endpoint signaling withholds a later phase until the current one is acknowledged
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         seq I64
@@ -513,11 +513,11 @@ Feature: Websocket signaling protocols
   Scenario Outline: Websocket endpoint signaling answers a server challenge before sending anything
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         seq I64
@@ -582,11 +582,11 @@ Feature: Websocket signaling protocols
   Scenario Outline: Websocket endpoint signaling passes data through once its ACCEPT DATA matcher is satisfied
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         seq I64
@@ -651,11 +651,11 @@ Feature: Websocket signaling protocols
   Scenario Outline: Websocket endpoint signaling withholds held data when ACCEPT DATA is never reached
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         seq I64

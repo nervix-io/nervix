@@ -11,7 +11,7 @@ Materialized state keeps the latest full record per branch instance. It is a rel
 an existing relay can adopt it with `ALTER RELAY`
 ([Altering Relays](relay.md#altering-relays)):
 
-```nspl
+```plexus
 BEGIN;
 
 ALTER RELAY orders_by_customer SET MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -28,7 +28,7 @@ A generator declares exactly one materialized relay and reads it through the
 require a flush policy. Branch identity is node-wide: the generator, its materialized relay, and
 its output relay must share the exact branch.
 
-```nspl
+```plexus
 CREATE SCHEMA order_heartbeat (
   customer STRING,
   last_order_id STRING,

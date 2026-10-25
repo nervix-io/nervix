@@ -2,11 +2,11 @@ Feature: Expression function semantics
   Scenario Outline: Case conversion agrees across literal, column and repeated expressions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA greeting (
         id STRING,
@@ -77,11 +77,11 @@ Feature: Expression function semantics
   Scenario Outline: NULLIF uses the same equality as the comparison operator
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA measurement (
         id STRING,
@@ -155,11 +155,11 @@ Feature: Expression function semantics
   Scenario Outline: Regular expressions prepare constant patterns and read per-message patterns
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA note (
         id STRING,
@@ -265,11 +265,11 @@ Feature: Expression function semantics
   Scenario Outline: CASE ignores float function errors from unselected arms
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA growth (
         id STRING,
@@ -345,11 +345,11 @@ Feature: Expression function semantics
   Scenario Outline: List sum reports integer overflow as a message error
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         id STRING,
@@ -421,11 +421,11 @@ Feature: Expression function semantics
   Scenario Outline: Count and position functions read unsigned counts in full and refuse text a STRING cannot hold
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA sizing (
         id STRING,
@@ -512,7 +512,7 @@ Feature: Expression function semantics
 
   Scenario Outline: List item functions reject nested elements when the statement is applied
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "function 'first' requires ARRAY or VEC elements of a scalar type"
+    When these Plexus commands fail with "function 'first' requires ARRAY or VEC elements of a scalar type"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA detection_batch (

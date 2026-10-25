@@ -1,5 +1,7 @@
 # Typed States And Validation Boundaries
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
 stand for a missing value or a different state. The owner of each state decides when a value is
@@ -644,7 +646,7 @@ past its step limit, a minimum above its maximum, or a size that is not a whole 
 such data fails to decode with a typed error and is never normalized into a valid value. A timestamp
 is its signed Unix nanoseconds, and every conversion into one goes through them, so two spellings of
 one instant, such as an offset and its UTC equivalent, or a leap second and the second after it, are
-one timestamp. Every duration Nervix reads from text, whether an NSPL literal, a domain-clock period
+one timestamp. Every duration Nervix reads from text, whether a Plexus literal, a domain-clock period
 or skew, a Model's timeout, interval, retention or TTL, a window aggregate's delay, or a node's
 command-line option, is read by one guarded parser in the vocabulary. It refuses text whose spans
 could add up to the most seconds a duration holds with a typed error; the grammar library it wraps

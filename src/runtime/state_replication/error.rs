@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** The semantic failure classes returned by runtime-state replication operations.
 //! - **Depends on.** Runtime-state placements and typed interconnect failure envelopes.
-//! - **Must not know.** Scheduling policy, NSPL parsing, or connector lifecycle.
+//! - **Must not know.** Scheduling policy, Plexus parsing, or connector lifecycle.
 
 #![cfg_attr(
     nervix_lint,

@@ -4,7 +4,7 @@
 //! - **Owns.** Encoding and validating branch keys, last activity, and incarnations in the
 //!   lifecycle snapshot, and walking a validated stored snapshot one branch at a time.
 //! - **Depends on.** Typed branch identities, timestamps, and the state codec.
-//! - **Must not know.** NSPL parsing, graph scheduling, connector protocols, or record payloads.
+//! - **Must not know.** Plexus parsing, graph scheduling, connector protocols, or record payloads.
 
 #![cfg_attr(
     nervix_lint,

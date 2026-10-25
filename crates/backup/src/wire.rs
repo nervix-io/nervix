@@ -71,7 +71,7 @@ pub(crate) struct SectionEntryWire {
 #[derive(Debug, Clone, Copy, PartialEq, Archive, Serialize, Deserialize)]
 pub(crate) enum SectionContentWire {
     Record { kind: u16 },
-    Nspl,
+    Plexus,
     ResourceArchive,
     WasmGuestBlob,
     MaterializedColumns,
