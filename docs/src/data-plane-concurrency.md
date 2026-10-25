@@ -135,7 +135,8 @@ owns the capacities, grace periods and reconciliation deadlines.
 Production-owner Shuttle checks cover delayed events against a reused position, registration
 against shutdown, admission waiter drop against a reply, final silence sweeps against terminal and
 Alive reports, a first claim against a sweep, a sweep that completes while an unclaimed position's
-guard is held, body claim against cancellation, admission against peer ending, and another peer's
+guard is held, body claim against cancellation, admission against peer ending, a channel's next
+grant against the return of the outcome delivery of the attempt before it, and another peer's
 progress while one peer holds its guard. The production admission choice has a Loom model for one
 irreversible verdict; replacing its compare-and-exchange with an overwriting swap must fail and
 replay. ArcSwap, queues and external semaphore internals remain outside that atomic claim.
