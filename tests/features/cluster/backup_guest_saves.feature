@@ -10,13 +10,13 @@ Feature: Guest saves above the bulk budget
     And the active domain is "{{domain}}"
     And node "node-1" has a state-counting WASM fixture with 40 MiB saves in resource directory "wasm_processor"
     And Kafka topic "backup_guest_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -60,7 +60,7 @@ Feature: Guest saves above the bulk budget
       """
       state structures: 2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -96,7 +96,7 @@ Feature: Guest saves above the bulk budget
     Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 1 resource versions and 11 models
     And the CLI restore reports domain "{{domain}}_copy" as "RUNNING" at start version 1
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """

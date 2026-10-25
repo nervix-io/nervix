@@ -240,7 +240,7 @@ impl Arbitrary<'_> {
     /// A placement between two non-empty groups of runtime nodes, each member named once.
     ///
     /// `ALTER PLACEMENT` sets the same groups, and reads a comma before a bare operation keyword as
-    /// the next operation, so in the NSPL domain no member is named like one.
+    /// the next operation, so in the Plexus domain no member is named like one.
     pub fn create_placement(&mut self) -> CreatePlacement {
         let name = self.name();
         let from = self.distinct_names_refusing::<ModelName>(1, ITEMS, &ALTER_OPERATION_WORDS);

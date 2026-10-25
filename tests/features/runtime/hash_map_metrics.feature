@@ -9,11 +9,11 @@ Feature: Hash map metrics
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
@@ -22,7 +22,7 @@ Feature: Hash map metrics
       """
       uploaded resource version 1
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA zip_code_entry (
         zip STRING,
@@ -46,7 +46,7 @@ Feature: Hash map metrics
 
       START;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       LOOKUP zip_codes_by_zip KEY '60601';
       LOOKUP zip_codes_by_zip KEY '60601';
@@ -55,7 +55,7 @@ Feature: Hash map metrics
       """
       "city":"Chicago"
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE HASH MAP zip_codes_by_zip;
       """

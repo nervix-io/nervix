@@ -1078,7 +1078,7 @@ fn inferencer_input_mappings_compile_when_template_is_materialized() {
             inputs: vec![InferencerTensorMapping {
                 tensor: "features".to_string(),
                 schema: inferencer_tensor_schema(nonzero!(2u32)),
-                expression: nervix_nspl::parse_expression("input.missing")
+                expression: nervix_plexus::parse_expression("input.missing")
                     .expect("test expression must parse"),
             }],
             output_schema: vec![InferencerTensorDeclaration {
@@ -1652,7 +1652,7 @@ fn branched_node_specs_capture_processor_output_route_tree() {
                     output_routes: (ProcessorOutputs::new(vec![
                         ProcessorOutput {
                             relay: named("urgent_orders"),
-                            construction: nervix_nspl::parse_route_construction(
+                            construction: nervix_plexus::parse_route_construction(
                                 "WHERE output.urgent",
                             )
                             .expect("route construction must parse"),

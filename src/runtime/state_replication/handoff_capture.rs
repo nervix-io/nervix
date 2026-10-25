@@ -6,7 +6,7 @@
 //!   its ownership handoff carries.
 //! - **Depends on.** The entity's scheduled node task, replicated runtime-state carriers and the
 //!   state store.
-//! - **Must not know.** NSPL parsing, schedule planning or external connector configuration.
+//! - **Must not know.** Plexus parsing, schedule planning or external connector configuration.
 
 #![cfg_attr(
     nervix_lint,

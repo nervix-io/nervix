@@ -380,7 +380,7 @@ scheduled target, the request is answered from its owner. Node traffic is groupe
 `incoming_edges` and `outgoing_edges`; relay descriptions keep owner-buffer utilization under
 `relay_buffers` rather than mixing relay traffic into the relay node:
 
-```nspl
+```plexus
 DESCRIBE RELAY notifications WHERE (user_id = 42);
 DESCRIBE INGESTOR kafka_notifications;
 DESCRIBE JUNCTION route_notifications;

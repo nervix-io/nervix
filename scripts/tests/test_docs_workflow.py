@@ -11,12 +11,12 @@ from scripts.publish_docs_alias import update_alias
 
 
 class DocsWorkflowTests(unittest.TestCase):
-    def test_nspl_agent_skill_is_a_top_level_book_section(self) -> None:
+    def test_plexus_agent_skill_is_a_top_level_book_section(self) -> None:
         summary = Path("docs/src/SUMMARY.md").read_text()
 
-        self.assertIn("- [NSPL Agent Skill](./nspl-agent-skill.md)", summary.splitlines())
+        self.assertIn("- [Plexus Agent Skill](./plexus-agent-skill.md)", summary.splitlines())
         self.assertNotIn(
-            "  - [NSPL Agent Skill](./nspl-agent-skill.md)",
+            "  - [Plexus Agent Skill](./plexus-agent-skill.md)",
             summary.splitlines(),
         )
 
@@ -244,7 +244,7 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertTrue(Path("docs/theme/nervix-pdf-mark.pdf").is_file())
 
     def test_pdf_chapter_uses_local_license_link(self) -> None:
-        agent_skill = Path("docs/src/nspl-agent-skill.md").read_text()
+        agent_skill = Path("docs/src/plexus-agent-skill.md").read_text()
 
         self.assertIn("[FCL-1.0-ALv2 license](license.md)", agent_skill)
         self.assertNotIn(

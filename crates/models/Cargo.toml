@@ -1,5 +1,5 @@
 [package]
-description = "The Models and vocabulary of Nervix: NSPL statements, validated names, timestamps, branch keys and node references"
+description = "The Models and vocabulary of Nervix: Plexus statements, validated names, timestamps, branch keys and node references"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-models"

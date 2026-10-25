@@ -8,11 +8,11 @@ Feature: LOOKUP_HASH_MAP filter-map function
         "lookup.jsonl": "{\"normalized_title\":\"mr\",\"city_name\":\"Chicago\",\"region_name\":\"IL\"}\n{\"normalized_title\":\"dr\",\"city_name\":\"Austin\",\"region_name\":\"TX\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE titles_data;
       UPLOAD RESOURCE titles_data VERSION '{{titles_dir}}';
@@ -21,7 +21,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
       """
       uploaded resource version 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification_in (
         id STRING,
@@ -167,11 +167,11 @@ Feature: LOOKUP_HASH_MAP filter-map function
         "lookup.jsonl": "{\"normalized_title\":\"mr\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE titles_data;
       UPLOAD RESOURCE titles_data VERSION '{{titles_dir}}';
@@ -217,7 +217,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
         PATH 'lookup.jsonl'
         DECODE USING title_lookup_codec;
       """
-    When these NSPL commands fail with "LOOKUP_HASH_MAP field 'missing_city' is missing from hash map 'titles_by_normalized' schema"
+    When these Plexus commands fail with "LOOKUP_HASH_MAP field 'missing_city' is missing from hash map 'titles_by_normalized' schema"
       """
       CREATE DEDUPLICATOR enrich_titles
         FROM incoming_logs
@@ -240,7 +240,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
   Scenario Outline: Filter-map LOOKUP_HASH_MAP validation rejects hash map and field names that are not string literals
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
 
@@ -258,7 +258,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
       CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
       CREATE RELAY enriched_logs SCHEMA notification_out UNBRANCHED;
       """
-    When these NSPL commands fail with "model 'enrich_titles' in domain '{{domain}}' is invalid: LOOKUP_HASH_MAP argument <argument> must be a string literal"
+    When these Plexus commands fail with "model 'enrich_titles' in domain '{{domain}}' is invalid: LOOKUP_HASH_MAP argument <argument> must be a string literal"
       """
       CREATE DEDUPLICATOR enrich_titles
         FROM incoming_logs
@@ -289,11 +289,11 @@ Feature: LOOKUP_HASH_MAP filter-map function
         "lookup.jsonl": "{\"normalized_title\":\"mr\",\"city_name\":\"Chicago\",\"region_name\":\"IL\"}\n{\"normalized_title\":\"dr\",\"city_name\":\"Austin\",\"region_name\":\"TX\"}\n{\"normalized_title\":\"ms\",\"city_name\":\"Denver\",\"region_name\":\"CO\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE titles_data;
       UPLOAD RESOURCE titles_data VERSION '{{titles_dir}}';
@@ -302,7 +302,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
       """
       uploaded resource version 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification_in (
         id STRING,
@@ -433,11 +433,11 @@ Feature: LOOKUP_HASH_MAP filter-map function
         "lookup.jsonl": "{\"normalized_title\":\"mr\",\"city_name\":\"Chicago\",\"region_name\":\"IL\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE titles_data;
       UPLOAD RESOURCE titles_data VERSION '{{titles_dir}}';
@@ -446,7 +446,7 @@ Feature: LOOKUP_HASH_MAP filter-map function
       """
       uploaded resource version 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification_in (
         id STRING,

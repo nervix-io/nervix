@@ -2,11 +2,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: JSON ingestion preserves every wire value and reports strict and malformed payloads
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA json_value (
         max_u8 U8,
@@ -161,11 +161,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: A <wire_format> codec binds every exact wire type to the internal type of its name
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA exact_value (
         u8_max U8,
@@ -238,11 +238,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: A <wire_format> number reads as the F32 whose shortest decimal it is
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA single_value ( value F32 );
       CREATE WIRE <wire_format> SCHEMA single_value_wire MODE STRICT ( value number );
@@ -281,11 +281,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: HTTP endpoint ingestor maps a payload encoded as <wire_format> from wire field order into internal schema order
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -344,11 +344,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a schemaful codec
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metrics (
         device STRING,
@@ -404,11 +404,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: HTTP endpoint ingestor preserves multidimensional fixed and variable array shapes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA shaped_metrics (
         device STRING,
@@ -458,11 +458,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: Schemaful <wire_format> wire schemas enforce strictness for extra fields
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -551,11 +551,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a JAQ-native codec
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metrics (
         device STRING,
@@ -605,11 +605,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: HTTP endpoint ingestor delivers a single <wire_format> payload through a JAQ-native codec
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,

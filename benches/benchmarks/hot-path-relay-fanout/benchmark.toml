@@ -23,7 +23,7 @@ ingestor_max_batch_size = "8MiB"
 
 [implementations.nervix]
 kind = "nervix"
-template = "nervix.nspl.upon"
+template = "nervix.plexus.upon"
 
 [implementations.vector]
 command = ["--config", "/etc/vector/vector.yaml"]

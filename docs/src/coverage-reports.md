@@ -42,7 +42,7 @@ counters.
 | `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures and their loaded procedural macro objects, using the analysis compiler's matching LLVM tools. API doctests finish separately without instrumentation. |
 | `coverage-native-extras bench-smoke` (`extra-tests`) | Every Criterion body once in test mode. Its instrumented timings are not performance evidence. |
 | `coverage-native-extras test-primitives-ordinary` (`extra-tests`) | The primitive boundary's native ordinary conformance checks. Other conformance modes remain separate. |
-| Language completion walk (`extra-tests`) | The composed grammar's completion reachability check for Plexus, the Nervix graph definition language, collected under the current `nspl-completion-walk` recipe. |
+| Language completion walk (`extra-tests`) | The composed grammar's completion reachability check for Plexus, the Nervix graph definition language, collected under the current `plexus-completion-walk` recipe. |
 | Connector declaration validation (`extra-tests`) | The compiled Plexus vocabulary export and comparison of generated capability tables and manual regions, collected by `validate-connector-matrix`. |
 
 The `extra-tests` job also exports ordinary Python tooling reports. Each recipe executes the
@@ -87,7 +87,7 @@ lines they execute. Run them the way CI does:
 just coverage-native-extras
 ```
 
-Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, `validate-connector-matrix`,
+Name producers to run only those: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`, `validate-connector-matrix`,
 `test-shuttle`, `test-loom`, `test-turmoil`, `test-deadlock-evidence-order`, `test-deadlock-report`,
 `test-deloxide`, `test-deloxide-order`, `test-deloxide-stress`, `test-deloxide-stress-restore`, or
 an individual `test-primitives-<mode>` recipe. The focused diagnostic owner and probes use the
@@ -104,7 +104,7 @@ An instrumented record missing either measurement fails completion. A build-only
 selects native conformance in ordinary, Shuttle, Loom, Turmoil and Deloxide execution:
 
 ```bash
-just coverage-native-extras nspl-completion-walk
+just coverage-native-extras plexus-completion-walk
 just coverage-native-extras test-primitives
 just coverage-native-extras test-shuttle test-loom
 just coverage-native-extras test-turmoil
@@ -439,8 +439,36 @@ fuzz campaigns a pull request carrying `fuzz` requests. It reads the ordinary re
 [CRAP report](#advisory-crap-report) and patch line coverage keep reading the ordinary report
 alone, so modeled execution never changes either of them.
 
+The completion check's GitHub Actions identity is `coverage-full` in the `Check` workflow. Its
+verdict is mandatory: a missing, failed, cancelled or timed-out selected producer cannot qualify a
+release. `just release-evidence <pull-request>` requires the successful union on the revision,
+alongside the ordinary report's integrity checks and each method's independent verdict. Its
+percentages remain advisory. A verified prose-only change selects no suites and skips the union;
+that skip supplies no coverage or release-qualification evidence.
+
+Branch protection is configured outside source control, and nothing in the repository installs or
+verifies it. A qualification records the live default-branch ruleset on its ClickUp task: its
+identity, enforcement, branch scope and required status checks, with the checked revision. A
+source change is never evidence that such a setting is active. A ruleset that requires the
+completion check names `coverage-full` from the GitHub Actions app, and that name stays stable
+across runner, producer and artifact changes.
+
+Producer jobs retain sampled CPU utilization, steal time, used memory and swap with their build
+and execution evidence. Tests, scenarios and fuzz shards record their load directly; native
+extras, Shuttle, Loom, Turmoil, diagnostic evidence and workload lanes, client conformance and the
+independent Loom weakening shards use `.github/actions/runner-load` around their workloads. Its
+finish phase runs after failure too, waits at most ten seconds for the recorder, and requires its
+summary before uploading `runner-load-<job>`; diagnostic selections and weakening shards append
+their matrix identity so their artifacts cannot overwrite one another. The workflow contract tests
+of `just test-coverage-full` hold every producer job of the ordinary report and of the union, and
+both qualification jobs, to that recording. These are measurements of the runner, including build
+and service memory, rather than individual-process peak RSS. Workflow step times and collection
+records delimit producer work. Instrumented timings measure collection cost; runtime performance
+claims still require ordinary builds on the same host. Recording the load of a weakening or replay
+does not make that altered-source execution coverage evidence.
+
 The `coverage-full` job waits for every producer job, including one that failed or was skipped. It
-downloads their artifacts, rebuilds nothing, and records the run's selection before it combines:
+records the run's selection before downloading artifacts, then rebuilds nothing and combines:
 
 ```bash
 just coverage-full-select --event "$EVENT" --labels "$LABELS" \
@@ -469,6 +497,11 @@ Bolero selection record must show that the randomized properties passed and that
 campaigns ran exactly when `fuzz` requested them. Without `fuzz`, the recorded deliberate skip is
 valid and supplies no report. A job that a later attempt of the run did not rerun keeps its earlier
 attempt's verdict and artifacts, so a collection of any attempt up to the current one is the run's.
+
+A failed suite-selection job runs and fails the completion check rather than turning it into a
+skip. Missing downloads reach the union as missing inputs, with the selection retained, so its
+failure record and summary identify the producer, job and artifact to repair. A download failure
+also leaves its failing job verdict intact; attempting the union afterwards cannot erase it.
 
 Each input is validated before its lines join the union:
 

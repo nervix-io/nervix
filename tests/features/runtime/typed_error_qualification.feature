@@ -1,7 +1,7 @@
 Feature: Typed error qualification through public streams
   Scenario Outline: VM compile failures retain the owning model and specific function cause
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "model 'transform' in domain '{{domain}}' is invalid: FILTER-MAP compile failed: unknown function 'missing_transform' with arity 1"
+    When these Plexus commands fail with "model 'transform' in domain '{{domain}}' is invalid: FILTER-MAP compile failed: unknown function 'missing_transform' with arity 1"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA function_input (value STRING);
@@ -24,12 +24,12 @@ Feature: Typed error qualification through public streams
 
   Scenario Outline: Parse diagnostics locate the unexpected token in the client source
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And client "diagnostics" is connected to the leader node
-    When client "diagnostics" submits this NSPL command request
+    When client "diagnostics" submits this Plexus command request
       """
       CREATE SCHEMA broken (id BOGUS);
       """
@@ -48,12 +48,12 @@ Feature: Typed error qualification through public streams
 
   Scenario Outline: Parse diagnostics locate the unexpected token in a later statement of the client source
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And client "diagnostics" is connected to the leader node
-    When client "diagnostics" submits this NSPL command request
+    When client "diagnostics" submits this Plexus command request
       """
       CREATE SCHEMA accepted (id STRING);
       CREATE SCHEMA broken (id BOGUS);
@@ -73,12 +73,12 @@ Feature: Typed error qualification through public streams
 
   Scenario Outline: Lex diagnostics locate the rejected character in the client source
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And client "diagnostics" is connected to the leader node
-    When client "diagnostics" submits this NSPL command request
+    When client "diagnostics" submits this Plexus command request
       """
       CREATE SCHEMA accepted (id STRING);
       CREATE SCHEMA broken (id STRING @);
@@ -97,11 +97,11 @@ Feature: Typed error qualification through public streams
 
   Scenario Outline: Validation identifies the node and route of a message error branch mismatch
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE SCHEMA calculation (tenant STRING, id STRING);
       CREATE SCHEMA calculation_error (source_id STRING);
@@ -128,7 +128,7 @@ Feature: Typed error qualification through public streams
 
   Scenario Outline: A rejected alteration names the model and the refused operation and changes nothing
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event (id STRING);
@@ -142,19 +142,19 @@ Feature: Typed error qualification through public streams
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands fail with "model 'route_orders' in domain '{{domain}}' is invalid: input relay `accepted_orders` is not configured"
+    When these Plexus commands fail with "model 'route_orders' in domain '{{domain}}' is invalid: input relay `accepted_orders` is not configured"
       """
       ALTER JUNCTION route_orders DROP FROM accepted_orders;
       """
-    And these NSPL commands fail with "model 'route_orders' in domain '{{domain}}' is invalid: a processor must retain at least one input"
+    And these Plexus commands fail with "model 'route_orders' in domain '{{domain}}' is invalid: a processor must retain at least one input"
       """
       ALTER JUNCTION route_orders SET DETACHED, DROP FROM orders;
       """
-    And these NSPL commands fail with "model 'order_event' in domain '{{domain}}' is invalid: field `missing` does not exist"
+    And these Plexus commands fail with "model 'order_event' in domain '{{domain}}' is invalid: field `missing` does not exist"
       """
       ALTER SCHEMA order_event DROP FIELD missing;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CREATE JUNCTION route_orders;
       """
@@ -176,11 +176,11 @@ Feature: Typed error qualification through public streams
 
   Scenario Outline: Direct VALUES cannot expose a sensitive field without explicit leakage
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE SCHEMA secret_event (id STRING, secret STRING SENSITIVE);
       CREATE RELAY secret_events SCHEMA secret_event UNBRANCHED;
@@ -194,7 +194,7 @@ Feature: Typed error qualification through public streams
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE POSTGRES TABLE EMITTER direct_values_allowed FROM secret_events
         TO database TABLE 'existing_events'
@@ -212,11 +212,11 @@ Feature: Typed error qualification through public streams
   Scenario Outline: Processor message errors retain their concrete branch and omit sensitive input
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA calculation (
         tenant STRING,

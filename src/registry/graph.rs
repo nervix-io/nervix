@@ -1543,7 +1543,7 @@ mod tests {
                                 relay: named("correlator_errors"),
                                 assignments: vec![Assignment {
                                     target: AssignmentTarget::bare(named("value")),
-                                    value: nervix_nspl::parse_expression("left.value")
+                                    value: nervix_plexus::parse_expression("left.value")
                                         .expect("error assignment must parse"),
                                 }],
                             };

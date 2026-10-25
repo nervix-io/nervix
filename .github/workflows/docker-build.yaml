@@ -794,7 +794,7 @@ jobs:
             echo "- Target: \`${{ steps.docs.outputs.target }}\`"
             echo "- Book: ${{ steps.docs.outputs.url }}"
             echo "- PDF: ${{ steps.docs.outputs.pdf_url }}"
-            echo "- NSPL agent index: ${{ steps.docs.outputs.llms_url }}"
+            echo "- Plexus agent index: ${{ steps.docs.outputs.llms_url }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Comment docs link on PR
@@ -809,7 +809,7 @@ jobs:
             - Target: \`${{ steps.docs.outputs.target }}\`
             - Book: ${{ steps.docs.outputs.url }}
             - PDF: ${{ steps.docs.outputs.pdf_url }}
-            - NSPL agent index: ${{ steps.docs.outputs.llms_url }}`;
+            - Plexus agent index: ${{ steps.docs.outputs.llms_url }}`;
 
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;

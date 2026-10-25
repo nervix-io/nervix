@@ -20,10 +20,10 @@ ingestor_flush_each = "10ms"
 ingestor_max_batch_size = "8MiB"
 
 [implementations.nervix]
-after_start = "after-start.nspl.upon"
+after_start = "after-start.plexus.upon"
 kind = "nervix"
 nodes = 2
-template = "nervix.nspl.upon"
+template = "nervix.plexus.upon"
 
 [implementations.vector]
 command = ["--config", "/etc/vector/vector.yaml"]

@@ -26,7 +26,7 @@ use nervix_client_core::{
     RestoreReport, RestoreScope, RestoreStepOutcome,
 };
 use nervix_models::{DomainName, RestoreLifecycle, RestoreState, Statement};
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
 use nervix_primitives::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -479,7 +479,7 @@ mod tests {
             }
         );
         assert_eq!(
-            restore.to_canonical_nspl(),
+            restore.to_canonical_plexus(),
             "RESTORE DOMAIN payments AS payments_copy FROM 'cluster.nvxb';"
         );
     }
@@ -507,7 +507,7 @@ mod tests {
             assert_eq!(restore.state, RestoreState::WithoutSourceOffsets);
             assert!(
                 restore
-                    .to_canonical_nspl()
+                    .to_canonical_plexus()
                     .contains(" RESUME DRY RUN WITHOUT SOURCE OFFSETS;")
             );
         }

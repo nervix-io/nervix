@@ -294,6 +294,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Runner diagnostics before Check diagnostic evidence and report tool coverage
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -303,6 +308,13 @@ jobs:
         run: just coverage-deadlock
         env:
           NERVIX_DEADLOCK_PROBE_ARTIFACTS: target/diagnostic-evidence/probes
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-diagnostic-evidence
 
       - name: Upload diagnostic evidence
         if: always()
@@ -437,6 +449,11 @@ jobs:
       # The bound covers prerequisites, the inventory's separate build and workload budgets,
       # and the coverage export. At its end the collector and the lane each
       # record their attempt as interrupted and end every process they started.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Runner diagnostics before Diagnostic lane
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -457,6 +474,13 @@ jobs:
 
       # Every attempt's record, logs, evidence and finding descriptions, whatever its verdict: a
       # failed lane is investigated and replayed from what it kept. The raw profiles stay here.
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-deloxide-${{ matrix.selection }}
+
       - name: Upload diagnostic lane evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -1049,7 +1073,7 @@ jobs:
   coverage-full:
     name: coverage-full
     needs: [test-selection, bolero, coverage, extra-tests, diagnostic-evidence, shuttle, loom, turmoil, deloxide]
-    if: ${{ !cancelled() && needs.test-selection.outputs.tests-required == 'true' }}
+    if: ${{ !cancelled() && (needs.test-selection.result != 'success' || needs.test-selection.outputs.tests-required == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -1064,23 +1088,34 @@ jobs:
         with:
           tool: just
 
+      - name: Record the event, labels and producer results
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          TESTS_REQUIRED: ${{ needs.test-selection.outputs.tests-required }}
+          BOLERO_REQUIRED: ${{ needs.test-selection.outputs.bolero-required }}
+          JOBS: ${{ toJSON(needs) }}
+        run: |
+          just coverage-full-select --event "$EVENT" --labels "$LABELS" \
+            --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
+
       - name: Download ordinary coverage
         uses: actions/download-artifact@v4
         with:
-          name: coverage-merged
-          path: coverage-full-inputs/coverage-merged
+          pattern: coverage-merged
+          path: coverage-full-inputs
 
       - name: Download native extra coverage
         uses: actions/download-artifact@v4
         with:
-          name: coverage-native-extras
-          path: coverage-full-inputs/coverage-native-extras
+          pattern: coverage-native-extras
+          path: coverage-full-inputs
 
       - name: Download diagnostic evidence
         uses: actions/download-artifact@v4
         with:
-          name: diagnostic-evidence
-          path: coverage-full-inputs/diagnostic-evidence
+          pattern: diagnostic-evidence
+          path: coverage-full-inputs
 
       # The artifacts of label-enabled producers and of the Bolero call. A pattern that matches no
       # artifact downloads nothing; the union then names what the selection required and lacks.
@@ -1120,18 +1155,8 @@ jobs:
           pattern: bolero-selection
           path: coverage-full-inputs
 
-      - name: Record the event, labels and producer results
-        env:
-          EVENT: ${{ github.event_name }}
-          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          TESTS_REQUIRED: ${{ needs.test-selection.outputs.tests-required }}
-          BOLERO_REQUIRED: ${{ needs.test-selection.outputs.bolero-required }}
-          JOBS: ${{ toJSON(needs) }}
-        run: |
-          just coverage-full-select --event "$EVENT" --labels "$LABELS" \
-            --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
-
       - name: Combine coverage
+        if: ${{ !cancelled() }}
         run: just coverage-full coverage-full-inputs/*
 
       - name: Upload full coverage
@@ -1267,6 +1292,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Runner diagnostics before Client conformance
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -1276,6 +1306,13 @@ jobs:
         run: |
           just toolchains-install
           just test-client-conformance
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-client-conformance
 
       - name: Publish kache cache
         if: always()
@@ -1416,6 +1453,11 @@ jobs:
 
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Runner diagnostics before Capability doctests
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -1545,8 +1587,8 @@ jobs:
         with:
           label: plexus-completion-walk
 
-      - name: NSPL completion walk
-        run: just coverage-native-extras nspl-completion-walk
+      - name: Plexus completion walk
+        run: just coverage-native-extras plexus-completion-walk
 
       - name: Runner diagnostics before Plexus connector declaration export
         uses: ./.github/actions/runner-diagnostics
@@ -1559,6 +1601,13 @@ jobs:
       # Each collection's report, completion record, executions and export diagnostics, whatever
       # its verdict: a failed or interrupted record is the evidence of what the collection saw. The
       # raw profiles stay on the runner.
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-extra-tests
+
       - name: Upload native extra coverage
         if: always()
         uses: actions/upload-artifact@v4
@@ -1703,6 +1752,11 @@ jobs:
 
       # Every registered Shuttle check under its exploration and under the nondeterminism detector,
       # each in its own process, then the proof that a failing schedule persists and replays.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Runner diagnostics before Shuttle concurrency checks
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -1720,6 +1774,13 @@ jobs:
 
       - name: Shuttle schedule replay
         run: just test-shuttle-replay-check
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-shuttle
 
       - name: Upload Shuttle coverage
         if: always()
@@ -1855,6 +1916,11 @@ jobs:
       # Every registered Loom model of a production owner explored to exhaustion. The proof that
       # each model fails under the ordering weakening it exists to detect runs in the
       # loom-qualification jobs.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Runner diagnostics before Loom memory-ordering models
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -1864,6 +1930,13 @@ jobs:
         run: |
           just toolchains-install
           just coverage-native-extras test-loom
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-loom
 
       - name: Upload Loom coverage
         if: always()
@@ -2010,6 +2083,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Runner diagnostics before Loom ordering qualification
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -2019,6 +2097,13 @@ jobs:
         run: |
           just toolchains-install
           just test-loom-qualification ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-loom-qualification-${{ matrix.shard }}
 
       - name: Publish kache cache
         if: always()
@@ -2135,6 +2220,11 @@ jobs:
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
         run: python3 scripts/kache_remote.py start
 
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
       - name: Runner diagnostics before Turmoil simulations
         uses: ./.github/actions/runner-diagnostics
         with:
@@ -2166,6 +2256,13 @@ jobs:
           just coverage-patch "$BASE_SHA" target/turmoil.lcov --scope turmoil \
             --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA" \
             --output target/turmoil-patch-coverage.md
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-turmoil
 
       - name: Upload Turmoil coverage
         if: always()

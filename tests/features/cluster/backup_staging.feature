@@ -11,13 +11,13 @@ Feature: Restore staging reclamation and storage accounting
     And the active domain is "{{domain}}"
     And node "node-1" has a state-counting WASM fixture with 1 MiB saves in resource directory "wasm_processor"
     And Kafka topic "backup_wasm_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -54,11 +54,11 @@ Feature: Restore staging reclamation and storage accounting
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       START;
       """
@@ -77,13 +77,13 @@ Feature: Restore staging reclamation and storage accounting
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "restore checkpoint staging quota"
     And abandoned restore storage is reclaimed across every node
     Given the active domain is "{{source_domain}}_quota"
-    When these NSPL commands fail with "restore state installation is incomplete"
+    When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
     When the cluster is restarted
     Then restore checkpoint staging usage is zero on every node
-    When these NSPL commands fail with "restore state installation is incomplete"
+    When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
@@ -106,7 +106,7 @@ Feature: Restore staging reclamation and storage accounting
     And the restore stream's report shows every step applied
     And restore checkpoint staging usage is zero on every node
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """

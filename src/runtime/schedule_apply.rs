@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Materializing, replacing and removing local tasks named by an execution schedule.
 //! - **Depends on.** Typed schedules, runtime lifecycle handles and installed domain capabilities.
-//! - **Must not know.** NSPL parsing, registry validation or placement-policy computation.
+//! - **Must not know.** Plexus parsing, registry validation or placement-policy computation.
 
 #![cfg_attr(
     nervix_lint,

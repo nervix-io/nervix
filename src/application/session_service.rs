@@ -32,7 +32,7 @@ use nervix_models::{
     RequestedResourceVersion, ResourceId, ResourceName, ResourceUploadKey, ResourceVersionStatus,
     SemanticReference, TransactionPosition,
 };
-use nervix_nspl::{
+use nervix_plexus::{
     Token, Word,
     client_statement::{
         ClientStatement, CompletionExpectation, local_path_fragment,
@@ -2291,7 +2291,7 @@ mod tests {
     #[test]
     fn a_rejected_source_names_its_stage_and_keeps_every_span() {
         let query = "USE demo;\nCREATE SCHEMA broken (id BOGUS);";
-        let parse = nervix_nspl::client_statement::parse_client_statement_sources(query)
+        let parse = nervix_plexus::client_statement::parse_client_statement_sources(query)
             .expect_err("BOGUS is not a type");
         let response = rejected_source_response(parse.current_context());
         assert!(!response.succeeded());
@@ -2300,7 +2300,7 @@ mod tests {
         assert_eq!(response.diagnostics[0].span, Some(35..40));
 
         let query = "USE demo;\nCREATE SCHEMA broken (id STRING @);";
-        let lex = nervix_nspl::client_statement::parse_client_statement_sources(query)
+        let lex = nervix_plexus::client_statement::parse_client_statement_sources(query)
             .expect_err("`@` starts no token");
         let response = rejected_source_response(lex.current_context());
         assert!(!response.succeeded());

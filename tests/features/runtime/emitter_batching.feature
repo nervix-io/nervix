@@ -9,11 +9,11 @@ Feature: Emitter batching configuration
   Scenario Outline: The batching clause round-trips through SHOW CREATE and DESCRIBE for every emitter
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -207,7 +207,7 @@ Feature: Emitter batching configuration
       | mysql_rows      | BATCH MAX MESSAGES 100 MAX SIZE 1MiB     |
       | mongodb_rows    | BATCH MAX MESSAGES 100 MAX SIZE 16MiB    |
       | iceberg_files   | BATCH MAX MESSAGES 65536 MAX SIZE 128MiB |
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER kafka_batched;
       """
@@ -225,7 +225,7 @@ Feature: Emitter batching configuration
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE CODEC sentry_codec;
       """
@@ -233,7 +233,7 @@ Feature: Emitter batching configuration
       """
       ON EMITTING BATCH '{message: "batched events", extra: {records: .}}'
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER postgres_rows;
       """
@@ -243,7 +243,7 @@ Feature: Emitter batching configuration
       batch: MAX MESSAGES 250 MAX SIZE 4MiB
       flush: FLUSH IMMEDIATE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER kafka_single;
       """
@@ -262,12 +262,12 @@ Feature: Emitter batching configuration
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -283,7 +283,7 @@ Feature: Emitter batching configuration
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH MAX MESSAGES 500 MAX SIZE 1MiB;
       """
@@ -291,7 +291,7 @@ Feature: Emitter batching configuration
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER event_emitter;
       """
@@ -308,7 +308,7 @@ Feature: Emitter batching configuration
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER ZEROMQ PUSH EMITTER event_emitter SET BATCH MAX MESSAGES 20 MAX SIZE 64KiB;
       """
@@ -316,7 +316,7 @@ Feature: Emitter batching configuration
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER event_emitter;
       """
@@ -324,7 +324,7 @@ Feature: Emitter batching configuration
       """
       batch: MAX MESSAGES 20 MAX SIZE 64KiB
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER ZEROMQ PUSH EMITTER event_emitter DROP BATCH;
       """
@@ -332,7 +332,7 @@ Feature: Emitter batching configuration
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER event_emitter;
       """
@@ -340,7 +340,7 @@ Feature: Emitter batching configuration
       """
       batch: none
       """
-    When these NSPL commands fail with "emitter batching is not configured"
+    When these Plexus commands fail with "emitter batching is not configured"
       """
       ALTER ZEROMQ PUSH EMITTER event_emitter DROP BATCH;
       """
@@ -353,11 +353,11 @@ Feature: Emitter batching configuration
   @emitter_batching_database_sinks
   Scenario Outline: A database emitter keeps its batching clause through every ALTER
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -379,7 +379,7 @@ Feature: Emitter batching configuration
         TO otel_main
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'time' = NOW(), 'body' = 'record' } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "MONGODB COLLECTION emitters require BATCH MAX MESSAGES"
+    When these Plexus commands fail with "MONGODB COLLECTION emitters require BATCH MAX MESSAGES"
       """
       ALTER MONGODB COLLECTION EMITTER row_sink DROP BATCH;
       """
@@ -390,7 +390,7 @@ Feature: Emitter batching configuration
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 100ms VALUES { 'seq' = input.seq }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER MONGODB COLLECTION EMITTER row_sink SET BATCH MAX MESSAGES 10 MAX SIZE 2MiB;
       BEGIN;
@@ -415,11 +415,11 @@ Feature: Emitter batching configuration
   @emitter_batching_validation
   Scenario Outline: Batching limits and the emitter and codec contracts are validated
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -438,7 +438,7 @@ Feature: Emitter batching configuration
         'database' = 'nervix'
       };
       """
-    When these NSPL commands fail with "<diagnostic>"
+    When these Plexus commands fail with "<diagnostic>"
       """
       CREATE <emitter_kind> EMITTER rejected FROM outgoing
         TO <connector_body>
@@ -464,12 +464,12 @@ Feature: Emitter batching configuration
   @emitter_batching_codec_grammar
   Scenario: ON EMITTING BATCH is only written after ON EMITTING
     Given a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );
       """
-    When these NSPL commands fail with "expected string_literal, found BATCH"
+    When these Plexus commands fail with "expected string_literal, found BATCH"
       """
       CREATE CODEC batch_only FROM JSON TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING BATCH '{records: .}';
@@ -480,13 +480,13 @@ Feature: Emitter batching configuration
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "bounded_events_{{test_id}}" exists with 1 partitions
     And Kafka topic "bounded_events_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event (

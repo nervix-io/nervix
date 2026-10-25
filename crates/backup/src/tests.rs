@@ -413,7 +413,7 @@ fn cluster_sections(resources: BackupResources) -> Vec<TestSection> {
         ),
         bytes_section(
             SectionPath::domain_models(&domain(long_domain)),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             b"CREATE SCHEMA order_event (\n  id U64\n);\n".to_vec(),
         ),
     ];
@@ -448,7 +448,7 @@ fn cluster_sections(resources: BackupResources) -> Vec<TestSection> {
     ));
     sections.push(bytes_section(
         SectionPath::domain_models(&domain("staging")),
-        SectionContent::Nspl,
+        SectionContent::Plexus,
         Vec::new(),
     ));
     sections
@@ -500,7 +500,7 @@ fn materialized_sections(groups: u32) -> Vec<TestSection> {
         record_section(SectionPath::domain_record(&domain), &unpaced_domain("prod")),
         bytes_section(
             SectionPath::domain_models(&domain),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             Vec::new(),
         ),
         record_section(
@@ -709,7 +709,7 @@ fn a_domain_archive_holds_no_users() {
         record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
         bytes_section(
             SectionPath::domain_models(&prod),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             b"CREATE SCHEMA s (id U64);".to_vec(),
         ),
     ];
@@ -765,7 +765,7 @@ fn unsupported_state_record_headers_are_verified_and_reported_as_skipped() {
             record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
             bytes_section(
                 SectionPath::domain_models(&prod),
-                SectionContent::Nspl,
+                SectionContent::Plexus,
                 Vec::new(),
             ),
             bytes_section(
@@ -812,7 +812,7 @@ fn an_unsupported_wasm_descriptor_skips_its_guest_blob_together() {
         record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
         bytes_section(
             SectionPath::domain_models(&prod),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             Vec::new(),
         ),
         bytes_section(
@@ -895,7 +895,7 @@ fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() 
         record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
         bytes_section(
             SectionPath::domain_models(&prod),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             Vec::new(),
         ),
         bytes_section(
@@ -979,7 +979,7 @@ fn a_long_path_travels_in_a_gnu_long_name_entry() {
         ),
         bytes_section(
             SectionPath::domain_models(&long_domain),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             b"".to_vec(),
         ),
         record_section(
@@ -1069,7 +1069,7 @@ fn a_long_named_section_names_the_place_of_its_bytes() {
         ),
         bytes_section(
             SectionPath::domain_models(&long_domain),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             Vec::new(),
         ),
         record_section(
@@ -1124,7 +1124,7 @@ fn models_that_are_not_utf8_are_refused() {
         record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
         bytes_section(
             SectionPath::domain_models(&prod),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             vec![0xff, 0xfe, b';'],
         ),
     ];
@@ -1136,11 +1136,11 @@ fn models_that_are_not_utf8_are_refused() {
             .collect(),
     );
     let (_, bytes) = write_archive(manifest, &sections);
-    let error = read_archive_contents(bytes.as_slice()).expect_err("the NSPL is not text");
+    let error = read_archive_contents(bytes.as_slice()).expect_err("the Plexus is not text");
     assert_eq!(
         error.current_context(),
         &ArchiveReadError::InvalidText {
-            path: "domains/prod/models.nspl".to_string(),
+            path: "domains/prod/models.plexus".to_string(),
         }
     );
 }
@@ -1148,13 +1148,13 @@ fn models_that_are_not_utf8_are_refused() {
 #[test]
 fn the_contents_reader_refuses_what_the_description_refuses() {
     let (_, mut bytes) = cluster_archive(BackupResources::Included);
-    let range = section_range(&bytes, "domains/prod/models.nspl");
+    let range = section_range(&bytes, "domains/prod/models.plexus");
     bytes[range.start] ^= 0x20;
     let error = read_archive_contents(bytes.as_slice()).expect_err("a changed byte is refused");
     assert_eq!(
         error.current_context(),
         &ArchiveReadError::DigestMismatch {
-            path: "domains/prod/models.nspl".to_string(),
+            path: "domains/prod/models.plexus".to_string(),
         }
     );
 }
@@ -1180,13 +1180,13 @@ fn section_range(bytes: &[u8], path: &str) -> std::ops::Range<usize> {
 #[test]
 fn a_changed_byte_is_refused_at_the_section_it_changed() {
     let (_, mut bytes) = cluster_archive(BackupResources::Included);
-    let range = section_range(&bytes, "domains/prod/models.nspl");
+    let range = section_range(&bytes, "domains/prod/models.plexus");
     bytes[range.start] ^= 0x20;
     let error = read_error(&bytes);
     assert_eq!(
         error.current_context(),
         &ArchiveReadError::DigestMismatch {
-            path: "domains/prod/models.nspl".to_string(),
+            path: "domains/prod/models.plexus".to_string(),
         }
     );
 }
@@ -1301,7 +1301,7 @@ fn a_cluster_archive_without_users_is_refused() {
         record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
         bytes_section(
             SectionPath::domain_models(&prod),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             Vec::new(),
         ),
     ];
@@ -1339,7 +1339,7 @@ fn a_domain_without_its_models_is_refused() {
         read_error(&bytes).current_context(),
         &ArchiveReadError::IncompleteDomain {
             domain: "prod".to_string(),
-            missing: "models.nspl",
+            missing: "models.plexus",
         }
     );
 }
@@ -1354,7 +1354,7 @@ fn a_record_at_another_domains_path_is_refused() {
         ),
         bytes_section(
             SectionPath::domain_models(&prod),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             Vec::new(),
         ),
     ];
@@ -1427,13 +1427,13 @@ fn the_pieces_of_a_layout_add_up_to_its_total() {
     );
 }
 
-/// A visitor that keeps the bytes of every NSPL section.
+/// A visitor that keeps the bytes of every Plexus section.
 #[derive(Default)]
-struct NsplCollector {
+struct PlexusCollector {
     texts: Vec<String>,
 }
 
-impl SectionVisitor for NsplCollector {
+impl SectionVisitor for PlexusCollector {
     fn manifest(&mut self, _manifest: &BackupManifest) -> Result<(), Report<ArchiveReadError>> {
         Ok(())
     }
@@ -1443,11 +1443,11 @@ impl SectionVisitor for NsplCollector {
         entry: &SectionEntry,
         content: &mut SectionReader<'_>,
     ) -> Result<(), Report<ArchiveReadError>> {
-        if entry.content == SectionContent::Nspl {
+        if entry.content == SectionContent::Plexus {
             let mut text = String::new();
             content
                 .read_to_string(&mut text)
-                .assured("the test NSPL is UTF-8");
+                .assured("the test Plexus is UTF-8");
             self.texts.push(text);
         }
         Ok(())
@@ -1457,7 +1457,7 @@ impl SectionVisitor for NsplCollector {
 #[test]
 fn a_visitor_that_reads_part_of_a_section_still_gets_every_section_verified() {
     let (_, bytes) = cluster_archive(BackupResources::Included);
-    let mut collector = NsplCollector::default();
+    let mut collector = PlexusCollector::default();
     read_archive(bytes.as_slice(), &mut collector).assured("the archive reads back");
     assert_eq!(
         collector.texts,

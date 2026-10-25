@@ -47,7 +47,7 @@ async fn runtime_report_chain_admitted_client_batch_log() {
         &ModelName::from(&ingestor),
         IngestorMetadataScope::Headers,
         false,
-        &nervix_nspl::parse_route_construction("SET id = input.id")
+        &nervix_plexus::parse_route_construction("SET id = input.id")
             .assured("the fixture route assigns its declared field"),
         RuntimeVmSchemaPair {
             input: schema.arrow_schema(),

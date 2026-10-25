@@ -77,6 +77,32 @@ def runs(*entries: dict[str, object]) -> tuple[CheckRun, ...]:
 
 
 class InventoryTests(unittest.TestCase):
+    def test_release_requires_a_successful_full_workspace_union(self) -> None:
+        methods = release_evidence.parse_inventory((ROOT / release_evidence.INVENTORY).read_text())
+        ordinary = next(method for method in methods if method.name == "ordinary")
+        successful = []
+        for index, check in enumerate(ordinary.checks, 1):
+            if check != "coverage-full":
+                successful.append(run(check, identity=index))
+        cases = (
+            (None, "it did not run on the revision"),
+            ("failure", "its latest run is failure"),
+            ("cancelled", "its latest run is cancelled"),
+            ("timed_out", "its latest run is timed_out"),
+            ("skipped", "its latest run is skipped"),
+        )
+        for conclusion, reason in cases:
+            with self.subTest(conclusion=conclusion):
+                entries = list(successful)
+                if conclusion is not None:
+                    entries.append(run("coverage-full", conclusion=conclusion, identity=100))
+                _, problems = release_evidence.judge((ordinary,), frozenset(), runs(*entries))
+                self.assertEqual(problems, [f"ordinary: `coverage-full`: {reason}"])
+        _, problems = release_evidence.judge(
+            (ordinary,), frozenset(), runs(*successful, run("coverage-full", identity=100)),
+        )
+        self.assertEqual(problems, [])
+
     def test_the_repository_inventory_declares_every_method_with_its_label(self) -> None:
         methods = release_evidence.parse_inventory((ROOT / release_evidence.INVENTORY).read_text())
         labels = {method.name: method.label for method in methods}

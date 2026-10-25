@@ -8,7 +8,7 @@
 //!   end of their attachments, and the node's byte budget for producer payloads.
 //! - **Depends on.** Typed client source plans, the ingestor's bound routes and quiesce control,
 //!   the ingest group executor, ACK roots, and Arrow body decoding.
-//! - **Must not know.** Sessions, the session or interconnect wire, NSPL, or how a producer
+//! - **Must not know.** Sessions, the session or interconnect wire, Plexus, or how a producer
 //!   reached this node.
 //!
 //! Each client ingestor this node executes has one endpoint task. It owns every attachment, the

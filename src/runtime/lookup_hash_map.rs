@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Typed lookup-call keys, pending calls and result-column construction.
 //! - **Depends on.** Compiled expressions, Arrow values and resource lookups.
-//! - **Must not know.** NSPL parsing, scheduling or connector lifecycle.
+//! - **Must not know.** Plexus parsing, scheduling or connector lifecycle.
 
 #![cfg_attr(
     nervix_lint,

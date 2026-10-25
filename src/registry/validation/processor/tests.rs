@@ -535,7 +535,7 @@ fn apply_batch_accepts_unconditional_processor_output_route() {
                     .with_flush_policy(FlushPolicy::Immediate),
                     branched_by: BranchSelection::unbranched(),
                     deduplicate_on: vec![
-                        nervix_nspl::parse_expression("input.value")
+                        nervix_plexus::parse_expression("input.value")
                             .expect("deduplicate expression must parse"),
                     ],
                     max_time: "10m".to_string(),
@@ -692,7 +692,7 @@ fn apply_batch_rejects_multiple_deduplicator_inputs_with_different_schemas() {
                         .with_flush_policy(FlushPolicy::Immediate),
                     branched_by: BranchSelection::unbranched(),
                     deduplicate_on: vec![
-                        nervix_nspl::parse_expression("input.value")
+                        nervix_plexus::parse_expression("input.value")
                             .expect("deduplicate expression must parse"),
                     ],
                     max_time: "10m".to_string(),
@@ -1207,7 +1207,7 @@ fn apply_batch_rejects_output_predicate_missing_from_schema() {
                         with_inherit_all(ProcessorOutputs::new(vec![
                             ProcessorOutput {
                                 relay: named("errors"),
-                                construction: nervix_nspl::parse_route_construction(
+                                construction: nervix_plexus::parse_route_construction(
                                     r#"WHERE input.missing = "error""#,
                                 )
                                 .expect("route construction must parse"),

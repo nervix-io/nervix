@@ -49,7 +49,7 @@ pub use self::{
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "nervix-server")]
-#[command(about = "NSPL gRPC server")]
+#[command(about = "Plexus gRPC server")]
 pub struct Args {
     /// Who the node is, where it listens and is reached, and the files and directories it uses.
     #[command(flatten)]

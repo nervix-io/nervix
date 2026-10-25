@@ -232,21 +232,21 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     "") \
       cargo sonic --target-cpus="${SONIC_TARGET_CPUS}" --parallelism="${SONIC_PARALLELISM}" --loader bundle --auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server \
       && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
-      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-nspl-format \
+      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-plexus-format \
       && mkdir -p /artifacts/release \
       && cp "/app/target/sonic/${RUST_TARGET}/release/nervix-server" /artifacts/release/nervix-server \
       && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix-server.bundle" /artifacts/release/nervix-server.bundle \
       && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/release/nervix-cli \
-      && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/release/nervix-nspl-format;; \
+      && cp "/app/target/${RUST_TARGET}/release/nervix-plexus-format" /artifacts/release/nervix-plexus-format;; \
     deloxide | deloxide-order | deloxide-stress) \
       cargo auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server --features "${NERVIX_DIAGNOSTIC_SELECTION}" \
       && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
-      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-nspl-format \
+      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-plexus-format \
       && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-deadlock --features report-tool --bin nervix-deadlock-report \
       && mkdir -p /artifacts/diagnostic \
       && cp "/app/target/${RUST_TARGET}/release/nervix-server" /artifacts/diagnostic/nervix-server \
       && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/diagnostic/nervix-cli \
-      && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/diagnostic/nervix-nspl-format \
+      && cp "/app/target/${RUST_TARGET}/release/nervix-plexus-format" /artifacts/diagnostic/nervix-plexus-format \
       && cp "/app/target/${RUST_TARGET}/release/nervix-deadlock-report" /artifacts/diagnostic/nervix-deadlock-report;; \
     *) echo "unknown NERVIX_DIAGNOSTIC_SELECTION=${NERVIX_DIAGNOSTIC_SELECTION}" >&2; exit 1 ;; \
     esac \
@@ -399,7 +399,7 @@ FROM runtime-cuda AS cuda
 COPY --link --from=builder /artifacts/release/nervix-server /usr/local/bin/nervix-server
 COPY --link --from=builder /artifacts/release/nervix-server.bundle /usr/local/bin/nervix-server.bundle
 COPY --link --from=builder /artifacts/release/nervix-cli /usr/local/bin/nervix-cli
-COPY --link --from=builder /artifacts/release/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+COPY --link --from=builder /artifacts/release/nervix-plexus-format /usr/local/bin/nervix-plexus-format
 
 USER nervix:nervix
 
@@ -417,7 +417,7 @@ LABEL io.nervix.diagnostic.selection="${NERVIX_DIAGNOSTIC_SELECTION}"
 
 COPY --link --from=builder /artifacts/diagnostic/nervix-server /usr/local/bin/nervix-server
 COPY --link --from=builder /artifacts/diagnostic/nervix-cli /usr/local/bin/nervix-cli
-COPY --link --from=builder /artifacts/diagnostic/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+COPY --link --from=builder /artifacts/diagnostic/nervix-plexus-format /usr/local/bin/nervix-plexus-format
 COPY --link --from=builder /artifacts/diagnostic/nervix-deadlock-report /usr/local/bin/nervix-deadlock-report
 
 USER nervix:nervix
@@ -430,7 +430,7 @@ FROM runtime-cpu AS cpu
 COPY --link --from=builder /artifacts/release/nervix-server /usr/local/bin/nervix-server
 COPY --link --from=builder /artifacts/release/nervix-server.bundle /usr/local/bin/nervix-server.bundle
 COPY --link --from=builder /artifacts/release/nervix-cli /usr/local/bin/nervix-cli
-COPY --link --from=builder /artifacts/release/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+COPY --link --from=builder /artifacts/release/nervix-plexus-format /usr/local/bin/nervix-plexus-format
 
 USER nervix:nervix
 

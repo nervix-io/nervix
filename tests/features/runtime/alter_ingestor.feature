@@ -3,11 +3,11 @@ Feature: Altering ingestors
   Scenario Outline: ALTER INGESTOR applies ordered operations and SHOW CREATE renders the result
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -68,11 +68,11 @@ Feature: Altering ingestors
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -98,7 +98,7 @@ Feature: Altering ingestors
       """
       "seq":1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER HTTP ENDPOINT INGESTOR event_source
         SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB;
@@ -126,13 +126,13 @@ Feature: Altering ingestors
     Given entity gate deadline is configured as "30s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
     And the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA buffered_event ( seq I64 );
       CREATE WIRE JSON SCHEMA buffered_event_wire MODE STRICT ( seq integer );
@@ -162,7 +162,7 @@ Feature: Altering ingestors
       """
       {"seq":1}
       """
-    And these NSPL commands begin executing in the background
+    And these Plexus commands begin executing in the background
       """
       ALTER HTTP ENDPOINT INGESTOR buffered_source SET DECODE USING buffered_event_codec_v2;
       """
@@ -179,7 +179,7 @@ Feature: Altering ingestors
       """
     Then within "5s" node "node-1" eventually reports describe ingestor "buffered_source" as "nervix_ingestor_quiesce_buffered_records: 2"
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And within "5s" the observed broker receives payloads
       """
       "seq":1
@@ -196,11 +196,11 @@ Feature: Altering ingestors
   Scenario Outline: SET QUIESCE changes only to a mode supported by the current source
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA quiesce_event ( seq I64 );
       CREATE WIRE JSON SCHEMA quiesce_event_wire MODE STRICT ( seq integer );
@@ -221,7 +221,7 @@ Feature: Altering ingestors
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR quiesce_source;
       """
@@ -229,7 +229,7 @@ Feature: Altering ingestors
       """
       ON QUIESCE REJECT RETRY AFTER 7s
       """
-    When these NSPL commands fail with "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
+    When these Plexus commands fail with "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
       """
       ALTER HTTP ENDPOINT INGESTOR quiesce_source SET QUIESCE SUSPEND;
       """
@@ -243,12 +243,12 @@ Feature: Altering ingestors
   Scenario Outline: A paced domain rejects dropping an ingestor timestamp source
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100000h;
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 1.0;
 
@@ -292,11 +292,11 @@ Feature: Altering ingestors
       """
       "seq":1
       """
-    When these NSPL commands fail with "requires ingestor 'paced_source' to declare TIMESTAMP NOW"
+    When these Plexus commands fail with "requires ingestor 'paced_source' to declare TIMESTAMP NOW"
       """
       ALTER HTTP ENDPOINT INGESTOR paced_source DROP TIMESTAMP;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR paced_source;
       """

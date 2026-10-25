@@ -1,4 +1,4 @@
-//! Public semantic models for NSPL statements.
+//! Public semantic models for Plexus statements.
 //!
 //! Layer: vocabulary.
 //!
@@ -331,7 +331,7 @@ impl ModelKind {
             .assured("the strum property is declared on every variant of this enum")
     }
 
-    /// The NSPL keyword phrase that names this kind in `DROP` and `SHOW CREATE`.
+    /// The Plexus keyword phrase that names this kind in `DROP` and `SHOW CREATE`.
     pub fn keyword_phrase(self) -> &'static str {
         self.get_str("keyword")
             .assured("the strum property is declared on every variant of this enum")
@@ -693,8 +693,8 @@ impl RelocationMember {
         Self { kind, name }
     }
 
-    /// The `<kind> <name>` spelling used in canonical NSPL and in diagnostics.
-    pub fn to_nspl(&self) -> String {
+    /// The `<kind> <name>` spelling used in canonical Plexus and in diagnostics.
+    pub fn to_plexus(&self) -> String {
         format!("{} {}", self.kind.keyword_phrase(), self.name.as_str())
     }
 }
@@ -722,7 +722,7 @@ impl RelocationSelection {
         }
     }
 
-    fn to_nspl(&self) -> String {
+    fn to_plexus(&self) -> String {
         match self {
             Self::List(members) => format_relocation_members(members),
             Self::Corridor { from, to } => format!(
@@ -759,7 +759,7 @@ pub enum RelocationPreferenceStrategy {
 }
 
 impl RelocationPreferenceStrategy {
-    /// The composed NSPL keyword phrase that spells this strategy.
+    /// The composed Plexus keyword phrase that spells this strategy.
     pub fn keyword_phrase(self) -> &'static str {
         self.get_str("keyword")
             .assured("the strum property is declared on every variant of this enum")
@@ -794,17 +794,17 @@ pub struct Relocation {
 impl Relocation {
     /// Renders the clauses shared by both statements, with the default strategy before any
     /// `FOR` override and members in written order.
-    pub fn to_nspl_clauses(&self) -> String {
+    pub fn to_plexus_clauses(&self) -> String {
         let mut rendered = format!(
             "{} ONTO NODE {} {}",
-            self.selection.to_nspl(),
+            self.selection.to_plexus(),
             self.destination,
             self.strategy.keyword_phrase()
         );
         for override_clause in &self.overrides {
             rendered.push_str(&format!(
                 " FOR {} {}",
-                override_clause.member.to_nspl(),
+                override_clause.member.to_plexus(),
                 override_clause.strategy.keyword_phrase()
             ));
         }
@@ -815,7 +815,7 @@ impl Relocation {
 fn format_relocation_members(members: &[RelocationMember]) -> String {
     members
         .iter()
-        .map(RelocationMember::to_nspl)
+        .map(RelocationMember::to_plexus)
         .collect::<Vec<_>>()
         .join(", ")
 }

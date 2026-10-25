@@ -14,7 +14,7 @@ that vhost, and the ingestor consumes the endpoint. An `HTTP ENDPOINT` ingestor 
 and entity in its head and reads only a `TYPE HTTP` endpoint. The existing `order_codec` decodes
 the same JSON as the Kafka path:
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE RELAY orders_http SCHEMA order_record UNBRANCHED;

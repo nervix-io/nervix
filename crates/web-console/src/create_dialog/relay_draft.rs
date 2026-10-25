@@ -207,7 +207,7 @@ mod tests {
         BranchName, CreateStatement, MaterializedRelayState, Model, ModelKind, ModelName, NodeRef,
         RelayBranching, RequestedResourceVersion, SchemaName, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
     use strum::IntoEnumIterator as _;
 
     use super::{BranchingDraft, RelayDraft, RelayDraftError};
@@ -232,7 +232,7 @@ mod tests {
         let model: Model<RequestedResourceVersion> = model.into();
         let statement = Statement::Create(CreateStatement::new(Box::new(model), if_not_exists));
         let source = statement
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .assured("every completed relay has a canonical command");
         let parsed = parse_client_statement(&source)
             .assured("the canonical command must parse back to the same Model");
