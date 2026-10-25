@@ -31,8 +31,9 @@ enrich requires every record to be emitted with its own branch's materialized pr
 default, and with at least the version durable at the milestone once the milestone has passed.
 
 counter requires each record's guest count to equal its branch index before the fault and never
-fall below it, to exceed it only by records the volatile interval could replay, and to advance by
-one per record after recovery.
+fall below it, and to advance by one per record after recovery. Volatile inputs may be replayed
+repeatedly, including when the restored checkpoint already reflects them; the output ledger does
+not bound the resulting count excess.
 EOF
 }
 
@@ -359,8 +360,6 @@ counter() {
     jq -n --slurpfile input "${input}" --slurpfile output "${output}" \
         --slurpfile bounds "${boundaries}" "${common}"'
         | ($b.pre_fault_outputs.chaos_counted_output // 0) as $pre
-        | ($input | map(select(class(.sequence) == "volatile")) | group_by(.branch_name)
-           | map({key: .[0].branch_name, value: length}) | from_entries) as $volatile_rows
         | [$output | to_entries[] | {offset: .key, record: .value}] as $rows
         | ([$output[].event_id] | unique) as $observed
         | [$rows[] | select($by_id[.record.event_id] == null) | .record] as $unexpected
@@ -375,7 +374,6 @@ counter() {
               excess: ($row.record.branch_count - $record.branch_index)}] as $counted
         | [$counted[] | select(.excess < 0)] as $below
         | [$counted[] | select(($strict or .offset < $pre) and .excess != 0)] as $inexact
-        | [$counted[] | select(.excess > ($volatile_rows[.branch_name] // 0))] as $beyond
         | [$counted | map(select(.class == "recovered")) | group_by(.branch_name)[]
            | select((map(.excess) | unique | length) > 1)
            | {branch_name: .[0].branch_name, excesses: (map(.excess) | unique)}] as $unsteady
@@ -391,7 +389,6 @@ counter() {
             (if ($missing | length) > 0 then "accepted records missing from the guest output" else empty end),
             (if ($below | length) > 0 then "a guest count fell below the branch index: acknowledged input was lost from guest state" else empty end),
             (if ($inexact | length) > 0 then "a guest count differed from the branch index while no fault had occurred" else empty end),
-            (if ($beyond | length) > 0 then "a guest count exceeded what the volatile interval could replay" else empty end),
             (if ($unsteady | length) > 0 then "guest counts after recovery did not advance by one per record" else empty end),
             (if ($violating_replays | length) > 0 then "records were emitted twice while no fault had occurred" else empty end),
             (if ($strict | not) and ($recovered | length) == 0
@@ -405,7 +402,7 @@ counter() {
             output_records: ($output | length),
             checks: {missing: ($missing | length), unexpected: ($unexpected | length),
                      incorrect_content: ($incorrect | length), below_branch_index: ($below | length),
-                     inexact_without_a_fault: ($inexact | length), beyond_replay_bound: ($beyond | length),
+                     inexact_without_a_fault: ($inexact | length),
                      unsteady_after_recovery: ($unsteady | length),
                      replays_without_a_fault: ($violating_replays | length)},
             replay_excess_after_recovery: ($recovered | group_by(.branch_name)
@@ -420,7 +417,6 @@ counter() {
             incorrect: $incorrect,
             below: $below,
             inexact: $inexact,
-            beyond: $beyond,
             unsteady: $unsteady,
             replays: $replays,
             failures: $failures

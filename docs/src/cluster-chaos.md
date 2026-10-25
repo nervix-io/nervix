@@ -1705,8 +1705,12 @@ expectations:
     restores reflects every acknowledged input
 - **The volatile interval.** It permits what periodic checkpoints and replayed acknowledgements
   allow: a duplicate of a key first seen there may pass; a window row from it may be lost or
-  aggregated twice; its profile version may fall back to version 2; and a guest may count a replayed
-  record again, by at most the number of records the interval holds.
+  aggregated twice; its profile version may fall back to version 2; and a guest may count the same
+  replayed record repeatedly. A restored checkpoint may already reflect those inputs, including
+  callbacks whose output was not observed. As the [WASM replay contract](wasm-state.md#replay-duplicates-and-exactly-once)
+  permits repeated delivery, neither the number of distinct volatile inputs nor the observed output
+  duplicates bounds the guest's count excess. The verdict records observed duplicates and
+  post-recovery excess separately; it does not infer an unobserved callback count.
 
 Every verdict also requires:
 
