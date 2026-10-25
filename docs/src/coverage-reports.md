@@ -445,24 +445,26 @@ alongside the ordinary report's integrity checks and each method's independent v
 percentages remain advisory. A verified prose-only change selects no suites and skips the union;
 that skip supplies no coverage or release-qualification evidence.
 
-Repository administrators enforce the same completion boundary for merges by requiring the
-`coverage-full` status check from the GitHub Actions app on the default branch's ruleset. The
-workflow and release inventory do not install that external setting. A qualification records the
-live ruleset identity, enforcement, branch scope and required check on its ClickUp task, along with
-the checked revision and check result; changing source alone is not evidence that the setting is
-active. The check name stays stable across runner, producer and artifact changes.
+Branch protection is configured outside source control, and nothing in the repository installs or
+verifies it. A qualification records the live default-branch ruleset on its ClickUp task: its
+identity, enforcement, branch scope and required status checks, with the checked revision. A
+source change is never evidence that such a setting is active. A ruleset that requires the
+completion check names `coverage-full` from the GitHub Actions app, and that name stays stable
+across runner, producer and artifact changes.
 
 Producer jobs retain sampled CPU utilization, steal time, used memory and swap with their build
 and execution evidence. Tests, scenarios and fuzz shards record their load directly; native
 extras, Shuttle, Loom, Turmoil, diagnostic evidence and workload lanes, client conformance and the
-independent Loom weakening shards use `.github/actions/runner-load` around their workloads. Its finish phase runs
-after failure too, waits at most ten seconds for the recorder, and requires its summary before
-uploading `runner-load-<job>`; diagnostic selections and weakening shards append their matrix
-identity so their artifacts cannot overwrite one another. These are measurements of the runner,
-including build and service memory, rather than individual-process peak RSS. Workflow step times
-and collection records delimit producer work. Instrumented timings measure collection cost;
-runtime performance claims still require ordinary builds on the same host. Recording the load of
-a weakening or replay does not make that altered-source execution coverage evidence.
+independent Loom weakening shards use `.github/actions/runner-load` around their workloads. Its
+finish phase runs after failure too, waits at most ten seconds for the recorder, and requires its
+summary before uploading `runner-load-<job>`; diagnostic selections and weakening shards append
+their matrix identity so their artifacts cannot overwrite one another. The workflow contract tests
+of `just test-coverage-full` hold every producer job of the ordinary report and of the union, and
+both qualification jobs, to that recording. These are measurements of the runner, including build
+and service memory, rather than individual-process peak RSS. Workflow step times and collection
+records delimit producer work. Instrumented timings measure collection cost; runtime performance
+claims still require ordinary builds on the same host. Recording the load of a weakening or replay
+does not make that altered-source execution coverage evidence.
 
 The `coverage-full` job waits for every producer job, including one that failed or was skipped. It
 records the run's selection before downloading artifacts, then rebuilds nothing and combines:

@@ -1209,6 +1209,37 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("run: just coverage-full-runner\n", extras)
         self.assertIn("            target/coverage-full/python.lcov\n", step_section(extras, "Upload native extra coverage"))
 
+    def test_every_producer_job_retains_the_load_of_its_runner(self) -> None:
+        # The ordinary report's producer jobs, every job of this workflow a requirement names, and
+        # the qualification jobs whose budgets the same measurements size.
+        coverage = job_section(self.workflow, "coverage")
+        jobs = set(re.search(r"needs: \[(.*)\]", coverage)[1].split(", "))
+        for requirement in REQUIREMENTS:
+            if requirement.job not in ("coverage", "bolero"):
+                jobs.add(requirement.job)
+        jobs.update(("loom-qualification", "client-conformance"))
+        artifacts = []
+        for name in sorted(jobs):
+            with self.subTest(job=name):
+                job = job_section(self.workflow, name)
+                if "python3 scripts/record_runner_load.py" in job:
+                    self.assertIn("name: runner-load-${{ github.job }}\n", job)
+                    artifacts.append(f"runner-load-{name}")
+                    continue
+                start = step_section(job, "Start recording runner load")
+                self.assertIn("uses: ./.github/actions/runner-load\n", start)
+                self.assertIn("phase: start\n", start)
+                finish = step_section(job, "Publish runner load")
+                self.assertIn("if: always()\n", finish)
+                self.assertIn("phase: finish\n", finish)
+                self.assertLess(job.index(start), job.index(finish))
+                artifact = re.search(r"artifact-name: (.+)\n", finish)[1]
+                self.assertTrue(artifact.startswith("runner-load-"), artifact)
+                if "\n      matrix:\n" in job:
+                    self.assertIn("${{ matrix.", artifact)
+                artifacts.append(artifact)
+        self.assertEqual(len(artifacts), len(set(artifacts)), artifacts)
+
     def test_every_required_native_producer_is_collected_in_its_declared_mode(self) -> None:
         for requirement in REQUIREMENTS:
             if requirement.producer in (coverage_full.ORDINARY_REPORT, coverage_full.FUZZ_PRODUCER):
