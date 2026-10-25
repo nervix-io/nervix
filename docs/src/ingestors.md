@@ -1228,6 +1228,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-ingest).
 <!-- connector-matrix:ingest-rabbitmq-queue:end -->
 
+`QUEUE` names an existing queue and preserves its spelling, including letter case and Unicode.
+Its string literal must contain 1 to 255 UTF-8 bytes, the AMQP short-string limit; a multibyte
+character contributes every byte to that limit. `SHOW CREATE INGESTOR` retains the exact queue
+name and the configured acknowledgement, retry and instance policies.
+
+
 Choose `MODE NO ACK`, `MODE ACK SEQUENTIAL ACK TIMEOUT <duration> RETRY POLICY …`, or
 `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <duration> ACK TIMEOUT <duration> RETRY POLICY …`.
 `DESCRIBE INGESTOR` prints the complete selected mode.

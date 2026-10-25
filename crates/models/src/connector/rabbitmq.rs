@@ -41,6 +41,13 @@ use crate::{
 configured_client!(RabbitMq: unpooled, config NervixWithAddressQuery, CreateClientRabbitMq => RabbitMqConfigEntry);
 
 /// The longest queue name AMQP 0-9-1 carries, in bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "AMQP 0-9-1 encodes queue names as one-byte-length short strings"
+    )
+)]
 const RABBITMQ_QUEUE_MAX: usize = 255;
 
 external_names! {
@@ -312,3 +319,6 @@ super::publishing::emitter_modes! {
         Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
     }
 }
+
+#[cfg(test)]
+mod tests;

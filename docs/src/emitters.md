@@ -1274,6 +1274,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-emit).
 <!-- connector-matrix:emit-rabbitmq-queue:end -->
 
+`QUEUE` names an existing queue through the broker's default exchange. The same case-preserving
+queue-name type is used for ingestion and emission: 1 to 255 UTF-8 bytes, including every byte of
+a multibyte character. `SHOW CREATE EMITTER` retains the external name and the complete publishing
+and optional batching policy.
+
 `ACK` enables publisher confirms and waits for the confirm of each message. A broker nack is an
 infrastructure failure and is retried with backpressure. In `NO ACK` the broker confirms nothing,
 so once a write's messages are on the channel, the emitter asks the channel for one round trip,
