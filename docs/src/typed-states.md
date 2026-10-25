@@ -188,6 +188,12 @@ append request, retained exactly once while setup runs. A membership, admission 
 after obtaining that request remains a failure naming its peer; it is not inferred from ended
 input. The caller's retry and cancellation gate runs before this distinction is resolved.
 
+**Consensus log chunks.** An unread chunk, a buffered chunk owning decoded entries and their
+reservation, and an exhausted chunk boundary are distinct states. Taking the last entry replaces
+the buffered state with the exhausted boundary and drops both its iterator allocation and charge
+before returning. The exhausted state carries the need to yield before the next read without
+retaining memory on behalf of an empty chunk. A consumer need not poll again to release that memory.
+
 **Runtime checkpoint exchange.** A state synchronization answer uses `None` only when the
 requester already holds the owner's current revision. `Some` carries a typed revision, byte length
 and digest; zero-length checkpoint bytes remain a present checkpoint. The subsequent bulk request

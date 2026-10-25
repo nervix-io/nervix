@@ -848,7 +848,7 @@ scenario = "A stale restore coordinator cannot republish after a new leader resu
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Quiesced capture and restore of WASM guest state and Kafka source offsets."
+coverage = "Quiesced capture and restore of WASM guest state and Kafka source offsets, followed by source readiness and Commands-memory headroom on the fresh cluster."
 examples = 2
 feature = "tests/features/cluster/backup.feature"
 id = "scenario.wasm-kafka-restore"
@@ -1664,7 +1664,7 @@ scenario = "A stale restore coordinator cannot republish after a new leader resu
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
-coverage = "Under scheduling stress: quiesced capture and restore of WASM guest state and Kafka source offsets."
+coverage = "Under scheduling stress: quiesced capture and restore of WASM guest state and Kafka source offsets, followed by source readiness and Commands-memory headroom on the fresh cluster."
 examples = 2
 feature = "tests/features/cluster/backup.feature"
 id = "stress.wasm-kafka-restore"
@@ -2506,6 +2506,8 @@ workloads = [
   "scenario.diagnostic-server-processes",
   "stress.diagnostic-nodes",
   "stress.diagnostic-server-processes",
+  "scenario.wasm-kafka-restore",
+  "stress.wasm-kafka-restore",
 ]
 
 [[owner]]
