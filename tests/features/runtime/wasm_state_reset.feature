@@ -72,6 +72,122 @@ Feature: Coordinated WASM processor state reset
       | 1            | 0             |
       | 3            | 1             |
 
+  @wasm_reset_authority_recovery @deloxide_stress
+  Scenario Outline: A branch reset survives authority refusals in both application attempts
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    When the next 2 WASM reset publications for domain "{{domain}}" lose authority
+    And this Plexus command request with execution reference "authority-reset-{{test_id}}" is executed on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then the last command request succeeded
+    And domain "{{domain}}" has consumed 2 WASM reset publication authority refusals
+    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      state reset: READY, branch, generation 2
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And this Plexus command request with execution reference "authority-reset-{{test_id}}" is executed on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then the last command request succeeded
+    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      state reset: READY, branch, generation 2
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  @wasm_reset_publication_failure @deloxide_stress
+  Scenario Outline: A genuine reset publication failure retains its failed command outcome
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And WASM reset generation publications for domain "{{domain}}" fail
+    And a branched state-counting WASM reset graph is running
+    Then domain "{{domain}}" has WASM reset publication failure state pending
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    When this Plexus command request with execution reference "failed-reset-{{test_id}}" is executed on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then the last command error contains
+      """
+      failed to publish a new guest-state generation for WASM processor 'counting_guest'
+      """
+    And the last command request has a known failed outcome
+    And domain "{{domain}}" has WASM reset publication failure state delivered
+    When the WASM reset publication failure for domain "{{domain}}" is cleared
+    Then domain "{{domain}}" has WASM reset publication failure state disabled
+    When this Plexus command request with execution reference "failed-reset-{{test_id}}" is executed on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then the last command error contains
+      """
+      failed to publish a new guest-state generation for WASM processor 'counting_guest'
+      """
+    And the last command request has a known failed outcome
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   Scenario Outline: Retrying an NSPL reset keeps the selected branch's new lifetime
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
@@ -601,7 +717,7 @@ Feature: Coordinated WASM processor state reset
       {"tenant":"alpha","sequence":1}
       """
     Then the relay subscription does not receive a payload within "1500ms"
-    When the next schedule publication for domain "{{domain}}" fails
+    When WASM reset generation publications for domain "{{domain}}" fail
     And WASM processor "counting_guest" state reset for branch fails
       """
       {"tenant":"alpha"}
@@ -610,6 +726,9 @@ Feature: Coordinated WASM processor state reset
       """
       failed to publish a new guest-state generation for WASM processor 'counting_guest'
       """
+    And domain "{{domain}}" has WASM reset publication failure state delivered
+    When the WASM reset publication failure for domain "{{domain}}" is cleared
+    Then domain "{{domain}}" has WASM reset publication failure state disabled
     When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":2}

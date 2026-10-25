@@ -534,6 +534,12 @@ same node may still lead when it answers.
 from the durable record of an earlier attempt with the same reference, `Recovered`. A recovered
 failure is the same failure: its message and diagnostics are the ones retained when it happened.
 
+For a WASM state reset, loss of Raft leadership during generation publication leaves the durable
+step applying under its original reference. The request can wait for recovery or answer
+`OutcomeUnknown` if its coordinator no longer leads; it does not retain a failed outcome merely
+because that publication lost authority. A genuine reset failure still returns `RequestFailed`,
+including when the client repeats the same reference.
+
 A request of several statements reports each statement's own disposition, which is one of
 `CommandCompleted`, `RequestFailed`, or `LeaderRedirect`, in written order, and the command's
 disposition is that of the statement that ended it. Several statements in one request always belong

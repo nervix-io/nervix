@@ -310,6 +310,10 @@ An unknown outcome from an interrupted finalization is subject to E-3 and E-6. I
 describe effects that already applied; the typed disposition still requires recovery under the
 retained reference, query and transaction expectations.
 
+This includes a WASM state reset interrupted while publishing its generation. Recovery uses the
+same reference and can finish the existing reset; creating a fresh reference would request another
+reset. A genuine reset failure arrives as `RequestFailed` and follows the failure rule above.
+
 ## Leader Redirect And Reconnect
 
 - **D-1.** On a `LeaderRedirect` that names the leader with an endpoint, a client MUST open a

@@ -55,6 +55,12 @@ the finished transaction recorded: the same transaction for its opening, each ap
 admission, and the transaction's terminal outcome for its commit or revert. The result it finalizes
 therefore describes the effects the interrupted attempt applied, and none of them applies again.
 
+A WASM state reset follows this rule in both its first application and recovery. A typed loss of
+Raft leadership during generation publication leaves the transaction step applying. The same
+reset request resumes against the committed schedule and completes only at `Ready`, without
+advancing an already published generation again. A genuine reset failure remains a retained
+failure; repeating its command reference returns that outcome.
+
 The retained history is bounded. Once it holds as many applying, finished, and expired executions as
 its capacity allows, a new reference is refused with an explicit capacity error. Admitted work is
 never evicted to make room, and repeating an admitted request still joins it or returns its
