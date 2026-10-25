@@ -51,6 +51,24 @@ it resolves through the node's resolver, as the sections below describe, and a d
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
 
+### Declaration validation
+
+Each ingestor and emitter entity declares its accepted modes, quiesce forms, client kinds, payload
+form, codec and header support, and batching legality in the vocabulary. Direct-value entities
+also declare their mapped-value types there: destination columns accept the current Plexus scalar,
+array and vector types, while OTEL protocol fields require their declared exact types. The OTEL
+connector uses that same type table when checking its prepared input schema.
+
+The registry checks these declarations against the candidate graph before accepting `CREATE` or
+`ALTER`. It rejects duplicate `VALUES` keys, unsupported or wrongly typed mappings, and invalid
+transport-ingestor delivery durations before any ingestor or emitter opens. ACK timeouts and retry
+durations must be positive; a zero batch timeout gathers without waiting. Every duration must fit
+the shared schedulable deadline bound, and retry maximum must be at least its initial backoff.
+OTEL `RESOURCE` mappings remain literal-only. Required batching is established by validation, so
+planning consumes that guarantee rather than discovering a missing `BATCH` when an emitter starts.
+An invalid alteration leaves the accepted graph intact. Driver configuration checks and external
+availability retain their own boundaries; these declaration checks perform no transport I/O.
+
 ### Entity implementations and composition
 
 The vocabulary owns `IngestorEntityKind` and `EmitterEntityKind`. Each connector crate exposes one
@@ -598,7 +616,7 @@ deadline keys mean the same thing for every connector:
 | --- | --- |
 | `timeout_ms` | The whole of one request or operation: name resolution, connection setup, TLS and the answer. |
 | `connect_timeout_ms` | Establishing a connection: name resolution, the address attempts, TLS and the protocol's own handshake. |
-| `idle_timeout_ms` | Silence while actively reading an established connection, including its liveness probe; expiry closes the connection. Transport backpressure is outside an active read. |
+| `idle_timeout_ms` | Silence while waiting for peer activity on an established connection, including its liveness probe; expiry closes the connection. Each entity declares its activity and whether cancellation or handoff backpressure retains the activity deadline. |
 
 A read that waits for whatever the peer sends next is bounded by the protocol's keep-alive or by
 `idle_timeout_ms`, and a write by `timeout_ms` or the retry policy. A key's value is a positive whole
@@ -648,6 +666,11 @@ read: the grammar takes each external name's completion label from it, the vocab
 read it, generated conformance tests hold the grammar and completion to it, and an inventory holds
 the scenario suite to its runtime capabilities. Each example a declaration carries is a complete
 clause the grammar accepts, so documentation can show it and generated statements write it.
+
+A capability joins its entity's declaration in the same change as its grammar and executable
+behavior. That change also supplies its generated conformance and runtime scenario registration.
+The declaration describes the product a user can execute; plans for additional connector clauses
+remain in their owning work records until that delivery.
 
 | Side | What the entity declares |
 | --- | --- |
@@ -1054,7 +1077,8 @@ in one of these ways:
 | --- | --- |
 | `KAFKA TOPIC`, `PULSAR TOPIC` | Ends at once, while it waits for a batch's first record or between the records of an `ACK PARALLEL` batch, with every record it gathered. |
 | `MQTT TOPIC` | Ends at once, while it waits for a batch's first publish or between the publishes of an `ACK PARALLEL` batch, with every publish it gathered. A publish the connection had already read when the read stopped waiting stays in the connection's read-ahead, which hands it to the next read first. |
-| `NATS SUBJECT`, `REDIS PUBSUB`, `RABBITMQ QUEUE`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
+| `RABBITMQ QUEUE` | Ends at once while waiting for the first delivery or between deliveries of a parallel batch, returning every gathered delivery. A transport failure found after gathering is retained and reported on the next read, after the gathered deliveries reach the host. |
+| `NATS SUBJECT`, `REDIS PUBSUB`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `SYSLOG LISTENER` | Reads one message at a time and takes nothing until that read returns, so it ends at once while it waits. |
 | `SQS QUEUE` | Sends no further `ReceiveMessage`, but never abandons the one in flight: the service takes the messages it answers with off the queue, so the read waits for that answer, which the receive's one-second long poll bounds, and returns what it brought. A service that has not answered within 10 seconds of the cancellation ends the read with a typed read failure, and a message it was returning stays invisible until its visibility timeout. |
 
 An MQTT read takes its publishes from its connection's read-ahead, which the connection's driver
@@ -1070,18 +1094,18 @@ its connection until the connection ends or the source drops it. The task is the
 client's event loop and polls it without pause, so the client writes the acknowledgements the
 source requests and the keep-alive pings its broker expects whatever the host does meanwhile,
 including waiting on a batch's acknowledgement trees for as long as a downstream emitter holds
-them. The task hands every publish the event loop reads to the source through a bounded
-read-ahead, in the order it read them.
+them. The task classifies each decoded publish before decoding another, then hands admitted
+publishes or compact discard acknowledgements to the source through a bounded read-ahead, in
+packet order. Admitted topic, payload and correlation bytes are copied out of the raw framing
+allocation, so a small admitted slice cannot retain an oversized neighbouring frame.
 
 In an `ACK` mode every `CONNECT` advertises the mode's acknowledgement window and 64 more as its
 Receive Maximum: 65 under `ACK SEQUENTIAL`, and `ACK PARALLEL MAX` plus 64 up to MQTT's largest
 Receive Maximum, 65,535. The broker then sends no further publish at QoS 1 while that many wait on
 their acknowledgements, so a batch holds at most that many, and an `ACK PARALLEL MAX` above 65,535
-gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. A broker that discards a
-publish above the advertised Maximum Packet Size may keep counting it against the Receive Maximum,
-waiting for an acknowledgement the source never sends, as EMQX does; the 64 let the window fill
-around that many such publishes instead of one of them holding back every later publish. The
-broker holds back no publish at QoS 0, which a subscription at QoS 1 receives from a publisher
+gathers at most 65,535 of them before its `BATCH TIMEOUT` ends it. The extra capacity lets the
+connection keep reading while the host holds a batch. The broker holds back no publish at QoS 0,
+which a subscription at QoS 1 receives from a publisher
 that sends at QoS 0, and under `NO ACK`, where the client acknowledges every publish on receipt,
 it holds back none. The read-ahead holds as many publishes as the Receive Maximum admits, or 64
 under `NO ACK`. Once it is full, the task holds the next publish and polls nothing until the
@@ -1105,11 +1129,29 @@ rejects the positions, a rejection fails once its publishes' connection is gone,
 delivers again every publish the lost connection did not acknowledge once the source resumes; see
 [Confirmed acknowledgements](#confirmed-acknowledgements).
 
-A failed poll ends the connection. The task has handed over every publish it read, so the source
-reads the read-ahead empty, and its next read then reports the lost connection: beneath
-`MqttTopicIngestorError::Receive`, or as `MqttTopicIngestorError::PacketTooLarge` for a packet above the
-advertised Maximum Packet Size. Suspension, close and every failure drop the connection, which
-aborts its task and closes the broker connection.
+Every `CONNECT` advertises MQTT's full framing limit, 268,435,460 bytes: the maximum Remaining
+Length plus its fixed header. This transport bound is separate from the 10 KiB admission bound
+for each complete publish, including its topic and properties. Local admission drops an oversized
+publish's bytes before read-ahead and retains only its prepared acknowledgement, if required.
+At QoS 1 or 2 under manual acknowledgement the ingestor queues its `PUBACK` or `PUBREC` through the
+same request owner as ordinary acknowledgements and waits for its write before returning
+`IngestorBatch::Oversized`. Automatic acknowledgement remains the client's responsibility; QoS 0
+requires none. Thus an oversized publish releases its broker inflight slot without depending on
+the broker's handling of a subscriber's smaller Maximum Packet Size.
+
+A cancelled read retains the discard's queue state, confirmation target and original keep-alive
+deadline in its connection. The next read resumes that same acknowledgement and reports the size
+rejection once. If a partial batch already holds ordinary messages, it returns them first and
+retains the unstarted discard for the following read. MQTT requires acknowledgements in receive
+order, so the host settles that ordinary prefix before the next read starts the discard's
+acknowledgement and its physical deadline. An acknowledgement failure on this read path preserves
+the same typed cause as an ordinary acknowledgement failure and drops the connection. No oversized
+payload reaches the codec or the host's acknowledgement trees.
+
+A failed poll ends the connection. The task has handed over every packet outcome it read, so the
+ingestor reads the read-ahead empty, and its next read then reports the lost connection beneath
+`MqttTopicIngestorError::Receive`. Suspension, close and every connection-ending failure abort the driver
+and close the broker connection.
 
 ### Oversized payloads
 
@@ -1118,8 +1160,9 @@ drops a payload larger than its client's message size bound and returns `Ingesto
 with how many it dropped. The host counts them in `nervix_ingestor_oversized_payloads_total`, which
 `DESCRIBE INGESTOR` renders, and reads again at once; the drop is neither a read failure nor a
 decode rejection, because the payload never reached the codec. A `SYSLOG LISTENER` does this for a
-UDP datagram larger than `max_message_size`. A stream transport cannot find the frame after an
-oversized one, so its source closes that connection instead and counts nothing.
+UDP datagram larger than `max_message_size`; an `MQTT TOPIC` does it for a complete publish above
+its 10 KiB admission bound, after acknowledging it when required. A stream source that cannot
+identify the next frame closes that connection instead and counts nothing.
 
 ### MQTT session retirement
 
@@ -1239,6 +1282,28 @@ again. A Pulsar rejection is a redelivery request, which the broker does not ans
 returns once the consumer sent the request. It fails when the consumer could not send it within the
 operation timeout, such as while it reconnects to a broker it cannot reach, or when its connection
 closed first, and the broker redelivers the message once the consumer's connection is replaced.
+
+RabbitMQ registers `NO ACK` as an automatically acknowledging AMQP consumer, with no `basic.qos`
+request and no later ACK or NACK traffic. Its existing Lapin delivery queue is unbounded without
+broker prefetch; the host refuses and counts an unacknowledged payload its extension workers
+cannot admit. Closing the connection drops any auto-acknowledged deliveries it still held, and
+there is no transport position to recover. The gathered batch itself is bounded by the host's
+request: one delivery under `NO ACK` or `ACK SEQUENTIAL`, and at most the parallel maximum otherwise.
+
+Acknowledged RabbitMQ consumers use prefetch one under `ACK SEQUENTIAL` and their typed nonzero
+16-bit maximum under `ACK PARALLEL`. The connector declares individual settlement. The host admits
+each delivery with its own confirmed root, waits for those outcomes concurrently, and settles
+each position separately with AMQP `multiple = false`. A successful sibling is never negatively
+acknowledged because another root failed. Each resolved root remains outstanding for drain and
+handoff until its own transport settlement completes. If the connection is lost, only unresolved
+positions follow the broker-redelivered recovery path; already confirmed positions are not counted
+again. Commit-oriented sources retain their declared batch settlement boundary.
+
+Once an individual transport settlement fails, the host retains the other admitted graph waits
+until they finish, without sending more operations on that transport. Only then does it reopen
+the consumer and hand the retained positions to recovery. This prevents broker replay from
+overtaking downstream work admitted on the preceding connection. A stop ends those waits and
+reports every still-unconfirmed retained or pending position.
 
 The host reports progress for a batch only once acknowledging it returns. Until then the
 ingestor's transient status stays as it was, and the batch's work stays outstanding: the last of
@@ -2022,13 +2087,21 @@ sequenceDiagram
   `WEBSOCKETS CONNECTION` source through `IngestorConnector` and `BrokerIngestorConnector`. It has
   no emitter or listening endpoint. Its plan carries resolved client configuration, the node
   resolver, validated literal upgrade headers and an optional compiled signaling protocol. The
-  vocabulary owns its strict CONFIG schema: endpoint, positive connection/ping durations and TLS
+  vocabulary owns its strict CONFIG schema: endpoint, positive connection/ping/idle durations,
+  positive handoff/message/frame limits and TLS
   file keys restricted to secure endpoints with paired client identity files. Registry creation
   and source construction after template rendering both validate it. The omitted connection
   timeout is thirty seconds; omitted ping cadence means only answering peer pings. `open` prepares local transport and TLS
   state without resolving a name or connecting; `resume` resolves and connects, completes any
   signaling handshake, and only then reports readiness. Accepted data from a successful
-  handshake is queued for polling before new socket frames. Text and binary payload-carrying
+  handshake stays in one bounded `HandshakeFrames` handoff for polling before new socket frames.
+  Its capacity is `handshake_buffer_capacity` (default 16 messages), with each message bounded by
+  `max_message_size` (default 64 MiB) and each transport frame by `max_frame_size` (default 16 MiB).
+  The full handoff backpressures signaling, retaining at most one further accepted frame while
+  waiting for room within the protocol's `TIMEOUT`. The negotiating future owns this queue, so a
+  failed or cancelled handshake discards its handoff before another connection starts. Only
+  successful signaling publishes it for source reads. The channel is created only for signaling and released after handoff
+  drains; ordinary socket reads then inspect task-owned absence. Text and binary payload-carrying
   variants retain their kind through signaling and become bytes for the host to decode. Each
   connection captures its printable ASCII upgrade response headers once; queued and delivered messages
   share that immutable snapshot, so suspension, reconnection and quiesce replay preserve the
@@ -2038,8 +2111,13 @@ sequenceDiagram
   signaling at the configured cadence, with the close handshake's existing one-second budget
   declared once in the vocabulary and shared by both transport operations, and continue alongside
   data reads. Protocol control frames remain transport concerns.
-  Suspension drops the connection while retaining queued payloads, and close also clears that
-  queue. Transport failure requires another resume of the retained source.
+  `idle_timeout_ms` bounds silence; omission derives three configured ping intervals, or thirty
+  seconds without configured pings. Received data and control frames refresh the absolute activity
+  deadline; local pings and read cancellation do not. An explicit idle value overrides derivation.
+  Incoming frame or message overflow fails the read and ends the connection, as `fail_read` declares.
+  The host reconnects on its policy. Suspension closes the connection while retaining successful
+  handshake payloads, which drain before another connection opens; close clears the queue.
+  Transport failure requires another resume of the retained source.
   The host composer currently resolves the named signaling protocol and chooses buffered intake,
   a flush after each intake, and refusal with counting when unacknowledged unfolding cannot enter
   the executor. Holding its polling loop would also stop answering the peer's pings. These

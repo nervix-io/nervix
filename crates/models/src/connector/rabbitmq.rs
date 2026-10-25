@@ -14,7 +14,7 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU16, NonZeroU64};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,13 @@ use crate::{
 configured_client!(RabbitMq: unpooled, config NervixWithAddressQuery, CreateClientRabbitMq => RabbitMqConfigEntry);
 
 /// The longest queue name AMQP 0-9-1 carries, in bytes.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "AMQP 0-9-1 encodes queue names as one-byte-length short strings"
+    )
+)]
 const RABBITMQ_QUEUE_MAX: usize = 255;
 
 external_names! {
@@ -66,17 +73,28 @@ pub struct RabbitMqQueueIngestor {
 
 /// What the connector of a RABBITMQ QUEUE ingestor holds and how long it waits.
 const RABBITMQ_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[DeclaredBuffer {
-        holds: "deliveries the broker sends ahead of their acknowledgement",
-        bound: BufferBound::Bounded {
-            capacity: BufferCapacity::Items {
-                count: 1,
-                unit: "delivery",
-            },
-            overflow: BufferOverflow::Backpressure,
+    buffers: &[
+        DeclaredBuffer {
+            holds: "Lapin's existing consumer delivery queue; broker prefetch bounds it in \
+                    acknowledged modes, but automatic acknowledgements do not apply that bound",
+            bound: BufferBound::Unbounded,
         },
-    }],
+        DeclaredBuffer {
+            holds: "deliveries gathered for one host read",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting(
+                    "1 under NO ACK and ACK SEQUENTIAL; ACK PARALLEL MAX otherwise, at most 65,535",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+    ],
     waits: &[
+        DeclaredWait {
+            wait: "gathering further deliveries after the first under ACK PARALLEL; cancellation \
+                   hands over every delivery already gathered",
+            bound: WaitBound::Clause("BATCH TIMEOUT"),
+        },
         DeclaredWait {
             wait: "connection: name resolution, address attempts, TLS, the AMQP handshake, \
                    channel open and consume",
@@ -90,7 +108,13 @@ const RABBITMQ_INGESTOR_BOUNDS: DeclaredBounds = DeclaredBounds {
             bound: WaitBound::Driver("twice the negotiated heartbeat"),
         },
     ],
-    driver_limits: &["A frame above the negotiated frame_max ends the connection."],
+    driver_limits: &[
+        "Consumer prefetch is 1 under ACK SEQUENTIAL and ACK PARALLEL MAX under ACK PARALLEL, at \
+         most 65,535; the broker holds back deliveries beyond that window.",
+        "NO ACK has no prefetch bound; auto-acknowledged deliveries can accumulate in Lapin's \
+         existing consumer queue while the host is not reading.",
+        "A frame above the negotiated frame_max ends the connection.",
+    ],
 };
 
 /// What the connector of a RABBITMQ QUEUE emitter holds and how long it waits.
@@ -145,7 +169,11 @@ impl IngestorDeclaration for RabbitMqQueueIngestor {
         reference: IngestorReferenceKind::Client(ConnectorKind::RabbitMq),
         position_class: PositionClass::BrokerRedelivered,
         acknowledgement_confirmation: AcknowledgementConfirmation::Written,
-        delivery: &[DeclaredDelivery::ACK_SEQUENTIAL],
+        delivery: &[
+            DeclaredDelivery::NO_ACK,
+            DeclaredDelivery::ACK_SEQUENTIAL,
+            DeclaredDelivery::ACK_PARALLEL,
+        ],
         quiesce: &[DeclaredQuiesce::SUSPEND],
         locator: Some(LocatorDeclaration {
             keywords: "QUEUE",
@@ -182,15 +210,35 @@ pub enum RabbitMqIngestMode {
         timeout: String,
         retry_policy: RetryPolicy,
     },
+    NoAck,
+    AckParallel {
+        /// AMQP's nonzero, 16-bit consumer prefetch count.
+        max: NonZeroU16,
+        batch_timeout: String,
+        timeout: String,
+        retry_policy: RetryPolicy,
+    },
 }
 
 impl RabbitMqIngestMode {
     pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         match self {
+            Self::NoAck => IngestAcknowledgement::Unacknowledged,
             Self::AckSequential {
                 timeout,
                 retry_policy,
             } => IngestAcknowledgement::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+            Self::AckParallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Parallel {
+                max: (*max).into(),
+                batch_timeout,
                 timeout,
                 retry: retry_policy,
             },
@@ -271,3 +319,6 @@ super::publishing::emitter_modes! {
         Ack { window: crate::AckWindow, ack_timeout: String, retry_policy: crate::RetryPolicy } => BrokerAck,
     }
 }
+
+#[cfg(test)]
+mod tests;

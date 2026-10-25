@@ -18,10 +18,16 @@ for the delivery consequences at each emitter.
 
 ## Stop Requests
 
-A node begins shutting down for exactly two reasons:
+A node begins shutting down for exactly three reasons:
 
 - It receives its first `SIGINT` or `SIGTERM`.
 - One of its public listeners stops, whether it failed or returned.
+- It is refused as it joins the cluster: a connection it dials is refused, before any has
+  completed, because the two nodes cannot run together; a live member of the membership it has
+  applied publishes prerequisites it cannot run beside before it is a member itself; or the clock
+  of a peer it completed a handshake with is beyond its tolerance.
+  [Prerequisites At Join](./node-settings.md#prerequisites-at-join) describes each. The refused
+  node requests its own stop; a node that has joined never stops because of a newcomer.
 
 There is no NSPL statement, API call, or cluster command that stops a node. `CORDON NODE`,
 `DRAIN NODE`, `RELOCATE`, and `DROP NODE` move work and change eligibility; none of them ends a
@@ -123,6 +129,8 @@ guarantees the process ends.
 | Shutdown deadline expired | `1` |
 | A public listener, cluster shutdown, or storage release reported an error | `1` |
 | Termination signal handlers could not be registered at startup | `1` |
+| The [startup preflight](./node-settings.md#the-startup-preflight) refused the node before it bound a listener or opened a store | `1` |
+| The node was refused as it joined the cluster, once its shutdown phases have run | `1` |
 | A diagnostic node's deadlock diagnostics could not start | `1` |
 | A diagnostic node reported an active deadlock among its tracked locks and recorded it | `3` |
 | A diagnostic node reported a deadlock it could not record, lost findings, or outlived the budget for recording one | `4` |
@@ -474,9 +482,15 @@ last on every snapshot interval and once more as the branch stops. That task bel
 runtime, not to its branch task, because it goes on after it: a branch ended at a stop grace
 before its own stop was reached published nothing as it went, so what it published before is the
 newest state a restart can restore, and the snapshot task still writes it. A branch that stops in
-time publishes its state first and waits for that write itself. Either way the write is finished
-before terminal teardown releases the node's storage, as [Terminal Teardown](#terminal-teardown)
-describes.
+time publishes its state first and waits for that write itself. A branch ended at its grace does
+not, so the stop of its domain waits for it instead: once every task of a stopping domain
+execution has ended, the stop waits for the last write of each of the domain's deduplicator and
+window branches, with no grace, and only then completes. `STOP`, a rebuild of the domain's
+execution and runtime teardown alike therefore never leave such a write running after the
+domain's stop, and a stopped domain's stored checkpoints are what its branches published last,
+which a [stopped backup cut](./backup-and-restore-architecture.md#cut-kinds), a restart and the
+next `START` read. Either way the write is finished before terminal teardown releases the node's
+storage, as [Terminal Teardown](#terminal-teardown) describes.
 
 A coordinated WASM state reset is serialized with domain lifecycle, placement, ownership movement,
 resource rebinding, and model mutation by the domain alteration lease and its entity gate. If node
@@ -757,6 +771,12 @@ group in `MODE NO ACK` acknowledges nothing: when intake stops, its source commi
 driver delivered since the driver's last commit, and waits for the answer before the consumer
 leaves the group, and a Pulsar subscription in `MODE NO ACK` only queues its acknowledgements.
 
+RabbitMQ `ACK PARALLEL` retains a separate admitted acknowledgement root for each delivery through
+its own transport operation. A failed transport keeps the remaining admitted graph waits owned
+until they finish; shutdown reports the retained and pending positions as unconfirmed. RabbitMQ
+`NO ACK` has no transport confirmation for the drain to await; its already delivered input may be
+lost when the process ends.
+
 Work whose acknowledgement root is still unresolved when the drain ends is negatively acknowledged,
 so the source's own redelivery contract applies. A source instance that stops while it still waits
 on such a batch logs `source instance stopped before its transport confirmed positions it read; the
@@ -890,7 +910,9 @@ checkpoint and replicate state. A task that has not ended when its stop grace ru
 The node logs `shutdown task exceeded grace period; aborting` at `warn` with the domain, the task's
 kind, and its name, or `relay owner task did not stop cleanly` and
 `relay state task did not stop cleanly` for a relay's tasks. The grace is two seconds, except that
-a relay owner and an emitter are given the domain drain timeout first.
+a relay owner and an emitter are given the domain drain timeout first. Once the domain's tasks have
+ended, its stop waits for the last write of each of its deduplicator and window branches, which a
+branch ended at its grace left to its snapshot task, before teardown moves to the next domain.
 
 Generators and reingestors share their grace. A generator reads its source relay from the node that
 owns it, and both kinds publish to the node that owns their output relay, so while they work they
@@ -902,14 +924,14 @@ its teardown one grace and its reingestors one more, however many of them a stop
 The other kinds persist or replicate state they own, or drain an emitter, as they stop, and are waited
 for one after another, each with a grace of its own.
 
-Once every domain's tasks have ended, runtime teardown tells the snapshot task of every
-deduplicator and window branch that is still waiting for its branch to write what that branch
-published last, and waits for all of them. A snapshot task holds the runtime and its storage, so
-this wait is what keeps the node database from being released under a write: it has no grace and
-cancels nothing, and lasts as long as the slowest of those writes. A window whose retained rows
-exceed one snapshot section is sealed and published in bounded pieces through the storage and
-bulk workers, so its write waits for those workers like any other job. The node logs nothing for
-this wait; a write that fails is logged at `warn` as
+Once every domain has stopped, runtime teardown tells the snapshot task of every deduplicator and
+window branch that is still waiting for its branch, one no domain stop ended, to write what that
+branch published last, and waits for all of them. A snapshot task holds the runtime and its
+storage, so these waits, the domain's and this one, are what keep the node database from being
+released under a write: they have no grace and cancel nothing, and last as long as the slowest of
+those writes. A window whose retained rows exceed one snapshot section is sealed and published in
+bounded pieces through the storage and bulk workers, so its write waits for those workers like any
+other job. The node logs nothing for these waits; a write that fails is logged at `warn` as
 `failed to flush branch state snapshot during shutdown`, and a restart then finds the checkpoint
 written before it.
 
@@ -1029,7 +1051,7 @@ strongly consistent, selected runtime state is checkpointed, and the hot path is
 | Committed control-plane state: models, schedules, domain lifecycle, cordons, users, resources | Reopens from the committed generation | Reopens from the last committed generation; nothing acknowledged is lost |
 | Published consensus snapshots | Reopen from the current manifest; a marked installation is finished before state is exposed | Reopen from the current manifest; a marked installation is redone before state is exposed |
 | Durable handoff and forced-recovery preparations | Preserved, then reconciled or activated | Preserved, then reconciled or activated |
-| Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop; a deduplicator or window branch ended at its stop grace has what it published last written before terminal teardown ends; a materialized relay, and a window whose retained rows exceed one 8 MiB snapshot section, are sealed to quota-owned files and written as segments synchronized before their header | Reopen at the last completed periodic checkpoint |
+| Runtime-state checkpoints: Kafka domain offsets, deduplicator and window state, materialized relay records | Flushed again as runtime tasks stop; a deduplicator or window branch ended at its stop grace has what it published last written before its domain's stop completes; a materialized relay, and a window whose retained rows exceed one 8 MiB snapshot section, are sealed to quota-owned files and written as segments synchronized before their header | Reopen at the last completed periodic checkpoint |
 | WASM guest-state checkpoints | Every checkpoint that released an acknowledgement is already synchronized | Reopen at the newest checkpoint on the node's storage, which covers every acknowledged input |
 | Restored backup state: materialized relay rows, WASM guest saves, Kafka domain offsets, branch lifecycle, deduplicator keys and window state | A restore synchronizes a complete chunked namespace and its atomic active-generation pointer before releasing the stopped domain's START gate or resuming its archived lifecycle | Reopens pointer and checkpoints from one complete database view on each assigned owner and replica; a durable pointer alone does not release an incomplete replicated installation gate. A resumed domain retains every restored kind. A normal START continues saved guest state, source positions, branch incarnations, deduplicator keys and windows, and resets materialized rows |
 | External source offsets and emitter commits | Complete when the drain succeeds | Only the external connector's own delivery and transaction guarantee applies |
@@ -1127,6 +1149,18 @@ bootstrap host for first contact.
 
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.
+
+### Checks Before A Node Rejoins
+
+Every start, the first and one after a forced ending alike, passes the
+[startup preflight](./node-settings.md#the-startup-preflight) before the node binds a listener or
+opens a store: its directories prove writable, its memory limit holds its budgets, its quotas fit
+its database volume, and its resolver loads. A refusal exits with status `1` and leaves the node's
+stores as the previous run left them: the preflight creates a directory only when it is absent, and
+removes the probe file it writes. A returning node that starts with peers to reach is then held to
+the cluster's prerequisites as it rejoins. When a connection it dials is refused before any has
+completed, or the clock of a peer it completed a handshake with is beyond its tolerance, it stops
+through the ordinary phases and exits with status `1`, while the incumbents keep running.
 
 ### Whole-Cluster Restart Keeps Ownership
 

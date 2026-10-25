@@ -954,6 +954,14 @@ external keys are invalid, `output` is unavailable, and sensitive values require
 Bare fields, `message.field`, and `input.field` read the source row. Direct emitters reject
 `INHERIT` and all current direct emitters reject `INVOKE`.
 
+Nervix checks these mappings against the source schema during `CREATE` and `ALTER`, before opening
+the destination. Database and Iceberg columns accept Plexus scalar, array and vector types; OTEL
+fields require their documented exact types. For example, an I32 source field can supply
+`severity_number`, while the integer literal `9` is inferred as I64 and is refused for that field.
+OTEL attributes accept supported scalar values and arrays or vectors of those values; `RESOURCE`
+entries must be literal expressions. Mapping types are never implicitly coerced. A refused
+alteration preserves the emitter's accepted configuration.
+
 ## Header invocations
 
 `write_header` is a side-effect function. It accepts statically non-null `STRING` name and value
@@ -1265,6 +1273,11 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [RABBITMQ QUEUE capability and mirror reference](connector-capabilities.md#rabbitmq-queue-emit).
 <!-- connector-matrix:emit-rabbitmq-queue:end -->
+
+`QUEUE` names an existing queue through the broker's default exchange. The same case-preserving
+queue-name type is used for ingestion and emission: 1 to 255 UTF-8 bytes, including every byte of
+a multibyte character. `SHOW CREATE EMITTER` retains the external name and the complete publishing
+and optional batching policy.
 
 `ACK` enables publisher confirms and waits for the confirm of each message. A broker nack is an
 infrastructure failure and is retried with backpressure. In `NO ACK` the broker confirms nothing,

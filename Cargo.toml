@@ -67,6 +67,7 @@ shuttle = [
   "nervix-connector-sentry/shuttle",
   "nervix-connector-sqs/shuttle",
   "nervix-connector-syslog/shuttle",
+  "nervix-connector-websockets/shuttle",
   "nervix-connector-zeromq/shuttle",
   "nervix-consensus/shuttle",
   "nervix-deadlock?/shuttle",
@@ -174,6 +175,7 @@ nervix-roto = { workspace = true }
 nervix-simd-kernels = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
 nonzero_ext = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true, default-features = false, features = [

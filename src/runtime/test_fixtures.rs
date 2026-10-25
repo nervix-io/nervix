@@ -372,7 +372,8 @@ pub(super) async fn attach_loopback_cluster(
         bootstrap_host: None,
         recovery_endpoints: Default::default(),
         interconnect: interconnect.clone(),
-        node_unavailability_timeout: Duration::from_secs(10),
+        membership: crate::cluster::MembershipSettings::default(),
+        prerequisites: interconnect.local_prerequisites(),
         fault_injection: Default::default(),
     })
     .await

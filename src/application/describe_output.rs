@@ -298,6 +298,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
     match &ingestor.input {
         IngestorInput::Transport(transport) => {
             lines.push(format!("codec: {}", transport.codec.as_str()));
+            if let nervix_models::IngestorEntity::RabbitMq(
+                nervix_models::RabbitMqIngestor::Queue(source),
+            ) = &transport.source
+            {
+                lines.push(format!("mode: {}", source.mode.to_canonical_plexus()));
+            }
         }
         IngestorInput::Client(client) => {
             lines.push(format!("schema: {}", client.schema.as_str()));

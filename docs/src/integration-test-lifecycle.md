@@ -565,7 +565,10 @@ must not be mistaken for a measurement including the final sync.
 
 Raw tool reports, wall time and process CPU time are retained separately. Sysbench invocations
 have three-second process-group guards and fio a four-second guard, all within a ten-second
-calibration allowance. Completed tool reports survive a later timeout; the supervisor kills the
+calibration allowance. The timeout-retention regression synchronizes on a child-ready signal
+after its measurement is flushed, then applies the same short timeout to the stalled child;
+it does not assume process startup finishes within that timeout. Completed tool reports survive
+a later timeout; the supervisor kills the
 tool's process group and removes its temporary directory. Missing tools and unsupported direct
 I/O retain their actual error, with no buffered-read substitute and no global cache drops.
 
@@ -691,10 +694,11 @@ had not already published.
 Two kinds of deadline meet in every scenario.
 
 A **product deadline** is configuration a node enforces on itself: its shutdown and drain timeouts,
-its command retry validity and transaction idle timeout, its node-unavailability and election
-timeouts. Test clusters start with test values for some of them. A scenario about one of them
-configures it, drives the node to it, and asserts the outcome the owning chapter defines. No harness
-deadline shortens a product deadline while the scenario can still observe it.
+its command retry validity and transaction idle timeout, its node-unavailability timeout and the
+election timeouts its Raft heartbeat derives. Test clusters start with test values for some of
+them. A scenario about one of them configures it, drives the node to it, and asserts the outcome
+the owning chapter defines. No harness deadline shortens a product deadline while the scenario can
+still observe it.
 
 A **harness deadline** bounds how long the harness waits: for a status reply, for a node to become
 ready, for a cluster to stop, for the whole run. Its expiry changes nothing inside a node. It ends a
@@ -1346,9 +1350,26 @@ needs a step of its own.
 A setting the node refuses fails its launch before the node is spawned, with the refusal's whole
 report, and that failure is terminal. A scenario whose subject is the refusal starts the node with
 `When node "<node>" attempts to start`, which records the outcome instead of failing the step, and
-asserts it with `Then node "<node>" refused to start because "<text>"`. The settings of the current
-launch also decide how long a scenario-driven stop of that node may take, so a scenario that names
-a longer shutdown or drain timeout lengthens that bound with it.
+asserts it with `Then node "<node>" refused to start because "<text>"`. A node the startup preflight
+refuses ends the same way, as an application error of its task. The settings of the current launch
+also decide how long a scenario-driven stop of that node may take, so a scenario that names a longer
+shutdown or drain timeout lengthens that bound with it.
+
+Test clusters start with a 166 ms Raft heartbeat, so the election timeouts consensus derives from
+it, 996 ms to 1,992 ms, stay just inside the one and two seconds scenarios size their leader waits
+for. A scenario changes the heartbeat for the whole cluster with
+`Given raft heartbeat interval is configured as "<duration>"` before the cluster starts. Neither a
+test cluster nor a server process names a restore-staging quota of its own, so each node derives
+its quota from the volume that holds its database and passes the startup preflight on a host whose
+volume is smaller than 128 GiB.
+
+A node refused as it joins may already have answered its readiness probe when it stops, so its
+refusal is the ending of its task rather than a failed launch. A scenario whose subject is a join
+starts the node, adding it as a new member when the cluster does not have it yet, with
+`When node "<node>" attempts to join`. The step waits until the node is a voter of the membership
+or its task has ended, and records which. The scenario asserts the ending with
+`Then node "<node>" refused to join because "<text>"`, against the report the node's task ended
+with, or the admission with `Then node "<node>" joined the cluster`.
 
 ### Cluster Construction
 
@@ -1578,8 +1599,14 @@ until that node has ended.
   for the next connection. The BUFFER/codec-change outlines end a partial upgrade and await that
   cancellation event before starting their one- or three-node cluster. The shared peer's ordinary
   harness tests also end a completed upgrade before its probe, then require a replacement
-  connection to receive both gated payloads. A reset after confirmation still fails the fixture,
-  qualified by a separate transport test; other handshake errors remain fatal as well.
+  connection to receive both gated payloads. After confirmation, unexpected stream-read
+  errors still fail the fixture, qualified by a separate transport test; other handshake
+  errors remain fatal as well. A received Close frame supplies the graceful-close
+  observation. Its queued reply can find the connection already closed or TCP reset or
+  broken: the initiator can end TCP after sending Close and before reading that reply.
+  The shared close-reply owner treats those endings as completion. Focused harness tests
+  parse a real Close frame before injecting reply-write failures; unexpected reply
+  failures retain their typed causes and fail the fixture and its After hook.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes, and the
   endpoints it stood in front of a shared dependency, are released once those nodes have ended.
 - The ZeroMQ and syslog ports drawn for the scenario return to the pool after their nodes and
@@ -1838,6 +1865,16 @@ first time a scenario needs one and shared by every scenario of the run. The run
 it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse` sets, keeps them
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
+
+The RabbitMQ fixture publishes its management HTTP port beside the AMQP endpoints. A scenario's
+`RabbitMqQueueProbe` observes its explicitly provisioned queue with the fixture credentials:
+consumer acknowledgement mode and prefetch, unacknowledged deliveries, or total outstanding
+messages. Each observation uses the shared status budget and bounded polling. These are broker
+observations. Missing statistics before the broker's first queue sample mean the observation is
+pending; they never mean zero messages. The `@rabbitmq_consumer_modes` outlines use them on
+one and three nodes to qualify automatic consumption, a four-delivery prefetch window, mixed
+graph outcomes and connection-loss recovery. They join the ordinary and diagnostic selections;
+the stress selection includes their eight examples in its registered total.
 
 MongoDB write-concern scenarios use a separate single-member replica set, reached through a direct
 connection after its primary election completes within the dependency startup budget. A client

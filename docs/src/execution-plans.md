@@ -89,6 +89,12 @@ plan into connector configuration without normalization. Iceberg resolves its co
 client into the S3, GCS or Azure Blob backend while constructing this plan; the runtime receives
 that resolved backend and never infers it from the statement or location.
 
+The registry establishes batching legality and direct-mapping key and type contracts from each
+entity's vocabulary declaration before planning. A emitter that requires `BATCH` therefore receives
+the already-validated batch configuration; planning does not maintain another required-batching
+table. Transport-ingestor ACK, batch and retry durations are likewise validated before admission,
+including the shared schedulable bound, so an unusable policy cannot reach source installation.
+
 Connector plans preserve the vocabulary's connector/entity nesting. The ingestor planner emits,
 for example, `IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(...))`; the emitter planner
 emits `EmitterConnectorPlan::Otel(OtelEmitterPlan::{Logs, Traces, Metrics}(...))`. Each entity has
@@ -103,6 +109,12 @@ Kafka source installation also binds the node-owned executor into the connector 
 inspectors used by scheduling and the host's partition watch use that same node executor. The
 connector interprets the effective native client deadline and admits its synchronous driver calls;
 the decision layer neither opens a consumer nor selects a worker backend.
+
+RabbitMQ's typed input keeps its complete acknowledgement policy. A parallel maximum is a
+`NonZeroU16` at the vocabulary boundary, so installation cannot truncate AMQP's prefetch field.
+Composition converts the policy once into either an automatic consumer or a manual consumer with
+its exact prefetch count; the connector receives that resolved transport choice without reading
+configuration Models. Automatic consumers use the host's refuse-and-count admission policy.
 
 The tables describe distinct decisions in one revision, not independently selectable runtime
 configurations. Every node, including one placed elsewhere, is planned from the same domain

@@ -51,7 +51,7 @@ port and a time budget, and receives addresses or a typed failure.
 | Owner | What it owns about name resolution |
 | --- | --- |
 | `nervix-dns` | The resolver, its policy and bounds, its failures, its client-library hooks, and the connection budget and ordered address attempts |
-| The server, as composition root | Loading the node's resolver once at startup from the node's DNS options, and handing clones to the runtime, the interconnect, and the node's own trace exporter |
+| The server, as composition root | Loading the node's resolver once, in its startup preflight, from the node's DNS options, and handing clones to the runtime, the interconnect, and the node's own trace exporter |
 | `nervix-interconnect` | When and where a peer endpoint is resolved, the TLS and HTTP/2 identity of the connection, and peer failure classification |
 | `nervix-connector` | The shared HTTP client configuration that installs the resolver on the Reqwest clients of HTTP polling, Prometheus, Sentry and OTEL HTTP |
 | Each connector crate | Installing the resolver its typed plan carries at its driver's hook, or resolving and dialling itself; its TLS, framing, protocol handshake, and the error it reports |
@@ -66,14 +66,16 @@ seam where the Turmoil build substitutes simulated names, as
 
 ## Resolver Lifetime
 
-A node loads its resolver once, at startup, after its TLS material and before it opens its runtime
-state or binds the interconnect. Loading reads the resolver configuration and the hosts file on the
-blocking pool, so a slow filesystem never stalls a reactor thread, and then builds Hickory's
-resolver on the node's Tokio runtime. The read is one of the declared owners of the blocking pool
-outside the bounded executor, because a node loads its resolver before it builds its executor and a
-client tool loads the same resolver without one; see
-[Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor). Neither file is read again: a changed resolver configuration
-or hosts file takes effect when the node next starts.
+A node loads its resolver once, at startup, as the last check of its
+[startup preflight](./node-settings.md#the-startup-preflight): after the TLS material of its client
+listeners, and before it binds any listener, reads its interconnect credentials or opens a store.
+Loading reads the resolver configuration and the hosts file on the blocking pool, so a slow
+filesystem never stalls a reactor thread, and then builds Hickory's resolver on the node's Tokio
+runtime. The read is one of the declared owners of the blocking pool outside the bounded executor,
+because the Rust client and the CLI load the same resolver without an executor; see
+[Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor).
+Neither file is read again: a changed resolver configuration or hosts file takes effect when the
+node next starts.
 
 Clones of the resolver share its configuration, hosts snapshot, answer cache and concurrency bound.
 The node hands one clone to the runtime, which passes it into the typed plan of every source and
@@ -97,10 +99,10 @@ shared C binding always loads the host's `/etc/resolv.conf` and `/etc/hosts`.
 
 With `--otel-enabled`, the process installs its subscriber and batch span exporter before node
 startup. The lazy Tonic 0.14 connector waits for startup to publish the node's resolver. Creating
-the channel performs no lookup or dial. Startup loads DNS at its usual point, after TLS material
-and before runtime state, then publishes a clone to this service. Early spans remain in the batch
-exporter's existing bounded queue. No second resolver is constructed, and a DNS configuration
-failure remains a node startup failure.
+the channel performs no lookup or dial. The startup preflight loads DNS before the node binds a
+listener, and startup publishes a clone to this service once it has bound its listeners and read
+its interconnect credentials. Early spans remain in the batch exporter's existing bounded queue.
+No second resolver is constructed, and a DNS configuration failure remains a node startup failure.
 
 Every new collector connection uses the node's configuration, hosts snapshot, cache and concurrency
 bound. The endpoint retains its hostname and authority. Waiting for resolver installation stays
@@ -157,7 +159,7 @@ exist and be readable, and its search list and options still apply. The hosts fi
 readable too; an empty file is valid.
 
 Loading fails, and the node does not start, with `failed to load the name resolver configuration`
-above one of these causes:
+beneath `the startup preflight refused this node` and above one of these causes:
 
 | Cause | When |
 | --- | --- |

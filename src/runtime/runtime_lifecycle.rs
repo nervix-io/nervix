@@ -71,11 +71,12 @@ impl Runtime {
             executor,
             dns,
             db,
+            restore_staging_max_bytes,
             fault_injection,
             temp_dir,
         } = environment;
         let state_snapshot_interval = settings.state_snapshot_interval();
-        let restore_staging_max_bytes = settings.restore_staging_max_bytes();
+        let restore_staging_max_bytes = restore_staging_max_bytes.as_u64();
         let events = RuntimeEvents::new();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
@@ -775,6 +776,15 @@ impl Runtime {
         for task in execution.tasks {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;
         }
+        // Every branch task of the execution has ended, in time or at a stop grace, so the
+        // snapshot task of each of its deduplicator and window branches is making its last write.
+        // A branch ended at its grace did not wait for that write, so the domain waits for it
+        // here: a stopped domain's checkpoints are what a stopped backup cut, a restart and the
+        // next start read, and they are on disk once its stop completes.
+        self.inner
+            .branch_snapshot_tasks
+            .wait_for_domain(domain)
+            .await;
         let quiesce_keys = self
             .inner
             .node_quiesce_counters

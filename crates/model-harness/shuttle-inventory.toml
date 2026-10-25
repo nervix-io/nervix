@@ -76,6 +76,7 @@ name = "nervix-connector-kafka"
 
 [[package]]
 checks = [
+  "topic::ingestor::driver::shuttle_tests::shuttle_a_cancelled_discard_preserves_acknowledgement_and_batch_order",
   "topic::ingestor::driver::shuttle_tests::shuttle_an_acknowledgement_never_waits_on_a_driver_that_holds_a_publish_for_room",
   "topic::ingestor::driver::shuttle_tests::shuttle_an_acknowledgement_returns_once_the_loop_wrote_every_acknowledgement_it_requested",
   "topic::ingestor::driver::shuttle_tests::shuttle_an_acknowledgement_waits_on_a_driver_whose_held_publish_the_ingestor_made_room_for",
@@ -91,6 +92,13 @@ checks = [
   "queue::ingestor::shuttle_tests::shuttle_a_cancelled_read_waits_for_an_unanswered_receive_only_until_its_budget",
 ]
 name = "nervix-connector-sqs"
+
+[[package]]
+checks = [
+  "queue::ingestor::reader::shuttle_tests::shuttle_a_batch_deadline_racing_cancellation_preserves_every_delivery",
+  "queue::ingestor::reader::shuttle_tests::shuttle_a_cancelled_read_hands_over_every_delivery_once_and_in_order",
+]
+name = "nervix-connector-rabbitmq"
 
 [[package]]
 checks = [
@@ -169,6 +177,8 @@ checks = [
   "runtime::ingestors::connector::shuttle_tests::shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch",
   "runtime::ingestors::connector::shuttle_tests::shuttle_a_reconnect_discards_rejections_the_broker_redelivers",
   "runtime::ingestors::connector::shuttle_tests::shuttle_an_interrupted_broker_read_hands_the_host_every_message_it_took",
+  "runtime::ingestors::connector::tests::shuttle_individual_settlement_preserves_every_delivery_until_its_own_graph_outcome",
+  "runtime::ingestors::connector::tests::shuttle_individual_settlement_keeps_admitted_graph_work_until_transport_recovery",
   "runtime::ingestors::connector::shuttle_tests::shuttle_broker_ingestor_observes_engagement_during_dispatch",
   "runtime::ingestors::connector::shuttle_tests::shuttle_paced_ingestor_observes_engagement_during_dispatch",
   "runtime::ingestors::connector::shuttle_tests::shuttle_request_ingestor_observes_engagement_during_dispatch",
@@ -215,6 +225,7 @@ checks = [
   "runtime::state_replication::routing::shuttle_tests::shuttle_state_replacement_and_retirement_fence_frames_in_flight",
   "runtime::state_replication::schedule_installation_tests::shuttle_recovery_never_misses_initial_schedule_installation",
   "runtime::state_replication::tasks::shuttle_tests::shuttle_a_closed_snapshot_task_owner_is_waited_for_until_every_task_has_written",
+  "runtime::state_replication::tasks::shuttle_tests::shuttle_a_stopping_domain_waits_for_its_own_snapshot_tasks_and_keeps_late_ones",
   "runtime::state_store::durability::shuttle_tests::shuttle_a_failed_synchronization_refuses_every_uncovered_writer",
   "runtime::state_store::durability::shuttle_tests::shuttle_an_abandoned_synchronization_frees_the_barrier",
   "runtime::state_store::durability::shuttle_tests::shuttle_an_abandoned_writers_failed_synchronization_still_refuses_what_it_covered",
@@ -264,3 +275,11 @@ checks = [
   "listener::tests::shuttle_a_decoded_frame_racing_suspension_is_handed_off_once",
 ]
 name = "nervix-connector-syslog"
+
+[[package]]
+checks = [
+  "connection::ingestor::handshake::shuttle_tests::shuttle_a_completed_or_cancelled_handshake_preserves_its_exact_frame_lifetime",
+  "connection::ingestor::handshake::shuttle_tests::shuttle_a_full_handshake_handoff_backpressures_until_expiry_and_releases_every_slot",
+  "connection::ingestor::handshake::shuttle_tests::shuttle_a_handshake_future_dropped_before_readiness_ends_its_exact_handoff",
+]
+name = "nervix-connector-websockets"

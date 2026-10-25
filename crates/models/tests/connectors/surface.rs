@@ -127,7 +127,11 @@ fn source_surface(kind: IngestorEntityKind) -> IngestorSurface {
             options: &[("QUEUE GROUP", true), ("INSTANCES", true)],
         },
         IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => IngestorSurface {
-            delivery: &[(IngestDeliveryKind::AckSequential, false)],
+            delivery: &[
+                (IngestDeliveryKind::NoAck, false),
+                (IngestDeliveryKind::AckSequential, false),
+                (IngestDeliveryKind::AckParallel, false),
+            ],
             quiesce: SUSPEND,
             locator: Some(("QUEUE", "rabbitmq_queue")),
             options: &[("INSTANCES", false)],
@@ -701,6 +705,12 @@ fn assert_generated_emitter_states_what_its_entity_declares(bytes: &[u8]) {
         ) => false,
     };
     assert!(formed, "{emitter_kind} writes {:?}", emitter.body);
+    let mapped_types = emitter.connector.mapped_value_types();
+    assert_eq!(
+        mapped_types.is_some(),
+        declared.body == EmitterBodyForm::Values,
+        "{emitter_kind} must declare the types of its direct mappings",
+    );
     let batching = match (declared.batch, &emitter.batch) {
         (EmitterBatchLegality::Required { .. }, Some(_))
         | (EmitterBatchLegality::Optional { .. }, _)

@@ -837,7 +837,7 @@ impl OtlpEncoder {
                 .checked_add(offset)
                 .assured("an emitter maps fewer columns than usize can count");
             let field = mapped_schema.field(index);
-            if !Self::valid_attribute_type(field.data_type()) {
+            if !nervix_models::MappedValueType::Attribute.admits(field.data_type()) {
                 return Err(Report::new(OtelValueError::InvalidAttributeMappingType {
                     key: key.clone(),
                     actual: field.data_type().clone(),
@@ -856,85 +856,20 @@ impl OtlpEncoder {
     }
 
     fn valid_value_type(signal: &OtlpSignal, key: &str, ty: &DataType) -> (bool, &'static str) {
-        let string = || (*ty == DataType::Utf8, "STRING");
-        let datetime = || (Self::is_datetime_type(ty), "DATETIME");
-        match signal {
-            OtlpSignal::Logs => match key {
-                "time" => datetime(),
-                "severity_text" | "body" | "trace_id" | "span_id" => string(),
-                "severity_number" => (*ty == DataType::Int32, "I32"),
-                _ => (false, "a supported LOGS value type"),
-            },
-            OtlpSignal::Traces => match key {
-                "trace_id" | "span_id" | "parent_span_id" | "name" | "kind" | "status_code"
-                | "status_message" => string(),
-                "start_time" | "end_time" => datetime(),
-                _ => (false, "a supported TRACES value type"),
-            },
-            OtlpSignal::Metric(metric) => match (&metric.kind, key) {
-                (_, "time" | "start_time") => datetime(),
-                (OtelMetricKind::Gauge | OtelMetricKind::Sum { .. }, "value") => (
-                    Self::is_number_type(ty),
-                    "an integer-family, F32, or F64 value",
-                ),
-                (OtelMetricKind::Histogram { .. }, "count") => {
-                    (Self::is_integer_type(ty), "an integer-family value")
+        let declaration = match signal {
+            OtlpSignal::Logs => nervix_models::OTEL_LOG_VALUE_TYPES,
+            OtlpSignal::Traces => nervix_models::OTEL_TRACE_VALUE_TYPES,
+            OtlpSignal::Metric(metric) => match metric.kind {
+                OtelMetricKind::Gauge | OtelMetricKind::Sum { .. } => {
+                    nervix_models::OTEL_NUMBER_VALUE_TYPES
                 }
-                (OtelMetricKind::Histogram { .. }, "sum" | "min" | "max") => (
-                    Self::is_number_type(ty),
-                    "an integer-family, F32, or F64 value",
-                ),
-                (OtelMetricKind::Histogram { .. }, "bucket_counts") => (
-                    Self::list_element_type(ty).is_some_and(Self::is_integer_type),
-                    "an integer ARRAY or VEC",
-                ),
-                (OtelMetricKind::Histogram { .. }, "explicit_bounds") => (
-                    Self::list_element_type(ty).is_some_and(|element| {
-                        matches!(element, DataType::Float32 | DataType::Float64)
-                    }),
-                    "an F32 or F64 ARRAY or VEC",
-                ),
-                _ => (false, "a value supported by the configured metric shape"),
+                OtelMetricKind::Histogram { .. } => nervix_models::OTEL_HISTOGRAM_VALUE_TYPES,
             },
+        };
+        match declaration.value_type(nervix_models::MappedValueSection::Values, key) {
+            Some(expected) => (expected.admits(ty), expected.into()),
+            None => (false, "a declared value type"),
         }
-    }
-
-    fn is_datetime_type(ty: &DataType) -> bool {
-        matches!(ty, DataType::Timestamp(TimeUnit::Nanosecond, _))
-    }
-
-    fn is_integer_type(ty: &DataType) -> bool {
-        matches!(
-            ty,
-            DataType::UInt8
-                | DataType::Int8
-                | DataType::UInt16
-                | DataType::Int16
-                | DataType::UInt32
-                | DataType::Int32
-                | DataType::UInt64
-                | DataType::Int64
-        )
-    }
-
-    fn is_number_type(ty: &DataType) -> bool {
-        Self::is_integer_type(ty) || matches!(ty, DataType::Float32 | DataType::Float64)
-    }
-
-    fn list_element_type(ty: &DataType) -> Option<&DataType> {
-        match ty {
-            DataType::List(field) | DataType::FixedSizeList(field, _) => Some(field.data_type()),
-            _ => None,
-        }
-    }
-
-    fn valid_attribute_type(ty: &DataType) -> bool {
-        matches!(
-            ty,
-            DataType::Utf8 | DataType::Boolean | DataType::Float32 | DataType::Float64
-        ) || Self::is_integer_type(ty)
-            || Self::is_datetime_type(ty)
-            || Self::list_element_type(ty).is_some_and(Self::valid_attribute_type)
     }
 
     fn timestamp_to_unix_nano(value: i64, key: &str) -> error_stack::Result<u64, OtelRecordError> {
@@ -2352,7 +2287,7 @@ fn number_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<number_data_
                 )
                 .value(row),
         )),
-        ty if OtlpEncoder::is_integer_type(ty) => {
+        ty if nervix_models::MappedValueType::Integer.admits(ty) => {
             integer_as_i64(array, row).map(number_data_point::Value::AsInt)
         }
         ty => Err(Report::new(OtelValueError::ExpectedMetricNumeric {
@@ -2408,7 +2343,7 @@ fn any_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<Option<AnyValue
                 )
                 .value(row),
         ),
-        ty if OtlpEncoder::is_integer_type(ty) => {
+        ty if nervix_models::MappedValueType::Integer.admits(ty) => {
             any_value::Value::IntValue(integer_as_i64(array, row)?)
         }
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {

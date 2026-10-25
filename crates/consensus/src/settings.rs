@@ -2,11 +2,12 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The setting definitions of the Raft heartbeat and election timeouts, which a node
-//!   must bring to reach the live cluster, and of the snapshot cadence and covered-log retention
-//!   bounds, which are what this node's storage carries; their single defaults and the groups that
-//!   hold them.
-//! - **Depends on.** The vocabulary's setting classes and byte quantities.
+//! - **Owns.** The setting definition of the Raft heartbeat, which a node must bring to reach the
+//!   live cluster, the election timeouts it derives from it by fixed factors, the durability
+//!   promise its log appends keep, and the definitions of the snapshot cadence and covered-log
+//!   retention bounds, which are what this node's storage carries; their single defaults and the
+//!   groups that hold them.
+//! - **Depends on.** The vocabulary's setting classes, prerequisites and byte quantities.
 //! - **Must not know.** Command-line parsing, or how the server's edge names a value it refuses.
 
 #![cfg_attr(
@@ -20,38 +21,80 @@
 use std::{convert::Infallible, time::Duration};
 
 use error_stack::Report;
-use meticulous::ResultExt as _;
-use nervix_models::{NodeCapabilities, Prerequisites, Setting, SettingDefinition};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{
+    NodeCapabilities, Prerequisites, RaftLogDurability, Setting, SettingDefinition,
+    TIMING_COMPATIBILITY_FACTOR, TimingPrerequisite,
+};
 use thiserror::Error;
 use ubyte::ByteUnit;
 
 use crate::RaftRetentionPolicy;
 
-/// Why Raft timings cannot run together. Each variant names both settings by their option names,
-/// with the values given, because the relationship between them is what failed.
+/// How many heartbeat intervals a follower waits, at least, without hearing from a leader before
+/// it stands for election.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the election timeouts derive from the heartbeat by fixed factors, so every \
+                  node's pairing of heartbeat and election stays inside the compatibility bound"
+    )
+)]
+pub const ELECTION_TIMEOUT_MIN_HEARTBEATS: u32 = 6;
+
+/// How many heartbeat intervals a follower waits, at most, without hearing from a leader before it
+/// stands for election.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the election timeouts derive from the heartbeat by fixed factors, so every \
+                  node's pairing of heartbeat and election stays inside the compatibility bound"
+    )
+)]
+pub const ELECTION_TIMEOUT_MAX_HEARTBEATS: u32 = 12;
+
+const _: () = assert!(
+    ELECTION_TIMEOUT_MIN_HEARTBEATS < ELECTION_TIMEOUT_MAX_HEARTBEATS,
+    "the randomized election window must be nonempty"
+);
+const _: () = assert!(
+    TIMING_COMPATIBILITY_FACTOR * 3 <= ELECTION_TIMEOUT_MIN_HEARTBEATS,
+    "the slowest heartbeat a compatible leader sends must stay within a third of every follower's \
+     minimum election timeout"
+);
+
+/// What every Raft log append is synchronized with before the node acknowledges it.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the consensus store commits every append with a full synchronization, the \
+                  promise Raft's acknowledgements rely on"
+    )
+)]
+pub const RAFT_LOG_DURABILITY: RaftLogDurability = RaftLogDurability::FsyncEveryAppend;
+
+/// Why a Raft heartbeat cannot run. Each variant names the setting by its option name, with the
+/// value given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum RaftTimingError {
     #[error(
-        "{min} ({election_timeout_min:?}) must exceed {heartbeat} ({heartbeat_interval:?})",
-        min = RaftElectionTimeoutMin::NAME,
+        "{heartbeat} ({heartbeat_interval:?}) must be at least 1ms, the resolution consensus runs \
+         timings at",
         heartbeat = RaftHeartbeatInterval::NAME
     )]
-    ElectionTimeoutNotAboveHeartbeat {
-        election_timeout_min: Duration,
-        heartbeat_interval: Duration,
-    },
+    HeartbeatBelowOneMillisecond { heartbeat_interval: Duration },
     #[error(
-        "{max} ({election_timeout_max:?}) must exceed {min} ({election_timeout_min:?})",
-        max = RaftElectionTimeoutMax::NAME,
-        min = RaftElectionTimeoutMin::NAME
+        "{heartbeat} ({heartbeat_interval:?}) times {ELECTION_TIMEOUT_MAX_HEARTBEATS} must fit the \
+         milliseconds consensus counts an election timeout in",
+        heartbeat = RaftHeartbeatInterval::NAME
     )]
-    ElectionTimeoutMaxNotAboveMin {
-        election_timeout_max: Duration,
-        election_timeout_min: Duration,
-    },
+    HeartbeatTooLong { heartbeat_interval: Duration },
 }
 
-/// The whole milliseconds consensus runs a timing with, which is how two timings are compared.
+/// The whole milliseconds consensus runs a timing with.
 fn whole_milliseconds(timing: Duration) -> u128 {
     timing.as_millis()
 }
@@ -63,118 +106,51 @@ impl SettingDefinition for RaftHeartbeatInterval {
     type Class = Prerequisites;
     type Value = Duration;
     type Context = ();
-    type Error = Infallible;
+    type Error = RaftTimingError;
 
-    const NAME: &'static str = "raft-heartbeat-interval";
+    const NAME: &'static str = TimingPrerequisite::RaftHeartbeatInterval.setting_name();
     const DERIVATION: Option<&'static str> = None;
 
     fn default_value(_: &()) -> Duration {
         Duration::from_millis(250)
     }
 
-    fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
+    fn validate(heartbeat_interval: &Duration, _: &()) -> Result<(), Report<RaftTimingError>> {
+        let milliseconds = whole_milliseconds(*heartbeat_interval);
+        if milliseconds == 0 {
+            return Err(Report::new(RaftTimingError::HeartbeatBelowOneMillisecond {
+                heartbeat_interval: *heartbeat_interval,
+            }));
+        }
+        let longest_election = milliseconds
+            .checked_mul(u128::from(ELECTION_TIMEOUT_MAX_HEARTBEATS))
+            .assured("a duration's milliseconds fit 75 bits, so twelve of them fit 128");
+        if u64::try_from(longest_election).is_err() {
+            return Err(Report::new(RaftTimingError::HeartbeatTooLong {
+                heartbeat_interval: *heartbeat_interval,
+            }));
+        }
         Ok(())
     }
 }
 
-/// The shortest time a follower waits without hearing from a leader before it stands for
-/// election.
-pub struct RaftElectionTimeoutMin;
-
-impl SettingDefinition for RaftElectionTimeoutMin {
-    type Class = Prerequisites;
-    type Value = Duration;
-    /// The heartbeat interval the minimum must exceed.
-    type Context = Duration;
-    type Error = RaftTimingError;
-
-    const NAME: &'static str = "raft-election-timeout-min";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &Duration) -> Duration {
-        Duration::from_millis(1500)
-    }
-
-    fn validate(
-        election_timeout_min: &Duration,
-        heartbeat_interval: &Duration,
-    ) -> Result<(), Report<RaftTimingError>> {
-        if whole_milliseconds(*election_timeout_min) > whole_milliseconds(*heartbeat_interval) {
-            return Ok(());
-        }
-        Err(Report::new(
-            RaftTimingError::ElectionTimeoutNotAboveHeartbeat {
-                election_timeout_min: *election_timeout_min,
-                heartbeat_interval: *heartbeat_interval,
-            },
-        ))
-    }
-}
-
-/// The longest time a follower waits without hearing from a leader before it stands for
-/// election.
-pub struct RaftElectionTimeoutMax;
-
-impl SettingDefinition for RaftElectionTimeoutMax {
-    type Class = Prerequisites;
-    type Value = Duration;
-    /// The minimum election timeout the maximum must exceed.
-    type Context = Duration;
-    type Error = RaftTimingError;
-
-    const NAME: &'static str = "raft-election-timeout-max";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &Duration) -> Duration {
-        Duration::from_millis(3000)
-    }
-
-    fn validate(
-        election_timeout_max: &Duration,
-        election_timeout_min: &Duration,
-    ) -> Result<(), Report<RaftTimingError>> {
-        if whole_milliseconds(*election_timeout_max) > whole_milliseconds(*election_timeout_min) {
-            return Ok(());
-        }
-        Err(Report::new(
-            RaftTimingError::ElectionTimeoutMaxNotAboveMin {
-                election_timeout_max: *election_timeout_max,
-                election_timeout_min: *election_timeout_min,
-            },
-        ))
-    }
-}
-
-/// The heartbeat and election timeouts a node brings to the cluster.
+/// The heartbeat a node brings to the cluster, and the election timeouts derived from it.
 ///
-/// Its construction validates, in the whole milliseconds consensus runs with, that the heartbeat
-/// interval is shorter than the minimum election timeout and the minimum shorter than the maximum,
-/// so consensus never opens with timings it would reject.
+/// The election timeouts are never configured on their own: they are
+/// [`ELECTION_TIMEOUT_MIN_HEARTBEATS`] and [`ELECTION_TIMEOUT_MAX_HEARTBEATS`] heartbeats, so two
+/// nodes whose heartbeats stay within the compatibility bound also keep each other's elections
+/// apart from their heartbeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RaftTimings {
     pub heartbeat_interval: Setting<RaftHeartbeatInterval>,
-    pub election_timeout_min: Setting<RaftElectionTimeoutMin>,
-    pub election_timeout_max: Setting<RaftElectionTimeoutMax>,
 }
 
 impl RaftTimings {
-    /// Resolves each timing that is not given through its definition's default, then validates
-    /// each against the one it depends on.
-    pub fn resolve(
-        heartbeat_interval: Option<Duration>,
-        election_timeout_min: Option<Duration>,
-        election_timeout_max: Option<Duration>,
-    ) -> Result<Self, Report<RaftTimingError>> {
-        let heartbeat_interval = Setting::<RaftHeartbeatInterval>::resolve(heartbeat_interval, &())
-            .assured("the heartbeat interval declares no validation of its own");
-        let election_timeout_min =
-            Setting::resolve(election_timeout_min, heartbeat_interval.value())?;
-        let election_timeout_max =
-            Setting::resolve(election_timeout_max, election_timeout_min.value())?;
+    /// Resolves the heartbeat through its definition's default when it is not given, then
+    /// validates it.
+    pub fn resolve(heartbeat_interval: Option<Duration>) -> Result<Self, Report<RaftTimingError>> {
         Ok(Self {
-            heartbeat_interval,
-            election_timeout_min,
-            election_timeout_max,
+            heartbeat_interval: Setting::resolve(heartbeat_interval, &())?,
         })
     }
 
@@ -182,21 +158,28 @@ impl RaftTimings {
         *self.heartbeat_interval.value()
     }
 
+    /// The shortest time a follower waits without hearing from a leader before it stands for
+    /// election.
     pub fn election_timeout_min(&self) -> Duration {
-        *self.election_timeout_min.value()
+        self.heartbeats(ELECTION_TIMEOUT_MIN_HEARTBEATS)
     }
 
+    /// The longest time a follower waits without hearing from a leader before it stands for
+    /// election.
     pub fn election_timeout_max(&self) -> Duration {
-        *self.election_timeout_max.value()
+        self.heartbeats(ELECTION_TIMEOUT_MAX_HEARTBEATS)
+    }
+
+    fn heartbeats(&self, count: u32) -> Duration {
+        self.heartbeat_interval().checked_mul(count).verified(
+            "the heartbeat's validation keeps twelve of them inside consensus milliseconds",
+        )
     }
 }
 
 impl Default for RaftTimings {
     fn default() -> Self {
-        Self::resolve(None, None, None).assured(
-            "the default heartbeat is shorter than the default election minimum, which is shorter \
-             than the default maximum",
-        )
+        Self::resolve(None).assured("the default heartbeat is at least one millisecond and short")
     }
 }
 
@@ -361,91 +344,62 @@ mod tests {
     use std::time::Duration;
 
     use meticulous::OptionExt as _;
+    use nervix_models::SettingDefinition as _;
 
-    use super::{RaftTimingError, RaftTimings};
-
-    fn timings(
-        heartbeat_millis: u64,
-        minimum_millis: u64,
-        maximum_millis: u64,
-    ) -> Result<RaftTimings, error_stack::Report<RaftTimingError>> {
-        RaftTimings::resolve(
-            Some(Duration::from_millis(heartbeat_millis)),
-            Some(Duration::from_millis(minimum_millis)),
-            Some(Duration::from_millis(maximum_millis)),
-        )
-    }
+    use super::{RaftHeartbeatInterval, RaftTimingError, RaftTimings};
 
     #[test]
-    fn timings_in_order_resolve_and_the_defaults_are_in_order() {
-        let resolved = timings(100, 300, 600).expect("ordered timings are valid");
+    fn the_election_timeouts_are_fixed_multiples_of_the_heartbeat() {
+        let resolved =
+            RaftTimings::resolve(Some(Duration::from_millis(100))).expect("a 100ms heartbeat runs");
         assert_eq!(resolved.heartbeat_interval(), Duration::from_millis(100));
-        assert_eq!(resolved.election_timeout_min(), Duration::from_millis(300));
-        assert_eq!(resolved.election_timeout_max(), Duration::from_millis(600));
+        assert_eq!(resolved.election_timeout_min(), Duration::from_millis(600));
+        assert_eq!(resolved.election_timeout_max(), Duration::from_millis(1200));
 
         let defaults = RaftTimings::default();
         assert_eq!(defaults.heartbeat_interval(), Duration::from_millis(250));
         assert_eq!(defaults.election_timeout_min(), Duration::from_millis(1500));
         assert_eq!(defaults.election_timeout_max(), Duration::from_millis(3000));
+        assert_eq!(RaftHeartbeatInterval::NAME, "raft-heartbeat-interval");
     }
 
     #[test]
-    fn an_election_minimum_that_does_not_exceed_the_heartbeat_names_both() {
-        for minimum in [200, 250] {
-            let refused = timings(250, minimum, 3000)
+    fn a_heartbeat_below_one_whole_millisecond_is_refused_naming_it() {
+        for heartbeat in [Duration::ZERO, Duration::from_micros(999)] {
+            let refused = RaftTimings::resolve(Some(heartbeat))
                 .err()
-                .assured("the minimum does not exceed the heartbeat");
+                .assured("consensus runs this heartbeat as zero milliseconds");
             assert_eq!(
                 refused.current_context(),
-                &RaftTimingError::ElectionTimeoutNotAboveHeartbeat {
-                    election_timeout_min: Duration::from_millis(minimum),
-                    heartbeat_interval: Duration::from_millis(250),
+                &RaftTimingError::HeartbeatBelowOneMillisecond {
+                    heartbeat_interval: heartbeat,
                 }
             );
         }
-        let refused = timings(250, 200, 3000)
+        let refused = RaftTimings::resolve(Some(Duration::from_micros(500)))
             .err()
-            .assured("the minimum is below the heartbeat");
+            .assured("half a millisecond rounds to none");
         assert_eq!(
             format!("{refused:#}"),
-            "raft-election-timeout-min (200ms) must exceed raft-heartbeat-interval (250ms)"
+            "raft-heartbeat-interval (500µs) must be at least 1ms, the resolution consensus runs \
+             timings at"
         );
+        assert!(RaftTimings::resolve(Some(Duration::from_millis(1))).is_ok());
     }
 
     #[test]
-    fn an_election_maximum_that_does_not_exceed_the_minimum_names_both() {
-        let refused = timings(250, 1500, 1000)
+    fn a_heartbeat_whose_election_timeout_exceeds_consensus_milliseconds_is_refused() {
+        let longest = Duration::from_millis(u64::MAX / 12);
+        assert!(RaftTimings::resolve(Some(longest)).is_ok());
+        let too_long = Duration::from_millis(u64::MAX / 12 + 1);
+        let refused = RaftTimings::resolve(Some(too_long))
             .err()
-            .assured("the maximum is below the minimum");
-
+            .assured("twelve of these heartbeats exceed u64 milliseconds");
         assert_eq!(
             refused.current_context(),
-            &RaftTimingError::ElectionTimeoutMaxNotAboveMin {
-                election_timeout_max: Duration::from_secs(1),
-                election_timeout_min: Duration::from_millis(1500),
+            &RaftTimingError::HeartbeatTooLong {
+                heartbeat_interval: too_long,
             }
         );
-        assert_eq!(
-            format!("{refused:#}"),
-            "raft-election-timeout-max (1s) must exceed raft-election-timeout-min (1.5s)"
-        );
-    }
-
-    #[test]
-    fn timings_are_compared_in_the_whole_milliseconds_consensus_runs_with() {
-        // Consensus runs both timings as 250 whole milliseconds, where the minimum would not
-        // exceed the heartbeat, so the finer difference cannot make them valid.
-        let refused = RaftTimings::resolve(
-            Some(Duration::from_micros(250_100)),
-            Some(Duration::from_micros(250_900)),
-            None,
-        )
-        .err()
-        .assured("both timings are 250 whole milliseconds");
-
-        assert!(matches!(
-            refused.current_context(),
-            RaftTimingError::ElectionTimeoutNotAboveHeartbeat { .. }
-        ));
     }
 }

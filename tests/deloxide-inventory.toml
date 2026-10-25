@@ -153,6 +153,8 @@ tags = [
   "@kept_ingestor_offsets",
   "@redis_subscription_backpressure",
   "@redis_idle_subscription",
+  "@rabbitmq_consumer_modes",
+  "@node_prerequisite_refusal",
 ]
 target = "test:scenarios"
 
@@ -1290,6 +1292,26 @@ scenario = "An NSPL cluster backup waits across independent domain cut budgets"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "A joining node whose Raft heartbeat a member cannot run beside is refused at its first handshake and stops itself through the shutdown coordinator, while the members keep their leader. The handshake, the join progress watch and the gossip view are untracked."
+examples = 2
+feature = "tests/features/cluster/node_prerequisites.feature"
+id = "scenario.prerequisite-join-refusal"
+invariant = "A joining node beyond the heartbeat bound stops with a refusal naming the prerequisite and both values, and the cluster keeps its voters and a stable leader."
+invocation = "scenarios"
+scenario = "A node whose heartbeat is outside the compatibility bound is refused on a cluster of <cluster_size>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A node whose memory limit cannot hold its memory budgets is refused by the startup preflight before any store opens or listener binds, then starts with a sufficient limit and rejoins. The preflight's filesystem probes run on the executor's storage workers."
+examples = 2
+feature = "tests/features/cluster/node_prerequisites.feature"
+id = "scenario.prerequisite-preflight-refusal"
+invariant = "A refused preflight leaves nothing behind that keeps the same node from starting again with a limit that holds its budgets."
+invocation = "scenarios"
+scenario = "A node whose memory limit cannot hold its memory budgets refuses to start at preflight on a cluster of <cluster_size>"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Whole-cluster teardown, node-owned store reopening and automatic scheduling after a voter's first relayed heartbeat. Watch channels and the test fault map are untracked."
 examples = 1
 feature = "tests/features/cluster/restarted_voter_observation.feature"
@@ -1547,6 +1569,26 @@ id = "stress.inferencer-inspection-admission"
 invariant = "A full bulk queue refuses model inspection before storing the inferencer, and releasing the queue permits the same inferencer to be validated and created on one and three nodes."
 invocation = "stress-scenarios"
 scenario = "Inferencer model inspection refuses a full bulk queue and recovers"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a joining node whose Raft heartbeat a member cannot run beside is refused at its first handshake and stops itself through the shutdown coordinator, while the members keep their leader. The handshake, the join progress watch and the gossip view are untracked."
+examples = 2
+feature = "tests/features/cluster/node_prerequisites.feature"
+id = "stress.prerequisite-join-refusal"
+invariant = "A joining node beyond the heartbeat bound stops with a refusal naming the prerequisite and both values, and the cluster keeps its voters and a stable leader."
+invocation = "stress-scenarios"
+scenario = "A node whose heartbeat is outside the compatibility bound is refused on a cluster of <cluster_size>"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: a node whose memory limit cannot hold its memory budgets is refused by the startup preflight before any store opens or listener binds, then starts with a sufficient limit and rejoins. The preflight's filesystem probes run on the executor's storage workers."
+examples = 2
+feature = "tests/features/cluster/node_prerequisites.feature"
+id = "stress.prerequisite-preflight-refusal"
+invariant = "A refused preflight leaves nothing behind that keeps the same node from starting again with a limit that holds its budgets."
+invocation = "stress-scenarios"
+scenario = "A node whose memory limit cannot hold its memory budgets refuses to start at preflight on a cluster of <cluster_size>"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -3202,4 +3244,84 @@ id = "stress.command-transaction-retention-recovery"
 invariant = "Recovery of an ordinary command or transaction batch beyond tombstone age returns its recorded outcome without applying the effect again."
 invocation = "stress-transaction-retention"
 scenario = "Leadership recovery uses a finished transaction beyond its age retention"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "scenario.rabbitmq-auto-ack"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "scenarios"
+scenario = "RabbitMQ NO ACK consumes automatically without prefetch or pending transport acknowledgements"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "stress.rabbitmq-auto-ack"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "stress-scenarios"
+scenario = "RabbitMQ NO ACK consumes automatically without prefetch or pending transport acknowledgements"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "scenario.rabbitmq-parallel-reject-reconnect"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "scenarios"
+scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must reject them after its connection was lost"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "stress.rabbitmq-parallel-reject-reconnect"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "stress-scenarios"
+scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must reject them after its connection was lost"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "scenario.rabbitmq-parallel-ack-reconnect"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "scenarios"
+scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must acknowledge them after its connection was lost"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "stress.rabbitmq-parallel-ack-reconnect"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "stress-scenarios"
+scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must acknowledge them after its connection was lost"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "scenario.rabbitmq-individual-settlement"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "scenarios"
+scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: RabbitMQ consumer composition, per-delivery graph acknowledgements and connection teardown on one and three nodes; Lapin's internal locks remain outside the detector."
+examples = 2
+feature = "tests/features/runtime/rabbitmq_ingestion.feature"
+id = "stress.rabbitmq-individual-settlement"
+invariant = "The declared auto-ack or parallel-prefetch contract survives graph outcomes and reconnection without losing or duplicating a position beyond its declared mode."
+invocation = "stress-scenarios"
+scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected"
 selections = ["deloxide-stress"]

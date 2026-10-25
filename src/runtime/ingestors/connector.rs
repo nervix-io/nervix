@@ -28,8 +28,8 @@ use nervix_connector::{
     IngestorBatchAcknowledgement, IngestorBatchRequest, IngestorCapabilities, IngestorConnector,
     IngestorError, IngestorHost, IngestorHostServices, IngestorIntakeError, IngestorIntakeMessage,
     IngestorIntakeResult, IngestorMessage, IngestorPlan, IngestorPoll, IngestorResume,
-    PacedIngestorConnector, ParsedRetryPolicy, RetainedIngestHeaders, next_retry_delay,
-    physical_time::actual_utc_now,
+    IngestorSettlement, PacedIngestorConnector, ParsedRetryPolicy, RetainedIngestHeaders,
+    next_retry_delay, physical_time::actual_utc_now,
 };
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement, PositionClass};
 use nervix_primitives::sync::CancellationToken;
@@ -46,6 +46,10 @@ use crate::runtime::ingestor_quiesce::{IngestorQuiesceObservation, LiveDeliveryE
 #[path = "connector_acknowledgement.rs"]
 mod acknowledgement;
 use acknowledgement::{BatchRoots, RuntimeBatchAcknowledgement};
+
+#[path = "individual_settlement.rs"]
+mod individual_settlement;
+use individual_settlement::IndividualBatch;
 
 #[path = "connector_read.rs"]
 mod read;
@@ -1932,6 +1936,14 @@ where
         position_class: policy.position_class,
         retry_after,
     };
+    if let (IngestorSettlement::Individual, IngestorAckPolicy::Parallel { timeout, .. }) =
+        (C::SETTLEMENT, policy.acknowledgement)
+    {
+        return IndividualBatch::intake(host, messages, timeout)
+            .await
+            .settle(source, host, settlement)
+            .await;
+    }
     let positions = messages
         .iter()
         .map(|message| message.position().clone())

@@ -220,7 +220,8 @@ identifier, endpoint name, validity period, and key all agree. A remote connecti
 when all of the following are true:
 
 - its certificate chains to the configured cluster CA
-- its identity URI names the same cluster
+- its identity URI names the same cluster; a certificate that names another one is refused as a
+  cluster-identity mismatch, as [The Join Contract](#the-join-contract) describes
 - its node identifier is the expected peer identifier, once that identifier is known
 - its endpoint subject alternative name matches the advertised endpoint being contacted
 - its certificate is currently valid
@@ -231,9 +232,11 @@ the process wall clock. Rustls verification on both sides of the handshake and t
 validity and expiry checks read that one clock, so they cannot disagree about a certificate.
 
 The first HTTP/2 exchange binds the connection to its authenticated node, traffic class, advertised
-endpoint, current process epoch, and wire-contract fingerprint. The receiver cross-checks those
-claims against the TLS identity and the connection slot it is accepting. This prevents a valid peer
-from relabeling a connection as a different node or traffic class.
+endpoint, current process epoch, and the dialing node's prerequisite record, which carries the
+wire-contract fingerprint. The receiver cross-checks those claims against the TLS identity and the
+connection slot it is accepting, and judges the record as [The Join Contract](#the-join-contract)
+describes. This prevents a valid peer from relabeling a connection as a different node or traffic
+class.
 
 Three identities serve different purposes:
 
@@ -391,12 +394,61 @@ drain. For a release it is the bound
 [Releasing The Drain Cordon](./shutdown.md#releasing-the-drain-cordon) states.
 [Topology Cases](./shutdown.md#topology-cases) owns when a node sends it.
 
+## The Join Contract
+
+Every hello a node dials with carries its prerequisite record: its cluster identity, the
+fingerprint of the trust anchors it currently holds, the wire contract it speaks, the largest
+command and management event its executor admits, its durability promise, and its Raft heartbeat,
+gossip interval and clock-skew tolerance.
+[Node Settings](node-settings.md#the-prerequisite-list-is-closed) owns the record and the rule that
+judges two of them: every value equal, except the timings, which must stay within a factor of two
+of each other.
+
+The accepting node judges the hello's record against its own after it has checked the hello's
+identity and before it registers the connection in a pool. It answers either with its own record,
+which binds the connection, or with a refusal that names the first prerequisite the two records
+disagree on and both values, seen from the accepting node. A refusal reaches the dialing node
+before the connection closes: the accepting node starts the connection's graceful shutdown and
+keeps it polled for at most the progress timeout while the answer leaves. The dialing node judges
+an accepted answer's record the same way, so a connection binds only when both nodes accept the
+other's record. The judgment is symmetric: reversing two records reverses the mismatch and never
+removes it, so both nodes name the same prerequisite. A certificate whose identity URI names another
+cluster is the same mismatch, of cluster identity, judged on whichever side reads it, before any
+hello is exchanged.
+
+A refusal is `TransportError::RefusedByPeer` on the dialing node and
+`TransportError::IncompatiblePeer` on the node that judged it, each naming the peer and the
+mismatch from its own side. The accepting node logs
+`refused an interconnect peer that cannot run beside this node` at `warn` with the peer, its
+address, the prerequisite and the refusal, and the dialing node logs
+`an outbound interconnect connection ended in a prerequisite refusal` at `warn`. A refused outbound
+pool connection is counted with reason `prerequisite` and reconnects with its slot's backoff like
+any other failed attempt; the refusal decides nothing else inside the transport.
+
+The transport also reports how far its node has come in joining the cluster. That progress starts
+as joining and leaves it exactly once, whichever comes first: at the first outbound pool connection
+the process completes, naming the peer it joined through, or at the first outbound attempt, a
+bootstrap exchange included, that ends in a refusal. A connection a peer dials never moves it, so a
+node that has joined never leaves because a newcomer cannot run beside it. The server stops a
+joining node whose progress ends in a refusal, as
+[Prerequisites At Join](node-settings.md#prerequisites-at-join) describes.
+
+A joining node bounds its clock skew to each peer it completes a handshake with, the one it joined
+through first, with the typed `peer_clock` request. The request uses the management pool's
+discovery subquota under a one-second deadline, and it may target a node the requester does not
+yet list as live, because a joining node can reach a peer before its gossip has. The answering node
+returns its physical clock as time since the Unix epoch, or that its clock reads before the epoch,
+and the requester bounds the skew between its own readings before the request left and after the
+answer arrived.
+
 ## Wire Contract And Payloads
 
 All nodes in a running cluster use one current wire contract. A fixed fingerprint covers the set of
-supported operations and their encoded shapes. A fingerprint mismatch rejects connection setup;
-there is no version negotiation or alternate decoding path. A wire-contract change therefore
-requires a coordinated cluster stop and start with all nodes on the same version.
+supported operations and their encoded shapes. It is one of the prerequisites every hello carries,
+so a node whose fingerprint differs is refused at join as a wire-contract mismatch, and a hello of
+another shape fails as a malformed handshake before its record can be judged. There is no version
+negotiation or alternate decoding path. A wire-contract change therefore requires a coordinated
+cluster stop and start with all nodes on the same version.
 The subscription-interest visibility request includes the advertisement version, and its current
 wire fingerprint fences that request shape during connection setup.
 
@@ -461,6 +513,18 @@ HTTP/2 flow control adds another bound. Each stream begins with a 64 KiB receive
 connection begins with a 256 KiB receive window, and request headers are limited to 16 KiB. A
 receiver releases more HTTP/2 credit only as it accepts and accounts for more data. Large streamed
 objects can therefore cross the cluster without either endpoint holding the whole object in memory.
+
+A bulk connection grants more, on the side that opened it and receives its responses. Each of its
+four streams gets the bulk receive window, 1 MiB by default (the `interconnect-bulk-receive-window`
+node capability), and the connection gets room for all four at once. A sender moves at most one
+window of a response per round trip, and on a loaded node every round trip waits for several
+scheduled tasks on both sides. With a 64 KiB window a 40 MiB guest save needs 640 round trips; with
+1 MiB it needs 40. The window is never advertised without backing: every stream on a bulk
+connection, its binding exchange included, reserves one window from the `bulk_window` memory class
+before its request leaves, and returns it when the stream ends. A bulk request waits for a window,
+within its own deadline, while every window is held; a binding exchange waits within the
+connection's setup deadline. The other pools keep the windows above, and the request bodies a bulk
+connection carries toward its peer arrive under that peer's 64 KiB windows.
 
 ## Traffic And Resource Isolation
 
@@ -545,8 +609,14 @@ Memory and CPU execution are isolated by class:
 | Commands and replication | 24 MiB | Control |
 | Relay | 192 MiB | Data |
 | Bulk | 32 MiB | Bulk |
+| Bulk receive windows | 16 MiB | None |
 
-The total interconnect memory budget is 256 MiB. Reservations cannot borrow from another class. The
+The total interconnect memory budget is 272 MiB. Reservations cannot borrow from another class. The
+bulk receive windows are a class of their own because an open bulk stream charges the chunks its
+reader takes to Bulk. A stream waiting for a window therefore never holds the room an open stream's
+next chunk needs, and an open stream needs nothing more from the window class to finish. A full
+window class delays new bulk streams and never stalls one already running. Sixteen default windows
+fit, as many as the resource and snapshot transfers a node admits outbound at once. The
 relay budget holds two worst-case operations, each consisting of a 32 MiB encoded body, a 32 MiB
 decoded batch, and 16 MiB of decode scratch space. The commands and replication budget holds the
 four decoded replication batches a follower keeps resident beside one batch being encoded, so a
@@ -560,10 +630,11 @@ peer therefore holds at most the stream slots of its own connections. Once it ho
 management streams of a connection, a further shared operation to that peer waits for a slot
 until its own deadline, while liveness, cancellation, and discovery still use the reserved streams
 of the same connection. Every connection to another peer keeps all of its slots. A stream whose
-reader stops reading holds one HTTP/2 stream window of response bytes: flow control stops the
-producer once that window is spent, and five seconds without progress resets the stream and returns
-its admission and memory. A relay batch the receiving application holds without admitting keeps
-the reservation of its exact body, the largest decoded batch, and decode scratch. Another channel
+reader stops reading holds one receive window of response bytes, which on a bulk stream is its
+backed bulk receive window. Flow control stops the producer once that window is spent, and five
+seconds without progress resets the stream and returns its admission and memory. A relay batch the
+receiving application holds without admitting keeps the reservation of its exact body, the largest
+decoded batch, and decode scratch. Another channel
 still receives grants and admission beside it, and cancelling the held batch returns the whole
 reservation once the application drops the batch. Once the application has decoded a batch, it keeps
 only the batch's body and decoded columns charged while its runtime takes the batch in.
@@ -597,7 +668,12 @@ operation's domain semantics.
    sequence of chunks. The reader rejects early end, extra bytes, and a stalled chunk. Dropping the
    reader cancels the stream and releases its reservations. The producer's opening callback and
    each chunk carry a local `StreamHandlerError` report; an admission, storage, or encoding cause
-   stays beneath that handler context until the response reaches the wire boundary.
+   stays beneath that handler context until the response reaches the wire boundary. A chunk the
+   producer wrote may be larger than the reader's window: while it is being written, each nonzero
+   flow-control grant restarts the five-second write progress bound, as it does for a duplex
+   frame, so a chunk has no total transfer deadline while its reader keeps reading. A reader that
+   grants nothing for the bound, and a producer whose next chunk takes longer than it, reset the
+   stream with the typed transport progress timeout.
 4. **Ordered duplex stream.** Each direction sends length-prefixed, validated frames in order and
    may close independently. Opening the stream is bounded by the operation's declared setup
    deadline. An idle established stream is valid; the owning protocol sets deadlines for answers it
@@ -1082,6 +1158,10 @@ membership, after which application health and Raft reconciliation use the curre
 Admission to consensus membership requires an available interconnect endpoint. A discovered node
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
 voter, and it becomes eligible on the round that publishes an endpoint this node accepts. The
+leader also admits a candidate only when its published prerequisite record is one the leader can
+read and is compatible with the record of every live voter; it logs a candidate it leaves out for
+that reason once while the reason holds, at `warn` for a record that cannot run beside a voter and
+at `debug` for a record not yet published. The
 client and web-console advertisements are independent of admission: a node joins, votes, and leads
 with either of them unavailable. Membership replaces the recorded address of an existing member
 when its advertised endpoint changes. A returning voter remains a voter, while a learner still
@@ -1185,7 +1265,8 @@ Resource archives and runtime-state snapshots use streamed bulk responses with a
 length. Consensus snapshots use bounded begin, chunk, and finish operations on the same isolated
 bulk class. Receivers stage and validate the owning artifact while releasing HTTP/2 credit chunk by
 chunk. The whole transfer may exceed the 32 MiB bulk-memory budget because only bounded chunks and
-the active decoded section are resident at once.
+the active decoded section are resident at once. At most one bulk receive window of a response is in
+flight toward its receiver, backed by that stream's window reservation.
 [Resource Versions And Bindings](./resource-versions.md#publication-and-transfer) defines when a
 node fetches a resource archive and how it verifies and records the fetched version.
 
@@ -1390,10 +1471,13 @@ Branch-aggregate metrics retain the exact encoded bytes first selected for each 
 elapsed times are captured once. Describing, streaming and persisting that revision therefore
 agree byte for byte, and restoration retains the incoming bytes until the next metric update.
 The replica opens a Snapshot-subquota bulk stream for the described revision; the owner refuses a revision it no longer
-holds. Chunks are at most the configured bulk chunk size (64 KiB by default). Each side admits the
-whole captured or received allocation against `restore_metadata`, up to a 256 MiB checkpoint
-transfer bound. The replica checks the stream's declared length, received length and digest before
-the checkpoint can reach its assignment-fenced installation and stable-storage acknowledgement.
+holds. Chunks are at most the configured bulk chunk size (64 KiB by default). The stream's bulk
+receive window lets the owner keep sixteen default chunks in flight. Bandwidth, not round trips,
+therefore paces a large checkpoint, and a loaded replica fetches a 40 MiB guest save in 40 window
+round trips rather than 640. Each side admits the whole captured or received allocation against
+`restore_metadata`, up to a 256 MiB checkpoint transfer bound. The replica checks the stream's
+declared length, received length and digest before the checkpoint can reach its assignment-fenced
+installation and stable-storage acknowledgement.
 Debug events name the placement, revision and declared length when streaming and after verification,
 without logging checkpoint bytes. A branch checkpoint listing request names the entity's branch
 lifecycle placement and the cursor the replica's previous listing
@@ -1817,7 +1901,12 @@ PEM parsing failures as typed categories. Error reports and watcher logs omit cr
 and malformed PEM input bytes.
 
 After a valid replacement, new outbound pools use the new credentials and existing inbound HTTP/2
-connections begin graceful shutdown. Certificate expiration is also mapped to a process-monotonic
+connections begin graceful shutdown. A replacement whose trust anchors differ changes the node's
+trust-root fingerprint: the node republishes its prerequisite record, logs
+`published the trust root of the reloaded interconnect credentials` at `info`, and every later
+hello carries the new fingerprint. Until a peer holds the same anchors, the connections the
+replacement retired are refused when they dial again, as [The Join Contract](#the-join-contract)
+describes. Certificate expiration is also mapped to a process-monotonic
 deadline when a connection is authenticated, so a connection cannot remain open beyond the validity
 of either peer certificate even if the wall clock later moves.
 
@@ -1865,8 +1954,9 @@ statuses, and what each ending preserves.
 
 ## Failure Ownership And Persistence
 
-Transport failures identify name-resolution, setup, authentication, admission, encoding, decoding,
-flow-control, timeout, remote-response, and target-departure failures separately. Typed remote
+Transport failures identify name-resolution, setup, authentication, prerequisite-refusal,
+admission, encoding, decoding, flow-control, timeout, remote-response, and target-departure
+failures separately. Typed remote
 errors remain available to the operation owner, which decides whether a request is safe to retry.
 The interconnect does not infer idempotency for arbitrary control-plane or runtime operations.
 Local transport operations return `error_stack` reports. TLS and wire failures retain their typed
@@ -1907,9 +1997,13 @@ cover connection and stream occupancy, pending operations, setup failures and re
 exhaustion, request latency, relay channels and grants, grant refusals by direction and reason,
 admission wait, unresolved delivery age, and bulk-transfer bytes. Interconnect memory, worker
 queues, reactor delay, and consensus retention show whether pressure originates in transport,
-execution, or the protocol using it. A connection attempt
-that could not resolve its peer's advertised host is counted with reason `resolution`, apart from
-setup, handshake, capacity, and closed failures, so a DNS outage is visible as itself.
+execution, or the protocol using it. A connection attempt that could not resolve its peer's
+advertised host is counted with reason `resolution`, and one that ended in a prerequisite refusal
+with reason `prerequisite`, apart from setup, handshake, capacity, and closed failures, so a DNS
+outage and a node that cannot run beside its peer are each visible as themselves. The
+`bulk_window` class of the execution memory series counts the bulk receive windows a node backs:
+its reserved bytes are one window for every bulk stream the node has open, and its reservation
+count grows with every bulk stream it opens.
 
 Typed-request observations are labeled by the subquota a request uses: operation `liveness` counts
 application health together with the other requests of that subquota, the drain-status polls of

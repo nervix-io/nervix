@@ -116,6 +116,21 @@ test_target = "lib"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "src/cluster/__fuzz__/cluster__prerequisites__tests__bolero_peer_clock_probes_and_answers_round_trip_through_the_archive/corpus"
+domain_version = 1
+features = []
+id = "cluster-peer-clock-probes"
+invariant = "A peer clock probe and every answer, a reading since the Unix epoch to the nanosecond at either end of the seconds range or a clock that reads before the epoch, round trip through the archive unchanged."
+manifest = "Cargo.toml"
+max_input_bytes = 64
+package = "nervix-server"
+random_iterations = 256
+source = "src/cluster/prerequisites.rs"
+test = "cluster::prerequisites::tests::bolero_peer_clock_probes_and_answers_round_trip_through_the_archive"
+test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "src/runtime/state_replication/__fuzz__/runtime__state_replication__replica_branch_checkpoints__tests__bolero_a_replica_catches_up_every_named_branch_with_its_owner/corpus"
 domain_version = 1
 features = []
@@ -162,7 +177,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_model_roundtrip_canonical_nspl/corpus"
-domain_version = 14
+domain_version = 15
 features = []
 id = "nspl-model"
 invariant = "Canonical Plexus of a generated Model of every family reparses through the client and server grammars to the complete CREATE statement."
@@ -177,7 +192,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/backup/__fuzz__/backup__tests__bolero_models_exported_through_an_archive_reparse_to_themselves/corpus"
-domain_version = 15
+domain_version = 16
 features = []
 id = "nspl-archive-model"
 invariant = "Complete cluster/domain archives preserve every ordered canonical Model document through export, production restore reads, semantic reparse and byte-exact re-export."
@@ -372,7 +387,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_nspl/corpus"
-domain_version = 12
+domain_version = 14
 features = []
 id = "nspl-statement"
 invariant = "Canonical Plexus of every generated current statement form, session-only forms included, reparses through the client and server grammars to the complete statement."
@@ -402,7 +417,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl/src/__fuzz__/canonical_round_trip_tests__bolero_statement_text_is_canonical_or_rejected/corpus"
-domain_version = 12
+domain_version = 14
 features = []
 id = "nspl-statement-text"
 invariant = "Edited canonical text is either rejected with located diagnostics or read as statements whose canonical Plexus reparses to them."
@@ -417,7 +432,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatted_documents_keep_their_statements/corpus"
-domain_version = 12
+domain_version = 14
 features = []
 id = "nspl-format-document"
 invariant = "Formatting a generated document with gaps, comments and either line ending keeps its statements and comments and is idempotent."
@@ -432,7 +447,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/nspl-format/src/__fuzz__/format_round_trip_tests__bolero_formatter_text_is_formatted_or_rejected/corpus"
-domain_version = 11
+domain_version = 13
 features = []
 id = "nspl-format-text"
 invariant = "Edited documents are either refused as unparseable or formatted without changing their statements, idempotently."
@@ -507,10 +522,10 @@ test_target = "test:representations"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/tests/connectors/__fuzz__/surface__bolero_generated_entities_state_only_what_their_entity_declares/corpus"
-domain_version = 5
+domain_version = 6
 features = []
 id = "models-connector-declarations"
-invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits and a client of a declared connector."
+invariant = "A generated ingestor and emitter of every entity state only what their entity declares: a declared delivery or publishing mode whose required option choices they make, a quiesce mode their entity honors, a body of the declared form, batching the declared legality admits, a type contract exactly for direct-value bodies and a client of a declared connector."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-models"
@@ -716,8 +731,23 @@ test_target = "test:representations"
 
 [[target]]
 case_timeout_seconds = 10
+corpus = "crates/models/tests/representations/__fuzz__/prerequisites__bolero_prerequisite_records_round_trip_through_every_representation/corpus"
+domain_version = 1
+features = []
+id = "models-prerequisite-records"
+invariant = "A node's prerequisite record keeps every value through its gossip text and the archive and judges a peer as the written record does, fingerprints keep their digests through text, and a prerequisite mismatch keeps its kind and both values through the archive."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/tests/representations/prerequisites.rs"
+test = "prerequisites::bolero_prerequisite_records_round_trip_through_every_representation"
+test_target = "test:representations"
+
+[[target]]
+case_timeout_seconds = 10
 corpus = "crates/models/tests/representations/__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus"
-domain_version = 11
+domain_version = 13
 features = []
 id = "models-archived-models"
 invariant = "Every generated Model family and statement form keeps every field through its archive, and a stored Model widens to requested versions and pins back to itself."
@@ -1062,7 +1092,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/__fuzz__/registry__storage__tests__bolero_registry_archived_models_round_trip/corpus"
-domain_version = 9
+domain_version = 10
 features = []
 id = "registry-archived-models"
 invariant = "The registry's current tagged Model archive restores the complete generated vocabulary Model, including full-width counts and pinned resource bindings."
@@ -1991,7 +2021,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_registry_stored_models_list_back_from_memory_and_tables/corpus"
-domain_version = 6
+domain_version = 7
 features = []
 id = "registry-stored-models"
 invariant = "Committed Models named across the whole name rule list back complete and in key order, and read back by their own keys, from a reopened registry serving them from its journal or from the on-disk table a flush moved them into."
@@ -2006,7 +2036,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/registry/storage/__fuzz__/registry__storage__properties__bolero_corrupt_registry_records_fail_typed_or_list_canonically/corpus"
-domain_version = 6
+domain_version = 7
 features = []
 id = "registry-stored-models-corruption"
 invariant = "Damaged registry records free every decoding allocation, and damaged records and keys either fail the listing with the registry's typed storage failure or list Models whose own keys are exactly the stored keys."
@@ -2396,10 +2426,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_relay_messages_reach_the_receiver_whole/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "relay-wire-messages"
-invariant = "Every relay grant request with its delivery position, body length, branch key fields to the bit, row watermarks, registrations and admission, the payload the receiver rebuilds from it, and every grant reply, its typed refusals included, admission exchange, acknowledgement resolution and connection binding round trip through the bounded codec, and nothing stays charged."
+invariant = "Every relay grant request with its delivery position, body length, branch key fields to the bit, row watermarks, registrations and admission, the payload the receiver rebuilds from it, and every grant reply, its typed refusals included, admission exchange, acknowledgement resolution, connection hello with its prerequisite record and accepted or refused connection answer round trip through the bounded codec, and nothing stays charged."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-interconnect"
@@ -2411,7 +2441,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/interconnect/src/__fuzz__/wire__properties__bolero_damaged_relay_messages_fail_typed_or_decode_to_a_message/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "relay-wire-messages-malformed"
 invariant = "Truncated, bit-flipped or overwritten encodings of every relay message, and arbitrary bytes, fail with the codec's typed decode failure within the depth bound, or decode to a message that encodes and decodes back to itself, and either way leave no charge and no allocation of the decoder behind."
@@ -3191,10 +3221,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/models/src/connector/websockets/__fuzz__/connector__websockets__config_tests__bolero_client_config_preserves_every_valid_connection_setting/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "websocket-client-config"
-invariant = "Every bounded valid ws/wss configuration preserves the complete endpoint, connection timeout and ping interval while applying the declared TLS pairing rules."
+invariant = "Every bounded valid ws/wss configuration preserves the complete endpoint, connection and ping durations, effective idle deadline, handshake capacity and incoming message/frame limits while applying the declared TLS pairing rules."
 manifest = "Cargo.toml"
 max_input_bytes = 32
 package = "nervix-models"
@@ -3221,7 +3251,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/application/cli/__fuzz__/application__cli__properties__bolero_node_settings_survive_their_command_line/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "node-settings-command-line"
 invariant = "Current valid node settings of every group, with the Raft timings ordered in whole milliseconds, the drain shorter than the shutdown and the memory watermarks paired and ordered, render as the server's options and read back through the same options and validation unchanged; every duration and byte quantity help prints reads back as the same value."

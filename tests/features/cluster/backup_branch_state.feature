@@ -196,6 +196,63 @@ Feature: Deduplicator and window state in backup archives
       | 1            | 0             |
       | 3            | 1             |
 
+  @long_running
+  Scenario Outline: A stopped cut taken as soon as STOP returns holds the windows whose last writes outlast the stop grace
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      {{branch_state_models}}
+      CREATE SUBSCRIPTION source_summaries TO metric_summaries;
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/payments"
+      """
+      {"tenant":"alpha","transaction_id":"txn-1","amount":10}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"alpha","latency":10}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/payments"
+      """
+      {"tenant":"beta","transaction_id":"txn-2","amount":20}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","latency":20}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"alpha","latency":70}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","latency":80}
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      key={"tenant":"alpha"} | "total":80 | "latency_p0":15.0
+      key={"tenant":"beta"} | "total":100 | "latency_p0":25.0
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "running.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given every branch of window processor "latency_window" takes "15s" to write its state as it stops
+    When these NSPL commands are executed on the leader node
+      """
+      STOP;
+      """
+    And the CLI backs up "domain {{domain}}" from node "{{leader}}" into "stopped.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And backup archives "running.nvxb" and "stopped.nvxb" have identical deduplicator and window state
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: A stopped restore re-exports identical deduplicator and window sections, an interrupted installation keeps START gated, and WITHOUT STATE installs neither
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"

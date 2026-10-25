@@ -21,16 +21,18 @@ use arrow_schema::{DataType, Field, Schema};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass};
 use nervix_interconnect::{
-    ConnectionFailureReason, ControlEnvelope, Envelope, InterconnectRequest, PeerResolver,
-    PeerTarget, PoolClass, ReceivedEnvelope, RelayDelivery, RelayPayload, RelayPayloadKind,
-    RemoteOperationFailure, RemoteOperationSubject, RequestError, RequestSubquota, RuntimeState,
-    StateCheckpointAvailable, StatePlacementEnvelope, StateReplicationAck, StateSnapshotEnvelope,
-    StateSyncRequest, StateSyncResponse, TlsConfigBundle, Transport, TransportClock,
-    TransportEntropy, TransportError, TransportIdentity, TransportOptions,
+    ConnectionFailureReason, ControlEnvelope, Envelope, InterconnectRequest, JoinTerms,
+    PeerResolver, PeerTarget, PoolClass, ReceivedEnvelope, RelayDelivery, RelayPayload,
+    RelayPayloadKind, RemoteOperationFailure, RemoteOperationSubject, RequestError,
+    RequestSubquota, RuntimeState, StateCheckpointAvailable, StatePlacementEnvelope,
+    StateReplicationAck, StateSnapshotEnvelope, StateSyncRequest, StateSyncResponse,
+    TlsConfigBundle, Transport, TransportClock, TransportEntropy, TransportError,
+    TransportIdentity, TransportOptions,
 };
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, DomainName, ModelKind, ModelName,
-    NodeEndpoint, RelayName, RemoteAckRegistration, SchemaFingerprint, WasmStateGeneration,
+    NodeEndpoint, PrerequisiteTimings, RaftLogDurability, RelayName, RemoteAckRegistration,
+    SchemaFingerprint, WasmStateGeneration,
 };
 use nervix_primitives::sync::{StdArc, mpsc, watch};
 use rcgen::{
@@ -49,6 +51,7 @@ use super::{
 
 mod backup;
 mod isolation;
+mod prerequisites;
 mod relay;
 
 #[path = "materialized.rs"]
@@ -57,6 +60,19 @@ mod materialized;
 const CLUSTER: &str = "simulated";
 const PORT: u16 = 7443;
 const HOST_DEADLINE: Duration = Duration::from_secs(20);
+
+/// The join terms every fixture host brings unless a scenario gives it others, so their
+/// handshakes accept each other.
+fn fixture_join_terms() -> JoinTerms {
+    JoinTerms {
+        durability: RaftLogDurability::FsyncEveryAppend,
+        timings: PrerequisiteTimings {
+            raft_heartbeat_interval: Duration::from_millis(250),
+            gossip_interval: Duration::from_millis(500),
+            clock_skew_tolerance: Duration::from_millis(500),
+        },
+    }
+}
 
 #[derive(Clone)]
 struct Credentials {
@@ -282,6 +298,7 @@ async fn bind_with_incoming_options(
             cluster_id: CLUSTER.to_string(),
             node_id: ClusterNodeName::parse(name).assured("fixture node name is valid"),
             advertised_host: name.to_string(),
+            join_terms: fixture_join_terms(),
         },
         credentials.bundle(),
         options,

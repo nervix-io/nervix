@@ -640,6 +640,7 @@ fn parses_describe_resource_summary_statement() {
 fn describe_context_suggestions_include_resource_and_stream() {
     let input = "DESCRIBE ";
     let suggestions = suggest_statement(input, input.len());
+    assert!(suggestions.contains(&"CLUSTER".to_string()));
     assert!(suggestions.contains(&"DEDUPLICATOR".to_string()));
     assert!(suggestions.contains(&"DOMAIN".to_string()));
     assert!(suggestions.contains(&"EMITTER".to_string()));
@@ -649,6 +650,22 @@ fn describe_context_suggestions_include_resource_and_stream() {
     assert!(suggestions.contains(&"RESOURCE".to_string()));
     assert!(suggestions.contains(&"RELAY".to_string()));
     assert!(suggestions.contains(&"WINDOW".to_string()));
+}
+
+#[test]
+fn parses_describe_cluster_statement() {
+    let parsed = parse_statement("DESCRIBE CLUSTER;").expect("parse should succeed");
+    assert_eq!(
+        parsed,
+        Statement::DescribeCluster(nervix_models::DescribeCluster)
+    );
+}
+
+#[test]
+fn describe_cluster_context_offers_no_clause_of_show_cluster_status() {
+    let input = "DESCRIBE CLUSTER ";
+    let suggestions = suggest_statement(input, input.len());
+    assert!(!suggestions.contains(&"STATUS".to_string()));
 }
 
 #[test]

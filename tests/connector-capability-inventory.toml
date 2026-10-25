@@ -959,6 +959,13 @@ scenarios = [
 ]
 
 [[capability]]
+capability = "STALLED PEER idle_timeout_ms"
+entity = "WEBSOCKETS CONNECTION INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/websocket_connection_bounds.feature", scenario = "A WebSocket connection reports a silent peer through idle_timeout_ms on <cluster_size> nodes" },
+]
+
+[[capability]]
 capability = "MODE NO ACK"
 entity = "WEBSOCKETS ENDPOINT INGESTOR"
 scenarios = [
@@ -1013,6 +1020,22 @@ capability = "MODE ACK"
 entity = "WEBSOCKETS ENDPOINT INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/endpoint_acknowledgement.feature", scenario = "A WebSocket endpoint acknowledges each <result> frame during and after signaling" },
+]
+
+[[capability]]
+capability = "MODE NO ACK"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ NO ACK consumes automatically without prefetch or pending transport acknowledgements" },
+]
+
+[[capability]]
+capability = "MODE ACK PARALLEL"
+entity = "RABBITMQ QUEUE INGESTOR"
+scenarios = [
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must reject them after its connection was lost" },
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL preserves all four deliveries when it must acknowledge them after its connection was lost" },
+  { feature = "tests/features/runtime/rabbitmq_ingestion.feature", scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected" },
 ]
 
 [[capability]]

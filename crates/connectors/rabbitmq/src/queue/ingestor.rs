@@ -3,7 +3,7 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The AMQP connection, channel and consumer each ingestor instance reads through, its
-//!   one-delivery prefetch window, AMQP headers as ingest headers, and per-delivery
+//!   declared consumer mode and prefetch window, AMQP headers as ingest headers, and per-delivery
 //!   acknowledgement and requeue.
 //! - **Depends on.** The connector contract, typed client configuration entries, the crate's
 //!   broker connection, `error-stack`, Tokio and `lapin`.
@@ -21,11 +21,12 @@
     )
 )]
 
-use std::borrow::Cow;
+mod reader;
+
+use std::{borrow::Cow, num::NonZeroU16};
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
-use futures_util::StreamExt as _;
 use lapin::{
     Acker, Channel, Connection, Consumer,
     message::Delivery,
@@ -39,6 +40,7 @@ use nervix_connector::{
 };
 use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, RabbitMqQueueName};
+use reader::RabbitMqBatchReader;
 use thiserror::Error;
 
 use crate::queue::connection::RabbitMqBroker;
@@ -68,9 +70,20 @@ pub enum RabbitMqQueueIngestorError {
     Requeue,
     #[error("the RabbitMQ delivery was already settled or its channel closed")]
     DeliverySettled,
+    #[error("RabbitMQ batch timeout exceeds the monotonic clock range")]
+    BatchDeadline,
 }
 
 type RabbitMqQueueIngestorResult<T> = Result<T, Report<RabbitMqQueueIngestorError>>;
+
+/// The consumer's transport policy, resolved before the connector is composed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RabbitMqConsumerMode {
+    /// RabbitMQ considers a delivery complete as soon as it sends it.
+    NoAck,
+    /// Each delivery is settled on its own channel; prefetch bounds outstanding deliveries.
+    Ack { prefetch: NonZeroU16 },
+}
 
 /// What one RabbitMQ ingestor consumes: its resolved client entries, the node resolver its broker
 /// host resolves through, the queue, and the consumer tag each instance registers under, suffixed
@@ -81,6 +94,7 @@ pub struct RabbitMqQueueIngestorPlan {
     dns: DnsResolver,
     queue: RabbitMqQueueName,
     consumer_tag: String,
+    mode: RabbitMqConsumerMode,
 }
 
 /// The AMQP session one instance consumes through, kept together because dropping the channel
@@ -88,7 +102,7 @@ pub struct RabbitMqQueueIngestorPlan {
 struct RabbitMqConsumer {
     _connection: Connection,
     _channel: Channel,
-    consumer: Consumer,
+    reader: RabbitMqBatchReader<Consumer>,
 }
 
 impl RabbitMqQueueIngestorPlan {
@@ -97,12 +111,14 @@ impl RabbitMqQueueIngestorPlan {
         dns: DnsResolver,
         queue: RabbitMqQueueName,
         consumer_tag: String,
+        mode: RabbitMqConsumerMode,
     ) -> Self {
         Self {
             config,
             dns,
             queue,
             consumer_tag,
+            mode,
         }
     }
 
@@ -122,20 +138,29 @@ impl RabbitMqQueueIngestorPlan {
             )
             .await
             .map_err(|failure| failure.beneath(RabbitMqQueueIngestorError::Channel))?;
-        opening
-            .within_budget(
-                "setting the RabbitMQ prefetch window",
-                channel.basic_qos(1, BasicQosOptions::default()),
-            )
-            .await
-            .map_err(|failure| failure.beneath(RabbitMqQueueIngestorError::Qos))?;
+        let no_ack = match self.mode {
+            RabbitMqConsumerMode::NoAck => true,
+            RabbitMqConsumerMode::Ack { prefetch } => {
+                opening
+                    .within_budget(
+                        "setting the RabbitMQ prefetch window",
+                        channel.basic_qos(prefetch.get(), BasicQosOptions::default()),
+                    )
+                    .await
+                    .map_err(|failure| failure.beneath(RabbitMqQueueIngestorError::Qos))?;
+                false
+            }
+        };
         let consumer = opening
             .within_budget(
                 "starting the RabbitMQ consumer",
                 channel.basic_consume(
                     self.queue.as_str().into(),
                     format!("{}-{instance_index}", self.consumer_tag).into(),
-                    BasicConsumeOptions::default(),
+                    BasicConsumeOptions {
+                        no_ack,
+                        ..BasicConsumeOptions::default()
+                    },
                     FieldTable::default(),
                 ),
             )
@@ -148,7 +173,7 @@ impl RabbitMqQueueIngestorPlan {
         Ok(RabbitMqConsumer {
             _connection: opening.opened(),
             _channel: channel,
-            consumer,
+            reader: RabbitMqBatchReader::new(consumer),
         })
     }
 }
@@ -315,50 +340,30 @@ impl BrokerIngestorConnector for RabbitMqQueueIngestor {
     type Message = RabbitMqQueueIngestorMessage;
     type Position = RabbitMqQueueIngestorPosition;
 
-    /// The prefetch window admits one delivery at a time, so a batch holds one delivery whatever
-    /// the request asks for.
+    const SETTLEMENT: nervix_connector::IngestorSettlement =
+        nervix_connector::IngestorSettlement::Individual;
+
     async fn next_batch(
         &mut self,
-        _request: IngestorBatchRequest,
+        request: IngestorBatchRequest,
         cancellation: &IngestorReadCancellation,
     ) -> IngestorResult<IngestorBatch<Self::Message>> {
         let Some(consumer) = self.consumer.as_mut() else {
             return Ok(IngestorBatch::ResumeRequired);
         };
-        let Some(received) = cancellation
-            .unless_cancelled(consumer.consumer.next())
-            .await
-        else {
-            return Ok(IngestorBatch::Interrupted {
-                gathered: Vec::new(),
-            });
-        };
-        match received {
-            Some(Ok(delivery)) => Ok(IngestorBatch::Messages(vec![
-                RabbitMqQueueIngestorMessage::new(delivery),
-            ])),
-            Some(Err(error)) => {
-                self.consumer = None;
-                Err(Report::new(RabbitMqQueueIngestorError::Receive)
-                    .attach_printable(error.to_string())
-                    .change_context(IngestorError::Read {
-                        connector: RABBITMQ,
-                    }))
-            }
-            None => {
-                self.consumer = None;
-                Err(
-                    Report::new(RabbitMqQueueIngestorError::ConsumerClosed).change_context(
-                        IngestorError::Read {
-                            connector: RABBITMQ,
-                        },
-                    ),
-                )
-            }
+        let batch = consumer.reader.read(request, cancellation).await;
+        if batch.is_err() {
+            self.consumer = None;
         }
+        batch.change_context(IngestorError::Read {
+            connector: RABBITMQ,
+        })
     }
 
     async fn acknowledge(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
+        if let RabbitMqConsumerMode::NoAck = self.plan.mode {
+            return Ok(());
+        }
         for position in positions {
             nervix_primitives::task::consume_budget().await;
             let settled = position
@@ -366,8 +371,7 @@ impl BrokerIngestorConnector for RabbitMqQueueIngestor {
                 .ack(BasicAckOptions::default())
                 .await
                 .map_err(|source| {
-                    Report::new(RabbitMqQueueIngestorError::Acknowledge)
-                        .attach_printable(source.to_string())
+                    Report::new(source).change_context(RabbitMqQueueIngestorError::Acknowledge)
                 })
                 .change_context(IngestorError::Acknowledge {
                     connector: RABBITMQ,
@@ -385,6 +389,9 @@ impl BrokerIngestorConnector for RabbitMqQueueIngestor {
     /// A rejected delivery is negatively acknowledged with requeue, so the broker delivers it
     /// again rather than holding it against the prefetch window forever.
     async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
+        if let RabbitMqConsumerMode::NoAck = self.plan.mode {
+            return Ok(());
+        }
         for position in positions {
             nervix_primitives::task::consume_budget().await;
             let settled = position
@@ -395,8 +402,7 @@ impl BrokerIngestorConnector for RabbitMqQueueIngestor {
                 })
                 .await
                 .map_err(|source| {
-                    Report::new(RabbitMqQueueIngestorError::Requeue)
-                        .attach_printable(source.to_string())
+                    Report::new(source).change_context(RabbitMqQueueIngestorError::Requeue)
                 })
                 .change_context(IngestorError::Reject {
                     connector: RABBITMQ,
@@ -466,6 +472,9 @@ mod tests {
                 dns.clone(),
                 RabbitMqQueueName::parse("orders").expect("a fixed queue name is valid"),
                 "orders".to_string(),
+                RabbitMqConsumerMode::Ack {
+                    prefetch: NonZeroU16::MIN,
+                },
             );
             let mut source = RabbitMqQueueIngestor::open(&plan, 0)
                 .await
@@ -490,6 +499,37 @@ mod tests {
             assert_eq!(cause.is_configuration(), configuration, "{addr}");
             assert!(source.needs_resume(), "{addr}");
         }
+    }
+
+    #[nervix_primitives::test]
+    async fn automatic_consumption_never_uses_a_deliveries_transport_acknowledgement() {
+        let (_files, dns) = literal_address_resolver().await;
+        let plan = RabbitMqQueueIngestorPlan::new(
+            Vec::new(),
+            dns,
+            RabbitMqQueueName::parse("orders").expect("a fixed queue name is valid"),
+            "orders".into(),
+            RabbitMqConsumerMode::NoAck,
+        );
+        let mut source = RabbitMqQueueIngestor::open(&plan, 0)
+            .await
+            .expect("opening connects nothing");
+        let delivery = Delivery::mock(1, "".into(), "orders".into(), false, vec![1]);
+        let position = RabbitMqQueueIngestorPosition {
+            acker: delivery.acker,
+        };
+        source
+            .acknowledge(std::slice::from_ref(&position))
+            .await
+            .expect("an automatic delivery has no acknowledgement to send");
+        source
+            .reject(std::slice::from_ref(&position))
+            .await
+            .expect("an automatic delivery has no rejection to send");
+        assert!(
+            position.acker.usable(),
+            "neither host operation may consume the AMQP acker"
+        );
     }
 
     #[test]

@@ -10,8 +10,12 @@ accepts is either a declared setting in its owner's group or part of the node's 
 addresses and paths, which are not settings; [The Server's Settings](#the-servers-settings) lists
 them. Runtime constants that are not options keep their current wiring while their area owners
 adopt these declarations, and this chapter states the contract that adoption must satisfy. The
-class API alone does not publish records, commit parameters, detect machine capacity or change a
-running service.
+class API alone publishes no record, commits no parameter, detects no capacity and changes no
+running service. A node publishes, carries and verifies its prerequisites as
+[Prerequisites At Join](#prerequisites-at-join) describes, and its
+[startup preflight](#the-startup-preflight) detects its memory and measures its volumes. Cluster
+parameters are not committed through Raft and capability records are not announced: a node reads
+its cluster parameters from its own options, and its capabilities stay local claims.
 
 ## Choose The Class
 
@@ -33,20 +37,83 @@ the row acknowledgement accounting.
 
 ## The Prerequisite List Is Closed
 
-The prerequisites are cluster identity; trust roots and node identity credentials; the
-node-to-node wire contract; command and management-event size floors needed to join consensus;
-the durability promise including fsync mode; Raft heartbeat and election timing relationships;
-gossip cadence and its failure-detection relationships; and permitted physical clock skew.
+The prerequisites are cluster identity; the trust root; the node-to-node wire contract; the
+command and management-event size floors needed to join consensus; the durability promise of the
+Raft log; the Raft heartbeat, from which the election timeouts derive; the gossip interval, from
+which failure detection derives; and the physical clock skew a node tolerates. One record holds
+them all, and each has one source:
 
-Identity, trust, wire contract, consensus floors and durability require exact agreement. Raft
-timing and gossip cadence require bounded coexistence: election timeouts derive from heartbeat
-by fixed factors, and every pairing during a roll must satisfy those bounds. Per-node values
-remain visible. A proposed new prerequisite first has to establish why a committed cluster
-parameter applied by rebuilding its owner cannot express it.
+| Prerequisite | Source | Default | Two nodes run together when the values are |
+| --- | --- | --- | --- |
+| Cluster identity | `--cluster-id`, which the node's certificate must also name | `default` | equal |
+| Trust root | Detected: a SHA-256 fingerprint over the SHA-256 digests of the trust anchors in `--interconnect-tls-ca`, sorted and without repeats, so the order of the file does not change it | none | equal |
+| Wire contract | Fixed by the build: the fingerprint of the one node-to-node contract it speaks | none | equal |
+| Largest command, largest management event | Detected: the executor's operation limits | 1 MiB, 64 KiB | equal |
+| Durability promise | Fixed by the build: every Raft log append is synchronized, data and metadata, before the node acknowledges it, written `fsync every append` | none | equal |
+| Raft heartbeat | `--raft-heartbeat-interval` | `250ms` | within a factor of two |
+| Gossip interval | `--gossip-interval` | `500ms` | within a factor of two |
+| Clock-skew tolerance | `--clock-skew-tolerance` | `500ms` | within a factor of two |
 
-Startup preflight checks environmental facts: peer clock skew, available storage and quota
-relationships, memory sufficient for the resolved budgets, and a loadable resolver. Failures
-preserve typed causes before starting or joining. Environmental checks do not add a setting
+Two timings are within a factor of two when they are equal or the larger is below twice the
+smaller: a node with a `250ms` heartbeat runs beside one with `400ms`, not beside one with
+`500ms`. One rolling change may therefore move a timing by less than a factor of two, and a larger
+move takes more than one roll. The factor is a fixed contract rather than a setting, because the
+Raft timings rely on it. A node does not configure its election timeouts: a follower stands for
+election after a randomized timeout between six and twelve of its own heartbeat intervals, 1.5 to 3
+seconds by default. A compatible leader's heartbeat is shorter than twice the follower's, so the
+slowest heartbeat a compatible leader sends stays within a third of the follower's minimum
+election timeout. Gossip derives its failure detector the same way: it assumes ten gossip
+intervals between a peer's heartbeats until it has observed some, and takes no gap longer than
+twenty gossip intervals as a sample, 5 and 10 seconds by default.
+
+A proposed new prerequisite first has to establish why a committed cluster parameter applied by
+rebuilding its owner cannot express it.
+
+## The Startup Preflight
+
+Before it binds a listener or opens a store, a node checks the environment it is about to run in.
+It refuses to start at the first check that fails, exiting with status `1` and
+`the startup preflight refused this node` above the cause:
+
+1. It builds its executor from the execution limits, checked against one another, so budgets that
+   cannot hold the operations the limits admit refuse the start.
+2. It resolves its memory limit: `--memory-limit` when given, otherwise the smallest memory limit
+   of its control group and the groups above it, in the unified hierarchy or the version 1 memory
+   hierarchy, or its physical memory when no group limit is smaller. A platform that reports
+   neither leaves the limit unknown, and the memory checks do not run. A known limit must hold all
+   of the executor's memory budgets together, 2,323 MiB by default, and the
+   `--memory-high-watermark` when one is set.
+3. It creates its database directory and its temporary directory when they are absent, proves each
+   writable with a probe file it removes again, and measures the total size of the volume each
+   lives on.
+4. It resolves its restore-staging quota against the total size of the volume that holds the
+   database directory: `--restore-staging-max-bytes` when given, otherwise the smaller of 128 GiB
+   and that size. It then requires the quota, `--resource-max-archive-bytes` and
+   `--resource-max-extracted-bytes` each to fit that size. Each quota is compared with the size on
+   its own, and nothing the volume already holds is subtracted.
+5. It loads its name resolver, as [Name Resolution](name-resolution.md#resolver-lifetime)
+   describes.
+
+Each refusal names the setting or directory it judged, with the values involved:
+
+| Check | Refusal |
+| --- | --- |
+| Memory budgets | `memory-limit (1GiB) cannot hold the node's memory budgets of 2.27GiB`, or `the detected memory limit of 2GiB cannot hold the node's memory budgets of 2.27GiB` |
+| Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
+| Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
+| Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |
+| Quotas | `restore-staging-max-bytes (128GiB) exceeds the 64GiB capacity of the volume holding the database directory <path>`, for a quota the operator gave, or `resource-max-extracted-bytes (16GiB) exceeds the 5GiB capacity of the volume holding the database directory <path>` |
+| Resolver | `failed to load the name resolver configuration`, above the cause that resolver loading reports |
+
+Only the restore-staging quota, a node capability, follows the volume. The resource quotas are
+cluster parameters with fixed defaults, 4 GiB and 16 GiB: a node whose database volume is smaller
+refuses to start until its operator gives it quotas that fit. A node that passes logs
+`the startup preflight passed` at `info` with its memory limit, its memory budgets, the size of both
+volumes and the restore-staging quota it resolved.
+[Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) sizes them.
+
+Clock skew is the one environmental check that needs a peer, so a node makes it as it joins, as
+[Prerequisites At Join](#prerequisites-at-join) describes. Environmental checks add no setting
 class. [Name Resolution](name-resolution.md), [Domain Clock](domain-clock.md) and
 [Consensus Storage And Replication](consensus-storage-and-replication.md) own their detailed
 failure and timing contracts.
@@ -64,6 +131,67 @@ A returning node obtains construction-time cluster parameters from the live clus
 published state and verifies them against the log as it catches up. Its stale local log is
 not the initial policy authority. [Cluster Interconnect](interconnect.md) owns publication,
 authentication, wire forms and discovery.
+
+## Prerequisites At Join
+
+A node publishes its record in its gossip state under the key `prerequisites`, and carries it in
+the hello of every interconnect connection it dials. The node that accepts a connection judges the
+hello's record against its own before it binds the connection, and answers with its own record or
+with a refusal that names the first prerequisite they disagree on, in the order of the table above,
+and both values. The dialing node judges an accepted answer's record the same way. Neither side
+reads consensus, so the check holds for a node that has never reached the cluster. A certificate
+that names another cluster is refused as a cluster-identity mismatch before any hello is read.
+
+A refusal affects only the node that is joining. A node that starts with peers to reach, a
+bootstrap host or the other members its stored membership names, joins through the first
+connection it dials that completes; when a connection it dials is refused before any has
+completed, it stops instead. A node leaves that joining state once, and a connection another node
+dials never moves it, so an incompatible newcomer never stops a node that has joined. A node that
+bootstraps a cluster alone joins nothing.
+Until a joining node is a member of the membership it has applied, it also stops as soon as a live
+member of that membership publishes a record it cannot run beside. A live node outside it, such as
+another joining node or one that was itself refused and has not left gossip yet, never stops it. A
+node that has never been a member knows no membership before it is admitted, so the handshakes of
+the connections it dials are what refuse it. The leader admits a node gossip discovered only when
+the node's record is compatible with the record of every live voter, and leaves a node that has
+published no record it can read outside the membership.
+
+Once its first connection completes, a joining node asks the peer it joined through for its
+physical clock, then every other live peer it has completed a handshake with. It asks each peer
+once, and asks a peer that did not answer again a gossip interval later. The peer read its clock
+between the probe's departure and its answer's arrival, so one probe proves skew only when the
+reading falls outside that window, and the skew it proves is the distance to the nearer end. A peer
+whose clock reads before the Unix epoch answers so, and is behind by more than all the time since
+it. A node whose proven skew to one of those peers exceeds its `--clock-skew-tolerance` stops, but
+only while it is still joining. A member its stored membership names returns without changing the
+voters or the quorum, so its join ends at the first answer. Any other node's join ends once the
+membership it has applied admits it, because from then on the cluster may count it among its
+voters: a skew that an answer proves after that is logged at `warn`, and the node stays.
+
+A refused node logs `this node was refused at join and stops` at `error`, requests its own stop,
+runs the ordinary shutdown phases, and exits with status `1`. Its report, beneath
+`this node was refused at join`, names the peer, the prerequisite and both values, or the clock it
+judged:
+
+```text
+node 'node-1' cannot run beside this node: raft-heartbeat-interval is 1s on this node and 250ms on the peer, not within a factor of 2
+the physical clock of node 'node-1' is beyond this node's clock-skew-tolerance of 500ms: the peer is at least 1.2s ahead
+```
+
+The trust root follows the credentials a node holds. A credential reload that changes the trust
+anchors republishes the record, and the node's later handshakes carry the new fingerprint. Two
+nodes that hold different anchors cannot open a connection between them: during a rotation that
+has reached some nodes and not others, the connections a reload replaces are refused until both
+ends hold the same anchors. A node that has joined does not stop for it.
+
+`DESCRIBE CLUSTER` lists every live node's published record and marks each timing that differs
+from the leader's, and `nervix_cluster_timing_drift_nodes` counts the nodes whose timings differ.
+Both sides of a refused connection log the refusal at `warn`. The leader logs a node it leaves
+outside the membership once while the refusal holds: at `warn` when the node cannot run beside a
+voter, at `debug` while it has published no record the leader can read. An outbound pool
+connection that ends in a refusal is counted in `nervix_interconnect_connection_failures_total`
+with reason `prerequisite`. [Cluster Interconnect](interconnect.md#the-join-contract) owns the
+handshake and its wire forms.
 
 ## Typed Definitions And Defaults
 
@@ -109,7 +237,8 @@ describes, defaults included.
 
 | Option | Class | Owner group |
 | --- | --- | --- |
-| `--raft-heartbeat-interval`, `--raft-election-timeout-min`, `--raft-election-timeout-max` | prerequisite | Raft timings |
+| `--raft-heartbeat-interval` | prerequisite | Raft timings |
+| `--gossip-interval`, `--clock-skew-tolerance` | prerequisite | membership |
 | `--raft-snapshot-entry-threshold`, `--raft-snapshot-byte-threshold`, `--raft-covered-log-entries-retained`, `--raft-covered-log-bytes-retained`, `--raft-retained-log-cap` | node capability | Raft retention |
 | `--node-unavailability-timeout` | cluster parameter | membership |
 | `--replica-count` | cluster parameter | scheduling |
@@ -121,18 +250,25 @@ describes, defaults included.
 | `--drain-timeout`, `--shutdown-timeout` | node capability | shutdown |
 | `--resource-max-archive-bytes`, `--resource-max-extracted-bytes`, `--resource-max-file-count` | cluster parameter | resources |
 | `--otel-trace-sample-ratio` | node capability | trace export |
+| `--memory-limit` | node capability | capacity |
 
 Each node still reads its cluster parameters from its own options; until they are committed once
 for the cluster, give every node the same value. The memory watermarks have no default: without
-them the node runs no memory-pressure supervisor.
+them the node runs no memory-pressure supervisor. `--memory-limit` and
+`--restore-staging-max-bytes` have no default value either: without them the node detects its
+memory limit and derives its restore-staging quota from its database volume, as
+[The Startup Preflight](#the-startup-preflight) describes.
 
 ### Validation Before Any I/O
 
 The edge validates every value, and every relationship between values, before the node opens a
 store, binds a listener or starts a task:
 
-- The Raft heartbeat interval is shorter than the minimum election timeout, which is shorter than
-  the maximum, compared in the whole milliseconds consensus runs with.
+- The Raft heartbeat interval is at least one millisecond, the resolution consensus runs timings
+  at, and twelve of it, the longest election timeout, fit the milliseconds consensus counts it in.
+- The gossip interval and the clock-skew tolerance are each at least one millisecond, and twenty
+  gossip intervals fit a duration.
+- A memory limit, when one is given, is above zero.
 - The drain timeout does not exceed the shutdown timeout, which bounds every drain step. A drain
   timeout equal to it lets the drain use the whole deadline; the defaults leave time for terminal
   teardown after the drain.
@@ -142,10 +278,12 @@ store, binds a listener or starts a task:
 
 A value its option cannot read, such as malformed duration text or a sample ratio outside its
 range, ends the process with status `2` as the command line reports it. A relationship that does
-not hold ends the process with status `1` before it opens a store, with a message that names the
-settings involved and their values, such as
-`drain-timeout (60s) must not exceed shutdown-timeout (50s)`. The defaults satisfy every
-relationship, and the assertions that keep them doing so remain beside them.
+not hold, or a value outside its own bounds, ends the process with status `1` before it opens a
+store, with a message that names the settings involved and their values, such as
+`drain-timeout (60s) must not exceed shutdown-timeout (50s)` or
+`raft-heartbeat-interval (500µs) must be at least 1ms, the resolution consensus runs timings at`.
+The defaults satisfy every relationship, and the assertions that keep them doing so remain beside
+them.
 
 Rendered duration options preserve every nanosecond. Compact values use the largest exact unit,
 such as `250ms` or `15m`; a large fractional value uses whole seconds and remaining nanoseconds,
@@ -156,8 +294,11 @@ or another option is overridden.
 
 A cluster remains correct while two setting values coexist during a rolling restart in any
 order. The change takes full effect after the last node adopts it; rollback follows the same
-procedure in reverse. A prerequisite can reject a node outside its supported bounds. A
-capability is a local claim; a cluster parameter retains one committed authority throughout.
+procedure in reverse. A prerequisite can reject a node outside its supported bounds: a timing
+moves by less than a factor of two in one roll, and a restarted node whose timing is outside that
+bound of a live peer's is refused as it joins, alone. Identity, trust, the wire contract, the
+floors and the durability promise cannot be rolled, because two values of one never run together.
+A capability is a local claim; a cluster parameter retains one committed authority throughout.
 
 The alpha rule still requires one current data or message shape. Operational values coexist
 within that shape. A roll introduces no earlier schema, dual decoder or migration path.
@@ -205,11 +346,15 @@ Flags use `--<area>-<name>` and environment variables use `NERVIX_<AREA>_<NAME>`
 sizes use the existing human-readable forms. The [nervix-server Reference](nervix-server-reference.md)
 is the help output, whose names and defaults come from the declarations.
 
-Startup reports resolved settings with credentials and sensitive material redacted. Gossip
-exposes per-node prerequisites and the running committed revision. `DESCRIBE CLUSTER` and
-metrics distinguish committed parameters from running values, expose per-node capabilities,
-and show effective negotiated bounds. Refusals identify the setting and failed relationship
-without disclosing secrets. Connector-specific values remain in their owning manual and
+Startup reports resolved settings with credentials and sensitive material redacted: the
+`starting nervix server` line at `info` names the Raft heartbeat and the election timeouts derived
+from it, the gossip interval, the clock-skew tolerance and the memory limit with where it came
+from. Gossip exposes per-node prerequisites and the running committed revision. `DESCRIBE CLUSTER`
+shows each live node's prerequisites and the timings that differ from the leader's, and
+`nervix_cluster_timing_drift_nodes` counts those nodes. Committed parameters and capability
+records, once a node announces them, are reported beside the running values they govern, with the
+effective negotiated bounds. Refusals identify the setting and failed relationship without
+disclosing secrets. Connector-specific values remain in their owning manual and
 [Connector Contract](connector-contract.md).
 
 ## Verification Boundary
@@ -221,6 +366,15 @@ maximum permit representation before pool construction. Startup resolves it thro
 executor configuration, and the executor snapshot and worker metrics expose the running value.
 The existing execution-settings adoption owns detection and capability-record publication.
 Filesystem and consensus retain independent admission while a connector call holds its worker.
+
+The interconnect's bulk receive window is `Setting<BulkReceiveWindow>` with class
+`NodeCapabilities` inside `TransportOptions`. Its one default is 1 MiB, the HTTP/2 window each
+stream of a bulk connection grants its sender, and like the transport's other windows no
+command-line option sets it. The value must be
+nonzero, and the connection window derived from it, one window for each of the four bulk streams,
+must fit the 2^31-1 bytes HTTP/2 can advertise; the definition checks both. A transport refuses to
+bind when the executor's `bulk_window` memory budget cannot back one window. The fixed constant
+for the HTTP/2 maximum names RFC 9113.
 
 A Kafka consumer's single control-operation turn is an ordering invariant rather than an
 operator capacity. Its fixed constant states that a cancelled native mutation cannot be
@@ -245,8 +399,18 @@ every definition's default, and that each relationship refuses the node with its
 error. The registered `node-settings-command-line` Bolero property generates valid settings for
 every group, relationships held, and requires them to read back unchanged after rendering as
 options, along with every duration and byte quantity. Public scenarios start a real
-`nervix-server` process with a drain timeout above its shutdown timeout or election timeouts out of
-order and observe the refusal naming both settings, and restart a node of a one-node and a
+`nervix-server` process with a drain timeout above its shutdown timeout or a Raft heartbeat below
+one millisecond and observe the refusal naming the settings, and restart a node of a one-node and a
 three-node cluster with such a setting, through the harness step that names a setting for one
 node, before restarting it with a valid one. Converting and validating the options takes no lock
 and adds no lifecycle path, so the deadlock detector has nothing of it to observe.
+
+The prerequisite record, its compatibility rule, its gossip text and the order `DESCRIBE CLUSTER`
+lists it in have unit tests beside the record, and the record's gossip text has a registered Bolero
+property that requires it to read back unchanged. A second, `cluster-peer-clock-probes`, requires
+the clock probe and every answer to it to read back unchanged through the archive. Public scenarios
+on one-node and three-node clusters refuse a joining node whose cluster identity or trust root
+differs, or whose Raft heartbeat is outside the bound, and require the refusal to name the
+prerequisite and both values; admit a node whose heartbeat differs within the bound and show its
+drift through `DESCRIBE CLUSTER`; and refuse to start a node whose memory limit cannot hold its
+budgets.

@@ -19,9 +19,9 @@ use clap::Parser as _;
 use error_stack::{Report, ResultExt as _};
 
 use super::{
-    consensus::ConsensusArgs, membership::MembershipArgs, memory_pressure::MemoryPressureArgs,
-    resources::ResourceArgs, runtime::RuntimeArgs, scheduling::SchedulingArgs,
-    shutdown::ShutdownArgs, transactions::TransactionArgs,
+    capacity::CapacityArgs, consensus::ConsensusArgs, membership::MembershipArgs,
+    memory_pressure::MemoryPressureArgs, resources::ResourceArgs, runtime::RuntimeArgs,
+    scheduling::SchedulingArgs, shutdown::ShutdownArgs, transactions::TransactionArgs,
 };
 use crate::application::{error::AppError, node_settings::NodeSettings};
 
@@ -43,6 +43,8 @@ pub struct SettingsArgs {
     pub shutdown: ShutdownArgs,
     #[command(flatten)]
     pub resources: ResourceArgs,
+    #[command(flatten)]
+    pub capacity: CapacityArgs,
 }
 
 impl TryFrom<SettingsArgs> for NodeSettings {
@@ -63,10 +65,18 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             .shutdown
             .settings()
             .change_context(AppError::InvalidShutdownTimeouts)?;
+        let membership = args
+            .membership
+            .settings()
+            .change_context(AppError::InvalidMembershipSettings)?;
+        let capacity = args
+            .capacity
+            .settings()
+            .change_context(AppError::InvalidCapacitySettings)?;
         Ok(Self {
             raft,
             raft_retention: args.consensus.retention(),
-            membership: args.membership.settings(),
+            membership,
             scheduling: args.scheduling.settings(),
             runtime: args.runtime.settings(),
             transactions: args.transactions.limits(),
@@ -74,6 +84,7 @@ impl TryFrom<SettingsArgs> for NodeSettings {
             memory_pressure,
             shutdown,
             resources: args.resources.settings(),
+            capacity,
         })
     }
 }
@@ -92,6 +103,7 @@ impl From<&NodeSettings> for SettingsArgs {
             memory_pressure: MemoryPressureArgs::from_settings(&settings.memory_pressure),
             shutdown: ShutdownArgs::from_settings(&settings.shutdown),
             resources: ResourceArgs::from_settings(&settings.resources),
+            capacity: CapacityArgs::from_settings(&settings.capacity),
         }
     }
 }
@@ -108,6 +120,7 @@ impl SettingsArgs {
         self.memory_pressure.render(&mut command_line);
         self.shutdown.render(&mut command_line);
         self.resources.render(&mut command_line);
+        self.capacity.render(&mut command_line);
         command_line.arguments
     }
 }

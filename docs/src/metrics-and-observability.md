@@ -237,14 +237,15 @@ wall-clock reading, and the Prometheus histogram takes the batch in one flush.
 
 Every node also exposes its own interconnection: the authenticated HTTP/2 pools it carries internal
 traffic over, the execution admission every variable-size operation passes through, its consensus
-retention, and the reactor delay they share. These series describe the exporting node only, so they
-carry no node label, and they are aggregated by dimensions whose value sets are fixed: `class`,
-`direction`, `operation`, `reason`, and `outcome`. None of them carries a branch key, a peer
-identity, a domain, or an operation identifier.
+retention, the reactor delay they share, and the timing drift it sees between its peers and the
+leader. These series describe the exporting node only, so they carry no node label, and they are
+aggregated by dimensions whose value sets are fixed: `class`, `direction`, `operation`, `reason`,
+and `outcome`. None of them carries a branch key, a peer identity, a domain, or an operation
+identifier.
 
 `class` is the traffic class on transport series — `management`, `commands`, `replication`, `relay`,
 or `bulk` — and the execution class on admission series — `management`, `commands`, `relay`, `bulk`,
-`restore_metadata`, `credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
+`bulk_window`, `restore_metadata`, `credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
 `bulk_cpu`, `consensus_storage`, `filesystem_storage` for workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
 `discovery`, `liveness`, `progress`, `admission`, `cancellation`, or `terminal`.
 
@@ -256,8 +257,10 @@ Transport pools:
   and `operation`
 - `nervix_interconnect_connections_established_total`: connections established, by `class`
 - `nervix_interconnect_connection_failures_total`: connections that failed to establish or ended,
-  by `class` and `reason`, where `reason` is `setup`, `handshake`, `capacity`, `closed`, or
-  `resolution` for an attempt whose peer's advertised host did not resolve
+  by `class` and `reason`, where `reason` is `setup`, `handshake`, `capacity`, `closed`,
+  `resolution` for an attempt whose peer's advertised host did not resolve, or `prerequisite` for
+  one that ended because one node cannot run beside the other: a prerequisite they must share
+  differs, or a timing is outside the bound two nodes may hold apart
 - `nervix_interconnect_stream_resets_total`: streams that ended without a result, by `class` and
   `reason`, where `reason` is `deadline`, `capacity`, `peer`, `shutdown`, or `malformed`
 - `nervix_interconnect_quota_failures_total`: requests refused because their reserved subquota was
@@ -342,6 +345,15 @@ Consensus retention:
   holds against deletion, the readers those pins are held for, and generations waiting to be
   deleted
 
+Cluster prerequisites:
+
+- `nervix_cluster_timing_drift_nodes`: the live nodes whose Raft heartbeat, gossip interval or
+  clock-skew tolerance differs from the leader's, as this node's gossip sees them. It reads `-1`
+  while this node knows no leader or no record the leader published, rather than a zero that would
+  claim every node agrees. A difference within the bound two nodes may hold apart is counted too,
+  so the series shows a rolling change in progress; `DESCRIBE CLUSTER` names the nodes and the
+  values, as [Node Settings](./node-settings.md#prerequisites-at-join) describes
+
 These series answer two operational questions directly. A class that is saturated shows a reserved
 byte count at its capacity, or running jobs at its worker count with pending jobs behind them,
 while the other classes stay free — that is the isolation the pools exist for. A control answer
@@ -353,9 +365,9 @@ arriving late while bulk work runs shows up as reactor delay and as request seco
 Every node publishes its restore checkpoint maintenance after each sweep that completes:
 `nervix_restore_staging_bytes`, `nervix_restore_staging_keys` and
 `nervix_restore_staging_limit_bytes` are gauges of the unpublished restored checkpoint key and
-value bytes, their key count and the configured allowance; `nervix_restore_staging_reclaimed_bytes_total`
-and `nervix_restore_staging_sweeps_total` count the bytes completed sweeps removed and the sweeps
-themselves; and `nervix_restore_keyspaces_disk_bytes` is the disk allocation of the shared
+value bytes, their key count and the allowance the node configured or derived from its database
+volume; `nervix_restore_staging_reclaimed_bytes_total` and `nervix_restore_staging_sweeps_total`
+count the bytes completed sweeps removed and the sweeps themselves; and `nervix_restore_keyspaces_disk_bytes` is the disk allocation of the shared
 checkpoint keyspaces. They read zero until the node's first sweep completes. Backups have no metric
 family of their own: their transfers appear in the interconnection series and their conversions in
 the `bulk` and `restore_metadata` memory classes. [Backup And

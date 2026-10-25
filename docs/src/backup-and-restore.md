@@ -493,8 +493,11 @@ ends it.
 ### Restore Checkpoint Storage Quota And Metrics
 
 `nervix-server --restore-staging-max-bytes <bytes>` and
-`NERVIX_RESTORE_STAGING_MAX_BYTES` set the node-local unpublished checkpoint limit, defaulting to
-`128GiB`. This is separate from the quota for archive and transfer files. Admission counts the
+`NERVIX_RESTORE_STAGING_MAX_BYTES` set the node-local unpublished checkpoint limit. Without them the
+node derives it at startup as the smaller of `128GiB` and the size of the volume that holds its
+database, and a given limit larger than that volume refuses the start, as
+[The Startup Preflight](./node-settings.md#the-startup-preflight) describes. This is separate from
+the quota for archive and transfer files. Admission counts the
 current key and value bytes of every unpublished restored namespace across all domains, including
 partial chunks, headers, indices and receipts, reading each unpublished entry one chunk at a time
 without assembling a payload. The complete incoming checkpoint footprint must fit before the first
@@ -520,7 +523,7 @@ zero until the first sweep completes:
 | --- | --- |
 | `nervix_restore_staging_bytes` | Current unpublished checkpoint key and value bytes |
 | `nervix_restore_staging_keys` | Current unpublished checkpoint key count |
-| `nervix_restore_staging_limit_bytes` | Configured unpublished checkpoint allowance |
+| `nervix_restore_staging_limit_bytes` | Unpublished checkpoint allowance, as configured or derived from the database volume at startup |
 | `nervix_restore_staging_reclaimed_bytes_total` | Unpublished and unreferenced active checkpoint key/value bytes removed by completed sweeps since node start |
 | `nervix_restore_staging_sweeps_total` | Completed sweeps since node start |
 | `nervix_restore_keyspaces_disk_bytes` | SST allocation of shared checkpoint and publication keyspaces |
@@ -875,7 +878,7 @@ that compare restored and re-exported state.
 | Restore conversion admission wait | 30 seconds after the node first refuses one unit for room: a window section, a window while its checkpoint is finished, or a keyspace. The unit is converted again every 50 ms |
 | Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the relay memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
-| Unpublished restore checkpoint keys and values per node | 128 GiB by default; configurable with `--restore-staging-max-bytes` |
+| Unpublished restore checkpoint keys and values per node | The smaller of 128 GiB and the size of the volume that holds the node database by default; configurable with `--restore-staging-max-bytes`, up to that size |
 | Freeze of one running domain | From its pause until its owners have staged their state, at most the backup's `TIMEOUT`, or the 60-second domain drain timeout when none is given; archive assembly and the download follow the resume |
 
 The freeze covers only the drain of admitted work, the confirming force flush and the owners'

@@ -7,17 +7,21 @@
 //!   convergence, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
 //!   Iceberg-catalog-gate, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag,
 //!   runner-offload, server-executable, stallable-TCP-proxy, unaccepted-address,
-//!   process-observation, process-report, console-connection and WebSocket peer regressions with
-//!   Rust's test runner, and the stand-in nodes, clients, images and processes they talk to.
+//!   process-observation, process-report, WebSocket close-reply, console-connection and WebSocket peer regressions
+//!   with Rust's test runner, and the stand-in nodes, clients, images and processes those regressions
+//!   talk to.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
 //!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, gRPC-receiver,
 //!   NATS-observer, runner-lag, runner-offload, server-executable, stallable-TCP-proxy,
-//!   unaccepted-address, process-observation, process-report, console-connection, WebSocket peer and
-//!   materialized-state diagnostic harness modules, the product's shutdown coordinator a stopping
+//!   unaccepted-address, process-observation, process-report, WebSocket close-reply,
+//!   console-connection, WebSocket peer and materialized-state diagnostic harness modules, the product's shutdown
+//!   coordinator a stopping
 //!   node is read through, and the client wire session protocol the stand-in nodes answer status
 //!   requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
+
+use websocket_close::reply_to_close;
 
 #[path = "common/broker_observer.rs"]
 mod broker_observer;
@@ -117,6 +121,10 @@ mod suite_watchdog;
 mod unaccepted_address;
 #[path = "common/unaccepted_address_tests.rs"]
 mod unaccepted_address_tests;
+#[path = "common/websocket_close.rs"]
+mod websocket_close;
+#[path = "common/websocket_close_tests.rs"]
+mod websocket_close_tests;
 
 #[path = "websocket_lifecycle/peer.rs"]
 #[allow(

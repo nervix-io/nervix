@@ -133,6 +133,15 @@ an execution plan receives it. `WebsocketDataFrame` carries either text or binar
 text tag cannot accompany invalid UTF-8. Each message retains its connection's immutable response
 header snapshot; the quiesce buffer retains the same handle beside the typed frame kind.
 
+The validated WebSockets client configuration carries the handshake capacity as `NonZeroU16` and
+message/frame limits as `NonZeroU32`. Decimal CONFIG values cross this boundary once; zero,
+overflow and an unschedulable ping-derived idle deadline are typed configuration refusals. The
+effective idle duration is already established before planning. A handshake attempt owns its
+bounded queue until signaling succeeds; only the completed queue moves into ordinary source
+reads. Dropping or failing the negotiating future drops that exact queue, so its frames cannot
+become data for a replacement connection. After a completed queue drains, its absent channel is
+represented by `None`, and steady reads use only task-owned connection state.
+
 Zero work outstanding, an initial sequence value, an empty payload, and a genuinely empty result
 remain ordinary values. A documented scalar function may return zero for a particular input;
 that result is part of the function contract. Arrow values under a null or failure validity mask
@@ -146,6 +155,15 @@ distinct typed ABI verdicts. Protocol decoding checks the complete size-prefixed
 identifier access and verifies offsets and counts before constructing owned values.
 
 ## Absence And Distinct States
+
+**MQTT size admission.** A source packet is either an admitted publish with independently owned
+bytes or an oversized outcome with an optional prepared acknowledgement. Absence means that QoS
+requires none or the client acknowledges automatically. A discard is explicitly deferred for
+its ordinary prefix, unrequested with its deadline, or requested with its confirmation target.
+The following read starts its optional keep-alive deadline after the host acknowledges the
+ordinary prefix; that original deadline then survives cancellation. The connection retains at
+most one discard and clears it only when it returns the size outcome after confirmation. See
+[MQTT source connections](./connector-contract.md#mqtt-source-connections).
 
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
@@ -293,6 +311,23 @@ requires batching and which publishing modes it accepts. A client Model names th
 configures as a typed kind, so a source or an emitter is matched with its client by comparing kinds
 rather than labels. A session producer's source is no transport, so the transport union holds no
 Model of it; the kind union still names it, because capability decisions ask about every source.
+
+Direct-value entities declare their mapped field types in the same vocabulary. Codec and native
+bodies have no direct-mapping contract; column mappings and named protocol fields have distinct
+contracts. The registry infers each mapping's type and checks it without coercion before accepting
+the candidate graph. It also establishes required batching and schedulable transport delivery
+durations there. Planning consumes those guarantees, including the presence of a required batch,
+and an invalid alteration leaves the accepted configuration intact.
+
+RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
+and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch
+timeout; both acknowledged variants own an ACK timeout and retry policy. Zero cannot accidentally
+request AMQP's unlimited prefetch. The
+composed Plexus parser rejects a count outside `1..=65535` instead of truncating it. Runtime
+composition passes either automatic consumption or that exact nonzero count to the engine plan.
+The engine does not recover the mode from a missing timeout or a numeric marker. The host's
+settlement contract separately distinguishes batch commit boundaries from independent per-delivery
+ACK/NACK boundaries.
 
 Each emitter destination also owns its closed publishing enum: a Kafka topic can hold its own
 `NO ACK` or acknowledged policy, while an HTTP request can hold only its request acknowledgement

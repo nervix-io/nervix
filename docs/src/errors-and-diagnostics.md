@@ -177,6 +177,7 @@ attempt, so reporting an immediate local refusal does not create an unpaced retr
 | Replicated transaction mutation | The Raft response's `TransactionMutationError` | The state machine's typed refusal, cloned from the report's current context when the response is built | The proposer creates a new report from the typed refusal |
 | Consensus append stream | The stream's wire records | A matching, conflicting or higher-vote answer, or the request error | The leader hands Raft an unreachable-peer error that names the target and the reason |
 | Interconnect remote operation | The failure's class and subject, with the answering node's description for an executed failure only | The classified result; the local chain is not serialized | The requester keeps the class beside its own target and placement context |
+| Interconnect connection handshake | The answer's refusal | The `PrerequisiteMismatch` the accepting node judged, seen from that node | The dialing node creates `TransportError::RefusedByPeer` from the mismatch, reversed to its own side |
 | Remote relay payload refused before admission | The refusal's reason text | The rendered chain | The forwarding node receives the reason as text |
 | WASM guest ABI | An integer result code, and the reason on the global-error channel | The code of the guest error's current context, or the rendered chain as the reason of a guest failure | The host creates a guest-call report that holds the code or the reason |
 | Structured message error | The record's reference, code, operation, affected fields, time and message | The typed reason that selects the code and a non-sensitive message | The error route receives the record, never the report |
@@ -495,10 +496,10 @@ authority.
 ### Name Resolution
 
 The node resolver's own errors belong to `nervix-dns`. A resolver configuration that cannot be
-loaded is a `DnsConfigurationError`, which fails node startup beneath
-`failed to load the name resolver configuration` and a native client's connection as
-`ClientError::LoadDnsConfiguration`. A lookup that fails is a `DnsLookupError`: the host as the
-caller wrote it and one `DnsLookupFailure`, the closed set that
+loaded is a `DnsConfigurationError`, which fails node startup beneath the startup preflight's
+`PreflightError::Resolver`, `failed to load the name resolver configuration`, and a native client's
+connection as `ClientError::LoadDnsConfiguration`. A lookup that fails is a `DnsLookupError`: the
+host as the caller wrote it and one `DnsLookupFailure`, the closed set that
 [Lookup Outcomes](./name-resolution.md#lookup-outcomes) lists. A client library that resolves
 through one of the resolver's hooks receives the `DnsLookupError` itself and keeps it among the
 causes of its own connection error, where `DnsLookupError::find_in` recovers it. The HTTP request
@@ -517,8 +518,8 @@ The node's own trace export waits for the resolver installed by startup. Its con
 `TraceConnectError` distinguishes a closed installation, a connection timeout, and a Hyper
 connection failure retaining its `DnsLookupError` cause. Tonic and the OTLP SDK report the failed
 export. The export timeout encloses DNS and TCP after resolver installation; a missing DNS
-configuration still fails startup as
-`AppError::LoadDnsConfiguration`. Telemetry failures have no connector retry or ACK disposition.
+configuration still fails startup, in the startup preflight, as `PreflightError::Resolver` beneath
+`AppError::Preflight`. Telemetry failures have no connector retry or ACK disposition.
 
 ### Connectors
 
@@ -600,6 +601,15 @@ chain, down to a `connect_timeout_ms` it ran out of, which `DESCRIBE EMITTER` sh
 attaches credentials from the address. A `NO ACK` round trip that runs out of the client's
 `timeout_ms` fails the write as a publish failure with the elapsed deadline as its typed cause and
 its text leading the report.
+
+RabbitMQ consumption keeps a failed Lapin receive, ACK or NACK as the typed cause beneath
+`RabbitMqQueueIngestorError`; the host reports that chain through its ordinary ingestor-failure boundary.
+A requested batch deadline that cannot be represented is `RabbitMqQueueIngestorError::BatchDeadline`.
+If a stream failure or invalid deadline follows gathered deliveries, the reader hands those
+deliveries to the host before reporting the deferred failure on its next read. A parallel
+delivery's graph refusal rejects only its own position. A failed transport settlement retains
+the unresolved positions for the broker-redelivery recovery path, without counting positions
+already confirmed or requeued on that connection.
 
 A RabbitMQ publish that ends with the broker closing the emitter's channel is classified by the
 broker's own reason, which the emitter reads from its connection. A refusal of a message body larger
@@ -685,7 +695,11 @@ which keeps it beneath `MqttTopicIngestorError::Acknowledge`; a task that fails 
 publish for room in a full read-ahead fails as `MqttTopicIngestorError::ReadAheadFull`, naming the
 read-ahead's capacity, because nothing would write it before the host reads again, and one whose
 connection wrote nothing for a keep-alive interval fails as
-`MqttTopicIngestorError::AcknowledgementDeadline`, naming the keep-alive. A emitter's event
+`MqttTopicIngestorError::AcknowledgementDeadline`, naming the keep-alive. The same causes apply when an
+ingestor read acknowledges an oversized publish: they remain beneath `IngestorError::Read`, and the
+ingestor drops the connection. A successfully acknowledged oversized publish is an ordinary
+`IngestorBatch::Oversized` outcome, counted by the host without a diagnostic or codec rejection.
+An emitter's event
 loop records the connection error's message as the emitter's transient error, which
 `DESCRIBE EMITTER` shows, and reconnects on the emitter's retry policy. None rejects a record or
 acknowledges input. A QoS 1 or 2 publish keeps the driver's `ClientError` when the client refuses
@@ -868,6 +882,12 @@ broker ingestor's acknowledgement that its transport fails to confirm, and a rej
 take back, become the ingestor's transient status with the innermost context of the source's
 report as the reason, and only a later confirmed acknowledgement clears it.
 
+A WebSockets connection's idle expiry keeps `DeadlineElapsed` with the explicit
+`idle_timeout_ms` key, or `WebsocketsConnectionIngestorFailure::IdleTimeout` with its derived effective budget,
+beneath `IngestorError::Read`. The fieldless timer expiry is retained as a typed attachment, so the
+innermost context projected into `DESCRIBE` still names the actionable key or bound. Oversized
+frames or messages retain the driver's typed capacity failure and end that connection's read.
+
 Each source or emitter publishes its safe transient error and optional retry together. An emitter
 retains task-owned and connector-owned failures independently in one atomic publication. A publish
 or commit outcome clears the task failure; a retained connector's progress clears the connector
@@ -949,6 +969,14 @@ sequenceDiagram
 
 ### Registry Validation And Planning
 
+Connector declaration failures carry `RegistryError::InvalidConnectorDeclaration` with the domain,
+typed node identity, and a `ConnectorDeclarationIssue` naming the refused clause or mapping key.
+Duration failures retain the duration reader's typed cause; an unschedulable duration and an
+inverted retry range are distinct issues. A mapped-value type failure reports the declared type
+and the expression's inferred Arrow type, such as `VALUES key 'severity_number' requires I32,
+found Int64`. These are command refusals before publication, including during `ALTER`, rather
+than retried source or sink initialization failures. They never include a record's values.
+
 Registry validation and planning refuse invalid models before graph activation. Validation names the
 owning node, the route when the rule is route-local, the operation, and relevant fields or
 references. A branch mismatch in an error route, for example, identifies the source route, error
@@ -964,7 +992,8 @@ is created. The refusal names the connector, the client and the domain, with the
 or timeout rule, that rule's error is beneath the key, such as `PROMETHEUS client 'prom_main' in
 domain 'shop' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string`.
 A `WEBSOCKETS CLIENT` uses the same validation boundary with
-`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint or positive-duration values,
+`WebsocketsClientConfigError`: unknown/repeated keys, invalid endpoint, positive-duration or
+portable positive limit values, an unschedulable ping-derived idle bound,
 TLS keys on `ws`, and unpaired identity files are typed refusals naming their key, client and domain.
 `WebsocketsUpgradeHeadersError` names the connection ingestor and offending field without printing
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
@@ -1177,10 +1206,12 @@ owns these harness bounds and the distinction from product shutdown deadlines.
 
 The WebSocket declaration fixture treats `Protocol(HandshakeIncomplete)` during an opening
 upgrade as a cancelled attempt. It records that outcome and keeps its payload gate for the next
-completed upgrade. Other handshake errors and established-stream failures preserve their typed
-tungstenite cause beneath the I/O error; a fixture task ending with one still fails the scenario's
-After hook. [Fixture cleanup](./integration-test-lifecycle.md#what-cleanup-releases) owns the
-listener's lifetime.
+completed upgrade. A received Close frame supplies the graceful-close observation. When flushing
+its reply, `ConnectionClosed`, a TCP reset or a broken pipe means the initiator already ended its
+transport, so that observed close completes normally. Other handshake errors, established-stream
+reads and unexpected reply failures preserve their typed tungstenite cause beneath the I/O error;
+a fixture task ending with one still fails the scenario's After hook.
+[Fixture cleanup](./integration-test-lifecycle.md#what-cleanup-releases) owns the listener's lifetime.
 
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
@@ -1193,12 +1224,36 @@ transaction.
 The node converts its settings once, where it reads its options, and before it opens a store. Each
 owner's definition validates its own value and its relationships with the settings it depends on,
 so defaults and an operator's values cross the same check, and each refusal names the settings by
-their option names with their values. A minimum election timeout that does not exceed the heartbeat
-interval, or a maximum that does not exceed the minimum, is a `RaftTimingError` beneath
-`AppError::InvalidRaftTimings`. A drain timeout above the shutdown timeout is a
-`ShutdownSettingsError` beneath `AppError::InvalidShutdownTimeouts`. A setting that a test names for
-a node but that the server's command line does not read keeps clap's error beneath
-`AppError::ReadSettings`.
+their option names with their values. A Raft heartbeat below one millisecond, or one so long that
+twelve of it do not fit the milliseconds consensus counts an election timeout in, is a
+`RaftTimingError` beneath `AppError::InvalidRaftTimings`. A gossip interval or a clock-skew
+tolerance below one millisecond, or a gossip interval twenty of which do not fit a duration, is a
+`MembershipSettingsError` beneath `AppError::InvalidMembershipSettings`, and a memory limit of zero
+a `CapacitySettingsError` beneath `AppError::InvalidCapacitySettings`. A drain timeout above the
+shutdown timeout is a `ShutdownSettingsError` beneath `AppError::InvalidShutdownTimeouts`. A
+setting that a test names for a node but that the server's command line does not read keeps clap's
+error beneath `AppError::ReadSettings`.
+
+The startup preflight runs once the settings have converted and before the node binds a listener
+or opens a store. Each check that fails is a `PreflightError` beneath `AppError::Preflight`, and
+each variant names what it judged with the values involved: `ExecutionLimits` for execution limits
+the memory budgets cannot hold, `Execution` for preflight work the executor could not admit,
+`UnaddressableBudgets` for budgets whose sum is no byte count, `MemoryBelowBudgets` and
+`WatermarkAboveMemory` with the memory limit and where it came from, `DirectoryUnavailable` and
+`DirectoryNotWritable` with the directory and its path, `VolumeUnreadable` for a volume whose size
+cannot be read, `QuotaExceedsVolume` with the setting, the quota, the volume's capacity and the
+directory, and `Resolver` for a name resolver that does not load. A check that failed on an
+operation keeps that operation's report beneath its variant: the operating system's error for a
+directory or a volume, the executor's for its limits or its admission, and the resolver loader's.
+The node logs the whole chain at `error` as `the startup preflight refused this node` and exits
+with it. [The Startup Preflight](./node-settings.md#the-startup-preflight) lists the checks.
+
+A node that is refused as it joins stops with `AppError::JoinRefused` above a `JoinRefusedError`.
+`Prerequisite` holds the `JoinRefusal` that names the peer and the `PrerequisiteMismatch` from this
+node's side, and `ClockSkew` names the peer whose clock was judged, the skew one probe proved and
+this node's tolerance. The refusal is logged at `error` as
+`this node was refused at join and stops` when the node requests its own stop, and returned once
+its shutdown phases have run, so the exit renders the whole chain.
 
 Memory-pressure watermarks are validated the same way. A watermark set without its pair, a low
 watermark that is not below the high one, or a zero check interval while the watermarks are set is
@@ -1475,13 +1530,24 @@ the total time to transfer a frame. Expiry resets the exact stream; steady byte 
 the stream even when a large frame spans several progress intervals.
 
 The interconnect owns three kinds of failure. `TransportError` is a connection, TLS, framing,
-limit, deadline or relay delivery failure of the transport itself. `RequestError` is a typed
-request that could not be admitted, encoded, delivered or answered, with the peer's own
-`RemoteRequestFailure` when the peer's transport refused it. `RemoteOperationFailure` is the
-answering node's classified result of an operation it received, `Rejected`, `Unavailable`,
-`NotReady` or `Failed`, with a subject that is a domain, an entity, a state or a subscription
-interest. [Failure Ownership And Persistence](./interconnect.md#failure-ownership-and-persistence)
-owns what each means for a requester.
+limit, deadline or relay delivery failure of the transport itself, or a prerequisite refusal:
+`RefusedByPeer` when the dialed node refused this node and `IncompatiblePeer` when this node
+refused a peer, each with the peer and the typed `PrerequisiteMismatch`. A judged mismatch, and the
+`JoinRefusal` the transport's join progress holds, are declared outcome boundaries: they are what a
+join decided, not a failure of the node that judged it, and the server decides from their typed
+values. `RequestError` is a typed request that could not be admitted, encoded, delivered or
+answered, with the peer's own `RemoteRequestFailure` when the peer's transport refused it.
+`RemoteOperationFailure` is the answering node's classified result of an operation it received,
+`Rejected`, `Unavailable`, `NotReady` or `Failed`, with a subject that is a domain, an entity, a
+state or a subscription interest.
+[Failure Ownership And Persistence](./interconnect.md#failure-ownership-and-persistence) owns what
+each means for a requester.
+
+A bulk stream that cannot back its receive window sends nothing. Waiting for a window past the
+request's deadline reports `RequestTimeout`, like waiting for a stream slot. A `bulk_window` budget
+that refuses the reservation reports `BulkReceiveWindowRefused` naming the peer, with the typed
+`AdmissionError` beneath it. A transport whose budget cannot back even one window refuses to bind
+with `BulkReceiveWindowUnbacked`, which carries the window and the budget as numbers.
 
 The interconnect validates and bounds the wire request before its operation handler runs. A
 delivery correlation that has no free position reports `CorrelationCapacity`; an exhausted
@@ -1678,6 +1744,12 @@ context into the response where the response is built; the report's frames stay 
 evaluated it. The proposer wraps the typed refusal in a new report as
 `ConsensusTransactionError::Mutation`, beside `Consensus` for a proposal that failed and
 `InvalidResponse` for a response of another kind.
+
+A leader that leaves a gossip-discovered node outside the membership records why as a typed
+admission refusal rather than a report: the node has published no prerequisite record the leader
+can read, or it cannot run beside a live voter, which it names with the mismatch. The refusal is an
+outcome of membership reconciliation, logged once while it holds, and never fails the
+reconciliation.
 
 The durable store's own failure is a `StorageFailure`: a write beyond its admitted byte budget, a
 record that does not encode, a failed database write, stored state of an unrecognized shape, a
