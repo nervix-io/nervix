@@ -121,6 +121,12 @@ resolves the reference to its immutable local image ID. A reference that is not 
 bounded to 180 seconds. A reference that still cannot be resolved fails the run in preflight with a
 setup error.
 
+Both local overlays replace the base image's revision label with the checkout supplying their
+binaries. A tracked modification adds `-dirty` to that revision, so a suite requiring the clean
+commit refuses the image. A failed Git identity lookup stops the build before Docker runs. The
+overlay identity controls exercise both build recipes with inert tools; they run through
+`just test-chaos-local-image` and the full self-test.
+
 The Compose file has no build directive and no fallback tag. Every node and every disposable
 container of the image runs the resolved ID: the CLI containers, the clock observers and the
 deadlock report. The manifest records:
@@ -712,6 +718,11 @@ These controller bounds never relax a product recovery deadline. Pumba parameter
 product deadlines do not change with the sample size. `just test-chaos-degraded-evidence` and
 `just test-chaos-rate-probe` pin the counts, intervals and launch and sample bounds, and exercise
 both sides of the inclusive thresholds.
+
+The rate-probe self-test keeps its sender and receiver namespace owners alive until its cleanup
+removes them. Their lifetime follows the whole control sequence, so a slow worker cannot expire a
+namespace before a later control reaches it. Probe, sample and controller deadlines retain their
+own bounds.
 
 ### Network Preflight
 
