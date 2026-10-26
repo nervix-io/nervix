@@ -657,18 +657,14 @@ async fn pack_pending_rows(
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use std::collections::VecDeque;
-
     use error_stack::{AttachmentKind, FrameKind};
-    use nervix_connector::{
-        EmitterFinish, EmitterFinishResult, EmitterRecord, EmitterRecordId, EmitterWriteError,
-        PerRecordOutcome,
+    use nervix_connector_fake::{
+        FakeEmitter, PayloadPreparation, PublishAnswer as Answer, Records,
     };
     use nervix_models::{
         BatchMessageLimit, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec,
         CreateWireSchema, JsonType, ResolvedCodecWireFormat, WireSchemaField,
     };
-    use nervix_primitives::sync::blocking::Mutex;
 
     use super::*;
     use crate::{
@@ -678,64 +674,6 @@ mod tests {
         },
         runtime_schema::{RuntimeSchemaError, compile_codec, test_runtime_row},
     };
-
-    /// How the scripted emitter answers one write.
-    enum Answer {
-        /// The emitter fails before it answers for any record, as a stalled broker does.
-        Stall,
-        /// The emitter confirms every record of the write.
-        ConfirmAll,
-    }
-
-    /// A record emitter that keeps every payload it was handed and answers each write from a script.
-    struct ScriptedEmitter {
-        writes: Arc<Mutex<Vec<Vec<Vec<u8>>>>>,
-        answers: VecDeque<Answer>,
-    }
-
-    #[async_trait]
-    impl EmitterLifecycle for ScriptedEmitter {
-        fn kind(&self) -> nervix_models::EmitterEntityKind {
-            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
-        }
-
-        async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
-            Ok(EmitterFinish::NothingHeld)
-        }
-    }
-
-    #[async_trait]
-    impl RecordEmitter for ScriptedEmitter {
-        async fn publish(
-            &mut self,
-            records: Vec<EmitterRecord>,
-        ) -> PerRecordOutcome<EmitterRecordId> {
-            self.writes.lock().push(
-                records
-                    .iter()
-                    .map(|record| record.payload.clone())
-                    .collect(),
-            );
-            let mut outcome = PerRecordOutcome::with_capacity(records.len());
-            let answer = self
-                .answers
-                .pop_front()
-                .expect("the test scripts an answer for every write it makes");
-            match answer {
-                Answer::Stall => {
-                    outcome.fail(Report::new(EmitterWriteError::Publish {
-                        connector: "scripted",
-                    }));
-                }
-                Answer::ConfirmAll => {
-                    for record in &records {
-                        outcome.deliver(record.id);
-                    }
-                }
-            }
-            outcome
-        }
-    }
 
     fn json_codec() -> Arc<CompiledCodec> {
         let wire = CreateWireSchema {
@@ -815,50 +753,6 @@ mod tests {
         )
     }
 
-    struct PreparingEmitter {
-        publisher: ScriptedEmitter,
-        preparations: usize,
-    }
-
-    #[async_trait]
-    impl EmitterLifecycle for PreparingEmitter {
-        fn kind(&self) -> nervix_models::EmitterEntityKind {
-            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
-        }
-
-        async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
-            self.publisher.finish(deadline).await
-        }
-    }
-
-    #[async_trait]
-    impl RecordEmitter for PreparingEmitter {
-        #[cfg_attr(
-            nervix_lint,
-            nervix::error_boundary(outcome, reason = "the fixture implements payload refusals")
-        )]
-        fn prepare_payload(
-            &mut self,
-            payload: Vec<u8>,
-            _occurred_at: Timestamp,
-        ) -> Result<Vec<u8>, nervix_models::StructuredMessageError> {
-            self.preparations = self
-                .preparations
-                .checked_add(1)
-                .assured("the fixture prepares only the two payloads the test supplies");
-            let mut prepared = format!("prepared-{}:", self.preparations).into_bytes();
-            prepared.extend_from_slice(&payload);
-            Ok(prepared)
-        }
-
-        async fn publish(
-            &mut self,
-            records: Vec<EmitterRecord>,
-        ) -> PerRecordOutcome<EmitterRecordId> {
-            self.publisher.publish(records).await
-        }
-    }
-
     #[nervix_primitives::test]
     async fn row_and_batch_retries_prepare_each_payload_once() {
         let policy = EmitterBatchPolicy {
@@ -871,15 +765,11 @@ mod tests {
         for batch in [None, Some(policy)] {
             nervix_primitives::task::consume_budget().await;
             let context = emitter_context();
-            let writes = Arc::new(Mutex::new(Vec::new()));
+            let mut publisher = FakeEmitter::<Records>::new([Answer::Fail, Answer::ConfirmAll]);
+            publisher.preparation = PayloadPreparation::Numbered;
+            let writes = publisher.observations();
             let mut connector = EncodedRecordEmitter {
-                connector: Box::new(PreparingEmitter {
-                    publisher: ScriptedEmitter {
-                        writes: writes.clone(),
-                        answers: VecDeque::from([Answer::Stall, Answer::ConfirmAll]),
-                    },
-                    preparations: 0,
-                }),
+                connector: Box::new(publisher),
                 codec: json_codec(),
                 batch,
             };
@@ -915,7 +805,7 @@ mod tests {
                 )
                 .await
                 .assured("the second scripted publish confirms both payloads");
-            let writes = writes.lock();
+            let writes = writes.lock().payloads();
             assert_eq!(writes.len(), 2);
             assert_eq!(writes[0].len(), 1);
             assert_eq!(writes[1].len(), 2);
@@ -929,12 +819,10 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_retry_writes_the_retained_payloads_unchanged_before_packing_new_rows() {
         let context = emitter_context();
-        let writes = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeEmitter::<Records>::new([Answer::Fail, Answer::ConfirmAll]);
+        let writes = publisher.observations();
         let mut connector = EncodedRecordEmitter {
-            connector: Box::new(ScriptedEmitter {
-                writes: writes.clone(),
-                answers: VecDeque::from([Answer::Stall, Answer::ConfirmAll]),
-            }),
+            connector: Box::new(publisher),
             codec: json_codec(),
             batch: Some(EmitterBatchPolicy {
                 max_messages: BatchMessageLimit::try_from(2_u32)
@@ -983,7 +871,7 @@ mod tests {
             .expect("the retry is confirmed");
 
         assert_eq!(
-            *writes.lock(),
+            writes.lock().payloads(),
             vec![
                 vec![
                     br#"[{"value":1},{"value":2}]"#.to_vec(),
@@ -1007,12 +895,10 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_retry_writes_retained_row_payloads_unchanged() {
         let context = emitter_context();
-        let writes = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeEmitter::<Records>::new([Answer::Fail, Answer::ConfirmAll]);
+        let writes = publisher.observations();
         let mut connector = EncodedRecordEmitter {
-            connector: Box::new(ScriptedEmitter {
-                writes: writes.clone(),
-                answers: VecDeque::from([Answer::Stall, Answer::ConfirmAll]),
-            }),
+            connector: Box::new(publisher),
             codec: json_codec(),
             batch: None,
         };
@@ -1050,7 +936,7 @@ mod tests {
             .expect("the retry is confirmed");
 
         let expected = vec![br#"{"value":1}"#.to_vec(), br#"{"value":2}"#.to_vec()];
-        assert_eq!(*writes.lock(), vec![expected.clone(), expected]);
+        assert_eq!(writes.lock().payloads(), vec![expected.clone(), expected]);
         assert!(prepared.is_empty());
         assert_eq!(batches[0].resolved_rows(), vec![true, true]);
     }
@@ -1142,12 +1028,10 @@ mod tests {
     async fn transformed_batch_packing_runs_on_the_extension_workers() {
         let executor = Executor::default();
         let context = context_with(executor.clone());
-        let writes = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeEmitter::<Records>::new([Answer::ConfirmAll]);
+        let writes = publisher.observations();
         let mut connector = EncodedRecordEmitter {
-            connector: Box::new(ScriptedEmitter {
-                writes: writes.clone(),
-                answers: VecDeque::from([Answer::ConfirmAll]),
-            }),
+            connector: Box::new(publisher),
             codec: jaq_codec(),
             batch: Some(EmitterBatchPolicy {
                 max_messages: BatchMessageLimit::try_from(2_u32)
@@ -1172,7 +1056,7 @@ mod tests {
             .await
             .expect("the packed write is confirmed");
 
-        assert_eq!(writes.lock().len(), 1);
+        assert_eq!(writes.lock().writes.len(), 1);
         let snapshot = executor.snapshot();
         assert!(snapshot.extension_cpu.admitted >= 1);
         assert_eq!(

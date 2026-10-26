@@ -55,6 +55,8 @@ pub(crate) struct NatsEndpoint {
     mode: watch::Sender<NatsEndpointMode>,
     /// How many connections the endpoint refused while it was down.
     refused: watch::Sender<u64>,
+    /// Publishes this endpoint has read but is holding instead of forwarding.
+    held: watch::Sender<u64>,
     /// Cancelled to end every connection the endpoint forwards, when the endpoint stops.
     connections: CancellationToken,
     listener: JoinHandle<()>,
@@ -67,18 +69,21 @@ impl NatsEndpoint {
         let local_addr = listener.local_addr()?;
         let (mode, observed) = watch::channel(NatsEndpointMode::Forwarding);
         let (refused, _) = watch::channel(0_u64);
+        let (held, _) = watch::channel(0_u64);
         let connections = CancellationToken::new();
         let listener = nervix_primitives::task::spawn(Self::accept(
             listener,
             server,
             observed,
             refused.clone(),
+            held.clone(),
             connections.clone(),
         ));
         Ok(Self {
             local_addr,
             mode,
             refused,
+            held,
             connections,
             listener,
         })
@@ -115,6 +120,31 @@ impl NatsEndpoint {
             .discarded("the endpoint holds the sender for as long as it can be asked");
     }
 
+    /// Waits for a publish that the endpoint has stopped reading behind.
+    pub(crate) async fn holding_a_publish(&self) {
+        let mut held = self.held.subscribe();
+        held.wait_for(|held| *held > 0)
+            .await
+            .discarded("the endpoint retains its held-publish observation sender");
+    }
+
+    /// Ends the active connections, waits for a refused reconnection, and forwards again.
+    pub(crate) fn reconnect_after_loss(&self) -> impl Future<Output = Instant> + use<> {
+        let mode = self.mode.clone();
+        let mut refused = self.refused.subscribe();
+        let before = *refused.borrow_and_update();
+        async move {
+            mode.send_replace(NatsEndpointMode::Down);
+            refused
+                .wait_for(|refused| *refused > before)
+                .await
+                .discarded("the endpoint retains its reconnection observation sender");
+            let forwarding_at = Instant::now();
+            mode.send_replace(NatsEndpointMode::Forwarding);
+            forwarding_at
+        }
+    }
+
     /// Forwards everything clients send once `delay` has passed, and answers when it started to.
     /// The returned future owns its control, so the action it runs beside can borrow the scenario.
     pub(crate) fn forward_everything_after(
@@ -135,6 +165,7 @@ impl NatsEndpoint {
         server: SocketAddr,
         mode: watch::Receiver<NatsEndpointMode>,
         refused: watch::Sender<u64>,
+        held: watch::Sender<u64>,
         connections: CancellationToken,
     ) {
         loop {
@@ -157,6 +188,7 @@ impl NatsEndpoint {
                 client,
                 server,
                 mode.clone(),
+                held.clone(),
                 connections.clone(),
             ));
         }
@@ -169,6 +201,7 @@ impl NatsEndpoint {
         client: TcpStream,
         server: SocketAddr,
         mode: watch::Receiver<NatsEndpointMode>,
+        held: watch::Sender<u64>,
         stopped: CancellationToken,
     ) {
         let Ok(server) = TcpStream::connect(server).await else {
@@ -181,7 +214,7 @@ impl NatsEndpoint {
         nervix_primitives::select! {
             _ = stopped.cancelled() => {}
             _ = down.wait_for(|mode| *mode == NatsEndpointMode::Down) => {}
-            _ = Self::forward_client_frames(&mut client_read, &mut server_write, mode) => {}
+            _ = Self::forward_client_frames(&mut client_read, &mut server_write, mode, held) => {}
             _ = tokio::io::copy(&mut server_read, &mut client_write) => {}
         }
     }
@@ -193,6 +226,7 @@ impl NatsEndpoint {
         client: &mut (impl AsyncBufRead + Unpin),
         server: &mut (impl AsyncWrite + Unpin),
         mut mode: watch::Receiver<NatsEndpointMode>,
+        held: watch::Sender<u64>,
     ) -> io::Result<()> {
         let mut publishes_since_mode_change = 0_usize;
         loop {
@@ -201,7 +235,9 @@ impl NatsEndpoint {
                 return server.shutdown().await;
             };
             // A frame read before the mode changed is held to the mode it is forwarded under.
+            let mut announced_hold = false;
             loop {
+                nervix_primitives::task::consume_budget().await;
                 if mode.has_changed().map_err(io::Error::other)? {
                     publishes_since_mode_change = 0;
                 }
@@ -216,6 +252,14 @@ impl NatsEndpoint {
                 };
                 if may_forward {
                     break;
+                }
+                if frame.is_publish && !announced_hold {
+                    held.send_modify(|held| {
+                        *held = held
+                            .checked_add(1)
+                            .assured("a scenario holds far fewer than 2^64 NATS publishes");
+                    });
+                    announced_hold = true;
                 }
                 mode.changed().await.map_err(io::Error::other)?;
             }

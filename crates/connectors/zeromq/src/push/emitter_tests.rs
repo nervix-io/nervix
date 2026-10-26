@@ -78,6 +78,19 @@ async fn open(config: &[(&str, &str)]) -> EmitterStartResult<ZeroMqPushEmitter> 
     opened
 }
 
+#[nervix_primitives::test]
+async fn invalid_bind_is_a_configuration_refusal_before_the_socket_opens() {
+    let error = match open(&[("addr", "tcp://127.0.0.1:not-a-port"), ("bind", "yes")]).await {
+        Ok(_) => panic!("an invalid bind value cannot open a socket"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error.current_context(),
+        EmitterOpenError::InvalidConfiguration { connector: ZEROMQ }
+    ));
+    assert!(error.contains::<nervix_connector::ClientConfigError>());
+}
+
 /// Publishes one record of `size` bytes, and fails the test if nothing bounds the publish.
 async fn publish(
     connector: &mut ZeroMqPushEmitter,
