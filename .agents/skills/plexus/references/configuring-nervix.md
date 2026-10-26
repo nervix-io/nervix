@@ -201,13 +201,16 @@ relay. Do not use them to scan across branches.
   confirms asynchronously. No operational mode variable is inferred.
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
   [Emitters → Pulsar](../../../docs/src/emitters.md#pulsar) and
-  [Finishing an emitter](../../../docs/src/connector-contract.md#finishing-a-emitter).
+  [Finishing an emitter](../../../docs/src/connector-contract.md#finishing-an-emitter).
 - A RabbitMQ queue ingestor uses automatic `MODE NO ACK`, prefetch-one `MODE ACK SEQUENTIAL`,
   or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
   Parallel `MAX` is 1 through 65,535 per instance. ACK/NACK follows each delivery's own graph
   outcome; a rejection requeues that delivery. `NO ACK` disables broker prefetch and cannot
   recover a delivery already consumed before downstream completion. See
   [Ingestors → RabbitMQ](../../../docs/src/ingestors.md#rabbitmq).
+- For Core NATS completion, reconnect retries and finish outcomes, read
+  [Emitters → NATS](../../../docs/src/emitters.md#nats) and
+  [Finishing an emitter](../../../docs/src/connector-contract.md#finishing-an-emitter).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry

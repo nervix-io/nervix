@@ -107,6 +107,13 @@ one the outermost context. A typed attachment carries a value for one consumer, 
 the retry delay its receiver stated for the emitter host to read. Neither replaces a context: a
 caller decides from contexts and typed fields.
 
+A Core NATS flush keeps its driver's typed failure beneath `CoreFlushError::ClientFlush`.
+A connection change is the separate `CoreFlushError::ConnectionChanged` failure, carrying the
+nonzero count whose delivery can no longer be certified. Publication and finish add their own
+`EmitterWriteError` or `EmitterFinishError::Flush` context and render the complete report for the
+emitter's transient description. An elapsed write still names its configured `timeout_ms`; an
+elapsed finish reports the pending count through `EmitterFinishError::Unsent`.
+
 Two failures of one operation stay one report. When a model alteration fails after its domain
 paused and resuming the domain fails too, the resume's report is added beside the alteration's and
 one context is placed above both, so a caller still finds a leadership loss in either branch. A

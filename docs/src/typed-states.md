@@ -167,6 +167,13 @@ ordinary prefix; that original deadline then survives cancellation. The connecti
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
 
+The Core NATS emitter's buffer is either empty or pending with a nonzero record count and its
+connection expectation. A pending write that began connected requires that same successful
+connection; one queued while disconnected requires the next connection. The state is consumed
+only once the driver drains its buffer, and a mismatched connection becomes a typed failure
+instead of certifying discarded bytes. A deadline leaves the pending state intact. This is
+volatile connector state, never a stored shape or a separate representation of the host's rows.
+
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
 is unchanged creates no retirement. A connector session catalog has a private constructor that
