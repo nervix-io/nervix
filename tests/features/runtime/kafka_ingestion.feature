@@ -585,6 +585,53 @@ Feature: Kafka ingestion
       | 1            | 0             |
       | 3            | 1             |
 
+  @kafka_no_ack_reconnect
+  Scenario Outline: A NO ACK Kafka ingestor whose broker is down reconnects on the doubling reconnect cadence on <cluster_size> nodes
+    Given a mock Kafka broker serves topic "no_ack_down_{{test_id}}"
+    And the mock Kafka broker goes down
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    # The broker is down when the ingestor starts, so every attempt to take up the topic's
+    # partitions fails within the client's half-second socket timeout.
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA down_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA down_wire MODE STRICT ( seq integer );
+      CREATE CODEC down_codec FROM WIRE JSON SCHEMA down_wire TO SCHEMA down_event;
+      CREATE RELAY down_events SCHEMA down_event UNBRANCHED;
+      CREATE KAFKA CLIENT down_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'auto.offset.reset' = 'earliest',
+        'socket.timeout.ms' = '500'
+      };
+      CREATE KAFKA TOPIC INGESTOR down_source
+        FROM down_kafka TOPIC 'no_ack_down_{{test_id}}'
+        OFFSET BY DOMAIN MODE NO ACK
+        ON QUIESCE SUSPEND DECODE USING down_codec
+        TO down_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION down_subscription TO down_events;
+      START;
+      """
+    # Without a declared retry policy the ingestor waits 250 ms after its first failure and doubles
+    # the wait after each one, so the wait reaches two seconds after four failures.
+    Then within "60s" DESCRIBE INGESTOR "down_source" on the leader node reports a reconnect backoff of at least "2s"
+    When the mock Kafka broker comes back up
+    And mock Kafka message is published to topic "no_ack_down_{{test_id}}"
+      """
+      {"seq":1}
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @kafka_refused_commit
   Scenario Outline: A Kafka ingestor on <cluster_size> nodes reports a commit its broker refuses as a transient status and reports progress only once the broker commits
     Given a mock Kafka broker serves topic "refused_commit_{{test_id}}"

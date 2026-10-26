@@ -245,7 +245,7 @@ identifier.
 
 `class` is the traffic class on transport series — `management`, `commands`, `replication`, `relay`,
 or `bulk` — and the execution class on admission series — `management`, `commands`, `relay`, `bulk`,
-`bulk_window`, `restore_metadata`, `credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
+`state_read_cache`, `bulk_window`, `restore_metadata`, `credentials` for memory, and `control_cpu`, `credentials_cpu`, `data_cpu`, `extension_cpu`,
 `bulk_cpu`, `consensus_storage`, `filesystem_storage` for workers. `operation` is the reserved request subquota: `shared`, `append`, `resource`, `snapshot`,
 `discovery`, `liveness`, `progress`, `admission`, `cancellation`, or `terminal`.
 
@@ -323,6 +323,10 @@ a second of flushing; see [Kafka client retirement](./connector-contract.md#kafk
 - `nervix_execution_jobs_total`, `nervix_execution_jobs_completed_total`,
   `nervix_execution_job_rejections_total`: jobs admitted, jobs that left a worker, and jobs refused
   because the class already held its whole wait queue
+
+For `state_read_cache`, a rejected charge means the optional retained view had no room. The
+generator can still return a complete uncached read using transient relay admission. The cache's
+capacity is derived from the relay budget and counted separately in the startup memory total.
 - `nervix_execution_job_queue_seconds_total` and `nervix_execution_job_work_seconds_total`: time
   admitted jobs spent waiting for a worker, and time completed jobs spent holding one
 

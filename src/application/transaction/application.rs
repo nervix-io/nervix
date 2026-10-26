@@ -66,6 +66,14 @@ impl SessionServiceImpl {
                     .await
                     {
                         Ok(()) => None,
+                        Err(error)
+                            if matches!(
+                                error.downcast_ref::<ConsensusError>(),
+                                Some(ConsensusError::LeadershipLost { .. })
+                            ) =>
+                        {
+                            return Ok(TransactionApplicationAttempt::Retry);
+                        }
                         Err(error) => Some(format!(
                             "transaction '{}' committed the WASM state reset, but it did not \
                              become usable: {error:#}",

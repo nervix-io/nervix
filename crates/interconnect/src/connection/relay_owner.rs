@@ -129,6 +129,17 @@ pub(super) struct RelayOwnersPublication {
     live_nodes: Option<BTreeSet<ClusterNodeName>>,
 }
 
+/// Where the attempt a grant asks for stands against its channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RelayGrantPosition {
+    /// The attempt takes the channel's next position.
+    Next,
+    /// The channel's batch before it is still unadmitted.
+    Busy,
+    /// The attempt is not the channel's next position.
+    OutOfOrder,
+}
+
 enum RelayPeerRun {
     Starting,
     AwaitingMembership { epoch: u64, binding_sequence: u64 },
@@ -289,26 +300,21 @@ impl RelayPeerOwner {
         self.state.lock().retired_status(attempt)
     }
 
-    pub(super) fn can_follow(&self, attempt: &RelayAttemptKey) -> bool {
-        self.state.lock().can_follow(attempt)
-    }
-
-    pub(super) fn channel_busy(&self, attempt: &RelayAttemptKey) -> bool {
+    /// Where a grant for `attempt` stands against its channel. A grant for the position after an
+    /// attempt whose outcome is decided retires that attempt and takes the position.
+    pub(super) fn grant_position(&self, attempt: &RelayAttemptKey) -> RelayGrantPosition {
         let mut state = self.state.lock();
-        let Some(sequence) = state.active_channels.get(&attempt.channel).copied() else {
-            return false;
-        };
-        let active = RelayAttemptKey {
-            channel: attempt.channel.clone(),
-            sequence,
-        };
-        if let Some(record) = state.attempts.get(&active)
-            && record.is_unadmitted()
-        {
-            return true;
+        if state.channel_busy(attempt) {
+            return RelayGrantPosition::Busy;
         }
-        state.active_channels.remove(&attempt.channel);
-        false
+        if state.retire_resolved_predecessor(attempt) {
+            self.observations.relay_channel_watermark_evicted();
+        }
+        if state.can_follow(attempt) {
+            RelayGrantPosition::Next
+        } else {
+            RelayGrantPosition::OutOfOrder
+        }
     }
 
     pub(super) fn has_admission(&self, key: &RelayAdmissionKey) -> bool {
@@ -331,6 +337,9 @@ impl RelayPeerOwner {
         }
         if let Some(status) = state.retired_status(&record.attempt) {
             return RelayGrantRegistration::Retired(status.into());
+        }
+        if state.retire_resolved_predecessor(&record.attempt) {
+            self.observations.relay_channel_watermark_evicted();
         }
         if !state.can_follow(&record.attempt) {
             return RelayGrantRegistration::InvalidSequence;
@@ -421,10 +430,13 @@ impl RelayPeerOwner {
         if let Some(status) = state.retired_status(attempt) {
             return (status, None);
         }
-        if cancel
-            && !state.active_channels.contains_key(&attempt.channel)
-            && state.can_follow(attempt)
-        {
+        if !cancel {
+            return (RelayAdmissionStatus::Unknown, None);
+        }
+        if state.retire_resolved_predecessor(attempt) {
+            self.observations.relay_channel_watermark_evicted();
+        }
+        if !state.active_channels.contains_key(&attempt.channel) && state.can_follow(attempt) {
             if state.record_watermark(attempt, RelayAdmissionStatus::Cancelled) {
                 self.observations.relay_channel_watermark_evicted();
             }
@@ -669,6 +681,53 @@ impl RelayPeerProtocol {
             return attempt.sequence == 0 && !self.forgotten(&attempt.channel);
         };
         watermark.sequence.checked_add(1) == Some(attempt.sequence)
+    }
+
+    /// Whether `attempt`'s channel still has an unadmitted batch. A channel whose batch was
+    /// admitted or cancelled is no longer busy, even while that batch's attempt is retained.
+    fn channel_busy(&mut self, attempt: &RelayAttemptKey) -> bool {
+        let Some(sequence) = self.active_channels.get(&attempt.channel).copied() else {
+            return false;
+        };
+        let active = RelayAttemptKey {
+            channel: attempt.channel.clone(),
+            sequence,
+        };
+        if let Some(record) = self.attempts.get(&active)
+            && record.is_unadmitted()
+        {
+            return true;
+        }
+        self.active_channels.remove(&attempt.channel);
+        false
+    }
+
+    /// Retire the attempt `attempt`'s channel holds at the position before it, once that attempt's
+    /// outcome is decided. Returns whether recording the outcome forgot another channel's
+    /// watermark to make room.
+    ///
+    /// The receiver retires an attempt when the delivery of its terminal outcome returns, but the
+    /// sender continues the channel as soon as the outcome reaches it, so a grant or a cancellation
+    /// for the next position can arrive first. A sender asks for a channel's next position only
+    /// once it holds the outcome of the position before, so that request proves what the returned
+    /// delivery would, and the channel's watermark keeps the outcome as it would then.
+    fn retire_resolved_predecessor(&mut self, attempt: &RelayAttemptKey) -> bool {
+        let Some(sequence) = attempt.sequence.checked_sub(1) else {
+            return false;
+        };
+        let predecessor = RelayAttemptKey {
+            channel: attempt.channel.clone(),
+            sequence,
+        };
+        let Some(record) = self.attempts.get(&predecessor) else {
+            return false;
+        };
+        if record.is_unadmitted() {
+            return false;
+        }
+        let record = StdArc::clone(record);
+        let status = record.status();
+        self.retire(&record, status)
     }
 
     /// Whether `channel` is one this owner forgot, or one its sender opened before such a channel:

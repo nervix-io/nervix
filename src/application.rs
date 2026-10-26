@@ -1441,11 +1441,25 @@ impl Application {
                             Ok(identity) if &identity == target.identity() => {
                                 cluster::PeerHealthProbeOutcome::Healthy(identity)
                             }
-                            Ok(_) => cluster::PeerHealthProbeOutcome::Failure,
+                            Ok(identity) => {
+                                tracing::debug!(
+                                    ?target,
+                                    ?identity,
+                                    "application health probe returned a different identity"
+                                );
+                                cluster::PeerHealthProbeOutcome::Failure
+                            }
                             Err(error) if error.current_context().is_capacity_exhaustion() => {
                                 cluster::PeerHealthProbeOutcome::CapacityExhausted
                             }
-                            Err(_) => cluster::PeerHealthProbeOutcome::Failure,
+                            Err(error) => {
+                                tracing::debug!(
+                                    ?target,
+                                    error = %format_args!("{error:#}"),
+                                    "application health probe failed"
+                                );
+                                cluster::PeerHealthProbeOutcome::Failure
+                            }
                         };
                         cluster::PeerHealthProbeResult::new(
                             target,

@@ -542,6 +542,16 @@ State installation runs inside the apply-models step, after the models published
 stopped schedule, so state is staged under the placements the restored schedule computes for this
 cluster.
 
+Running generators keep remote source views only in their task-local read cache. They describe
+the selected owner's complete sealed identity before each reuse and replace a changed view even
+when its revision equals or precedes the one they observed before restart or restore. Cached
+rows carry their admission charges in the separate bounded `state_read_cache` pool, whose
+capacity equals the relay budget and is included in the startup total. Optional retention never
+waits for space: a full pool returns the complete current read uncached. Cached references are
+released before replacement admission and on
+quiescence or failure. They neither persist nor select a restore generation; complete publication,
+handle clearing and the installation gate remain the authority for resumption.
+
 ### The Installation Authority
 
 The coordinator first admits an installation generation through consensus. The admission is refused

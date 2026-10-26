@@ -318,6 +318,13 @@ work retains its existing acknowledgement ownership and registry bounds.
 | `RelayPeerProtocol::outbound_attempts`, `outbound_admissions` | send, status/cancel reconciliation, exact terminal reply, refusal cleanup and peer ending | per remote frame or ACK | retained peer owner; receiver epoch and full registrar identity | at most 2Q of each; idle retention 10 min; exact correlation retires once | retain: bounded peer protocol, Typed Ratchet 05 |
 | `RequestState::handlers` (`ArcSwap` of an immutable map) | copy-on-write registration; one load per request | per remote frame, lock-free | fixed at startup | none | retain: bounded protocol (copy-on-write table) |
 
+Generator source reads still issue one description per occurrence, but issue a snapshot fetch only
+when the selected owner, placement or complete sealed envelope changes. An unchanged generation
+therefore avoids the fetch handler's immutable-table load and bulk connection lease. Connection
+registries retain their lifecycle-only access. The generator's retained decoded view is one
+task-owned optional generation with its admission, released on replacement or task/read ending;
+it adds no map or lock and does not change relay-frame or ACK protocol maps.
+
 ### Metrics
 
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
@@ -362,6 +369,8 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::handoff_engagement_transport_failures` | Armed by a drain scenario; a testing build's coordinator looks its domain up before each remote ownership-handoff gate engagement request and delivers the failure once, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only handoff transport fault control |
 | `FaultInjectionState::lost_handoff_gate_engagements` | Armed by a drain scenario for one coordinator-to-node link; a testing build's coordinator looks that link up before each attempt to send it an ownership-handoff gate engagement request, loses and counts every such request, and the count stays for the scenario's assertion; absent from product builds | test-only handoff link fault control |
 | `FaultInjectionState::owner_relay_fanout_delays` | Armed by the slow busy relay scenario; a testing build's relay owner looks its domain up before every batch it fans out and waits the armed delay; absent from product builds | test-only relay delivery fault control |
+| `FaultInjectionState::wasm_reset_publication_authority_losses` | Armed for one scenario domain; looked up once before a generation publication and by explicit harness observations; its bounded remaining/delivered counts remain until that world's injector is dropped; absent from product builds | test-only WASM publication fault control |
+| `FaultInjectionState::failed_wasm_reset_publications` | Armed before ordinary graph publications; only reset generation publication reads it, and delivery is recorded after unpublished preparation is aborted; it stays enabled through uncertain outcome recording, then is explicitly cleared before exact replay; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped WASM publication failure in `fault_injection/wasm_reset_publication.rs` |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
 
 A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in

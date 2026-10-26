@@ -39,7 +39,7 @@ pub(crate) use checkpoint_reader::CapturedMaterializedCheckpoint;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, StorageClass,
+    AdmissionError, BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, StorageClass,
 };
 use nervix_models::{RemoteRuntimeField, RemoteRuntimeRecordMetadata};
 use nervix_primitives::sync::{Arc, StdArc};
@@ -1063,6 +1063,42 @@ pub(in crate::runtime) struct RestoredMaterializedSnapshot {
 }
 
 impl RestoredMaterializedSnapshot {
+    /// Admit optional retention without occupying the live relay pool between reads. A full
+    /// cache leaves the snapshot's current admission intact for this one uncached read.
+    pub(in crate::runtime) fn try_retain_for_reads(
+        &mut self,
+        executor: &Executor,
+    ) -> Result<bool, Report<MaterializedSnapshotError>> {
+        let metadata_bytes = self._metadata_charge.bytes();
+        let bytes = self
+            ._columns_charge
+            .iter()
+            .fold(metadata_bytes, |total, charge| {
+                total.checked_add(charge.bytes()).assured(
+                    "a snapshot's reservations together fit the relay pool that admitted them",
+                )
+            });
+        let charge = match executor.try_reserve(MemoryClass::StateReadCache, bytes) {
+            Ok(charge) => charge,
+            Err(error)
+                if matches!(
+                    error.current_context(),
+                    AdmissionError::BudgetExhausted { .. }
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error.change_context(MaterializedSnapshotError::Admission)),
+        };
+        let (metadata, columns) = charge
+            .split(metadata_bytes)
+            .change_context(MaterializedSnapshotError::Admission)?;
+        // Reserve the complete replacement first: no allocation ever outlives its byte charge.
+        self._metadata_charge = Arc::new(metadata);
+        self._columns_charge = Arc::new(vec![columns]);
+        Ok(true)
+    }
+
     #[cfg(test)]
     pub(in crate::runtime) fn from_captured_generation(
         executor: &Executor,

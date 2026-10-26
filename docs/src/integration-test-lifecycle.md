@@ -2684,13 +2684,34 @@ artifact carries `tests/logs`.
 | --- | --- | --- |
 | Cucumber report | Standard output | Every scenario and step result in order, the world of a failed step, the summary, and every failed scenario repeated at the end |
 | Harness transitions | Standard error | Node startup transitions and outcomes, the stops scenarios waited for, and a suite timeout's diagnostic and cleanup |
-| Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, cluster start requests and failures, the Plexus commands scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
+| Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, cluster start requests and failures, the Plexus statements scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
 | Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, wait time by reason, retries, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
 | Runner load | `runner-load-tests` and `runner-load-scenarios` artifacts | Five-second CPU utilization and steal-time samples and their mean and peak |
 | Node traces | `tests/logs/scenarios.log` | The trace output of every in-process node of the run |
 
 Server processes write their logs into their own temporary directories, and a failure quotes the
 tail it needs.
+
+The delayed-coordinator materialized restore fixture arms the existing publication hook on every
+candidate node, then captures the first coordinator that actually reaches it within the existing
+120-second bound. A terminal background outcome before that barrier is reported immediately. The
+fixture releases the unused hooks before transferring leadership, keeping only the captured
+coordinator held while its successor completes the same immutable restore and produces new rows.
+Releasing that captured hook must be refused and must leave the complete materialized generations
+identical. The controlled first-route scenario moves leadership before submission as well; a saved
+route does not identify the coordinator that admits the restore.
+
+Exact completed-restore replays in the native metadata fixture use the existing bounded outcome
+recovery helper. Each attempt retains the archive bytes, statement and execution reference while
+following leader changes; a saved node name is only the first route. The leadership-change scenario
+forces the saved route to become a follower and checks Completed/Recovered, every applied step and
+the identical complete report after restart. Raw redirect scenarios still observe a single reply.
+
+The large materialized workload records each command before sending it and its elapsed time after
+completion. A client failure includes that statement, domain, elapsed time and complete typed
+report. An uncertain command therefore remains distinguishable from a rejected command or a
+runtime revision that failed preparation; the fixture does not resubmit it under another identity
+or extend the client's deadline.
 
 | Failure | How it surfaces |
 | --- | --- |

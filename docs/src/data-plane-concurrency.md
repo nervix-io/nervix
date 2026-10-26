@@ -135,7 +135,8 @@ owns the capacities, grace periods and reconciliation deadlines.
 Production-owner Shuttle checks cover delayed events against a reused position, registration
 against shutdown, admission waiter drop against a reply, final silence sweeps against terminal and
 Alive reports, a first claim against a sweep, a sweep that completes while an unclaimed position's
-guard is held, body claim against cancellation, admission against peer ending, and another peer's
+guard is held, body claim against cancellation, admission against peer ending, a channel's next
+grant against the return of the outcome delivery of the attempt before it, and another peer's
 progress while one peer holds its guard. The production admission choice has a Loom model for one
 irreversible verdict; replacing its compare-and-exchange with an overwriting swap must fail and
 replay. ArcSwap, queues and external semaphore internals remain outside that atomic claim.
@@ -625,6 +626,32 @@ its existing wait for a place. Native broker waits, the destruction's included, 
 and Deloxide's lock detector; the ordinary connector and retirement regressions and the
 one-/three-node stalled-broker and retirement scenarios own that evidence.
 
+### Kafka source rejection floors
+
+A Kafka source under `OFFSET BY CONSUMER GROUP` records the earliest rejected record of every
+partition it rejects in its consumer's context, before it seeks the partitions the consumer is
+still assigned. The context's rebalance handling starts each partition the group assigns at its
+floor, so a revocation that loses the seek, from a rebalance, the host leaving and rejoining the
+group, or a lapsed group session, never resumes the partition past the rejected record. A commit
+that passes the record forgets the floor, and an eager assignment that omits a partition forgets
+its floor, since another member now resumes it from the committed offset. The floors sit behind one
+thread-blocking lock per consumer: the source takes it once per rejection and, while a floor is
+outstanding, once per acknowledged batch, and the rebalance handling takes it once per assignment.
+librdkafka serves a rebalance only while the source polls for its next batch, and the host never
+polls while it rejects or acknowledges, so the lock is never contended. No guard is held across an
+await or a driver call that waits on the broker: under it, the rebalance handling only sets the
+start offsets of the assignment list in memory. The registered
+`topic::ingestor::rejection::shuttle_tests::shuttle_a_rejected_record_is_read_again_whenever_its_group_takes_the_partition_away`
+and
+`topic::ingestor::rejection::shuttle_tests::shuttle_a_commit_past_the_rejected_record_lets_the_group_resume_from_the_committed_offset`
+checks let a coordinator task decide a revocation and an assignment at any point of a rejection,
+serve them in the source's polls as librdkafka does, and hold that the first record read again
+from the partition is the rejected one, and that once a commit passes it the record after the
+committed one is read next. Native consumer-group traffic is outside Shuttle. Deloxide's detector
+tracks the floors' lock, which the lane's refused-commit shutdown workloads reach at assignment, at
+the rejection of the refused batch and at the commit that reads it again; the mock-cluster
+regressions and the one- and three-node broker restart scenario own the driver evidence.
+
 ### Kafka producer retention
 
 A Kafka emitter counts the records its producer holds itself, because librdkafka's own out-queue
@@ -970,6 +997,23 @@ revision before clearing its current entries.
 An incoming materialized snapshot releases its response stream at EOF, before local verification
 or Arrow decoding. Those local operations retain their own staging and memory admission; they do
 not keep Snapshot request or connection-stream permits while waiting for executor work.
+
+A generator task retains at most one decoded remote source generation, including its metadata and
+column admission charges. Optional retention first reserves the complete charge from the
+independent `state_read_cache` pool, whose capacity equals the relay pool's, then returns the
+snapshot's relay charges. The additional pool is counted in the executor memory total. A full
+cache pool returns the current complete read without caching or waiting for retention space;
+its transient relay admission ends with that read. Each occurrence describes the currently selected owner again. Reuse
+requires the same owner, placement and complete sealed envelope: length, digest, revision, fence
+and branch generation. A revision alone cannot identify contents after restart or restore. A
+changed envelope drops the retained generation before replacement admission. Local routing,
+failed reads, paused domain time, a closed source gate and ending intake release that view. The
+cache is task-local and volatile; it adds no shared map, lock, waiter or publication protocol.
+An outstanding read shares the immutable snapshot and keeps its admission until that read ends;
+clearing the cache releases the cache's reference without revoking an admitted read.
+The public remote-generator regression and full-value authenticated transport test cover reuse
+and replacement. Deloxide reaches the existing sealing locks, but does not observe the task-local
+cache or async transport waits.
 
 Kafka offset catch-up checks the revision before retaining or encoding a checkpoint. Capture
 holds the assignment barrier only to select a conservative revision and immutable partition
@@ -1380,6 +1424,10 @@ it:
   lock scoped to that entity, one newest announcement per branch, and taken all at once by the
   entity's one replica task, never across an await; see [Replica catch-up](#replica-catch-up)
 - an ACK root locks only its single terminal sender transition
+- a Kafka consumer-group source's rejected-partition floors sit behind one lock per consumer, taken
+  once per rejection, once per acknowledged batch while a floor is outstanding, and once per
+  rebalance, never across an await or a driver call that waits on the broker; see
+  [Kafka source rejection floors](#kafka-source-rejection-floors)
 
 These sites are accepted for the contract and bound named above. A lock that merely makes shared
 state convenient, protects immutable configuration, or repeats registry discovery on every batch
@@ -2064,6 +2112,17 @@ observations and transport waits remain outside Deloxide; the public outcomes an
 state-machine regressions cover the retention decision. No synchronization protocol or memory
 ordering changes at this boundary.
 
+The WASM reset publication workloads reach tracked transaction state and impact recording during
+initial application and recovery on one- and three-node clusters. Ordinary, order-analysis and
+stressed selections distinguish typed loss of publication leadership from a retained genuine
+failure, preserve the reset's execution identity and generation, and check sibling branch state.
+The genuine-failure control is armed before ordinary graph publications and observed pending until
+reset preparation has been aborted, so another scheduling path cannot consume it. It remains
+enabled until a known failed outcome is observed, then is cleared before exact replay verifies
+retention independently of the injected condition.
+The test fault maps, asynchronous entity gates and consensus/network waits are untracked;
+the injected refusal establishes no claim about Raft election interleavings or memory ordering.
+
 The WebSocket ingestor lifecycle workloads drop an ingestor, move its owner and recover from repeated
 peer closes. Their ordinary and stressed selections reach tracked quiesce, schedule and teardown
 locks. Socket I/O, close-handshake deadlines and reconnect timers remain outside Deloxide's
@@ -2211,6 +2270,15 @@ The suite refuses an image whose labels name another kind or revision than its c
 artifacts. The evidence observes each process up to its kill, pause, stop or the freeze, without an
 upstream flush barrier, and only its tracked thread-blocking locks; recovery, ledger and timing
 verdicts stay the scenarios' own, with the product's deadlines and the suite's budgets unchanged.
+
+The evidence verdict and the scenario verdict are separate. A run can retain qualifying evidence
+from every process and still fail its ledger, recovery checks or controller budget. A soak
+qualification requires both suite verdicts to pass, with every configured entry complete on the
+ordinary and diagnostic images of the same revision. The owning task records the revision, both
+immutable image digests, every shard verdict and the diagnostic process-start and evidence-file
+counts, together with failed attempts and their owning corrections. Per-process evidence qualifies
+the tracked lock activity that was recorded; the complete scenario verdict also establishes the
+delivery and recovery behavior that the external runner observes.
 
 ## Deterministic Concurrency Verification
 
@@ -2413,7 +2481,7 @@ A family of names means each member runs independently through the recipe.
 | Protocol | Invariant and check |
 | --- | --- |
 | Waiter registration and cancellation (`crates/primitives/src/tests/shuttle_races.rs`) | `shuttle_reaches_a_notify_waiters_published_between_a_read_and_the_registration` and `shuttle_reaches_a_send_between_a_read_and_the_subscription` require a waiter that reads before it registers to deadlock in some schedule, which shows the scheduler reaches a publication between the read and the registration; `shuttle_registering_before_reading_never_misses_a_notify_waiters` and `shuttle_subscribing_before_reading_never_misses_a_send` require the correct order never to lose one. `shuttle_reaches_a_wake_between_a_read_and_the_waker_registration` and `shuttle_registering_the_waker_before_reading_never_misses_a_wake` hold an atomic waker to the same pair. `shuttle_a_notify_one_between_a_read_and_the_registration_is_kept_as_the_permit` shows a single notification's permit makes the other order correct for `notify_one`, and `shuttle_a_waiter_cancelled_as_it_is_notified_passes_the_notification_on` requires the surviving waiter to complete however a cancellation and a notification interleave. |
-| Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched` keeps a held connector call from consuming filesystem or consensus admission; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_full_wait_queue_is_exact_typed_backpressure` checks a full wait queue's typed rejection; `shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place` requires a job that waits for a place to take the first one freed and run before a job refused when full that asks after it; `shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge` returns a dropped waiter's charge and hands its place to the job waiting after it; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
+| Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity, including optional state-read retention while the live relay class is full; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched` keeps a held connector call from consuming filesystem or consensus admission; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_full_wait_queue_is_exact_typed_backpressure` checks a full wait queue's typed rejection; `shuttle_a_job_waiting_for_a_place_takes_the_first_freed_place` requires a job that waits for a place to take the first one freed and run before a job refused when full that asks after it; `shuttle_a_dropped_job_waiting_for_a_place_gives_up_its_place_and_charge` returns a dropped waiter's charge and hands its place to the job waiting after it; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
 | Force-flush obligations (`src/runtime/force_flush.rs`) | `shuttle_two_participant_generation_waits_for_every_obligation` prevents completion before all participants live at publication complete and redelivers a dropped, unhandled completion; `shuttle_stale_completions_never_clear_a_newer_generation` prevents an old completion from clearing new work; `shuttle_published_generation_wakes_a_waiting_participant` catches a lost publication wakeup; `shuttle_participant_lifecycle_balances_obligations_through_close` balances `pending()` across subscribe, request, participant drop, and close. |
 | Ingestor intake (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_ingestor_observes_engagement_during_dispatch`, `shuttle_paced_ingestor_observes_engagement_during_dispatch`, and `shuttle_request_ingestor_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. `shuttle_a_new_quiesce_ends_a_delivery_waiting_for_extension_room` and `shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room` race the engagement or the stop against a retained payload's delivery waiting for a place the extension class never frees: the waiter registers before it reads, so the delivery always ends, and its payload is back at the front of the buffer counted as it was. `shuttle_a_new_quiesce_decides_again_on_a_live_payload_waiting_for_extension_room` and `shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room` race a `BUFFER` engagement or the stop against a live payload waiting for such a place: the wait always ends, a new decision becomes the one the payload is decided under next and its buffer retains it, counted with its bytes, and a stop leaves nothing retained. |
 | Broker source confirmation (`src/runtime/ingestors/connector_shuttle_tests.rs`; `src/runtime/ingestors/connector.rs`, `src/runtime/ingestors/connector_acknowledgement.rs`, `src/runtime_ack.rs`) | `shuttle_a_drain_waits_for_the_transport_to_confirm_a_resolved_batch` lets a drain read the domain's ownership-handoff count at any point while the graph resolves the two confirmed roots of one batch in either order and the source's transport takes a round trip to confirm the batch. Whenever the drain reads no outstanding work, every batch whose roots resolved has been confirmed, and the count returns to zero once it is. The check fails under a batch acknowledgement that releases the last root before the loop drops it, and under a root released as it resolves. |

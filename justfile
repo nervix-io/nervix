@@ -304,8 +304,12 @@ test-native-metadata-restore-repeat: tests-deps
     printf 'Native metadata restore qualification complete; evidence: %s\n' "$attempt"
 
 # Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
+[positional-arguments]
 test-scenarios-binary binary *args: download-onnxruntime
-    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ quote(args) }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    exec "$@"
 
 # Replay a compiled ONNX inspection owner with an explicit runtime library.
 test-onnx-owner-binary binary library *args:

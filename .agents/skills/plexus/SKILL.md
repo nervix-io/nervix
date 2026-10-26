@@ -146,6 +146,9 @@ configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`
 `ATTACH DOMAIN CLOCK`/`DETACH DOMAIN CLOCK`, resource uploads, backups, restores, and node
 administration outside the transaction. Plan restore capacity for independently admitted archive
 metadata and streamed checkpoint I/O, following the backup guidance in `references/configuring-nervix.md`.
+Size node memory for every execution pool, including optional retained materialized-source reads;
+the default startup requirement is 2,531 MiB. Read [Node Settings](https://docs.nervix.io/node-settings.html)
+for the complete prerequisite checks.
 Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after
@@ -568,6 +571,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   with an exact typed literal for one selected branch. The processor must be running and the
   selected branch must already exist. This command loses the selected computation state; a fresh
   command reference is a new reset, while retrying the same reference returns its original outcome.
+  Keep that reference when publication loses leadership while the reset is applying;
+  `Command Completion` defines recovery and retained failures.
   See the reset section in `Runtime Nodes` and `Command Completion` before suggesting it.
 - To inspect WASM guest-state progress, use `DESCRIBE WASM PROCESSOR <processor> [FORMAT TEXT|JSON];`.
   Read its reset phase and generation beside the checkpoint revision and replica counts; both

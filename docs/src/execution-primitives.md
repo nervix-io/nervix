@@ -127,6 +127,13 @@ lists. `pause`, `advance` and `resume` exist only with the `test-util` capabilit
 tests of elapsed-time behavior enable and no production graph has, because a clock that can be
 paused is checked on every read.
 
+The executor keeps optional retained materialized-source reads in an independent
+`state_read_cache` memory class. Its capacity is derived from the relay budget and adds that
+capacity to the startup memory total. A snapshot reserves its complete retained charge there
+before returning its relay charges; when that immediate reservation finds no room, the generator
+keeps only the current uncached read and its relay admission through evaluation and dispatch.
+Retention adds no wait, worker pool or execution-mode backend.
+
 The runtime attributes build the selected runtime through a crate path fixed to the boundary: Tokio's
 attribute builds whatever runtime its crate path names, and an attribute that named `tokio` at the
 call site would construct whichever crate a package happened to call `tokio`. Shuttle's own test

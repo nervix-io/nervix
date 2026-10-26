@@ -81,8 +81,10 @@ It refuses to start at the first check that fails, exiting with status `1` and
    of its control group and the groups above it, in the unified hierarchy or the version 1 memory
    hierarchy, or its physical memory when no group limit is smaller. A platform that reports
    neither leaves the limit unknown, and the memory checks do not run. A known limit must hold all
-   of the executor's memory budgets together, 2,339 MiB by default, and the
+   of the executor's memory budgets together, 2,531 MiB by default, and the
    `--memory-high-watermark` when one is set.
+   This includes the optional materialized-source read-cache pool: its capacity is derived from
+   the relay budget, 192 MiB by default, with independent admission and no separate setting.
 3. It creates its database directory and its temporary directory when they are absent, proves each
    writable with a probe file it removes again, and measures the total size of the volume each
    lives on.
@@ -98,7 +100,7 @@ Each refusal names the setting or directory it judged, with the values involved:
 
 | Check | Refusal |
 | --- | --- |
-| Memory budgets | `memory-limit (1GiB) cannot hold the node's memory budgets of 2.28GiB`, or `the detected memory limit of 2GiB cannot hold the node's memory budgets of 2.28GiB` |
+| Memory budgets | `memory-limit (1GiB) cannot hold the node's memory budgets of 2.47GiB`, or `the detected memory limit of 2GiB cannot hold the node's memory budgets of 2.47GiB` |
 | Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
 | Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
 | Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |
