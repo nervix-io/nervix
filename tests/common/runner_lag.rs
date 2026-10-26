@@ -3,10 +3,11 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** A periodic tick polled beside a run on the same task, how late each tick is polled,
-//!   the totals of that lateness over a run, which ticks reached the stall bound, and the CPU and
-//!   run-queue time of the thread that polls the run.
-//! - **Depends on.** The binary's runtime and its monotonic timers, and the calling thread's
-//!   procfs scheduling counters.
+//!   the totals of that lateness over a run, which ticks reached the stall bound, the CPU and
+//!   run-queue time of the thread that polls the run, and keeping the allocator's purging of freed
+//!   memory off that thread.
+//! - **Depends on.** The binary's runtime and its monotonic timers, the calling thread's procfs
+//!   scheduling counters, and jemalloc's control interface.
 //! - **Must not know.** Which step held the task, or what a reporter does with a tick or a stall.
 //!
 //! Cucumber polls every running scenario, and the suite watchdog around them, from one runner task.
@@ -18,6 +19,12 @@
 //! many scenarios each do a little synchronous work in the same poll. The total lateness of every
 //! tick, and the time the thread spent on a CPU, therefore measure how busy the runner task is, not
 //! only its longest stalls: every scenario's steps wait for the same thread.
+//!
+//! That thread also allocates and frees on behalf of every scenario. jemalloc returns freed memory
+//! to the kernel from whichever thread happens to allocate when a purge falls due, and each purge
+//! in a process of hundreds of threads waits for a TLB shootdown across the CPUs running them, which
+//! a virtual machine makes slow. Purging on jemalloc's own background threads keeps that wait off
+//! the runner thread.
 
 use std::{
     fmt, io,
@@ -228,6 +235,18 @@ impl WorkerBusy {
             .checked_sub(earlier.busy)
             .assured("a runtime's workers only accumulate busy time")
     }
+}
+
+/// Moves jemalloc's purging of freed memory onto its own background threads for the rest of the
+/// process, so no thread that allocates, the runner thread above all, waits for the TLB shootdown a
+/// purge costs.
+///
+/// In the measurement of 26 October 2026 the thread that polls every scenario ran on a CPU for 86%
+/// of a CI run, and a profile of the same workload found most of that time in the kernel, waiting
+/// for those shootdowns while every scenario's steps waited for the thread. jemalloc keeps the
+/// decay schedule it purges on; only the thread that purges changes.
+pub(crate) fn purge_freed_memory_in_the_background() -> tikv_jemalloc_ctl::Result<()> {
+    tikv_jemalloc_ctl::background_thread::write(true)
 }
 
 /// What procfs said about the thread a run is polled on.

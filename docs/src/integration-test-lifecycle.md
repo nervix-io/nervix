@@ -450,8 +450,8 @@ including their instrumented builds. Coverage flags do not replace Wild linker s
 
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
-`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `4`, so its
-16-CPU runner has 64 slots. Cucumber may take up all parsed scenarios without charging a slot.
+`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `3`, so its
+16-CPU runner has 48 slots. Cucumber may take up all parsed scenarios without charging a slot.
 
 The slots are the suite's capacity, and the measurement of 26 October 2026 set their number. Over
 the retained artifacts of 20 Check runs, an ordinary run of one inventory of about 3,620 attempts
@@ -460,22 +460,27 @@ spread; the runner did. Every scenario of a run slows by the same factor: the me
 scenarios that passed their first attempt, of an attempt's time against that scenario's median
 across runs ranged from 0.74 to 1.25 from run to run, while inside one run half of the scenarios
 stayed within about a tenth of the run's own factor. The three slowest runs in that sample were
-the only ones on Intel Xeon runners, and they are the two passing runs that ended within 25
-seconds of the 75-minute budget and the one that exhausted it.
+the only Intel Xeon runners among the 17 whose runner diagnostics name the CPU, and they are the
+two passing runs that ended within 25 seconds of the 75-minute budget and the one that exhausted
+it.
 
-The suite waits rather than computes. Once the long-running attempts that start together have
-ended, the runner's CPUs averaged 51 to 55 percent busy while every one of the 48 slots held a
-scenario, and an ordinary scenario started during the 82 to 86 percent peak of the first fifteen
-minutes ran no slower, against its own median, than one started later. More slots therefore add
-throughput rather than contention, and memory is no limit: the runner used at most about 27 GiB
-of its 64. Factor `4` uses that idle CPU.
+The suite waits, but not for the runner's CPUs. Once the long-running attempts that start
+together have ended, the runner's CPUs averaged 51 to 55 percent busy while every one of the 48
+slots held a scenario, and an ordinary scenario started during the 82 to 86 percent peak of the
+first fifteen minutes ran no slower, against its own median, than one started later. What every
+scenario waits for is the one thread that polls all of their steps, described under
+[Runner Stalls](#runner-stalls). Factor `4` was measured in Check run 40358096404: with 64 slots
+that thread ran on a CPU for 86 percent of the run, every scenario took about 1.45 times its
+median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
+needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory is
+no limit: the runner used at most 28 GiB of its 64.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. A first run holds one slot.
 A retry holds a larger share, so it runs beside fewer scenarios than the run that failed. The first
 retry holds a sixteenth of the pool, and each later retry holds twice the share of the run before
-it. With Cucumber's two retries, the second retry holds an eighth, so the shares are 1, 4 and 8 of
-CI's 64 slots. Every run holds at least one slot, so a pool of fewer than sixteen slots gives its
+it. With Cucumber's two retries, the second retry holds an eighth, so the shares are 1, 3 and 6 of
+CI's 48 slots. Every run holds at least one slot, so a pool of fewer than sixteen slots gives its
 first retry one. A run past the configured retries, as a `--retry` override allows, keeps the last
 retry's share. No run holds more than a quarter of the pool, so no scenario runs alone. A retry
 whose share is not yet free keeps the slots that free up until its share fits. Otherwise the first
@@ -2436,6 +2441,18 @@ A runner thread that is on a CPU for most of the run is what every scenario wait
 long for a CPU is starved by the rest of the runner rather than by its own steps. Workers busy for
 most of their time say that the nodes, not the steps, set the pace.
 
+The runner thread also allocates and frees for every scenario it polls, and jemalloc returns freed
+memory to the kernel from whichever thread is allocating when a purge falls due. In a process of
+several hundred threads each purge waits for a TLB shootdown across the CPUs that run them, which a
+virtual machine makes slow. At 64 slots the runner thread ran on a CPU for 86 percent of Check run
+40358096404. A profile of the same workload on a development host found 88 percent of that thread's
+samples in the kernel, 79 percent in the cross-CPU call a TLB shootdown waits for, and its
+`madvise`, `brk` and `munmap` calls took 48, 421 and 100 milliseconds on average. The scenario
+process therefore turns on jemalloc's background threads before the run starts: they purge on the
+same decay schedule, and no thread that allocates waits for a purge. On that workload the runner
+thread's system time fell from 18 to 8 percent of the run, and its user time, the scenarios' own
+work, rose from 2 to 7 percent.
+
 ## Diagnostic Lane
 
 `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
@@ -2877,7 +2894,7 @@ contract.
    endpoint or task, on a paused clock where the budget is long, so the bound is proven without
    production-scale waits, and run `just test-harness-liveness`. Run the affected features with
    `just test-scenarios --input <feature>` at the CI concurrency factor,
-   `NERVIX_TEST_CONCURRENCY_FACTOR=2`.
+   `NERVIX_TEST_CONCURRENCY_FACTOR=3`.
 9. **Keep this chapter current** in the same change.
 
 ## Guarantees And Limits
@@ -2985,6 +3002,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
 | Every tick's lateness adds up beside the stalls, and the summary reports the runner thread's CPU and run-queue time and the runtime workers' busy time | `the_lateness_of_every_tick_adds_up_beside_the_stalls`, `a_tick_below_the_bound_counts_as_lateness_and_not_as_a_stall`, `a_thread_schedstat_reads_its_cpu_time_and_run_queue_wait`, `the_runner_thread_reads_the_cpu_time_it_spent_since_it_was_named`, `the_suite_summary_adds_up_every_runner_tick_beside_its_stalls` |
 | A stall lists only the scenarios that hold run slots, and a suite timeout counts only the scenarios still queued or running | `the_running_scenarios_are_those_that_hold_their_run_slots`, `a_suite_timeout_does_not_count_a_finished_attempt_as_active` |
+| jemalloc purges freed memory on its background threads once the scenario process asks, so the runner thread does not wait for a purge | `freed_memory_is_purged_on_jemalloc_background_threads` |
 | A step takes the messages a NATS observer's client already holds without a poll of the runner task for each one, in the order the server delivered them | `a_step_takes_buffered_deliveries_without_a_poll_per_message` |
 | NATS driver diagnostics distinguish a deliberately overflowing subscription from a disconnected TCP peer, and a disconnect preserves all 32,768 deliveries already buffered | `an_observer_records_the_drivers_slow_consumer_notifications`, `a_disconnected_observer_keeps_its_buffered_burst_and_reports_the_connection_end` |
 | The actual sequence/header assertion drains all 32,768 messages while its caller is unpolled past its deadline, preserves each oracle and still fails a stalled delivery at the original deadline | `a_buffered_sequence_meets_its_deadline_while_the_runner_is_stalled`, `a_sequence_keeps_every_message_and_header_oracle`, `a_stalled_delivery_still_fails_at_the_captured_sequence_deadline` |

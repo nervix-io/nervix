@@ -141,7 +141,7 @@ use crate::common::{
         SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
         command_output, fresh_execution_reference, outcome_awaits_leader,
     },
-    runner_lag::RunnerLagObserver,
+    runner_lag::{RunnerLagObserver, purge_freed_memory_in_the_background},
     runner_observation::ArrivalObservation,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
@@ -32761,11 +32761,18 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // hooks; the harness permits below are the only run capacity charged to a scenario.
     cli.runner.concurrency = None;
     let run_slots = StdArc::new(ScenarioRunSlots::new(effective_max_concurrent_scenarios));
+    // Every scenario's steps run on this thread, so it must not also wait for the TLB shootdowns
+    // jemalloc's purges cost in a process of this many threads.
+    purge_freed_memory_in_the_background().assured(
+        "tikv-jemallocator enables jemalloc's runtime support for background threads by default, \
+         and jemalloc starts them on Linux",
+    );
     truncate_cucumber_log();
     begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget());
     append_cucumber_log_line(&format!(
         "scenario parallelism: run_slots={effective_max_concurrent_scenarios} \
-         concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?}",
+         concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?} \
+         freed_memory_purged_by=jemalloc_background_threads",
         parallelism.tokio_worker_threads(),
         watchdog.budget()
     ));

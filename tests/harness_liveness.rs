@@ -406,19 +406,15 @@ mod tests {
         let run = |number: u32| {
             ScenarioRun::new(NonZeroU32::new(number).verified("the runs below count from one"))
         };
-        // In CI's 64 slots a first run holds one, the first retry a sixteenth and the second retry
+        // In CI's 48 slots a first run holds one, the first retry a sixteenth and the second retry
         // an eighth of the pool.
         assert_eq!(SCENARIO_RETRIES, 2);
-        assert_eq!(run(1).run_slots(64), 1);
-        assert_eq!(run(2).run_slots(64), 4);
-        assert_eq!(run(3).run_slots(64), 8);
-        // A run past the configured retries, as a `--retry` override allows, keeps the last share.
-        assert_eq!(run(4).run_slots(64), 8);
-        assert_eq!(run(9).run_slots(64), 8);
-        // A 48-slot pool, three slots per CPU of the same runner, gives its retries three and six.
         assert_eq!(run(1).run_slots(48), 1);
         assert_eq!(run(2).run_slots(48), 3);
         assert_eq!(run(3).run_slots(48), 6);
+        // A run past the configured retries, as a `--retry` override allows, keeps the last share.
+        assert_eq!(run(4).run_slots(48), 6);
+        assert_eq!(run(9).run_slots(48), 6);
         // A pool too small for a sixteenth still gives every run one slot.
         assert_eq!(run(2).run_slots(4), 1);
         assert_eq!(run(3).run_slots(4), 1);

@@ -726,10 +726,10 @@ jobs:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      # 64 slots on the 16-CPU runner. At 48 slots the suite kept every slot busy while the runner's
-      # CPUs were about half idle once the long-running attempts had ended, so it waited rather than
-      # computed, and an ordinary run on the slowest runners used 99.5% of the budget.
-      NERVIX_TEST_CONCURRENCY_FACTOR: "4"
+      # 48 slots on the 16-CPU runner. Every scenario's steps run on one runner thread, and 64 slots
+      # (Check 40358096404) kept that thread on a CPU for 86% of the run, made every scenario about
+      # 45% slower and raised no throughput; see the run slots in docs/src/integration-test-lifecycle.md.
+      NERVIX_TEST_CONCURRENCY_FACTOR: "3"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

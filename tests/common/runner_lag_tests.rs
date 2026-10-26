@@ -13,6 +13,7 @@ use nervix_primitives::{sync::blocking::mpsc, time::Instant};
 
 use crate::runner_lag::{
     RunnerLag, RunnerLagObserver, RunnerStall, RunnerThread, RunnerTick, ThreadTimes,
+    purge_freed_memory_in_the_background,
 };
 
 /// How long the stand-in run blocks the task it is polled on.
@@ -176,5 +177,20 @@ fn the_runner_thread_reads_the_cpu_time_it_spent_since_it_was_named() {
     assert!(
         since.on_cpu > Duration::ZERO,
         "{spins} spins over {BUSY:?} ran on a CPU: {since:?}"
+    );
+}
+
+/// After the scenario process asks for it, jemalloc purges freed memory on its own background
+/// threads, so no allocating thread, the runner thread above all, waits for a purge's TLB shootdown.
+#[test]
+fn freed_memory_is_purged_on_jemalloc_background_threads() {
+    purge_freed_memory_in_the_background().assured(
+        "tikv-jemallocator enables jemalloc's runtime support for background threads by default",
+    );
+    let enabled = tikv_jemalloc_ctl::background_thread::read()
+        .assured("jemalloc reports whether its background threads run");
+    assert!(
+        enabled,
+        "jemalloc runs its background threads once asked to"
     );
 }
