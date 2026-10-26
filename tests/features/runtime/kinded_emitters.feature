@@ -115,7 +115,7 @@ Feature: Emitters name their connector and entity in the Plexus statement head
       """
       CREATE SCHEMA telemetry ( event_ts DATETIME, body STRING, trace_id STRING, span_id STRING, value F64 );
       CREATE RELAY events SCHEMA telemetry UNBRANCHED;
-      CREATE OTEL CLIENT collector CONFIG { 'endpoint' = 'http://127.0.0.1:4317', 'protocol' = 'grpc' };
+      CREATE OTEL CLIENT collector CONFIG { 'endpoint' = 'http://127.0.0.1:4317', 'protocol' = 'grpc', 'timeout_ms' = 5000 };
       CREATE OTEL <entity> EMITTER outgoing FROM events TO collector <options>
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { <values> }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;

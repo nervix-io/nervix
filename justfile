@@ -1027,6 +1027,11 @@ test-consensus *args:
 test-models *args:
     cargo test --package nervix-models --all-targets -- {{ args }}
 
+# Exact OTEL field contracts, their Arrow admission and the declaration-driven Plexus grammar.
+test-otel-declarations:
+    cargo test --package nervix-models --lib --features arrow connector::otel::
+    cargo test --package nervix-plexus --lib emitter::
+
 # Run the interconnect unit tests, which live in the nervix-interconnect crate rather than the
 # server lib.
 test-interconnect *args:
