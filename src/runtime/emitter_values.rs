@@ -730,12 +730,11 @@ impl ProjectedValueRows {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use std::collections::VecDeque;
-
     use futures_util::FutureExt as _;
-    use nervix_connector::{
-        EmitterFinish, EmitterFinishResult, EmitterRecordId, EmitterRowRequest, EmitterWriteError,
-        EmitterWriteResult, PerRecordOutcome, PreparedRowRequest, RowRequestPreparation,
+    use nervix_connector::EmitterRowRequest;
+    use nervix_connector_fake::{
+        CarrierSelection as RecordedCarrier, EmitterObservations, FakeEmitter, HandedRequest,
+        PublishAnswer as RequestAnswer, PublishScript, RequestPreparation, RowRequests, Rows,
     };
     use nervix_models::ClickHouseValueMapping;
     use nervix_primitives::sync::blocking::Mutex;
@@ -746,52 +745,10 @@ mod tests {
         runtime_schema::test_runtime_row,
     };
 
-    /// One carrier of a write a row emitter received: its buffered batch and the rows it selected.
-    #[derive(Debug, PartialEq, Eq)]
-    struct RecordedCarrier {
-        batch_index: usize,
-        rows: Vec<usize>,
-    }
-
     fn recorded(batch_index: usize, rows: &[usize]) -> RecordedCarrier {
         RecordedCarrier {
             batch_index,
             rows: rows.to_vec(),
-        }
-    }
-
-    /// A row emitter that delivers every row it is handed and records the carriers of each write.
-    struct RecordingRowEmitter {
-        writes: StdArc<nervix_primitives::sync::blocking::Mutex<Vec<Vec<RecordedCarrier>>>>,
-    }
-
-    #[async_trait]
-    impl EmitterLifecycle for RecordingRowEmitter {
-        fn kind(&self) -> nervix_models::EmitterEntityKind {
-            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
-        }
-
-        async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
-            Ok(EmitterFinish::NothingHeld)
-        }
-    }
-
-    #[async_trait]
-    impl RowEmitter for RecordingRowEmitter {
-        async fn publish(
-            &mut self,
-            rows: MappedEmitterRows<'_>,
-        ) -> PerRecordOutcome<EmitterRecordPosition> {
-            let mut outcome = PerRecordOutcome::with_capacity(rows.member_count());
-            for member in rows.members() {
-                outcome.deliver(rows.position(member));
-            }
-            let mut write = Vec::new();
-            for carrier in &rows.carriers {
-                write.push(recorded(carrier.batch_index, carrier.selected_rows));
-            }
-            self.writes.lock().push(write);
-            outcome
         }
     }
 
@@ -811,13 +768,9 @@ mod tests {
     /// relay or branch starts the next one, so a write never mixes sources.
     #[nervix_primitives::test]
     async fn a_write_carries_successive_carriers_of_one_relay_and_branch() {
-        let writes = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::new()));
-        let mut connector = MappedRowEmitter::new(
-            Box::new(RecordingRowEmitter {
-                writes: writes.clone(),
-            }),
-            test_projection(),
-        );
+        let publisher = FakeEmitter::<Rows>::new(PublishScript::Repeat(RequestAnswer::ConfirmAll));
+        let writes = publisher.observations();
+        let mut connector = MappedRowEmitter::new(Box::new(publisher), test_projection());
         let mut batches = vec![
             source_batch("orders", 2, None),
             source_batch("orders", 1, None),
@@ -843,7 +796,7 @@ mod tests {
             .expect("every row is delivered");
 
         assert_eq!(
-            *writes.lock(),
+            writes.lock().selections(),
             vec![
                 vec![recorded(0, &[0, 1]), recorded(1, &[0])],
                 vec![recorded(2, &[0])],
@@ -1122,110 +1075,6 @@ mod tests {
         );
     }
 
-    /// How the scripted row request emitter answers one write.
-    enum RequestAnswer {
-        /// The first request is delivered, and the emitter fails before it answers for the rest.
-        DeliverFirstThenFail,
-        /// Every request of the write is delivered.
-        DeliverAll,
-    }
-
-    /// One request the scripted emitter was handed: its identity and its bytes.
-    #[derive(Debug, PartialEq, Eq)]
-    struct HandedRequest {
-        id: usize,
-        body: Vec<u8>,
-    }
-
-    impl HandedRequest {
-        fn new(id: usize, body: &str) -> Self {
-            Self {
-                id,
-                body: body.as_bytes().to_vec(),
-            }
-        }
-    }
-
-    /// A row request emitter that prepares one request for each pair of rows, whose bytes name the
-    /// rows and the preparation that made them, and answers every write from a script.
-    struct ScriptedRequestEmitter {
-        preparations: Arc<AtomicUsize>,
-        writes: Arc<Mutex<Vec<Vec<HandedRequest>>>>,
-        answers: VecDeque<RequestAnswer>,
-    }
-
-    #[async_trait]
-    impl EmitterLifecycle for ScriptedRequestEmitter {
-        fn kind(&self) -> nervix_models::EmitterEntityKind {
-            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
-        }
-
-        async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
-            Ok(EmitterFinish::NothingHeld)
-        }
-    }
-
-    #[async_trait]
-    impl RowRequestEmitter for ScriptedRequestEmitter {
-        async fn prepare(
-            &mut self,
-            rows: MappedEmitterRows<'_>,
-        ) -> EmitterWriteResult<RowRequestPreparation> {
-            let preparation = self.preparations.fetch_add(1, Ordering::SeqCst);
-            let mut prepared = RowRequestPreparation::default();
-            for carrier in &rows.carriers {
-                for pair in carrier.selected_rows.chunks(2) {
-                    let mut members = Vec::with_capacity(pair.len());
-                    for row in pair {
-                        members.push(EmitterRecordPosition {
-                            batch_index: carrier.batch_index,
-                            row_index: *row,
-                        });
-                    }
-                    prepared.requests.push(PreparedRowRequest {
-                        members,
-                        body: format!("preparation {preparation} of {pair:?}").into_bytes(),
-                    });
-                }
-            }
-            Ok(prepared)
-        }
-
-        async fn publish(
-            &mut self,
-            requests: Vec<EmitterRowRequest>,
-        ) -> PerRecordOutcome<EmitterRecordId> {
-            self.writes.lock().push(
-                requests
-                    .iter()
-                    .map(|request| HandedRequest {
-                        id: request.id.index(),
-                        body: request.body.clone(),
-                    })
-                    .collect(),
-            );
-            let mut outcome = PerRecordOutcome::with_capacity(requests.len());
-            let answer = self
-                .answers
-                .pop_front()
-                .expect("the test scripts an answer for every write it makes");
-            match answer {
-                RequestAnswer::DeliverFirstThenFail => {
-                    outcome.deliver(requests[0].id);
-                    outcome.fail(Report::new(EmitterWriteError::Publish {
-                        connector: "scripted",
-                    }));
-                }
-                RequestAnswer::DeliverAll => {
-                    for request in &requests {
-                        outcome.deliver(request.id);
-                    }
-                }
-            }
-            outcome
-        }
-    }
-
     /// One buffered batch whose rows each carry an acknowledgement root of their own, and the
     /// completions of those roots in row order.
     fn acknowledged_batch(values: &[i64]) -> (EmitterPublishBatch, Vec<AckCompletion>) {
@@ -1269,22 +1118,16 @@ mod tests {
     /// it: how many preparations it made, and every write it was handed.
     struct ScriptedRequests {
         connector: MappedRequestEmitter,
-        preparations: Arc<AtomicUsize>,
-        writes: Arc<Mutex<Vec<Vec<HandedRequest>>>>,
+        observations: Arc<Mutex<EmitterObservations<Vec<EmitterRowRequest>>>>,
     }
 
     fn scripted_requests(answers: impl IntoIterator<Item = RequestAnswer>) -> ScriptedRequests {
-        let preparations = Arc::new(AtomicUsize::new(0));
-        let writes = Arc::new(Mutex::new(Vec::new()));
-        let connector = ScriptedRequestEmitter {
-            preparations: preparations.clone(),
-            writes: writes.clone(),
-            answers: answers.into_iter().collect(),
-        };
+        let publisher =
+            FakeEmitter::<RowRequests>::new(PublishScript::Finite(answers.into_iter().collect()));
+        let observations = publisher.observations();
         ScriptedRequests {
-            connector: MappedRequestEmitter::new(Box::new(connector), value_projection()),
-            preparations,
-            writes,
+            connector: MappedRequestEmitter::new(Box::new(publisher), value_projection()),
+            observations,
         }
     }
 
@@ -1294,11 +1137,10 @@ mod tests {
         let context = emitter_context();
         let ScriptedRequests {
             mut connector,
-            preparations,
-            writes,
+            observations,
         } = scripted_requests([
             RequestAnswer::DeliverFirstThenFail,
-            RequestAnswer::DeliverAll,
+            RequestAnswer::ConfirmAll,
         ]);
         let (first, first_completions) = acknowledged_batch(&[1, 2, 3]);
         let mut batches = vec![first];
@@ -1343,7 +1185,7 @@ mod tests {
             .expect("the retry is delivered");
 
         assert_eq!(
-            *writes.lock(),
+            observations.lock().requests(),
             vec![
                 vec![
                     HandedRequest::new(0, "preparation 0 of [0, 1]"),
@@ -1357,7 +1199,7 @@ mod tests {
             "the retry sends the kept request byte for byte, ahead of the one prepared after it"
         );
         assert_eq!(
-            preparations.load(Ordering::SeqCst),
+            observations.lock().preparations,
             2,
             "each batch is prepared once"
         );
@@ -1367,63 +1209,12 @@ mod tests {
         }
     }
 
-    /// A row request emitter whose preparation answers for a row it was never handed.
-    struct ForeignRowEmitter;
-
-    #[async_trait]
-    impl EmitterLifecycle for ForeignRowEmitter {
-        fn kind(&self) -> nervix_models::EmitterEntityKind {
-            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
-        }
-
-        async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
-            Ok(EmitterFinish::NothingHeld)
-        }
-    }
-
-    #[async_trait]
-    impl RowRequestEmitter for ForeignRowEmitter {
-        async fn prepare(
-            &mut self,
-            rows: MappedEmitterRows<'_>,
-        ) -> EmitterWriteResult<RowRequestPreparation> {
-            let carrier = rows
-                .carriers
-                .first()
-                .expect("the host hands every preparation one carrier");
-            let mut members = Vec::new();
-            for row in carrier.selected_rows {
-                members.push(EmitterRecordPosition {
-                    batch_index: carrier.batch_index,
-                    row_index: *row,
-                });
-            }
-            members.push(EmitterRecordPosition {
-                batch_index: carrier.batch_index,
-                row_index: carrier.batch.num_rows(),
-            });
-            Ok(RowRequestPreparation {
-                requests: vec![PreparedRowRequest {
-                    members,
-                    body: b"every row and one more".to_vec(),
-                }],
-                rejected: Vec::new(),
-            })
-        }
-
-        async fn publish(
-            &mut self,
-            _requests: Vec<EmitterRowRequest>,
-        ) -> PerRecordOutcome<EmitterRecordId> {
-            panic!("a preparation that breaks its contract is never sent");
-        }
-    }
-
     #[nervix_primitives::test]
     async fn a_preparation_that_breaks_its_contract_keeps_nothing_and_is_not_retried() {
         let context = emitter_context();
-        let mut connector =
-            MappedRequestEmitter::new(Box::new(ForeignRowEmitter), value_projection());
+        let mut publisher = FakeEmitter::<RowRequests>::new([]);
+        publisher.preparation = RequestPreparation::ForeignRow;
+        let mut connector = MappedRequestEmitter::new(Box::new(publisher), value_projection());
         let (batch, _completions) = acknowledged_batch(&[1, 2]);
         let mut batches = vec![batch];
         let mut row_requests = PreparedPayloads::default();
