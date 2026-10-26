@@ -157,9 +157,9 @@ Feature: Web console Plexus REPL
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "created domain 'production'"
     And selector ".prompt-row" contains "production"
-    When selector ".prompt-row input" is filled with "BEGIN; CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
+    When selector ".prompt-row input" is filled with "BEGIN; CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "BEGIN; CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
+    Then selector ".terminal" contains "BEGIN; CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/a;b' }; CREATE SCHEMA notification ( user_id I64 ); COMMIT"
     And selector ".terminal" contains "quiesce level: DYNAMIC"
     When selector ".prompt-row input" is filled with "SHOW CREATE SCHEMA notification"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -1609,7 +1609,7 @@ Feature: Web console Plexus REPL
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
-      CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://example.com/ingest' };
+      CREATE HTTP CLIENT http_main CONFIG { 'endpoint' = 'http://example.com/ingest' };
       CREATE VHOST edge api.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;

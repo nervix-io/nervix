@@ -2,6 +2,14 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Client configuration declarations distinguish required, optional and address-scheme-dependent keys, Nervix and driver
+ownership, typed value rules, TLS certificate/identity file roles and delegated property namespaces.
+`All` is an explicit driver namespace, not an empty-prefix sentinel. The vocabulary schema owns
+key presence, duplicates, type checks and TLS pairing; rendered mount values cross that same
+boundary again before storage. Driver-specific validation stays in connector engines called by
+the composition root. Confidential inspection is an explicit projection of complete entries;
+stored configuration and archive serialization do not consume that projection.
+
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
 stand for a missing value or a different state. The owner of each state decides when a value is

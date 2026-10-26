@@ -183,6 +183,55 @@ fn classify_covers_every_label_shape() {
 }
 
 #[test]
+fn quoted_suggestions_materialize_as_one_complete_string_literal() {
+    let materializer = Materializer::new();
+    for label in ["\"addr\"", "'tls_ca_file'", "$key$option.key$key$", "\"\""] {
+        assert_eq!(
+            SuggestionClass::classify(label),
+            Some(SuggestionClass::StringLiteral)
+        );
+        let text = materializer
+            .materialize(label, 0)
+            .expect("literal materializes");
+        assert_eq!(text.text, label);
+        assert!(!text.free_form);
+    }
+    for label in [
+        "\"unterminated",
+        "\"addr\" \"another\"",
+        "\"addr\" // comment",
+    ] {
+        assert_eq!(SuggestionClass::classify(label), None);
+    }
+}
+
+#[test]
+fn offered_client_key_literals_complete_the_config_grammar() {
+    let grammar = Grammar::Client;
+    let prefix = "CREATE MQTT CLIENT nx_client CONFIG {";
+    let materializer = Materializer::new();
+    let mut literals = 0;
+    for label in grammar.suggest(prefix) {
+        if SuggestionClass::classify(&label) == Some(SuggestionClass::StringLiteral) {
+            let key = materializer
+                .materialize(&label, 0)
+                .expect("key materializes");
+            let statement = format!("{prefix} {} = 'nx_value' }};", key.text);
+            assert_eq!(
+                grammar.parse(&statement),
+                ParseOutcome::Accepted,
+                "{statement}"
+            );
+            literals += 1;
+        }
+    }
+    assert!(
+        literals > 0,
+        "client completion must offer declared literal keys"
+    );
+}
+
+#[test]
 fn repeated_names_are_distinct_so_a_statement_does_not_name_two_things_alike() {
     let materializer = Materializer::new();
     assert_eq!(

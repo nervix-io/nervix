@@ -17,8 +17,8 @@ use std::fmt;
 use error_stack::{Context, Report};
 use nervix_models::{
     BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
-    EndpointType, FieldName, IngestorEntityKind, ModelKind, ModelName, PrometheusClientConfigError,
-    RelayName, WebsocketsClientConfigError, WebsocketsUpgradeHeadersError,
+    EndpointType, FieldName, IngestorEntityKind, ModelKind, ModelName, RelayName,
+    WebsocketsClientConfigError, WebsocketsUpgradeHeadersError,
 };
 use thiserror::Error;
 
@@ -96,27 +96,6 @@ pub(crate) enum OtelMappingSection {
     Resource,
 }
 
-/// A client CONFIG key whose value Nervix decides for the connector, so a client may not set it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display, strum::AsRefStr)]
-pub(crate) enum NervixOwnedConfigKey {
-    #[strum(serialize = "allow.auto.create.topics")]
-    KafkaAllowAutoCreateTopics,
-}
-
-impl NervixOwnedConfigKey {
-    /// Every key Nervix decides for a Kafka client.
-    pub(crate) const KAFKA: [Self; 1] = [Self::KafkaAllowAutoCreateTopics];
-
-    /// Why Nervix keeps the key's value for itself.
-    pub(crate) fn reason(self) -> &'static str {
-        match self {
-            Self::KafkaAllowAutoCreateTopics => {
-                "Nervix never lets a Kafka consumer create the topic it reads"
-            }
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OtelMappingIssue {
     UnsupportedValue {
@@ -172,6 +151,11 @@ impl fmt::Display for OtelMappingIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
+    #[error("client '{client}' configuration is invalid in domain '{domain}'")]
+    ClientConfig {
+        domain: DomainName,
+        client: ClientName,
+    },
     #[error("failed to open registry storage")]
     OpenStorage,
     #[cfg(test)]
@@ -217,17 +201,14 @@ pub(crate) enum RegistryError {
         required: EndpointType,
         found: EndpointType,
     },
-    /// A Prometheus client whose `CONFIG` breaks a rule its client declares. The issue names the
-    /// key, so the one message a failed command shows states the whole reason, and the
-    /// vocabulary's report stays beneath it.
+    /// The Prometheus client context above the vocabulary's key/API-root report.
     #[error(
-        "{} client '{client}' in domain '{domain}' cannot use its CONFIG: {issue}",
+        "{} client '{client}' in domain '{domain}' cannot use its CONFIG",
         ConnectorKind::Prometheus
     )]
     InvalidPrometheusClientConfig {
         domain: DomainName,
         client: ClientName,
-        issue: PrometheusClientConfigError,
     },
     #[error(
         "{} client '{client}' in domain '{domain}' cannot use its CONFIG: {issue}",
@@ -400,15 +381,6 @@ pub(crate) enum RegistryError {
         domain: String,
         identifier: String,
         reason: String,
-    },
-    #[error(
-        "client '{client}' in domain '{domain}' cannot set CONFIG key '{key}': {}",
-        .key.reason()
-    )]
-    NervixOwnedClientConfigKey {
-        domain: DomainName,
-        client: ModelName,
-        key: NervixOwnedConfigKey,
     },
     #[error("codec '{codec}' in domain '{domain}' has an invalid {direction} jaq transformation")]
     InvalidCodecJaq {

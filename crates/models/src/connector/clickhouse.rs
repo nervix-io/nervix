@@ -3,8 +3,9 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The ClickHouse client Model, the table emitter Model, and what it declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared emitter declarations and the names a body references.
-//! - **Must not know.** The ClickHouse driver, its configuration keys, or how rows are inserted.
+//! - **Must not know.** The ClickHouse driver, or how rows are inserted.
 
 #![cfg_attr(
     nervix_lint,
@@ -26,7 +27,26 @@ use crate::{
     LocatorName,
 };
 
-configured_client!(ClickHouse: unpooled, config Nervix, CreateClientClickHouse => ClickHouseConfigEntry);
+configured_client!(ClickHouse: unpooled, config CLIENT_CONFIG, CreateClientClickHouse => ClickHouseConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("addr", V::Url(&["http", "https"])),
+            K::optional("database", V::String),
+            K::optional("password", V::String).secret(),
+            K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+            K::optional("user", V::String),
+        ],
+        &[],
+        &[],
+    )
+};
 
 pub type ClickHouseValueMapping = EmitterValueMapping;
 

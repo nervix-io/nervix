@@ -50,7 +50,10 @@ def declarations():
             },
             "template": "CREATE EMITTER <name>\n  FROM <relay> TO KAFKA <client> TOPIC orders\n  MODE <mode> ENCODE USING <codec>\n  FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
         }],
-        "clients": [{"kind": "KAFKA", "pool": "unpooled", "config_owner": "driver", "options": []}],
+        "clients": [{"kind": "KAFKA", "pool": "unpooled", "config_owner": "driver", "options": [],
+                     "keys": [{"name": "sasl.password", "presence": "optional", "type": "string",
+                               "owner": "driver; best effort", "confidential": True, "file": "none"}],
+                     "namespaces": ["all driver property names"], "reserved": ["group.id"]}],
     }
 
 
@@ -89,6 +92,7 @@ class ConnectorMatrixTests(unittest.TestCase):
         for value in ["KAFKA TOPIC", "metadata.offset: I64 OPTIONAL", "replayable", "answered",
                       "kafka_topic", "ACK SEQUENTIAL ACK TIMEOUT 5s", "unpooled", "driver",
                       "producer reports", "no AMQP or MQTT",
+                      "sasl.password", "driver; best effort", "all driver property names", "Reserved keys: `group.id`",
                       "messages prefetched per partition: driver default: queued.min.messages 100000",
                       "receive.message.max.bytes 100000000", "produce request: `timeout_ms`",
                       "`STALLED PEER timeout_ms`", "holds no buffer between its transport",
