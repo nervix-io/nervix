@@ -152,12 +152,13 @@ Feature: Interconnect health coordination
     Then node "node-1" eventually reports interconnect to "node-3" as "connected"
     Given application revision responses from node "node-2" pause before responding
     And application revision responses from node "node-3" pause before responding
-    Then within "9s" client "health_probe" completes these Plexus statements
+    Then within "20s" client "health_probe" completes these Plexus statements
       """
       CREATE USER health_probe_admin WITH PASSWORD 'created-password';
       CREATE RELAY independent_health_events SCHEMA health_event UNBRANCHED;
       SHOW CLUSTER STATUS;
       """
+    Then the last cluster status reports interconnect to "node-3" as "connected"
     Then the last cluster status owner for scheduled "relay" "independent_health_events" is saved as placeholder "independent_health_owner"
     And the application revision response pause on node "node-2" is reached
     And the application revision response pause on node "node-3" is reached

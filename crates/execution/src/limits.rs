@@ -233,14 +233,26 @@ pub struct MemoryBudgets {
 impl MemoryBudgets {
     /// Every class's budget together, or `None` when they do not add up to a byte count.
     pub fn total(&self) -> Option<ByteUnit> {
+        // The pattern names every field without a rest pattern, so a class added to the budgets
+        // does not compile here until the total counts it.
+        let Self {
+            management,
+            commands,
+            relay,
+            bulk,
+            bulk_window,
+            restore_metadata,
+            credentials,
+        } = *self;
         let mut total = 0_u64;
         for budget in [
-            self.management,
-            self.commands,
-            self.relay,
-            self.bulk,
-            self.restore_metadata,
-            self.credentials,
+            management,
+            commands,
+            relay,
+            bulk,
+            bulk_window,
+            restore_metadata,
+            credentials,
         ] {
             total = total.checked_add(budget.as_u64())?;
         }
