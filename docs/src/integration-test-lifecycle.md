@@ -80,6 +80,14 @@ same oracle runs on one and three nodes. The broker's native round-trip control 
 in the scenario and again during teardown before diagnostics or node drain, including after a
 failed assertion. It does not change a product deadline or use a readiness sleep.
 
+The Kafka explicit-start scenarios use a provisioned real topic and an independent broker observer.
+Their exact payload sets distinguish new work from acknowledged records replayed after a codec
+quiescence, full-cluster restart or partition growth. A later explicit start must replay its selected
+history. The restore outline captures the running domain, replaces the cluster with fresh stores,
+and requires only new records after `RESUME`. Both topologies use the production sticky scheduler
+for recovery from persisted state. Their diagnostic inventory includes active/order execution and
+the corresponding lifecycle or restore stress selection. No phase or suite budget changes.
+
 The Kafka consumer-retirement scenario holds the same broker's replies before it drops an ingestor
 whose eight instances joined their group, so destroying each consumer waits for its LeaveGroup
 answer. It waits for a running connector-storage job before sending a record through an HTTP

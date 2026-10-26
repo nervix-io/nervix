@@ -137,7 +137,14 @@ pub trait KafkaDomainOffsetServices: Send + Sync + 'static {
         partitions: &[i32],
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization>;
 
-    async fn reset(&self, positions: Vec<KafkaOffsetPosition>) -> KafkaDomainOffsetResult<()>;
+    /// Accepts the explicit generation start through persistence and its replica boundary.
+    /// An already accepted start retains its canonical positions. Subsequent initialization of
+    /// that same generation returns `Resume` with those recorded positions.
+    async fn reset(
+        &self,
+        generation: u64,
+        positions: Vec<KafkaOffsetPosition>,
+    ) -> KafkaDomainOffsetResult<()>;
 
     async fn commit(&self, position: KafkaOffsetPosition) -> KafkaDomainOffsetResult<()>;
 }
@@ -178,8 +185,12 @@ impl KafkaDomainOffsetHost {
         .await
     }
 
-    pub async fn reset(&self, positions: Vec<KafkaOffsetPosition>) -> KafkaDomainOffsetResult<()> {
-        self.inner.services.reset(positions).await
+    pub async fn reset(
+        &self,
+        generation: u64,
+        positions: Vec<KafkaOffsetPosition>,
+    ) -> KafkaDomainOffsetResult<()> {
+        self.inner.services.reset(generation, positions).await
     }
 
     pub async fn commit(&self, position: KafkaOffsetPosition) -> KafkaDomainOffsetResult<()> {
@@ -265,6 +276,15 @@ pub enum KafkaTopicIngestorError {
     RetirementAdmission,
     #[error("failed to initialize Kafka consumer")]
     Initialize,
+    #[error(
+        "the {connector} start generation {accepted_generation} was accepted, but initialization \
+         still requests an explicit start for generation {observed_generation}",
+        connector = ConnectorKind::Kafka
+    )]
+    UnresolvedDomainStart {
+        accepted_generation: u64,
+        observed_generation: u64,
+    },
     #[error("failed to subscribe to Kafka topic '{topic}'")]
     Subscribe { topic: String },
     #[error("failed to build Kafka offset commit for topic '{topic}' partition {partition}")]
@@ -875,70 +895,90 @@ impl KafkaTopicIngestor {
         &mut self,
         host: &KafkaDomainOffsetHost,
     ) -> IngestorResult<bool> {
-        let topic = self.topic.as_str().to_owned();
-        let partitions = self
-            .control
-            .run(&self.consumer, move |consumer, budget| {
-                topic_partitions(consumer, &topic, budget)
-            })
-            .await
-            .change_context(IngestorError::Resume { connector: KAFKA })?;
-        let initialization = host
-            .initialization(&partitions)
-            .await
-            .change_context(IngestorError::Resume { connector: KAFKA })?;
-        let generation = initialization.generation;
-        let topic = self.topic.as_str().to_owned();
-        let instance_index = self.instance_index;
-        let offset_reset = self.offset_reset;
-        let mut assignment = std::mem::take(&mut self.assignment);
-        struct InitializedOffsets {
-            ready: bool,
-            assignment: KafkaConsumerAssignment,
-            record: DomainOffsetRecord,
-        }
-        let initialized = self
-            .control
-            .run(&self.consumer, move |consumer, budget| {
-                let ready = initialization.schedule.is_some() && !partitions.is_empty();
-                let scheduled = ScheduledPartitions {
-                    topic: &topic,
-                    partitions: &partitions,
-                    assigned: scheduled_partitions(
-                        initialization.schedule.as_ref(),
-                        instance_index,
-                    ),
-                };
-                let start = DomainStart::resolve(
-                    consumer,
-                    &scheduled,
-                    initialization.start,
-                    offset_reset,
-                    budget,
-                )?;
-                assign_offsets_for_instance(
-                    consumer,
-                    &scheduled,
-                    start.offsets(),
-                    &mut assignment,
-                    budget,
-                )?;
-                Ok(InitializedOffsets {
-                    ready,
-                    assignment,
-                    record: start.into_record(&topic),
+        let mut accepted_start = None;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let topic = self.topic.as_str().to_owned();
+            let partitions = self
+                .control
+                .run(&self.consumer, move |consumer, budget| {
+                    topic_partitions(consumer, &topic, budget)
                 })
-            })
-            .await
-            .change_context(IngestorError::Resume { connector: KAFKA })?;
-        self.assignment = initialized.assignment;
-        initialized
-            .record
-            .store(host)
-            .await
-            .change_context(IngestorError::Resume { connector: KAFKA })?;
-        self.observed_generation = Some(generation);
-        Ok(initialized.ready)
+                .await
+                .change_context(IngestorError::Resume { connector: KAFKA })?;
+            let initialization = host
+                .initialization(&partitions)
+                .await
+                .change_context(IngestorError::Resume { connector: KAFKA })?;
+            let generation = initialization.generation;
+            if let Some(accepted_generation) = accepted_start
+                && matches!(&initialization.start, KafkaDomainOffsetStart::At(_))
+            {
+                return Err(Report::new(KafkaTopicIngestorError::UnresolvedDomainStart {
+                    accepted_generation,
+                    observed_generation: generation,
+                })
+                .change_context(IngestorError::Resume { connector: KAFKA }));
+            }
+            let topic = self.topic.as_str().to_owned();
+            let instance_index = self.instance_index;
+            let offset_reset = self.offset_reset;
+            let mut assignment = std::mem::take(&mut self.assignment);
+            struct InitializedOffsets {
+                ready: bool,
+                assignment: KafkaConsumerAssignment,
+                record: DomainOffsetRecord,
+            }
+            let initialized = self
+                .control
+                .run(&self.consumer, move |consumer, budget| {
+                    let ready = initialization.schedule.is_some() && !partitions.is_empty();
+                    let scheduled = ScheduledPartitions {
+                        topic: &topic,
+                        partitions: &partitions,
+                        assigned: scheduled_partitions(
+                            initialization.schedule.as_ref(),
+                            instance_index,
+                        ),
+                    };
+                    let start = DomainStart::resolve(
+                        consumer,
+                        &scheduled,
+                        initialization.start,
+                        offset_reset,
+                        budget,
+                    )?;
+                    assign_offsets_for_instance(
+                        consumer,
+                        &scheduled,
+                        start.offsets(),
+                        &mut assignment,
+                        budget,
+                    )?;
+                    Ok(InitializedOffsets {
+                        ready,
+                        assignment,
+                        record: start.into_record(&topic, generation),
+                    })
+                })
+                .await
+                .change_context(IngestorError::Resume { connector: KAFKA })?;
+            self.assignment = initialized.assignment;
+            let applied_start = matches!(&initialized.record, DomainOffsetRecord::Reset { .. });
+            initialized
+                .record
+                .store(host)
+                .await
+                .change_context(IngestorError::Resume { connector: KAFKA })?;
+            if applied_start {
+                // Another initializer may have accepted a different start while this instance was
+                // resolving timestamps. Assign its canonical stored positions before polling.
+                accepted_start = Some(generation);
+                continue;
+            }
+            self.observed_generation = Some(generation);
+            return Ok(initialized.ready);
+        }
     }
 }
 
@@ -1066,7 +1106,7 @@ impl DomainStart {
     }
 
     /// What the instance records in its domain offsets once it took its partitions up.
-    fn into_record(self, topic: &str) -> DomainOffsetRecord {
+    fn into_record(self, topic: &str, generation: u64) -> DomainOffsetRecord {
         match self {
             Self::Resumed {
                 offsets,
@@ -1093,7 +1133,10 @@ impl DomainStart {
                         offset,
                     });
                 }
-                DomainOffsetRecord::Reset(positions)
+                DomainOffsetRecord::Reset {
+                    generation,
+                    positions,
+                }
             }
         }
     }
@@ -1105,7 +1148,10 @@ enum DomainOffsetRecord {
     /// the partition there instead of placing it again, past what it has not acknowledged.
     Starts(Vec<KafkaOffsetPosition>),
     /// Every partition's start at a new start point, replacing what the domain offsets recorded.
-    Reset(Vec<KafkaOffsetPosition>),
+    Reset {
+        generation: u64,
+        positions: Vec<KafkaOffsetPosition>,
+    },
 }
 
 impl DomainOffsetRecord {
@@ -1118,7 +1164,10 @@ impl DomainOffsetRecord {
                 }
                 Ok(())
             }
-            Self::Reset(positions) => host.reset(positions).await,
+            Self::Reset {
+                generation,
+                positions,
+            } => host.reset(generation, positions).await,
         }
     }
 }
