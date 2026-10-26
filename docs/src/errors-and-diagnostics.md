@@ -2178,6 +2178,14 @@ counts, exact schemas and complete container consumption. Diagnostics carry type
 entity identities, without payload columns or branch field values. Replica installation refuses
 a revision older than its currently installed materialized revision.
 
+Generator source-read failures retain `MaterializedReadError::RemoteSnapshot` above the typed
+snapshot-exchange cause and the interconnect's `RequestError` when describing or opening the
+transfer fails. Each layer changes the report's context without flattening the transport cause
+into a printable attachment. The generator event renders the complete report chain with its domain,
+generator and source relay, without logging row columns or branch values. A failed read discards
+its retained remote generation and skips that occurrence; it cannot emit a cached success while
+the selected owner's description or transfer failed.
+
 Once admitted, a step that fails ends the restore as `restore failed at step '<step>':` and its
 reason, with the restore's report: the consensus command that records a step refuses it with a
 `RestoreStepConflict` naming the step and the domain, user, resource, or version, and a resource

@@ -702,6 +702,14 @@ earlier checkpoint. Recreating a branch allocates a fresh publication. Installat
 assignment capability, branch generation, captured fence and revision before replacing any row;
 the current branch lifecycle and revision cannot move backwards.
 
+A generator's optional retained remote generation keeps its selected owner, placement, complete
+sealed envelope and admitted snapshot together. Reuse follows a fresh description and equality of
+all those identity fields. Equal revision counters do not establish equal contents across owner
+restart or restore; changed digests, fences or branch generations require replacement. A failed
+read or transition to local routing cannot obtain a cached remote success. An admitted read retains
+its immutable view and admission until it ends, independently of cache release. This read cache cannot
+install state or weaken the installation boundary's monotonic checks.
+
 Server endpoint configuration and source availability are distinct states. The immutable route
 table contains configured definitions; a bound source lifetime contains an optional prepared intake.
 Source ending publishes absence through that lifetime before removing its route binding. A retained

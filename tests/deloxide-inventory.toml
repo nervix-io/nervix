@@ -954,6 +954,26 @@ scenario = "A resumed materialized cut preserves interleaved branches and genera
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "the first restore route loses leadership before submission, the admitted coordinator is held at its publication hook, and a successor completes the same restore before refusing the held publication. Existing archive and materialized assignment locks are tracked; the async hook selection is outside the detector."
+examples = 1
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.restore-publication-coordinator"
+invariant = "A paused coordinator is selected by its reached barrier, exact-reference recovery completes through a successor, all resumed and new rows are complete, and a refused stale publication cannot change the complete materialized generations."
+invocation = "scenarios"
+scenario = "A restore publication pause follows the admitted coordinator after the first route loses leadership"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A remote generator repeatedly describes and reads a stable materialized generation, then reads its replacement through authenticated snapshot transfer. Sealing exercises the existing tracked assignment and sealed-cache locks; transport waits and task-local reuse are outside the detector."
+examples = 1
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "scenario.materialized-read-reuse"
+invariant = "Every observation contains both exact branches and values; a stable generation transfers once and a changed generation is read completely."
+invocation = "scenarios"
+scenario = "Remote materialized generators reuse each complete generation and observe its replacement"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Materialized generations transferred in bulk to owners and replicas."
 examples = 4
 feature = "tests/features/cluster/backup_materialized.feature"
@@ -1342,6 +1362,16 @@ invariant = "A promoted replica preserves both confirmed guest saves when forced
 invocation = "stress-restore-scenarios"
 scenario = "A promoted replica retains its guest saves when recovery precedes schedule installation"
 selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "completed restore outcome replay follows a changed leader under the same execution reference, then recovers the identical complete report after restart. Existing restore archive and consensus locks are tracked; session transport waits are outside the detector."
+examples = 1
+feature = "tests/features/cluster/backup_metadata.feature"
+id = "scenario.restore-outcome-leadership"
+invariant = "A completed restore remains Completed/Recovered with every step applied and the identical full report through leadership change and restart."
+invocation = "scenarios"
+scenario = "A completed restore replay follows the current leader"
+selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
 coverage = "Distributed native lifecycle and Kafka metadata restoration above the bulk budget, durable generation publication, checkpoint replication and acknowledgement, and exact owner and replica values after restart. Stream waits and assignment atomics are untracked."
@@ -1764,6 +1794,26 @@ scenario = "A resumed materialized cut preserves interleaved branches and genera
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
+coverage = "Under scheduling stress: the first restore route loses leadership before submission, the admitted coordinator is held at its publication hook, and a successor completes the same restore before refusing the held publication. Existing archive and materialized assignment locks are tracked; the async hook selection is outside the detector."
+examples = 1
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.restore-publication-coordinator"
+invariant = "A paused coordinator is selected by its reached barrier, exact-reference recovery completes through a successor, all resumed and new rows are complete, and a refused stale publication cannot change the complete materialized generations."
+invocation = "stress-restore-scenarios"
+scenario = "A restore publication pause follows the admitted coordinator after the first route loses leadership"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: a remote generator reads and reuses a stable complete generation, then reads its replacement; existing assignment and sealed-cache locks are tracked. Async transport waits and task-local reuse remain outside Deloxide."
+examples = 1
+feature = "tests/features/cluster/backup_materialized.feature"
+id = "stress.materialized-read-reuse"
+invariant = "Every observation contains both exact branches and values; a stable generation transfers once and a changed generation is read completely."
+invocation = "stress-restore-scenarios"
+scenario = "Remote materialized generators reuse each complete generation and observe its replacement"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
 coverage = "Under scheduling stress: materialized generations transferred in bulk to owners and replicas."
 examples = 4
 feature = "tests/features/cluster/backup_materialized.feature"
@@ -1891,6 +1941,16 @@ id = "stress.backup-multi-domain-wait"
 invariant = "One- and three-node cluster backups wait across independent domain cut budgets and retain both quiesced cuts."
 invocation = "stress-restore-scenarios"
 scenario = "A Plexus cluster backup waits across independent domain cut budgets"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: completed restore outcome replay follows a changed leader under the same execution reference, then recovers the identical complete report after restart. Existing restore archive and consensus locks are tracked; session transport waits are outside the detector."
+examples = 1
+feature = "tests/features/cluster/backup_metadata.feature"
+id = "stress.restore-outcome-leadership"
+invariant = "A completed restore remains Completed/Recovered with every step applied and the identical full report through leadership change and restart."
+invocation = "stress-restore-scenarios"
+scenario = "A completed restore replay follows the current leader"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -2610,6 +2670,10 @@ workloads = [
 [[owner]]
 path = "src/application/restore/archives.rs"
 workloads = [
+  "scenario.restore-publication-coordinator",
+  "stress.restore-publication-coordinator",
+  "scenario.restore-outcome-leadership",
+  "stress.restore-outcome-leadership",
   "scenario.wasm-kafka-restore",
   "scenario.restore-generation",
   "scenario.restore-staging-quota",
@@ -2941,12 +3005,16 @@ workloads = [
 [[owner]]
 path = "src/runtime/materialized_state.rs"
 workloads = [
+  "scenario.restore-publication-coordinator",
+  "stress.restore-publication-coordinator",
   "owner.materialized-publications",
   "scenario.materialized-cut",
+  "scenario.materialized-read-reuse",
   "scenario.materialized-bulk-generations",
   "scenario.materialized-retention-activation",
   "scenario.materialized-restart-retention",
   "stress.materialized-cut",
+  "stress.materialized-read-reuse",
   "stress.materialized-bulk-generations",
   "stress.materialized-retention-activation",
   "stress.materialized-restart-retention",

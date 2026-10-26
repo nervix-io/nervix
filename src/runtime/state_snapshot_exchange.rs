@@ -260,6 +260,33 @@ impl Runtime {
         after_revision: Option<u64>,
     ) -> error_stack::Result<Option<RestoredMaterializedSnapshot>, MaterializedSnapshotExchangeError>
     {
+        let Some(envelope) = self
+            .describe_materialized_snapshot_from(target_node_id, placement, after_revision)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.fetch_described_materialized_snapshot(target_node_id, placement, schema, envelope)
+            .await
+            .map(Some)
+    }
+
+    /// Describe the selected owner's exact sealed generation before deciding whether bytes are
+    /// needed. Readers that retain contents compare the complete envelope, not only its revision.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "materialized readers describe the selected owner before each read"
+        )
+    )]
+    pub(in crate::runtime) async fn describe_materialized_snapshot_from(
+        &self,
+        target_node_id: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+        after_revision: Option<u64>,
+    ) -> error_stack::Result<Option<SealedSnapshotEnvelope>, MaterializedSnapshotExchangeError>
+    {
         let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return Err(Report::new(
                 MaterializedSnapshotExchangeError::DispatcherUnavailable {
@@ -278,12 +305,9 @@ impl Runtime {
                 DESCRIBE_TIMEOUT,
             )
             .await
-            .map_err(|reason| {
-                Report::new(MaterializedSnapshotExchangeError::Describe {
-                    target: target_node_id.clone(),
-                    placement: placement.clone(),
-                })
-                .attach_printable(reason)
+            .change_context_lazy(|| MaterializedSnapshotExchangeError::Describe {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
             })?
             .map_err(|failure| {
                 Report::new(MaterializedSnapshotExchangeError::RemoteFailure {
@@ -292,9 +316,35 @@ impl Runtime {
                     failure,
                 })
             })?;
-        let envelope = match described {
-            DescribedStateSnapshot::Current => return Ok(None),
-            DescribedStateSnapshot::Sealed(envelope) => envelope,
+        Ok(match described {
+            DescribedStateSnapshot::Current => None,
+            DescribedStateSnapshot::Sealed(envelope) => Some(envelope),
+        })
+    }
+
+    /// Receive and verify exactly the generation the owner described. A replaced generation is
+    /// refused by the owner or fails verification; no other contents can satisfy this envelope.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "materialized readers fetch a changed sealed generation"
+        )
+    )]
+    pub(in crate::runtime) async fn fetch_described_materialized_snapshot(
+        &self,
+        target_node_id: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+        schema: &nervix_primitives::sync::StdArc<arrow_schema::Schema>,
+        envelope: SealedSnapshotEnvelope,
+    ) -> error_stack::Result<RestoredMaterializedSnapshot, MaterializedSnapshotExchangeError> {
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
+            return Err(Report::new(
+                MaterializedSnapshotExchangeError::DispatcherUnavailable {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                },
+            ));
         };
         let mut body = dispatcher
             .request_stream(
@@ -305,12 +355,9 @@ impl Runtime {
                 },
             )
             .await
-            .map_err(|reason| {
-                Report::new(MaterializedSnapshotExchangeError::OpenTransfer {
-                    target: target_node_id.clone(),
-                    placement: placement.clone(),
-                })
-                .attach_printable(reason)
+            .change_context_lazy(|| MaterializedSnapshotExchangeError::OpenTransfer {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
             })?;
         if body.content_length() != envelope.length {
             return Err(Report::new(
@@ -362,7 +409,6 @@ impl Runtime {
             SealedSource::staged(staged),
         )
         .await
-        .map(Some)
         .change_context(MaterializedSnapshotExchangeError::OpenSnapshot {
             target: target_node_id.clone(),
             placement: placement.clone(),

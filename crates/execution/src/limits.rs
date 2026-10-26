@@ -67,6 +67,13 @@ pub enum MemoryClass {
     Management,
     Commands,
     Relay,
+    /// Transient decoded materialized snapshots. Independent admission lets their readers
+    /// evaluate and dispatch through the relay pool while the source columns stay charged.
+    StateRead,
+    /// Optional retained materialized-source views. This pool has the relay pool's capacity but
+    /// independent admission, so a cached view cannot hold up live relay work. Retention never
+    /// waits for this pool: a reader without room keeps only its current uncached read.
+    StateReadCache,
     Bulk,
     /// The receive window every open bulk stream grants its sender: what the transport may hold
     /// for that stream before its reader takes it. A stream holds its window from before its
@@ -87,6 +94,8 @@ impl MemoryClass {
             Self::Management => "management",
             Self::Commands => "commands",
             Self::Relay => "relay",
+            Self::StateRead => "state_read",
+            Self::StateReadCache => "state_read_cache",
             Self::Bulk => "bulk",
             Self::BulkWindow => "bulk_window",
             Self::RestoreMetadata => "restore_metadata",
@@ -249,6 +258,9 @@ impl MemoryBudgets {
             management,
             commands,
             relay,
+            // Active state reads and optional retention each have their own relay-sized pool.
+            relay,
+            relay,
             bulk,
             bulk_window,
             restore_metadata,
@@ -261,9 +273,10 @@ impl MemoryBudgets {
 }
 
 impl Default for MemoryBudgets {
-    /// 291 MiB of execution buffers plus 2 GiB of admitted retained restore metadata:
+    /// 675 MiB of execution buffers and materialized reads plus 2 GiB of restore metadata:
     /// 8 MiB reserved for management, 24 MiB for commands and replication,
-    /// 192 MiB for relay work, 32 MiB for bulk buffers, 16 MiB for the receive windows of bulk
+    /// 192 MiB each for relay work, active state reads and optional retention, 32 MiB for bulk buffers,
+    /// 16 MiB for the receive windows of bulk
     /// streams, sixteen of the default 1 MiB windows, and 19 MiB for the one password hash a node
     /// computes at a time.
     fn default() -> Self {

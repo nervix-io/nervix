@@ -39,7 +39,7 @@ pub(crate) use checkpoint_reader::CapturedMaterializedCheckpoint;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, StorageClass,
+    AdmissionError, BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, StorageClass,
 };
 use nervix_models::{RemoteRuntimeField, RemoteRuntimeRecordMetadata};
 use nervix_primitives::sync::{Arc, StdArc};
@@ -202,7 +202,7 @@ const RELAY_ROW_VIEW_BYTES: u64 = 8 * 1024 * 1024;
 pub(in crate::runtime) enum RestoredRows {
     /// A relay's materialized records, within one relay's 8 MiB row-view metadata ceiling.
     Relay,
-    /// A window's retained rows, which the window's own model bounds: as many as the relay memory
+    /// A window's retained rows, which the window's own model bounds: as many as the state-read memory
     /// class holds while the window reopens.
     Window,
 }
@@ -1063,6 +1063,42 @@ pub(in crate::runtime) struct RestoredMaterializedSnapshot {
 }
 
 impl RestoredMaterializedSnapshot {
+    /// Admit optional retention without occupying the live relay pool between reads. A full
+    /// cache leaves the snapshot's current admission intact for this one uncached read.
+    pub(in crate::runtime) fn try_retain_for_reads(
+        &mut self,
+        executor: &Executor,
+    ) -> Result<bool, Report<MaterializedSnapshotError>> {
+        let metadata_bytes = self._metadata_charge.bytes();
+        let bytes = self
+            ._columns_charge
+            .iter()
+            .fold(metadata_bytes, |total, charge| {
+                total.checked_add(charge.bytes()).assured(
+                    "a snapshot's reservations together fit the state-read pool that admitted them",
+                )
+            });
+        let charge = match executor.try_reserve(MemoryClass::StateReadCache, bytes) {
+            Ok(charge) => charge,
+            Err(error)
+                if matches!(
+                    error.current_context(),
+                    AdmissionError::BudgetExhausted { .. }
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(error.change_context(MaterializedSnapshotError::Admission)),
+        };
+        let (metadata, columns) = charge
+            .split(metadata_bytes)
+            .change_context(MaterializedSnapshotError::Admission)?;
+        // Reserve the complete replacement first: no allocation ever outlives its byte charge.
+        self._metadata_charge = Arc::new(metadata);
+        self._columns_charge = Arc::new(vec![columns]);
+        Ok(true)
+    }
+
     #[cfg(test)]
     pub(in crate::runtime) fn from_captured_generation(
         executor: &Executor,
@@ -1076,7 +1112,7 @@ impl RestoredMaterializedSnapshot {
             .assured("a bounded test generation fits");
         let charge = executor
             .try_reserve(
-                MemoryClass::Relay,
+                MemoryClass::StateRead,
                 u64::try_from(bytes)
                     .verified("a bounded test generation fits")
                     .max(1),
@@ -1157,7 +1193,7 @@ impl RestoredMaterializedSnapshot {
         // Admit the row views and uniqueness table before either grows. The columns become
         // materialized runtime state; these arrays are transient until installation consumes them.
         let mut metadata_charge = executor
-            .reserve(MemoryClass::Relay, layout.metadata_bytes.max(1))
+            .reserve(MemoryClass::StateRead, layout.metadata_bytes.max(1))
             .await
             .change_context(MaterializedSnapshotError::Admission)?;
         let mut records = Vec::with_capacity(layout.records);
@@ -1197,7 +1233,7 @@ impl RestoredMaterializedSnapshot {
                 .max(1);
             column_charges.push(
                 executor
-                    .try_reserve(MemoryClass::Relay, retained_bytes)
+                    .try_reserve(MemoryClass::StateRead, retained_bytes)
                     .map_err(|error| error.change_context(MaterializedSnapshotError::Admission))?,
             );
             let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(

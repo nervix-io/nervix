@@ -1662,6 +1662,13 @@ no available record for that read. The dependency policy then waits, skips, or s
 default; `REQUIRED WAIT` retains the batch and retries after routing, state, or bounded poll progress.
 Execution failures and transport failures remain errors.
 
+Generator scans describe their selected source owner on every occurrence. They retain one
+verified decoded generation and fetch bytes only when the owner, placement or complete sealed
+envelope changes. The envelope's digest, length, revision, ownership fence and branch generation
+all participate in reuse, so a restarted owner with changed contents at an equal or lower revision
+requires another transfer. A failed description never authorizes serving the retained view.
+This uses the existing describe and bounded fetch operations without another wire form or lane.
+
 The [Control Plane](./control-plane.md) defines when replicated changes and resources become
 authoritative. The [Data Plane](./data-plane.md) defines how a local execution consumes transferred
 state. The interconnect supplies bounded delivery between those owners and does not reinterpret
@@ -1836,6 +1843,10 @@ Every result is bound to the exact certificate node identifier, discovery incarn
 generation, advertised address, and observation time that were targeted. A healthy response must
 return the same application identity. If discovery replaces the incarnation or endpoint while a
 probe is running, its late result is ignored.
+
+A failed probe records its exact target and complete typed request-error chain at debug level.
+A response with a different application identity records the target and returned identity at the
+same level. These diagnostics do not change availability classification or the probe deadline.
 
 Health observations distinguish:
 

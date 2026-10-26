@@ -812,6 +812,14 @@ fn execution_families(families: &mut Families, executor: &nervix_execution::Exec
             budget: executor.relay_memory,
         },
         MemoryClassSample {
+            class: "state_read",
+            budget: executor.state_read_memory,
+        },
+        MemoryClassSample {
+            class: "state_read_cache",
+            budget: executor.state_read_cache_memory,
+        },
+        MemoryClassSample {
             class: "bulk",
             budget: executor.bulk_memory,
         },

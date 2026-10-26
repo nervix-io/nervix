@@ -21,7 +21,7 @@
 use error_stack::{Report, ResultExt as _};
 use nervix_primitives::sync::CancellationToken;
 
-use super::*;
+use super::{materialized_read::MaterializedGenerationReadCache, *};
 
 /// Every way a generator fails to start on this node, or its task fails to prepare or run one
 /// route for its branch. A failure to start reports its step beneath
@@ -589,6 +589,7 @@ impl Runtime {
                 }
             };
             let mut routing = DomainRoutingCache::new(shared_routing);
+            let mut source_generation = MaterializedGenerationReadCache::default();
             let mut activity = DomainActivityGuard::new(generator_activity);
             let mut quiesce_activity = Some(NodeQuiesceWorkGuard::begin(quiesce_counters.clone()));
             let mut cadence = cadence;
@@ -600,6 +601,7 @@ impl Runtime {
             loop {
                 nervix_primitives::task::consume_budget().await;
                 if *local_intake_rx.borrow_and_update() == LocalIntake::Closed {
+                    source_generation.clear();
                     // A terminating node admits no new work. The generator releases what its
                     // routes buffered and produces nothing further until the domain stops it.
                     runtime
@@ -619,6 +621,7 @@ impl Runtime {
                     break;
                 }
                 if source_gate.is_closed() {
+                    source_generation.clear();
                     pending_occurrence = None;
                     runtime
                         .flush_generator_route_buffers(
@@ -646,6 +649,7 @@ impl Runtime {
                     continue;
                 }
                 if domain_clock.is_paused() {
+                    source_generation.clear();
                     pending_occurrence = None;
                     runtime
                         .flush_generator_route_buffers(
@@ -689,8 +693,13 @@ impl Runtime {
                     let due_at = occurrence.due_at();
 
                     let mut state_load_failed = false;
-                    let state = match runtime
-                        .materialized_records_from_owner(&mut routing, &task_domain, &source_relay)
+                    let mut state = match runtime
+                        .materialized_records_from_owner(
+                            &mut routing,
+                            &mut source_generation,
+                            &task_domain,
+                            &source_relay,
+                        )
                         .await
                     {
                         Ok(state) => state,
@@ -698,13 +707,12 @@ impl Runtime {
                             state_load_failed = true;
                             task_events.report_error(format!(
                                 "failed to read materialized state for generator '{}' from relay \
-                                 '{}' in domain '{}': {}",
+                                 '{}' in domain '{}': {error:#}",
                                 task_generator.as_str(),
                                 source_relay.as_str(),
                                 task_domain.as_str(),
-                                error
                             ));
-                            Vec::new()
+                            Vec::new().into()
                         }
                     };
 
@@ -715,7 +723,9 @@ impl Runtime {
                         HashMap::<Option<BranchKey>, Vec<RuntimeRow>>::default();
                     if !state_load_failed {
                         let mut latest_state = HashMap::<Option<BranchKey>, RuntimeRow>::default();
-                        for record in state {
+                        // Keep an uncached snapshot's admission through evaluation and dispatch,
+                        // after its rows have been grouped into branch-local inputs.
+                        for record in state.by_ref() {
                             let replace = latest_state.get(&record.branch).is_none_or(|existing| {
                                 record.row.metadata().is_newer_than(existing.metadata())
                             });

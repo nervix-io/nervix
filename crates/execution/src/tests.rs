@@ -77,8 +77,7 @@ async fn default_limits_validate_together() {
     assert_eq!(snapshot.connector_storage.workers, 2);
 }
 
-/// Each class's budget counts once in the total. With a distinct power of two for every class, a
-/// class left out of the total or counted twice changes the sum.
+/// Each configured pool and both equally sized derived read pools count in the total.
 #[test]
 fn the_memory_total_counts_every_class_once() {
     let budgets = MemoryBudgets {
@@ -91,7 +90,7 @@ fn the_memory_total_counts_every_class_once() {
         credentials: ByteUnit::Byte(64),
     };
 
-    assert_eq!(budgets.total(), Some(ByteUnit::Byte(127)));
+    assert_eq!(budgets.total(), Some(ByteUnit::Byte(135)));
 }
 
 /// Budgets whose sum does not fit a byte count have no total, rather than one that wrapped.
@@ -106,7 +105,7 @@ fn memory_budgets_beyond_a_byte_count_have_no_total() {
 }
 
 /// The startup preflight refuses a memory limit below the total, so the total is what the executor
-/// can reserve: the capacity of every memory class together, 2,339 MiB by default.
+/// can reserve: the capacity of every memory class together, 2,723 MiB by default.
 #[nervix_primitives::test]
 async fn the_default_memory_total_is_what_the_executor_can_reserve() {
     use meticulous::ResultExt as _;
@@ -118,6 +117,8 @@ async fn the_default_memory_total_is_what_the_executor_can_reserve() {
         MemoryClass::Management,
         MemoryClass::Commands,
         MemoryClass::Relay,
+        MemoryClass::StateRead,
+        MemoryClass::StateReadCache,
         MemoryClass::Bulk,
         MemoryClass::BulkWindow,
         MemoryClass::RestoreMetadata,
@@ -125,11 +126,51 @@ async fn the_default_memory_total_is_what_the_executor_can_reserve() {
     ] {
         reservable = reservable
             .checked_add(executor.memory(class).capacity_bytes)
-            .assured("seven budgets that each fit a u32 permit count add up within a u64");
+            .assured("nine budgets that each fit a u32 permit count add up within a u64");
     }
 
     assert_eq!(config.budgets.total(), Some(ByteUnit::Byte(reservable)));
-    assert_eq!(reservable, ByteUnit::Mebibyte(2339).as_u64());
+    assert_eq!(reservable, ByteUnit::Mebibyte(2723).as_u64());
+}
+
+#[nervix_primitives::test]
+async fn active_reads_retained_reads_and_live_relays_have_independent_capacity() {
+    let executor = small_executor();
+    let capacity = executor.memory(MemoryClass::Relay).capacity_bytes;
+    assert_eq!(
+        executor.memory(MemoryClass::StateRead).capacity_bytes,
+        capacity
+    );
+    let active = executor
+        .try_reserve(MemoryClass::StateRead, capacity)
+        .expect("active source views can fill their own pool");
+    assert_eq!(
+        executor.memory(MemoryClass::StateReadCache).capacity_bytes,
+        capacity
+    );
+    let cached = executor
+        .try_reserve(MemoryClass::StateReadCache, capacity)
+        .expect("the cache can fill its own pool");
+    let exhausted = executor
+        .try_reserve(MemoryClass::StateReadCache, 1)
+        .expect_err("optional retention refuses a full pool without waiting");
+    assert!(matches!(
+        exhausted.current_context(),
+        AdmissionError::BudgetExhausted { .. }
+    ));
+    let live = executor
+        .try_reserve(MemoryClass::Relay, capacity)
+        .expect("a full cache leaves all live relay capacity available");
+    drop(cached);
+    assert_eq!(
+        executor.memory(MemoryClass::StateReadCache).reserved_bytes,
+        0
+    );
+    assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, capacity);
+    drop(active);
+    assert_eq!(executor.memory(MemoryClass::StateRead).reserved_bytes, 0);
+    drop(live);
+    assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, 0);
 }
 
 #[test]
@@ -645,6 +686,8 @@ mod shuttle_checks {
             ("management", snapshot.management_memory),
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
+            ("state_read", snapshot.state_read_memory),
+            ("state_read_cache", snapshot.state_read_cache_memory),
             ("bulk", snapshot.bulk_memory),
             ("bulk_window", snapshot.bulk_window_memory),
             ("restore_metadata", snapshot.restore_metadata_memory),
@@ -681,6 +724,8 @@ mod shuttle_checks {
             ("management", snapshot.management_memory),
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
+            ("state_read", snapshot.state_read_memory),
+            ("state_read_cache", snapshot.state_read_cache_memory),
             ("bulk", snapshot.bulk_memory),
             ("bulk_window", snapshot.bulk_window_memory),
             ("restore_metadata", snapshot.restore_metadata_memory),
@@ -727,6 +772,8 @@ mod shuttle_checks {
             for class in [
                 MemoryClass::Management,
                 MemoryClass::Commands,
+                MemoryClass::StateRead,
+                MemoryClass::StateReadCache,
                 MemoryClass::Bulk,
             ] {
                 let (started, has_started) = nervix_primitives::sync::oneshot::channel();
@@ -764,6 +811,8 @@ mod shuttle_checks {
             assert_eq!(snapshot.relay_memory.reserved_bytes, relay_capacity);
             assert_eq!(snapshot.management_memory.reserved_bytes, 1024);
             assert_eq!(snapshot.commands_memory.reserved_bytes, 1024);
+            assert_eq!(snapshot.state_read_memory.reserved_bytes, 1024);
+            assert_eq!(snapshot.state_read_cache_memory.reserved_bytes, 1024);
             assert_eq!(snapshot.bulk_memory.reserved_bytes, 1024);
 
             let Err(error) = executor.try_reserve(MemoryClass::Relay, 1) else {
