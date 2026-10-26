@@ -1945,10 +1945,27 @@ sequenceDiagram
   committed offset; a cooperative assignment lists only what it adds and forgets nothing.
   With `OFFSET BY DOMAIN`, the host supplies typed access to replicated next-offset state and a
   committed partition schedule. The leader observes partition topology and commits assignments;
-  executing sources follow that schedule. The domain offsets record only acknowledged positions and
+  executing sources follow that schedule. An explicit `START AT` resolves every partition once per
+  domain generation. The host stores that
+  generation with the offset checkpoint, and serializes the first reset against concurrent
+  instances. A later resume uses recorded positions and the original timestamp for an unrecorded
+  partition. The reset and a retry after interrupted persistence complete their persistence and
+  replica boundary before the source polls. Native replication and backups preserve the exact
+  optional applied-start generation.
+  After submitting an explicit start, the connector rereads the host's canonical positions and
+  assigns from them before polling. A late initializer's independently resolved timestamp lookup
+  cannot substitute its own positions for the start another instance already accepted.
+  This handoff accepts one explicit start and then requires a canonical resume. A further explicit
+  start ends that resume attempt with typed generation context, allowing the host to retry it.
+  The leader reconciles its partition watcher on the existing bounded cadence. If startup
+  admission fails and the watcher ends, the next reconciliation replaces that finished task,
+  retaining the full admission report for diagnostics; a matching configuration alone does not
+  establish that a watcher is still running.
+  The domain offsets record only acknowledged positions and
   the start of each partition an instance took up without one, so whichever instance the schedule
   assigns a rejected partition resumes it at or before the rejected record. A partition without a
-  domain offset starts at a concrete offset the instance resolves when it takes the partition up:
+  domain offset in a generation begun with plain `START` starts at a concrete offset the instance
+  resolves when it takes the partition up:
   in a paced domain its first record at or after the domain's current logical time, or its end as
   it stood before that lookup when it has no such record yet, and in an unpaced domain where the
   client's `auto.offset.reset` places it, `earliest` at its earliest retained record and `latest`

@@ -1017,8 +1017,18 @@ The public remote-generator regression and full-value authenticated transport te
 and replacement. Deloxide reaches the existing sealing locks, but does not observe the task-local
 cache or async transport waits.
 
-Kafka offset catch-up checks the revision before retaining or encoding a checkpoint. Capture
-holds the assignment barrier only to select a conservative revision and immutable partition
+Kafka offset catch-up checks the revision before retaining or encoding a checkpoint. Its table
+retains the optional explicit-start generation. First initialization publishes its
+generation and resolved positions under the existing exclusive assignment barrier; another instance
+that resolved the same start retains the current table and its committed slots. No new lock or
+concurrent map is introduced. The driver rereads the accepted positions before it begins polling.
+The production-owner Shuttle check
+`shuttle_instances_apply_a_generation_start_once_without_rewinding_commits` explores two instances
+initializing and committing independently. The public `@kafka_start_generation` and
+`@kafka_start_generation_restore` workloads cover resume, restart, partition growth and restored
+starts in the active, order and corresponding stress diagnostic selections; Deloxide observes their
+lifecycle and storage locks, while the assignment atomics remain outside its detector.
+Capture holds the assignment barrier only to select a conservative revision and immutable partition
 topology; encoding retains that topology and reads shared offset slots after the barrier returns.
 A commit included ahead of the captured revision is offered again by the following revision.
 The native encoder writes into quota-owned staging disk with a fixed 64 KiB I/O grant and separately

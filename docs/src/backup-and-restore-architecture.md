@@ -773,6 +773,12 @@ its offsets, and the restore checks it before installing them. A materialized pl
 fingerprint also mixes in the domain's start generation, and a WASM placement names the guest-state
 generation its schedule assigns.
 
+Kafka offset checkpoints and their archive records also retain the exact optional generation of an
+already applied explicit start. Restore installs it beside the next offsets, so resuming an archived
+`START AT` generation does not rewind acknowledged records. An absent marker stays absent; deriving
+it from the domain's start count would incorrectly claim that an incomplete source initialization
+had finished. A later explicit start uses its new generation and resets the positions normally.
+
 Branch keys are typed. Every archived key must belong to the branching its restored entity declares,
 exactly, with no value converted to fit, so no installed checkpoint names a branch the entity's
 routing could not reach. A section path names a branch by the BLAKE3 fingerprint of its key, or

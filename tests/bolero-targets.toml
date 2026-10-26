@@ -237,7 +237,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/stream__tests__bolero_streamed_records_match_their_wire_encoding/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "backup-streamed-state-records"
 invariant = "Kafka offsets and branch lifecycle records written from iterators equal the canonical rkyv encoding of their complete wire shape byte for byte and decode to the complete original records."
@@ -1824,10 +1824,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_streamed_kafka_preserves_every_partition_and_offset/corpus"
-domain_version = 2
+domain_version = 3
 features = []
 id = "restore-native-kafka"
-invariant = "Streaming native Kafka encoding preserves the complete ordered current topic, partition and next-offset set, including empty sets and integer boundaries."
+invariant = "Streaming native Kafka encoding preserves the complete ordered current topic, partition and next-offset set, including the optional applied-start generation, empty sets and integer boundaries."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"
@@ -1854,10 +1854,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__native_checkpoint_properties__bolero_captured_kafka_offsets_stream_in_archive_order/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "backup-native-kafka"
-invariant = "A stored native Kafka offset checkpoint in any partition order, with partitions recorded more than once, streams the archive record of every partition in topic and partition order with its last recorded next offset, as the runtime's own decoding reads it."
+invariant = "A stored native Kafka offset checkpoint in any partition order, with partitions recorded more than once, streams the archive record of every partition in topic and partition order with its last recorded next offset, and the exact optional applied-start generation, as the runtime's own decoding reads them."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"
@@ -1869,10 +1869,10 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "src/runtime/__fuzz__/runtime__kafka_offset_state__tests__bolero_captured_offsets_write_within_their_bound_and_read_back_whole/corpus"
-domain_version = 1
+domain_version = 2
 features = []
 id = "runtime-kafka-offset-captures"
-invariant = "A captured offset table with its topic schedules writes a native checkpoint no longer than the bound its capture reserves, from which the replica's cancellable reader restores every partition offset and schedule, checking before every native entry and stopping at whichever check refuses."
+invariant = "A captured offset table with its topic schedules writes a native checkpoint no longer than the bound its capture reserves, from which the replica's cancellable reader restores every partition offset, applied-start generation and schedule, checking before every native entry and stopping at whichever check refuses."
 manifest = "Cargo.toml"
 max_input_bytes = 2048
 package = "nervix-server"
@@ -1914,7 +1914,7 @@ test_target = "lib"
 [[target]]
 case_timeout_seconds = 10
 corpus = "crates/backup/src/__fuzz__/archive_properties__bolero_complete_archives_preserve_every_record_section_and_payload/corpus"
-domain_version = 3
+domain_version = 4
 features = []
 id = "backup-complete-archives"
 invariant = "Every promised current record, ordered section, length, digest and raw payload, including deduplicator key and window row and argument groups, survives export, extraction, restore reads and deterministic re-export under cluster/domain and resource/state options."

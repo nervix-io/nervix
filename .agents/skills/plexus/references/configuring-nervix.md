@@ -30,6 +30,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and emitters | `Common` → `Syslog` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
+| Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
 | Plexus entity modes, ordered options, typed metadata, CONFIG ownership and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Constructed Arrow output applications receive and explicitly ACK, retry or reject | `Emitters` → `Client emitters`, `Sessions` → `Emitter Consumers`, and `Client Implementation Manual` → `Emitter Consumers` |
