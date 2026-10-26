@@ -19,7 +19,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
     Assignment, AssignmentTarget, ClientDeadline, ClientIngestMode, CodecBatchContainer,
-    CreateClientHttp, CreateClientKafka, CreateCodec, CreateEmitter, CreateIngestor, CreateSchema,
+    CreateClientHttp, CreateCodec, CreateEmitter, CreateIngestor, CreateSchema,
     CreateSignalingProtocol, DomainName, EmitterEntity, EndpointName, Expression, FieldName,
     HttpApplicationHeaders, HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod,
     HttpOrigin, HttpRequestEmitter, IngestTimestampSource, IngestorInput, LiteralHeaderWrite,
@@ -39,8 +39,8 @@ use nervix_vm::{
 
 use crate::registry::{
     error::{
-        ConnectorDeclarationIssue, ConnectorDurationSetting, NervixOwnedConfigKey,
-        OtelMappingIssue, OtelMappingSection, OtelMappingSignal, RegistryError,
+        ConnectorDeclarationIssue, ConnectorDurationSetting, OtelMappingIssue, OtelMappingSection,
+        OtelMappingSignal, RegistryError,
     },
     validation::{
         branching::relay_declared_branch,
@@ -897,25 +897,6 @@ pub(in crate::registry) fn validate_http_request_expressions(
 
 /// Refuses a Kafka client whose CONFIG sets a key Nervix decides for every Kafka consumer. The
 /// key is matched without regard to ASCII case, so no spelling of it reaches the driver.
-pub(in crate::registry) fn validate_kafka_client(
-    domain: &DomainName,
-    identifier: &ModelName,
-    client: &CreateClientKafka,
-) -> Result<(), Report<RegistryError>> {
-    for entry in &client.config {
-        for key in NervixOwnedConfigKey::KAFKA {
-            if entry.key.eq_ignore_ascii_case(key.as_ref()) {
-                return Err(Report::new(RegistryError::NervixOwnedClientConfigKey {
-                    domain: domain.clone(),
-                    client: identifier.clone(),
-                    key,
-                }));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// The origin accepted by an HTTP emitter, once its client has an explicit, usable request timeout
 /// and complete TLS identity settings. The returned URL is safe to use as the base for
 /// request-target validation; its credentials, path, query and fragment have been ruled out.

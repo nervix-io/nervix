@@ -6,7 +6,7 @@ The tables describe the implemented surface. A connector Epic can extend a decla
 
 Ingest and emit are separate contracts: consuming a broker position and publishing a record need different acknowledgements. Each mirror column compares every declared entity of the same connector on the other side and explains transport differences. An absent capability requires reviewed explanatory prose; stale or missing explanations fail validation.
 
-Client declarations currently expose pooling, statement options and CONFIG ownership. They do not yet enumerate CONFIG keys, so these tables do not imply that an arbitrary Nervix-owned key is accepted. Read the linked entity manual and [client pool reference](database-client-pools.md) for those keys. Driver-owned CONFIG remains intentional pass-through.
+Client CONFIG keys below come from the same declaration used by validation, completion and public inspection. Keys are lowercase and case-sensitive; every key occurs at most once. Required keys, Nervix-owned value types and TLS identity pairs validate before storage. Driver property namespaces and address query options remain intentional pass-through; undeclared driver properties are confidential in public inspection. Kafka properties and Postgres, MySQL, Redis, RabbitMQ and NATS addresses also pass network-free driver checks before commit. Authentication, connectivity and checks requiring a remote service wait for initialization. Nervix-owned file values accept resource mount templates and must resolve to readable files; driver-owned file properties retain their native interpretation. HTTPS retains the driver's built-in trust roots; MQTT requires tls_ca_file for mqtts, as its key's conditional presence declares. tls_ca_file follows the connector's documented augmentation or replacement policy, and a client certificate requires its private key.
 
 ## Ingest
 
@@ -743,6 +743,17 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
 
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `endpoint` | required | URL (http or https) | Nervix; strict | no | none |
+| `method` | optional | string | Nervix; strict | no | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
 ### WEBSOCKETS client
 
 | Capability | Declaration |
@@ -752,14 +763,56 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | CONFIG owner class | Nervix |
 | Statement options | `WITH SIGNALING PROTOCOL signaling` (composed clause); optional; omitted when unset |
 
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `connect_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `endpoint` | required | URL (ws or wss) | Nervix; strict | no | none |
+| `handshake_buffer_capacity` | optional | positive integer | Nervix; strict | no | none |
+| `idle_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `max_frame_size` | optional | positive integer | Nervix; strict | no | none |
+| `max_message_size` | optional | positive integer | Nervix; strict | no | none |
+| `ping_interval_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
 ### KAFKA client
 
 | Capability | Declaration |
 | --- | --- |
 | Kind | KAFKA |
 | Connection pooling | unpooled |
-| CONFIG owner class | driver |
+| CONFIG owner class | declared keys and driver-delegated property namespaces |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `auto.offset.reset` | optional | string | driver; best effort | no | none |
+| `bootstrap.servers` | optional | string | driver; best effort | no | none |
+| `client.id` | optional | string | driver; best effort | no | none |
+| `fetch.wait.max.ms` | optional | unsigned integer | driver; best effort | no | none |
+| `heartbeat.interval.ms` | optional | positive integer | driver; best effort | no | none |
+| `linger.ms` | optional | unsigned integer | driver; best effort | no | none |
+| `message.max.bytes` | optional | positive integer | driver; best effort | no | none |
+| `message.timeout.ms` | optional | unsigned integer | driver; best effort | no | none |
+| `queue.buffering.max.messages` | optional | unsigned integer | driver; best effort | no | none |
+| `sasl.mechanism` | optional | string | driver; best effort | no | none |
+| `sasl.mechanisms` | optional | string | driver; best effort | no | none |
+| `sasl.oauthbearer.config` | optional | string | driver; best effort | yes | none |
+| `sasl.password` | optional | string | driver; best effort | yes | none |
+| `sasl.username` | optional | string | driver; best effort | yes | none |
+| `security.protocol` | optional | string | driver; best effort | no | none |
+| `session.timeout.ms` | optional | positive integer | driver; best effort | no | none |
+| `socket.timeout.ms` | optional | positive, schedulable whole milliseconds | driver; best effort | no | none |
+| `ssl.ca.location` | optional | file path, with resource mount templates resolved before use | driver; best effort | no | driver file |
+| `ssl.certificate.location` | optional | file path, with resource mount templates resolved before use | driver; best effort | no | driver file |
+| `ssl.key.location` | optional | file path, with resource mount templates resolved before use | driver; best effort | no | driver file |
+| `ssl.key.password` | optional | string | driver; best effort | yes | none |
+| `ssl.key.pem` | optional | string | driver; best effort | yes | none |
+
+Delegated property namespaces: all driver property names. Reserved keys: `allow.auto.create.topics`, `delivery.report.only.error`, `enable.auto.commit`, `enable.partition.eof`, `group.id`.
 
 ### PULSAR client
 
@@ -770,6 +823,16 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
 
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | URL (pulsar or pulsar+ssl) | Nervix; strict | no | none |
+| `namespace` | optional | string | Nervix; strict | no | none |
+| `tls_allow_insecure_connection` | optional | boolean | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_hostname_verification_enabled` | optional | boolean | Nervix; strict | no | none |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
 ### RABBITMQ client
 
 | Capability | Declaration |
@@ -778,6 +841,17 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Connection pooling | unpooled |
 | CONFIG owner class | Nervix; address query delegated to driver |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
+| `connect_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
 ### REDIS client
 
@@ -788,6 +862,18 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | CONFIG owner class | Nervix; address query delegated to driver |
 | Statement options | No entity-specific options. |
 
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
+| `connect_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `idle_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `subscription_buffer_messages` | optional | positive integer | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
 ### MQTT client
 
 | Capability | Declaration |
@@ -796,6 +882,16 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Connection pooling | unpooled |
 | CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | URL (mqtt or mqtts) | Nervix; strict | no | none |
+| `client_id` | optional | string | Nervix; strict | no | none |
+| `tls_ca_file` | required when `addr` uses `mqtts` | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
 ### NATS client
 
@@ -806,6 +902,16 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | CONFIG owner class | Nervix; address query delegated to driver |
 | Statement options | No entity-specific options. |
 
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
 ### ZEROMQ client
 
 | Capability | Declaration |
@@ -814,6 +920,15 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Connection pooling | unpooled |
 | CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | string | Nervix; strict | no | none |
+| `bind` | optional | boolean | Nervix; strict | no | none |
+| `connect_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
 ### SQS client
 
@@ -824,6 +939,19 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
 
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `access_key_id` | optional | string | Nervix; strict | yes | none |
+| `endpoint` | required | URL (http or https) | Nervix; strict | no | none |
+| `region` | optional | string | Nervix; strict | no | none |
+| `secret_access_key` | optional | string | Nervix; strict | yes | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
 ### SYSLOG client
 
 | Capability | Declaration |
@@ -832,6 +960,21 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Connection pooling | unpooled |
 | CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | string | Nervix; strict | no | none |
+| `connect_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `framing` | optional | octet-counting or non-transparent | Nervix; strict | no | none |
+| `idle_timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `max_message_size` | optional | positive integer | Nervix; strict | no | none |
+| `protocol` | required | udp or tcp or tls | Nervix; strict | no | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
 ### PROMETHEUS client
 
@@ -842,6 +985,16 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
 
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | URL (http or https) | Nervix; strict | no | none |
+| `timeout_ms` | required | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
 ### SENTRY client
 
 | Capability | Declaration |
@@ -850,6 +1003,12 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Connection pooling | unpooled |
 | CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `dsn` | required | URL (http or https) | Nervix; strict | yes | none |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
 ### OTEL client
 
@@ -860,6 +1019,19 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
 
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `compression` | optional | gzip | Nervix; strict | no | none |
+| `endpoint` | required | URL (http or https) | Nervix; strict | no | none |
+| `headers` | optional | string | Nervix; strict | yes | none |
+| `protocol` | required | grpc or http/protobuf | Nervix; strict | no | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
 ### CLICKHOUSE client
 
 | Capability | Declaration |
@@ -868,6 +1040,19 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | Connection pooling | unpooled |
 | CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | URL (http or https) | Nervix; strict | no | none |
+| `database` | optional | string | Nervix; strict | no | none |
+| `password` | optional | string | Nervix; strict | yes | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+| `user` | optional | string | Nervix; strict | no | none |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
 ### POSTGRES client
 
@@ -878,6 +1063,15 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | CONFIG owner class | Nervix; address query delegated to driver |
 | Statement options | No entity-specific options. |
 
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+| `tls_cert_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS certificate; requires tls_key_file |
+| `tls_key_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS private key; requires tls_cert_file |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
 ### MYSQL client
 
 | Capability | Declaration |
@@ -887,14 +1081,29 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | CONFIG owner class | Nervix; address query delegated to driver |
 | Statement options | No entity-specific options. |
 
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
+
 ### MONGODB client
 
 | Capability | Declaration |
 | --- | --- |
 | Kind | MONGODB |
 | Connection pooling | pooled; explicit POOL SIZE MIN &lt;minimum&gt; MAX &lt;maximum&gt; |
-| CONFIG owner class | Nervix; address query delegated to driver |
+| CONFIG owner class | Nervix |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `addr` | required | URL (mongodb or mongodb+srv) | Nervix; strict | no | none |
+| `database` | optional | string | Nervix; strict | no | none |
+| `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
+
+Delegated property namespaces: none; only declared keys are accepted. Reserved keys: none.
 
 ### S3 client
 
@@ -902,8 +1111,23 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | --- | --- |
 | Kind | S3 |
 | Connection pooling | unpooled |
-| CONFIG owner class | Nervix; property namespaces delegated to driver |
+| CONFIG owner class | declared keys and driver-delegated property namespaces |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `access_key_id` | optional | string | driver; best effort | yes | none |
+| `allow_anonymous` | optional | boolean | driver; best effort | no | none |
+| `client_region` | optional | string | driver; best effort | no | none |
+| `disable_ec2_metadata` | optional | boolean | driver; best effort | no | none |
+| `endpoint` | optional | URL (http or https) | driver; best effort | no | none |
+| `path_style_access` | optional | boolean | driver; best effort | no | none |
+| `region` | optional | string | driver; best effort | no | none |
+| `secret_access_key` | optional | string | driver; best effort | yes | none |
+| `session_token` | optional | string | driver; best effort | yes | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+
+Delegated property namespaces: all driver property names. Reserved keys: none.
 
 ### GCS client
 
@@ -911,8 +1135,18 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | --- | --- |
 | Kind | GCS |
 | Connection pooling | unpooled |
-| CONFIG owner class | Nervix; property namespaces delegated to driver |
+| CONFIG owner class | declared keys and driver-delegated property namespaces |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `credential_path` | optional | file path, with resource mount templates resolved before use | driver; best effort | yes | driver file |
+| `no_auth` | optional | boolean | driver; best effort | no | none |
+| `service_path` | optional | URL (http or https) | driver; best effort | no | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+| `token` | optional | string | driver; best effort | yes | none |
+
+Delegated property namespaces: all driver property names. Reserved keys: none.
 
 ### AZURE_BLOB client
 
@@ -920,8 +1154,23 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | --- | --- |
 | Kind | AZURE_BLOB |
 | Connection pooling | unpooled |
-| CONFIG owner class | Nervix; property namespaces delegated to driver |
+| CONFIG owner class | declared keys and driver-delegated property namespaces |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `account_key` | optional | string | driver; best effort | yes | none |
+| `account_name` | optional | string | driver; best effort | no | none |
+| `authority_host` | optional | string | driver; best effort | no | none |
+| `client_id` | optional | string | driver; best effort | no | none |
+| `client_secret` | optional | string | driver; best effort | yes | none |
+| `connection_string` | optional | string | driver; best effort | yes | none |
+| `endpoint` | optional | URL (http or https) | driver; best effort | no | none |
+| `sas_token` | optional | string | driver; best effort | yes | none |
+| `tenant_id` | optional | string | driver; best effort | no | none |
+| `timeout_ms` | optional | positive, schedulable whole milliseconds | Nervix; strict | no | none |
+
+Delegated property namespaces: all driver property names. Reserved keys: none.
 
 ### ICEBERG_REST client
 
@@ -929,5 +1178,16 @@ Client declarations currently expose pooling, statement options and CONFIG owner
 | --- | --- |
 | Kind | ICEBERG_REST |
 | Connection pooling | unpooled |
-| CONFIG owner class | Nervix; property namespaces delegated to driver |
+| CONFIG owner class | declared keys and driver-delegated property namespaces |
 | Statement options | No entity-specific options. |
+
+| CONFIG key | Presence | Value | Owner | Confidential | File role |
+| --- | --- | --- | --- | --- | --- |
+| `credential` | optional | string | driver; best effort | yes | none |
+| `oauth2-server-uri` | optional | URL (http or https) | driver; best effort | no | none |
+| `scope` | optional | string | driver; best effort | no | none |
+| `token` | optional | string | driver; best effort | yes | none |
+| `uri` | required | URL (http or https) | driver; best effort | no | none |
+| `warehouse` | optional | string | driver; best effort | no | none |
+
+Delegated property namespaces: all driver property names. Reserved keys: none.

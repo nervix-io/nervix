@@ -310,6 +310,12 @@ impl ClientDraft {
                 },
             });
         }
+        let schema = transport
+            .connector()
+            .client()
+            .assured("every client transport declares its configuration")
+            .config;
+        let presented_config = schema.inspection_entries(&presented_config);
         let actual = transport.model(name.clone(), pool, mount.clone(), signaling.clone(), config);
         let presentation = transport.model(name, pool, mount, signaling, presented_config);
         Ok(CompletedClient {

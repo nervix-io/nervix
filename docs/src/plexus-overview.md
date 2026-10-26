@@ -896,7 +896,7 @@ General notes:
 
 - keywords are case-insensitive
 - autocomplete is derived from the parser surface
-- transport/client configs are generally preserved as pass-through string key/value pairs
+- client CONFIG is a declared, lowercase, case-sensitive string key/value surface; [Connector Capabilities](connector-capabilities.md#clients) generates every current key, type, owner and confidentiality rule. Only explicitly delegated driver namespaces accept other property names. CREATE validates keys before storage, including network-free driver parsing; public inspection masks secrets while complete configuration remains available to backup serialization
 - native schema fields may use the `SENSITIVE` modifier; session subscription output masks those values as `<masked>`, while emitters may send sensitive values to their configured external emitter
 - `CREATE SUBSCRIPTION` and `DELETE SUBSCRIPTION` are not persisted in the registry
 - `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK` follow and stop following the active domain's

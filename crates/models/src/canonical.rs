@@ -1089,6 +1089,25 @@ pub fn canonical_plexus_document<'model, Version: Display + 'model>(
     Ok(document)
 }
 
+impl<Version: Display + Clone> Model<Version> {
+    /// The Plexus shown by public inspection, with declared client secrets redacted.
+    /// Complete canonical serialization remains the representation used by archives.
+    pub fn to_public_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let mut presented = self.clone();
+        if let Some(client) = self.configured_client() {
+            let declaration = client
+                .connector
+                .client()
+                .assured("a configured client has a declaration on its connector");
+            *presented
+                .client_config_mut()
+                .assured("the cloned configured client has the same variant") =
+                declaration.config.inspection_entries(client.config);
+        }
+        presented.to_canonical_plexus()
+    }
+}
+
 impl<Version: Display> Model<Version> {
     pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         match self {

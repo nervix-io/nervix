@@ -678,13 +678,46 @@ remain in their owning work records until that delivery.
 | --- | --- |
 | Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
-| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Prometheus and WebSockets clients also declare every key their `CONFIG` may set and the rule each value follows; the registry holds a client to them when it is created, and the ingestor holds its rendered configuration to them again when it opens. |
+| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
 composed head and canonical rendering use the vocabulary's connector kind; a console choice uses
 that same head. Pool bounds, when declared, precede the optional resource mount. WebSocket
 signaling precedes its mount. This syntax does not change which layer interprets configuration or
 how clients connect, pool or execute.
+
+Client keys are lowercase and case-sensitive. The pure registry refuses unknown, repeated,
+missing-required or mistyped Nervix-owned keys and incomplete TLS identities before a candidate
+can become an active graph. Kafka properties and object-store/catalog properties are explicitly
+driver-delegated; database, Redis, RabbitMQ and NATS address query options belong to their driver.
+Undeclared delegated values are confidential in public inspection. Drivers retain their existing
+trust policy: HTTPS without a custom CA uses their built-in roots, while MQTT's `mqtts` address
+requires its declared `tls_ca_file` before commit. Conditional presence belongs to the key declaration.
+Configured CA replacement or augmentation follows the connector's documented policy. A Nervix-owned custom file must be readable; it does
+not disable verification or silently fall back when unavailable.
+
+The server composition root extends the existing changed-model binding boundary before standalone
+mutation or transaction commit. It renders mount templates using the resource resolver and checks
+the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
+Rendered values also pass the existing WebSockets configuration and Prometheus API-root owners;
+an optional Redis subscription capacity passes the same range parser its ingestor plan uses.
+Ingestor-only presence requirements stay with that plan.
+MQTT's representative first instance uses the same instance-template renderer as execution.
+Connector-owned offline parsers check librdkafka property names and values, sqlx and mysql_async
+options, Redis connection information, lapin AMQP URIs and NATS server addresses. They create no
+connection, consumer, producer, DNS lookup or remote side effect. Checks requiring the remote
+service still belong to client initialization. The registry names no connector crate and runtime
+receives entries and pinned mounts rather than a Model.
+
+Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
+exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed
+key-bearing contexts without rendering driver diagnostics that may contain credentials. Worker
+admission and cancellation failures remain inspection failures, rather than invalid-key diagnoses.
+`SHOW CREATE CLIENT` and configured-choice/browser previews use the declared confidential
+projection, masking secrets and address credentials/query options as `********`. Complete canonical
+serialization retains values for strongly persisted configuration and backup archives; archives
+remain secret-bearing under [Backup And Restore](backup-and-restore.md). Existing entity `DESCRIBE`
+output references clients by name and does not print their CONFIG.
 
 A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
 `SUSPEND` require `SESSION PERSISTENT` and `QOS 1`, the session a broker keeps messages for, and the
@@ -1500,6 +1533,8 @@ still holds a message whose report its polling thread is serving, after every re
 served, has flushed, since no record is left. Otherwise `Unsent` counts the records still retained.
 Because a record stays retained until its report is served, the producer always asks for every
 record's report and sets `delivery.report.only.error` to `false` after the client's own entries.
+That property is reserved for Nervix, so client admission refuses it rather than accepting a value
+the producer cannot honor.
 
 The MQTT emitter hands each QoS 0 record to its client with a flush notice, which the client's event
 loop ends once it has written the publish and flushed the connection, or fails when that write or

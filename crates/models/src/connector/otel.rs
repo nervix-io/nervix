@@ -4,9 +4,9 @@
 //!
 //! - **Owns.** The OTEL client Model, the logs, traces and metrics emitter Models with the value
 //!   mappings they share and the metric a metrics emitter declares, and what each entity declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared emitter declarations and the names a body references.
-//! - **Must not know.** The OTLP encoding, the client's configuration keys, or how a signal is
-//!   exported.
+//! - **Must not know.** The OTLP encoding or how a signal is exported.
 
 #![cfg_attr(
     nervix_lint,
@@ -33,7 +33,26 @@ use crate::{
     OptionValue,
 };
 
-configured_client!(Otel: unpooled, config Nervix, CreateClientOtel => OtelConfigEntry);
+configured_client!(Otel: unpooled, config CLIENT_CONFIG, CreateClientOtel => OtelConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::optional("compression", V::Choice(&["gzip"])),
+            K::required("endpoint", V::Url(&["http", "https"])),
+            K::optional("headers", V::String).secret(),
+            K::required("protocol", V::Choice(&["grpc", "http/protobuf"])),
+            K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
+};
 
 pub type OtelValueMapping = EmitterValueMapping;
 

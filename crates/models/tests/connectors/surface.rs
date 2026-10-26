@@ -12,10 +12,10 @@ use std::num::NonZeroUsize;
 use meticulous::OptionExt as _;
 use nervix_arbitrary::{Arbitrary, Domain};
 use nervix_models::{
-    ChoiceRequirement, ClickHouseEmitterEntity, ClientConfigOwner, ClientEmitterEntity,
-    ClientIngestorEntity, ClientPooling, ConnectorKind, EmitterBatchLegality, EmitterBody,
-    EmitterBodyForm, EmitterEntityKind, EmitterPublishingModeKind, EmitterReferenceKind,
-    EnvelopeClauseKind, ExternalName, HttpEmitterEntity, HttpIngestorEntity, IcebergEmitterEntity,
+    ChoiceRequirement, ClickHouseEmitterEntity, ClientEmitterEntity, ClientIngestorEntity,
+    ClientPooling, ConnectorKind, EmitterBatchLegality, EmitterBody, EmitterBodyForm,
+    EmitterEntityKind, EmitterPublishingModeKind, EmitterReferenceKind, EnvelopeClauseKind,
+    ExternalName, HttpEmitterEntity, HttpIngestorEntity, IcebergEmitterEntity,
     IcebergStorageBackend, IngestDeliveryKind, IngestQuiesceKind, IngestorEntityKind,
     KafkaConsumerGroupName, KafkaEmitterEntity, KafkaIngestorEntity, KafkaTopicName,
     LocatorDeclaration, LocatorName, MongoDbEmitterEntity, MqttEmitterEntity, MqttIngestorEntity,
@@ -491,47 +491,31 @@ fn every_delivery_and_publishing_mode_kind_is_declared_at_most_once() {
 }
 
 #[test]
-fn every_client_declares_its_pooling_and_the_owner_of_its_configuration_keys() {
+fn every_client_declares_its_pooling_and_its_current_key_schema() {
     for connector in ConnectorKind::iter() {
-        let expected = match connector {
+        let expected_pool = match connector {
             ConnectorKind::Client | ConnectorKind::Iceberg => None,
-            ConnectorKind::Kafka => Some((ClientPooling::Unpooled, ClientConfigOwner::Driver)),
-            ConnectorKind::S3
-            | ConnectorKind::Gcs
-            | ConnectorKind::AzureBlob
-            | ConnectorKind::IcebergRest => Some((
-                ClientPooling::Unpooled,
-                ClientConfigOwner::NervixWithPropertyNamespaces,
-            )),
             ConnectorKind::Postgres
             | ConnectorKind::MySql
             | ConnectorKind::MongoDb
-            | ConnectorKind::Redis => Some((
-                ClientPooling::Pooled,
-                ClientConfigOwner::NervixWithAddressQuery,
-            )),
-            ConnectorKind::RabbitMq | ConnectorKind::Nats => Some((
-                ClientPooling::Unpooled,
-                ClientConfigOwner::NervixWithAddressQuery,
-            )),
-            ConnectorKind::Http
-            | ConnectorKind::Websockets
-            | ConnectorKind::Pulsar
-            | ConnectorKind::Mqtt
-            | ConnectorKind::ZeroMq
-            | ConnectorKind::Sqs
-            | ConnectorKind::Syslog
-            | ConnectorKind::Prometheus
-            | ConnectorKind::Sentry
-            | ConnectorKind::Otel
-            | ConnectorKind::ClickHouse => {
-                Some((ClientPooling::Unpooled, ClientConfigOwner::Nervix))
-            }
+            | ConnectorKind::Redis => Some(ClientPooling::Pooled),
+            _ => Some(ClientPooling::Unpooled),
         };
-        let declared = connector
-            .client()
-            .map(|client| (client.pooling, client.config));
-        assert_eq!(declared, expected, "{connector}");
+        assert_eq!(
+            connector.client().map(|client| client.pooling),
+            expected_pool,
+            "{connector}"
+        );
+        if let Some(client) = connector.client() {
+            assert!(
+                !client.config.keys().is_empty(),
+                "{connector} declares its current keys"
+            );
+            for key in client.config.keys() {
+                assert_eq!(client.config.key(key.name), Some(key));
+                assert_eq!(key.name.to_ascii_lowercase(), key.name);
+            }
+        }
     }
     let websockets = ConnectorKind::Websockets
         .client()
