@@ -32811,10 +32811,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let run_slots = StdArc::new(ScenarioRunSlots::new(effective_max_concurrent_scenarios));
     // Every scenario's steps run on this thread, so it must not also wait for the TLB shootdowns
     // jemalloc's purges cost in a process of this many threads.
-    purge_freed_memory_in_the_background().assured(
-        "tikv-jemallocator enables jemalloc's runtime support for background threads by default, \
-         and jemalloc starts them on Linux",
-    );
+    purge_freed_memory_in_the_background();
     truncate_cucumber_log();
     begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget());
     append_cucumber_log_line(&format!(

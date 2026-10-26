@@ -473,7 +473,7 @@ scenario waits for is the one thread that polls all of their steps, described un
 that thread ran on a CPU for 86 percent of the run, every scenario took about 1.45 times its
 median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
 needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory is
-no limit: the runner used at most 28 GiB of its 64.
+no limit: the runner used at most 28 GiB of its 62.
 
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. A first run holds one slot.
@@ -2487,8 +2487,8 @@ The runner thread also allocates and frees for every scenario it polls, and jema
 memory to the kernel from whichever thread is allocating when a purge falls due. In a process of
 several hundred threads each purge waits for a TLB shootdown across the CPUs that run them, which a
 virtual machine makes slow. At 64 slots the runner thread ran on a CPU for 86 percent of Check run
-40358096404. A profile of the same workload on a development host found 88 percent of that thread's
-samples in the kernel, 79 percent in the cross-CPU call a TLB shootdown waits for, and its
+40358096404. A profile of the same workload on a loaded development host found 88 percent of that
+thread's samples in the kernel, 79 percent in the cross-CPU call a TLB shootdown waits for, and its
 `madvise`, `brk` and `munmap` calls took 48, 421 and 100 milliseconds on average. The scenario
 process therefore turns on jemalloc's background threads before the run starts: they purge on the
 same decay schedule, and no thread that allocates waits for a purge. On that workload the runner

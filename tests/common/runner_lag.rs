@@ -32,7 +32,7 @@ use std::{
     time::Duration,
 };
 
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::time::Instant;
 
 /// Where a thread's `schedstat` puts the nanoseconds the thread ran on a CPU, and the nanoseconds
@@ -245,8 +245,11 @@ impl WorkerBusy {
 /// of a CI run, and a profile of the same workload found most of that time in the kernel, waiting
 /// for those shootdowns while every scenario's steps waited for the thread. jemalloc keeps the
 /// decay schedule it purges on; only the thread that purges changes.
-pub(crate) fn purge_freed_memory_in_the_background() -> tikv_jemalloc_ctl::Result<()> {
-    tikv_jemalloc_ctl::background_thread::write(true)
+pub(crate) fn purge_freed_memory_in_the_background() {
+    tikv_jemalloc_ctl::background_thread::write(true).assured(
+        "tikv-jemallocator builds jemalloc with runtime support for background threads by \
+         default, and jemalloc starts them on Linux",
+    );
 }
 
 /// What procfs said about the thread a run is polled on.

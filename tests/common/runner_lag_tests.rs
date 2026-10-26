@@ -184,9 +184,7 @@ fn the_runner_thread_reads_the_cpu_time_it_spent_since_it_was_named() {
 /// threads, so no allocating thread, the runner thread above all, waits for a purge's TLB shootdown.
 #[test]
 fn freed_memory_is_purged_on_jemalloc_background_threads() {
-    purge_freed_memory_in_the_background().assured(
-        "tikv-jemallocator enables jemalloc's runtime support for background threads by default",
-    );
+    purge_freed_memory_in_the_background();
     let enabled = tikv_jemalloc_ctl::background_thread::read()
         .assured("jemalloc reports whether its background threads run");
     assert!(
