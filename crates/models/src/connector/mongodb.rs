@@ -4,8 +4,9 @@
 //!
 //! - **Owns.** The MongoDB client Model with its connection pool, the collection emitter Model with
 //!   its conflict action, and what it declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared emitter declarations and the names a body references.
-//! - **Must not know.** The MongoDB driver, its configuration keys, or how documents are written.
+//! - **Must not know.** The MongoDB driver, or how documents are written.
 
 #![cfg_attr(
     nervix_lint,
@@ -30,7 +31,21 @@ use crate::{
     LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
 };
 
-configured_client!(MongoDb: pooled, config NervixWithAddressQuery, CreateClientMongoDb => MongoDbConfigEntry);
+configured_client!(MongoDb: pooled, config CLIENT_CONFIG, CreateClientMongoDb => MongoDbConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("addr", V::Url(&["mongodb", "mongodb+srv"])),
+            K::optional("database", V::String),
+            K::TLS_CA,
+        ],
+        &[],
+        &[],
+    )
+};
 
 pub type MongoDbValueMapping = EmitterValueMapping;
 

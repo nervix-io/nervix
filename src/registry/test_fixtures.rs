@@ -371,10 +371,16 @@ pub(in crate::registry) fn syslog_client(name: &str) -> Model {
     Model::ClientSyslog(CreateClientSyslog {
         name: named(name),
         mount: None,
-        config: vec![ClientConfigEntry {
-            key: "protocol".to_string(),
-            value: "udp".to_string(),
-        }],
+        config: vec![
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "127.0.0.1:514".to_string(),
+            },
+            ClientConfigEntry {
+                key: "protocol".to_string(),
+                value: "udp".to_string(),
+            },
+        ],
     })
 }
 

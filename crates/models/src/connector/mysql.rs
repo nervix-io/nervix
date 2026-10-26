@@ -4,8 +4,9 @@
 //!
 //! - **Owns.** The MySQL client Model with its connection pool, the table emitter Model with its
 //!   conflict action, and what it declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared emitter declarations and the names a body references.
-//! - **Must not know.** The MySQL driver, its configuration keys, or how rows are inserted.
+//! - **Must not know.** The MySQL driver, or how rows are inserted.
 
 #![cfg_attr(
     nervix_lint,
@@ -30,7 +31,17 @@ use crate::{
     LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
 };
 
-configured_client!(MySql: pooled, config NervixWithAddressQuery, CreateClientMySql => MySqlConfigEntry);
+configured_client!(MySql: pooled, config CLIENT_CONFIG, CreateClientMySql => MySqlConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[K::required("addr", V::DriverAddress), K::TLS_CA],
+        &[],
+        &[],
+    )
+};
 
 pub type MySqlValueMapping = EmitterValueMapping;
 

@@ -26,3 +26,6 @@
 
 pub mod topic;
 pub use topic::*;
+
+mod offline_config;
+pub use offline_config::validate_client_configuration;

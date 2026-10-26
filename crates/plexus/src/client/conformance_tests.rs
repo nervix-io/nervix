@@ -78,6 +78,41 @@ fn every_client_head_is_offered_as_one_composed_phrase() {
 }
 
 #[test]
+fn config_completion_offers_the_selected_clients_declared_keys() {
+    for (connector, declaration) in every_client() {
+        let pool = pool_bounds(declaration.pooling).join(" ");
+        let prefix = format!("CREATE {connector} CLIENT generated {pool} CONFIG {{");
+        let suggestions = crate::statement::suggest_statement(&prefix, prefix.len());
+        for key in declaration.config.keys() {
+            assert!(
+                suggestions.contains(&format!("\"{}\"", key.name)),
+                "{connector} key {}: {suggestions:?}",
+                key.name
+            );
+        }
+        for (_, other) in every_client() {
+            for key in other.config.keys() {
+                if declaration.config.key(key.name).is_none() {
+                    assert!(
+                        !suggestions.contains(&format!("\"{}\"", key.name)),
+                        "another connector's key leaked into {connector}: {}",
+                        key.name
+                    );
+                }
+            }
+        }
+        let outside = "CREATE RELAY generated ";
+        let outside = crate::statement::suggest_statement(outside, outside.len());
+        for key in declaration.config.keys() {
+            assert!(
+                !outside.contains(&format!("\"{}\"", key.name)),
+                "client key leaked into relay grammar"
+            );
+        }
+    }
+}
+
+#[test]
 fn every_client_head_is_case_insensitive_and_keeps_the_create_guard() {
     for (connector, declaration) in every_client() {
         let text = statement(connector, &pool_bounds(declaration.pooling));

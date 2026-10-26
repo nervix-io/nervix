@@ -14,12 +14,13 @@
 )]
 
 use nervix_models::{
-    BufferBound, BufferCapacity, BufferOverflow, ChoiceRequirement, ClientConfigOwner,
-    ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds, EmitterBatchLegality,
-    EmitterBodyForm, EmitterEntityCapabilities, EmitterEntityKind, EmitterReferenceKind,
-    HeaderModel, IngestorEntityCapabilities, IngestorEntityKind, IngestorReferenceKind,
-    LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration, OptionForm,
-    OptionPresence, OptionValue, WaitBound,
+    BufferBound, BufferCapacity, BufferOverflow, ChoiceRequirement, ClientConfigFile,
+    ClientConfigKey, ClientConfigNamespace, ClientConfigOwner, ClientConfigPresence,
+    ClientConfigValue, ClientDeclaration, ClientPooling, ConnectorKind, DeclaredBounds,
+    EmitterBatchLegality, EmitterBodyForm, EmitterEntityCapabilities, EmitterEntityKind,
+    EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities, IngestorEntityKind,
+    IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration,
+    OptionForm, OptionPresence, OptionValue, WaitBound,
 };
 use serde_json::{Value, json};
 use strum::IntoEnumIterator as _;
@@ -379,16 +380,53 @@ fn client(kind: ConnectorKind) -> Option<Value> {
         ClientPooling::Pooled => "pooled; explicit POOL SIZE MIN <minimum> MAX <maximum>",
         ClientPooling::Unpooled => "unpooled",
     };
-    let config_owner = match config {
-        ClientConfigOwner::Nervix => "Nervix",
-        ClientConfigOwner::Driver => "driver",
-        ClientConfigOwner::NervixWithAddressQuery => "Nervix; address query delegated to driver",
-        ClientConfigOwner::NervixWithPropertyNamespaces => {
-            "Nervix; property namespaces delegated to driver"
-        }
-    };
+    let config_owner = config.ownership_label();
+    let keys: Vec<_> = config.keys().iter().map(client_key).collect();
+    let namespaces: Vec<_> = config
+        .namespaces()
+        .iter()
+        .map(|namespace| match namespace {
+            ClientConfigNamespace::All => "all driver property names".to_owned(),
+            ClientConfigNamespace::Prefix(prefix) => format!("{prefix}*"),
+        })
+        .collect();
     let options: Vec<_> = options.iter().map(option).collect();
     Some(
-        json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options }),
+        json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options,
+            "keys": keys, "namespaces": namespaces, "reserved": config.reserved() }),
     )
+}
+
+fn client_key(key: &ClientConfigKey) -> Value {
+    let presence = match key.presence {
+        ClientConfigPresence::Required => "required".to_owned(),
+        ClientConfigPresence::Optional => "optional".to_owned(),
+        ClientConfigPresence::RequiredForScheme { address, scheme } => {
+            format!("required when `{address}` uses `{scheme}`")
+        }
+    };
+    let owner = match key.owner {
+        ClientConfigOwner::Nervix => "Nervix; strict",
+        ClientConfigOwner::Driver => "driver; best effort",
+    };
+    let value = match key.value {
+        ClientConfigValue::Url(schemes) => format!("URL ({})", schemes.join(" or ")),
+        ClientConfigValue::Choice(choices) => choices.join(" or "),
+        value => value.label().to_owned(),
+    };
+    let file = match key.value {
+        ClientConfigValue::File(ClientConfigFile::CertificateAuthority) => {
+            "TLS trust; follows the connector's documented root policy"
+        }
+        ClientConfigValue::File(ClientConfigFile::Certificate) => {
+            "TLS certificate; requires tls_key_file"
+        }
+        ClientConfigValue::File(ClientConfigFile::PrivateKey) => {
+            "TLS private key; requires tls_cert_file"
+        }
+        ClientConfigValue::File(ClientConfigFile::MountedFile) => "driver file",
+        _ => "none",
+    };
+    json!({ "name": key.name, "presence": presence, "type": value, "owner": owner,
+        "confidential": key.confidential, "file": file })
 }
