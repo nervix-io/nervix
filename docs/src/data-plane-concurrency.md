@@ -24,6 +24,14 @@ The hot paths are:
 - receiving and admitting one remote relay frame
 - creating, sharing, and resolving one acknowledgement
 
+One Core NATS emitter owns its pending-write state, including a nonzero record count and the
+connection expected to flush it. The driver exposes its successful-connection generation as a
+value, which the emitter captures before hand-over and checks after the driver's flush completes.
+There is no shared connector map, lock or callback publication in this check. The driver's
+private socket and atomics remain outside Nervix's modeled primitives: scripted transport tests
+and public reconnect/STOP scenarios qualify this boundary, while Deloxide qualifies the tracked
+lifecycle paths around it and cannot observe those driver internals.
+
 These paths may apply bounded backpressure and preserve required ordering. Their steady-state work
 must not acquire a `Mutex` or `RwLock`, including a read lock, merely to discover configuration,
 ownership, topology, a service, or a metric series. A read lock still changes shared lock state,

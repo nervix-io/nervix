@@ -23,8 +23,10 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+mod offline_config;
 pub mod pull;
 pub mod push;
+pub use offline_config::validate_client_configuration;
 pub use pull::{
     ZeroMqPullIngestor, ZeroMqPullIngestorError, ZeroMqPullIngestorMessage, ZeroMqPullIngestorPlan,
 };
