@@ -16,202 +16,14 @@ use std::{
     future,
 };
 
-use nervix_connector::{
-    IngestMessageHeaders, IngestMetadataRow, IngestorBatchAcknowledgementServices,
-    IngestorConnector, IngestorError, IngestorReadCancellation, IngestorResult,
+use nervix_connector::{IngestorBatchAcknowledgementServices, IngestorError};
+use nervix_connector_fake::{
+    FakeIngestor, FakeMessage, IngestorObservations as IngestorLoopObservations, RecordedIntake,
 };
 use nervix_primitives::sync::{Notify, blocking::Mutex};
 
 use super::*;
 use crate::runtime::domain_clock::DomainClockWaitError;
-
-/// Which intake the loop asked the host for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RecordedIntake {
-    Unacknowledged,
-    Acknowledged,
-}
-
-#[derive(Default)]
-struct IngestorLoopObservations {
-    /// Every resume, replay and poll in the order the loop performed them.
-    sequence: Vec<&'static str>,
-    /// Replays the host still has to deliver, as a quiesce buffer would.
-    pending_replays: usize,
-    requests: Vec<IngestorBatchRequest>,
-    intake: Vec<(RecordedIntake, usize)>,
-    acknowledged: Vec<Vec<u64>>,
-    rejected: Vec<Vec<u64>>,
-    rejection_notice: Option<Arc<Notify>>,
-    unconfirmed_stops: Vec<usize>,
-    poll_errors: Vec<String>,
-    reported_errors: Vec<String>,
-    ack_waits: usize,
-    ack_outcomes: VecDeque<IngestorAcknowledgementOutcome>,
-    resumes: usize,
-    suspends: usize,
-    closes: usize,
-    flushes: usize,
-    quiesce_waits: usize,
-    suspension_waits: usize,
-    transient_clears: usize,
-    ready: usize,
-    unready: usize,
-}
-
-struct FakeMessage {
-    position: u64,
-    payload: Vec<u8>,
-}
-
-impl IngestMessageHeaders for FakeMessage {
-    fn visit(&self, _visit: &mut dyn FnMut(&str, &str)) {}
-}
-
-impl IngestorMessage for FakeMessage {
-    type Position = u64;
-
-    fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-
-    fn position(&self) -> &Self::Position {
-        &self.position
-    }
-
-    fn headers(&self) -> &dyn IngestMessageHeaders {
-        self
-    }
-
-    fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Headers { headers: self }
-    }
-}
-
-struct FakeIngestor {
-    messages: VecDeque<FakeMessage>,
-    resume_required: bool,
-    resume_results: VecDeque<IngestorResult<IngestorResume>>,
-    reject_failures_left: usize,
-    replay_rejected: bool,
-    /// Replays each resume leaves pending, as a quiesce released during it would.
-    replays_pending_after_resume: usize,
-    resume_started: Option<Arc<Notify>>,
-    block_resume: bool,
-    observations: Arc<Mutex<IngestorLoopObservations>>,
-}
-
-#[async_trait]
-impl IngestorConnector for FakeIngestor {
-    const KIND: nervix_models::IngestorEntityKind =
-        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
-
-    type Plan = ();
-
-    async fn open(_plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
-        Err(Report::new(IngestorError::Open { connector: "fake" }))
-    }
-
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
-        {
-            let mut observations = self.observations.lock();
-            observations.resumes += 1;
-            observations.sequence.push("resume");
-            observations.pending_replays = observations
-                .pending_replays
-                .checked_add(self.replays_pending_after_resume)
-                .verified("the test leaves at most a few replays pending");
-        }
-        if let Some(started) = self.resume_started.as_ref() {
-            started.notify_one();
-        }
-        if self.block_resume {
-            future::pending::<()>().await;
-        }
-        match self.resume_results.pop_front() {
-            Some(result) => result,
-            None => Ok(IngestorResume::Ready),
-        }
-    }
-
-    async fn suspend(&mut self) -> IngestorResult<()> {
-        self.observations.lock().suspends += 1;
-        Ok(())
-    }
-
-    async fn close(&mut self) -> IngestorResult<()> {
-        self.observations.lock().closes += 1;
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl BrokerIngestorConnector for FakeIngestor {
-    type Message = FakeMessage;
-    type Position = u64;
-
-    async fn next_batch(
-        &mut self,
-        request: IngestorBatchRequest,
-        _cancellation: &IngestorReadCancellation,
-    ) -> IngestorResult<IngestorBatch<Self::Message>> {
-        let mut observations = self.observations.lock();
-        observations.requests.push(request);
-        observations.sequence.push("next_batch");
-        drop(observations);
-        if self.resume_required {
-            self.resume_required = false;
-            return Ok(IngestorBatch::ResumeRequired);
-        }
-        if self.messages.is_empty() {
-            return Ok(IngestorBatch::Closed);
-        }
-        let count = self.messages.len().min(request.max_messages.get());
-        let mut messages = Vec::with_capacity(count);
-        for _ in 0..count {
-            messages.push(
-                self.messages
-                    .pop_front()
-                    .verified("the count is bounded by the queue length above"),
-            );
-        }
-        Ok(IngestorBatch::Messages(messages))
-    }
-
-    async fn acknowledge(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
-        self.observations
-            .lock()
-            .acknowledged
-            .push(positions.to_vec());
-        Ok(())
-    }
-
-    async fn reject(&mut self, positions: &[Self::Position]) -> IngestorResult<()> {
-        let notice = {
-            let mut record = self.observations.lock();
-            record.rejected.push(positions.to_vec());
-            record.rejection_notice.clone()
-        };
-        if let Some(notice) = notice {
-            notice.notify_one();
-        }
-        if self.reject_failures_left > 0 {
-            self.reject_failures_left -= 1;
-            return Err(Report::new(IngestorError::Reject { connector: "fake" }));
-        }
-        if self.replay_rejected {
-            for position in positions.iter().rev() {
-                self.messages.push_front(FakeMessage {
-                    position: *position,
-                    payload: vec![
-                        u8::try_from(*position).verified("the test positions are all below 256"),
-                    ],
-                });
-            }
-        }
-        Ok(())
-    }
-}
 
 enum TestAcknowledgementPlan {
     Outcome(IngestorAcknowledgementOutcome),
@@ -420,9 +232,11 @@ fn replayable(acknowledgement: IngestorAckPolicy) -> BrokerIngestorPolicy {
 
 fn three_messages() -> VecDeque<FakeMessage> {
     (0..3)
-        .map(|position| FakeMessage {
-            position,
-            payload: vec![u8::try_from(position).verified("the test positions are all below 256")],
+        .map(|position| {
+            FakeMessage::new(
+                position,
+                vec![u8::try_from(position).verified("the test positions are all below 256")],
+            )
         })
         .collect()
 }
@@ -432,17 +246,10 @@ async fn run_policy_with_refresh(
     resume_required: bool,
 ) -> Arc<Mutex<IngestorLoopObservations>> {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let source = FakeIngestor {
-        messages: three_messages(),
-        resume_required,
-        resume_results: VecDeque::new(),
-        reject_failures_left: 0,
-        replay_rejected: false,
-        replays_pending_after_resume: 0,
-        resume_started: None,
-        block_resume: false,
-        observations: observations.clone(),
-    };
+    let mut source = empty_source(observations.clone());
+    source.queued().extend(three_messages());
+    source.resume_required = resume_required;
+    source.replays_pending_after_resume = 0;
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     run_ingestor_instance_with_retry(source, host, replayable(policy), shutdown_rx).await;
@@ -462,72 +269,10 @@ fn retry_policy() -> nervix_connector::ParsedRetryPolicy {
 }
 
 fn empty_source(observations: Arc<Mutex<IngestorLoopObservations>>) -> FakeIngestor {
-    FakeIngestor {
-        messages: VecDeque::new(),
-        resume_required: false,
-        resume_results: VecDeque::new(),
-        reject_failures_left: 0,
-        replay_rejected: false,
-        replays_pending_after_resume: 0,
-        resume_started: None,
-        block_resume: false,
-        observations,
-    }
-}
-
-#[async_trait]
-impl PacedIngestorConnector for FakeIngestor {
-    async fn poll(&mut self, _scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
-        panic!("the failed cadence ends the loop before its source is polled")
-    }
+    FakeIngestor::empty(observations)
 }
 
 struct FailedCadence;
-
-struct FailedPacedIngestor {
-    shutdown: watch::Sender<bool>,
-}
-
-#[async_trait]
-impl IngestorConnector for FailedPacedIngestor {
-    const KIND: nervix_models::IngestorEntityKind =
-        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
-
-    type Plan = ();
-
-    async fn open(_plan: &(), _instance_index: u64) -> IngestorResult<Self> {
-        panic!("the test installs its source directly")
-    }
-
-    async fn resume(&mut self) -> IngestorResult<IngestorResume> {
-        Ok(IngestorResume::Ready)
-    }
-
-    async fn suspend(&mut self) -> IngestorResult<()> {
-        Err(
-            Report::new(std::io::Error::other("could not pause the connection"))
-                .change_context(IngestorError::Suspend { connector: "fake" }),
-        )
-    }
-
-    async fn close(&mut self) -> IngestorResult<()> {
-        Err(
-            Report::new(std::io::Error::other("could not finish the connection"))
-                .change_context(IngestorError::Close { connector: "fake" }),
-        )
-    }
-}
-
-#[async_trait]
-impl PacedIngestorConnector for FailedPacedIngestor {
-    async fn poll(&mut self, _scheduled_at: Timestamp) -> IngestorResult<IngestorPoll> {
-        self.shutdown.send_replace(true);
-        Err(
-            Report::new(std::io::Error::other("the connection refused the poll"))
-                .change_context(IngestorError::Read { connector: "fake" }),
-        )
-    }
-}
 
 struct SingleOccurrenceCadence {
     occurrence: Option<Timestamp>,
@@ -550,9 +295,26 @@ impl PacedIngestorCadence for SingleOccurrenceCadence {
 async fn runtime_report_chain_ingestor_lifecycle() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     let (shutdown_tx, mut shutdown) = watch::channel(false);
-    let mut source = FailedPacedIngestor {
-        shutdown: shutdown_tx,
-    };
+    let mut source = empty_source(observations.clone());
+    source.stop_after_poll = Some(shutdown_tx);
+    source
+        .suspend_results
+        .push_back(Err(Report::new(std::io::Error::other(
+            "could not pause the connection",
+        ))
+        .change_context(IngestorError::Suspend { connector: "fake" })));
+    source
+        .close_results
+        .push_back(Err(Report::new(std::io::Error::other(
+            "could not finish the connection",
+        ))
+        .change_context(IngestorError::Close { connector: "fake" })));
+    source
+        .polls
+        .push_back(Err(Report::new(std::io::Error::other(
+            "the connection refused the poll",
+        ))
+        .change_context(IngestorError::Read { connector: "fake" })));
     let mut host = FakeHost::running(observations.clone());
     host.suspend_intake = true;
     host.wake_suspension = true;
@@ -655,17 +417,10 @@ async fn runtime_report_chain_ingestor_resume() {
 #[nervix_primitives::test]
 async fn source_loop_replays_a_buffer_released_during_resume_before_polling() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
-    let source = FakeIngestor {
-        messages: three_messages(),
-        resume_required: false,
-        resume_results: VecDeque::new(),
-        reject_failures_left: 0,
-        replay_rejected: false,
-        replays_pending_after_resume: 2,
-        resume_started: None,
-        block_resume: false,
-        observations: observations.clone(),
-    };
+    let mut source = empty_source(observations.clone());
+    source.queued().extend(three_messages());
+    source.resume_required = false;
+    source.replays_pending_after_resume = 2;
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     run_ingestor_instance_with_retry(
@@ -698,8 +453,7 @@ async fn source_shutdown_cancels_pending_resume_and_closes_the_source() {
     let observations = Arc::new(Mutex::new(IngestorLoopObservations::default()));
     let started = Arc::new(Notify::new());
     let mut source = empty_source(observations.clone());
-    source.resume_started = Some(started.clone());
-    source.block_resume = true;
+    source.resume_gate = Some(started.clone());
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let running = nervix_primitives::task::spawn(run_ingestor_instance_with_retry(
@@ -723,8 +477,7 @@ async fn source_quiesce_change_cancels_pending_resume_before_retrying() {
     let started = Arc::new(Notify::new());
     let changed = Arc::new(Notify::new());
     let mut source = empty_source(observations.clone());
-    source.resume_started = Some(started.clone());
-    source.block_resume = true;
+    source.resume_gate = Some(started.clone());
     let mut fake_host = FakeHost::running(observations.clone());
     fake_host.quiesce_change = Some(changed.clone());
     let host = IngestorHost::new(fake_host);
@@ -906,17 +659,10 @@ async fn failed_rewind_cannot_commit_past_an_unacknowledged_kafka_position() {
         IngestorAcknowledgementOutcome::Ack,
         IngestorAcknowledgementOutcome::Ack,
     ]);
-    let source = FakeIngestor {
-        messages: three_messages().into_iter().take(2).collect(),
-        resume_required: false,
-        resume_results: VecDeque::new(),
-        reject_failures_left: 2,
-        replay_rejected: true,
-        replays_pending_after_resume: 0,
-        resume_started: None,
-        block_resume: false,
-        observations: observations.clone(),
-    };
+    let mut source = empty_source(observations.clone());
+    source.queued().extend(three_messages().into_iter().take(2));
+    source.reject_failures_left = 2;
+    source.replay_rejected = true;
     let host = IngestorHost::new(FakeHost::running(observations.clone()));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let policy = IngestorAckPolicy::Sequential {

@@ -1131,9 +1131,14 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-emit).
 <!-- connector-matrix:emit-kafka-topic:end -->
 
-`ACK` waits for every record's delivery report. Kafka's `acks`, idempotence, batching, linger, and
-compression remain pass-through client configuration. `ACK TIMEOUT` bounds the report wait and is
-also the producer's own delivery bound: the emitter sets librdkafka's `message.timeout.ms` to its
+`ACK` waits for every record's delivery report through the shared confirmation window. If a publish
+attempt fails, the window first settles the answers already received and returns only unresolved
+members for retry; confirmed records are not sent again by that attempt's retry. An unanswered
+report is still ambiguous: the broker may have accepted the record, so a retry can duplicate it.
+
+Kafka's `acks`, idempotence, batching, linger, and compression remain pass-through client
+configuration. `ACK TIMEOUT` bounds the report wait and is also the producer's own delivery bound:
+the emitter sets librdkafka's `message.timeout.ms` to its
 `ACK TIMEOUT`, rounded up to the millisecond, and removes `delivery.timeout.ms`, overriding either
 name in the client's `CONFIG`. The producer therefore gives up a record within about a second of
 the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
@@ -1152,6 +1157,12 @@ queue is an infrastructure condition paced by the declared retry policy. In eith
 whose payload exceeds the entire `queue.buffering.max.kbytes` capacity is rejected through
 `ON MESSAGE ERROR`, with its payload size and the capacity in bytes. This queue capacity counts
 the payload alone; `message.max.bytes` separately bounds the encoded Kafka record.
+
+The producer keeps librdkafka's topic auto-creation default. A broker that permits it can therefore
+create a missing topic on the first publish, even though Nervix's consumers disable auto-creation
+and `CREATE KAFKA CLIENT` refuses `allow.auto.create.topics`. Provision output topics explicitly;
+the consumer's no-creation guarantee does not extend to the producer.
+
 When the emitter stops, it flushes what the producer still queues, in both modes and
 regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
 the node's graceful shutdown each give that flush their deadline. Records still awaiting their
@@ -1537,7 +1548,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| Envelope | Not offered: The PUSH socket sends one payload frame. Multipart envelopes and additional per-record envelope clauses are not offered. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | bytes queued for a peer: unbounded |
 | Network waits | connecting and the ZMTP handshake: `connect_timeout_ms`; 30s when omitted<br>a send: `timeout_ms`; unbounded when omitted |
@@ -1552,9 +1563,14 @@ paced by the declared retry policy.
 
 The emitter is a PUSH socket on the client's `addr`, a `tcp://<host>:<port>` or `ipc://<path>`
 endpoint. With `'bind' = 'true'` the socket binds that address and peers connect to it; otherwise
-it connects to a peer bound there. Every value of the client's `CONFIG` is rendered the way an
+it connects to a peer bound there (`'bind' = 'false'` is also the default when omitted).
+Only `true` and `false`, ignoring letter case, are accepted for `bind`; `CREATE CLIENT` refuses
+other values. Every value of the client's `CONFIG` is rendered the way an
 ingestor renders it, so it can name the client's `MOUNT`; see
 [Client Config Mounts](resources.md#client-config-mounts).
+
+`CREATE CLIENT` checks `addr` with the socket driver's TCP/IPC endpoint parser, including after
+rendering an address template. This check opens no socket and performs no name lookup.
 
 A client that connects rather than binds connects when the emitter starts. The driver retries a
 refused connection on its own and waits for the peer's ZMTP handshake, so the client's

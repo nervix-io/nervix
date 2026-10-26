@@ -737,6 +737,7 @@ fn unsupported_state_record_headers_are_verified_and_reported_as_skipped() {
         entity,
         schema: SchemaFingerprint::from_digest([3; 32]),
         revision: 3,
+        applied_start_generation: None,
         offsets: Vec::new(),
     };
     for (kind, version, expected) in [

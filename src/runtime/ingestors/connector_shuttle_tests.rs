@@ -15,7 +15,8 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use nervix_connector::{IngestMessageHeaders, IngestMetadataRow, IngestorReadCancellation};
+use nervix_connector::{IngestMetadataRow, IngestorReadCancellation};
+use nervix_connector_fake::{FakeIngestor as ChannelIngestor, FakeMessage as ChannelMessage};
 use nervix_model_harness::shuttle::{check_pct, check_random};
 use nervix_primitives::sync::{StdArc, mpsc, oneshot, watch};
 // The dispatch count is a record: an unmodeled atomic is not a Shuttle scheduling point, so it
@@ -24,8 +25,8 @@ use nervix_primitives::unmodeled::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{
     read_tests::{
-        GatheringIngestor, HostControl, IngestorSignals, ReadEvent, ReadInFlight, ReadLog,
-        RecordingHost, assert_every_taken_position_taken_in_first, gathering_policy,
+        GatheringIngestor, HostControl, IngestorSignals, ReadEvent, ReadLog, RecordingHost,
+        assert_every_taken_position_taken_in_first, gathering_policy,
     },
     reconnect_tests::{
         RedeliveringBroker, RedeliveringIngestor, RedeliveryHost, sequential_policy,
@@ -34,143 +35,6 @@ use super::{
 };
 
 const JOIN: &str = "the host loop runs until the check sends shutdown";
-
-struct ChannelMessage {
-    position: u64,
-    payload: Vec<u8>,
-}
-
-impl IngestMessageHeaders for ChannelMessage {
-    fn visit(&self, _visit: &mut dyn FnMut(&str, &str)) {}
-}
-
-impl IngestorMessage for ChannelMessage {
-    type Position = u64;
-
-    fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-
-    fn position(&self) -> &Self::Position {
-        &self.position
-    }
-
-    fn headers(&self) -> &dyn IngestMessageHeaders {
-        self
-    }
-
-    fn metadata(&self) -> IngestMetadataRow<'_> {
-        IngestMetadataRow::Headers { headers: self }
-    }
-}
-
-struct ChannelIngestor {
-    messages: mpsc::Receiver<ChannelMessage>,
-    read: ReadInFlight,
-}
-
-impl ChannelIngestor {
-    fn new(messages: mpsc::Receiver<ChannelMessage>) -> Self {
-        Self {
-            messages,
-            read: ReadInFlight::default(),
-        }
-    }
-
-    async fn receive(
-        &mut self,
-        cancellation: &IngestorReadCancellation,
-    ) -> nervix_connector::IngestorResult<IngestorBatch<ChannelMessage>> {
-        let Some(received) = cancellation.unless_cancelled(self.messages.recv()).await else {
-            return Ok(IngestorBatch::Interrupted {
-                gathered: Vec::new(),
-            });
-        };
-        match received {
-            Some(message) => Ok(IngestorBatch::Messages(vec![message])),
-            None => Ok(IngestorBatch::Closed),
-        }
-    }
-}
-
-#[async_trait]
-impl IngestorConnector for ChannelIngestor {
-    const KIND: nervix_models::IngestorEntityKind =
-        nervix_models::IngestorEntityKind::Kafka(nervix_models::KafkaIngestorEntity::Topic);
-
-    type Plan = ();
-
-    async fn open(
-        _plan: &Self::Plan,
-        _instance_index: u64,
-    ) -> nervix_connector::IngestorResult<Self> {
-        Err(Report::new(IngestorError::Open {
-            connector: "channel",
-        }))
-    }
-
-    async fn resume(&mut self) -> nervix_connector::IngestorResult<IngestorResume> {
-        Ok(IngestorResume::Ready)
-    }
-
-    async fn close(&mut self) -> nervix_connector::IngestorResult<()> {
-        self.read.assert_none_before("close");
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl BrokerIngestorConnector for ChannelIngestor {
-    type Message = ChannelMessage;
-    type Position = u64;
-
-    async fn next_batch(
-        &mut self,
-        _request: IngestorBatchRequest,
-        cancellation: &IngestorReadCancellation,
-    ) -> nervix_connector::IngestorResult<IngestorBatch<Self::Message>> {
-        self.read.start();
-        let batch = self.receive(cancellation).await;
-        self.read.finish();
-        batch
-    }
-
-    async fn acknowledge(
-        &mut self,
-        _positions: &[Self::Position],
-    ) -> nervix_connector::IngestorResult<()> {
-        Ok(())
-    }
-
-    async fn reject(
-        &mut self,
-        _positions: &[Self::Position],
-    ) -> nervix_connector::IngestorResult<()> {
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl PacedIngestorConnector for ChannelIngestor {
-    async fn poll(
-        &mut self,
-        scheduled_at: Timestamp,
-    ) -> nervix_connector::IngestorResult<IngestorPoll> {
-        let message = self
-            .messages
-            .recv()
-            .await
-            .assured("the check holds the payload sender until it shuts the source down");
-        Ok(IngestorPoll {
-            messages: vec![nervix_connector::IngestorPollMessage {
-                payload: message.payload,
-                headers: RetainedIngestHeaders::none(),
-            }],
-            failures: Vec::new(),
-            observed_at: scheduled_at,
-        })
-    }
-}
 
 struct ChannelCadence {
     due: mpsc::Receiver<Timestamp>,
@@ -383,10 +247,10 @@ async fn observe_within_steps(mut observed: oneshot::Receiver<()>) {
 
 async fn send_message(messages: &mpsc::Sender<ChannelMessage>, position: u64) {
     messages
-        .send(ChannelMessage {
+        .send(ChannelMessage::new(
             position,
-            payload: vec![u8::try_from(position).assured("the check uses positions one and two")],
-        })
+            vec![u8::try_from(position).assured("the check uses positions one and two")],
+        ))
         .await
         .assured("the ingestor loop keeps its payload channel open until shutdown");
 }
@@ -717,12 +581,10 @@ impl BrokerIngestorConnector for ConfirmingChannelIngestor {
         }
         let mut messages = Vec::with_capacity(self.queue.len());
         for position in self.queue.drain(..) {
-            messages.push(ChannelMessage {
+            messages.push(ChannelMessage::new(
                 position,
-                payload: vec![
-                    u8::try_from(position).assured("the check uses positions one and two"),
-                ],
-            });
+                vec![u8::try_from(position).assured("the check uses positions one and two")],
+            ));
         }
         Ok(IngestorBatch::Messages(messages))
     }
