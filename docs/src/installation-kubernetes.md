@@ -80,7 +80,7 @@ spec:
 
 Each node checks its volume and its memory before it starts, and refuses to start when they cannot
 hold its configuration: its volume must be at least as large as each resource quota, 16 GiB for
-extracted resources by default, and its memory limit must hold its execution budgets, 2.27 GiB. The
+extracted resources by default, and its memory limit must hold its execution budgets, 2.28 GiB. The
 example spells out the operator's defaults, a 20 GiB volume and a 3 GiB memory limit, which meet
 both checks. With a smaller volume or memory limit, every pod exits with the refusal.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) gives the rules.
@@ -169,3 +169,29 @@ preserves.
 Both the chart and the example currently default to rolling `latest` image tags. Pin reviewed
 operator and Nervix image tags or digests before using this setup in production. Also choose
 storage, resource requests, NodePort exposure, and Secret management appropriate for the cluster.
+
+## Deployment Qualification
+
+Nervix's Docker Build workflow deploys every publishable Debian server revision through the shipped
+operator on native amd64 and arm64 minikube runners. Both checks must pass before the workflow can
+update `debian-latest`. They run for image-building pull requests from this repository, manual builds
+and nightly builds; a pull request marked `no-docker` builds no image and runs no deployment check.
+
+Each check resolves the server image built by that run and the published operator image to registry
+digests, records the chart and example's `main` revision, and changes only the example's server
+image. It waits for user initialization, all three pods running that exact image, and a leader with
+three Raft voters reported by `SHOW CLUSTER STATUS` through the bootstrap NodePort. The CLI comes
+from the tested server image. Image identities, Kubernetes observations, command output and current
+and previous pod logs are retained as workflow artifacts, and the check deletes its own minikube
+profile after success, failure or cancellation.
+
+This qualifies the default deployment's startup command, interconnect certificates, memory limits
+and initialization sequence. Minikube's hostpath provisioner reports the host filesystem's capacity;
+it does not enforce the example's `20Gi` claim as a filesystem size. A passing deployment therefore
+does not qualify volume-size enforcement, another storage provisioner, or production availability.
+The [startup preflight](node-settings.md#the-startup-preflight) retains its separate volume tests.
+
+Changes to the server's command line, startup settings or initialization contract must keep the
+operator's generated startup command, chart and example current in the same delivery. The server
+PR's deployment check is required evidence for that work. The operator's own workflow also checks
+changes to its repository; it does not replace the server-image checks.
