@@ -113,6 +113,14 @@ Build configuration in dependency order:
 3. Define internal schemas, branch-key schemas, branches, wire schemas, and codecs.
 4. Define clients with a `<CONNECTOR> CLIENT` head, such as `CREATE KAFKA CLIENT`. Define signaling
    protocols, virtual hosts/endpoints, lookup models, and trusted Roto UDFs as needed.
+   Read the generated client CONFIG key tables in Connector Capabilities. Keys are lowercase and
+   case-sensitive; declare required keys exactly once, follow their value types and pair TLS
+   certificate/key files. Pass other property names only in an explicitly delegated driver
+   namespace. CREATE also runs network-free Kafka/connection-URL checks before storing a client;
+   credentials and connectivity still validate at initialization. Public SHOW CREATE and previews
+   redact declared secrets and address credentials/query options; backups retain secret-bearing
+   complete configuration under the archive contract.
+
 5. Define relays before nodes that read or write them.
 6. Define ingestors, processors, generators, and emitters in graph order.
 7. Define placement rules after every referenced runtime node, including each relay, exists.

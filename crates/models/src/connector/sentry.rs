@@ -3,9 +3,9 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The Sentry client Model, the event emitter Model, and what it declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared emitter declarations and the names a body references.
-//! - **Must not know.** The Sentry envelope protocol, its configuration keys, or how an event is
-//!   submitted.
+//! - **Must not know.** The Sentry envelope protocol or how an event is submitted.
 
 #![cfg_attr(
     nervix_lint,
@@ -26,7 +26,23 @@ use crate::{
     EmitterReferenceKind,
 };
 
-configured_client!(Sentry: unpooled, config Nervix, CreateClientSentry => SentryConfigEntry);
+configured_client!(Sentry: unpooled, config CLIENT_CONFIG, CreateClientSentry => SentryConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("dsn", V::Url(&["http", "https"])).secret(),
+            K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// The events of the Sentry project a client's configuration addresses.
 #[derive(

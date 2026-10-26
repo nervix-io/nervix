@@ -5,6 +5,7 @@
 //! - **Owns.** The Prometheus client Model with the `CONFIG` keys it declares and the API root
 //!   its address names, the query source Model with its delivery mode and response bound, and what
 //!   each declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and client declarations, the HTTP transport's request
 //!   timeout, the URL Standard parser, the domain clock's period, the byte size a limit holds and
 //!   the names a body references.
@@ -16,9 +17,8 @@
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
-use std::{collections::BTreeMap, str::FromStr as _};
-
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -33,72 +33,39 @@ use super::{
     entity_union::connector_ingestors,
 };
 use crate::{
-    AcknowledgementConfirmation, ByteSizeUnit, ClientConfigEntry, ClientDeadline,
-    ClientDeadlineError, ClientName, ConnectorKind, DeclaredDelivery, DeclaredQuiesce,
-    DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration,
-    IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference,
-    IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
-    PayloadSizeLimit, PositionClass,
+    AcknowledgementConfirmation, ByteSizeUnit, ClientConfigEntry, ClientName, ConnectorKind,
+    DeclaredDelivery, DeclaredQuiesce, DomainClockPeriod, IngestAcknowledgement, IngestQuiesceMode,
+    IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities, IngestorMetadataScope,
+    IngestorReference, IngestorReferenceKind, OptionDeclaration, OptionForm, OptionPresence,
+    OptionValue, PayloadSizeLimit, PositionClass,
 };
 
-configured_client!(Prometheus: unpooled, config Nervix, CreateClientPrometheus => PrometheusConfigEntry);
+configured_client!(Prometheus: unpooled, config CLIENT_CONFIG, CreateClientPrometheus => PrometheusConfigEntry);
 
-/// The keys a Prometheus client's `CONFIG { … }` block may set. Every one is Nervix's own, so a
-/// client that sets any other key is refused when it is created.
-///
-/// A key is matched without regard to ASCII case, as the client reads it.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    strum::AsRefStr,
-    strum::Display,
-    strum::EnumIter,
-    strum::EnumString,
-)]
-#[strum(serialize_all = "snake_case", ascii_case_insensitive)]
-pub enum PrometheusClientKey {
-    /// The [`PrometheusApiRoot`] every query is sent beneath. Required.
-    Addr,
-    /// The [`ClientDeadline`] that bounds each query. Required.
-    TimeoutMs,
-    /// A PEM certificate authority that HTTPS trusts in addition to the client's own roots.
-    TlsCaFile,
-    /// The PEM certificate chain the client presents over HTTPS, which [`Self::TlsKeyFile`]
-    /// accompanies.
-    TlsCertFile,
-    /// The PEM private key of [`Self::TlsCertFile`].
-    TlsKeyFile,
-}
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("addr", V::Url(&["http", "https"])),
+            K::required("timeout_ms", V::Milliseconds),
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// Why a Prometheus client's `CONFIG { … }` block cannot configure a query source. Each error
 /// names the key at fault and never quotes a value, which can name a credential's file.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PrometheusClientConfigError {
-    #[error("'{key}' is not a key this client reads")]
-    UndeclaredKey { key: String },
-    #[error("'{key}' is set more than once")]
-    RepeatedKey { key: PrometheusClientKey },
-    #[error("'{key}' is required")]
-    MissingKey { key: PrometheusClientKey },
-    #[error("'{}' is not an API root: {issue}", PrometheusClientKey::Addr)]
-    InvalidAddress { issue: PrometheusApiRootError },
-    #[error(
-        "'{}' is not a usable request timeout: {issue}",
-        PrometheusClientKey::TimeoutMs
-    )]
-    InvalidTimeout { issue: ClientDeadlineError },
-    #[error(
-        "'{}' and '{}' must be set together",
-        PrometheusClientKey::TlsCertFile,
-        PrometheusClientKey::TlsKeyFile
-    )]
-    UnpairedTlsIdentity,
+    #[error("invalid Prometheus client CONFIG")]
+    Schema,
+    #[error("invalid Prometheus client config key 'addr'")]
+    Address,
 }
 
 /// Why a Prometheus client's `addr` is not the root of an HTTP API.
@@ -138,66 +105,19 @@ impl PrometheusApiRoot {
         Ok(Self(url))
     }
 
-    /// The API root a Prometheus client's `CONFIG { … }` names, once the block sets only keys
-    /// [`PrometheusClientKey`] declares, each at most once: `addr` and `timeout_ms` present and
-    /// valid, and `tls_cert_file` and `tls_key_file` together or not at all.
-    ///
-    /// The registry holds a client to this when it is created, and a source holds the client's
-    /// rendered configuration to it again when it opens.
+    /// Validate the shared key declaration, then the API-root rule this connector owns.
+    /// Resource-file templates remain declarations until the host resolves their mount.
     pub fn of_client_config(
         config: &[ClientConfigEntry],
     ) -> Result<Self, Report<PrometheusClientConfigError>> {
-        let mut values = BTreeMap::new();
-        for entry in config {
-            let Ok(key) = PrometheusClientKey::from_str(&entry.key) else {
-                return Err(Report::new(PrometheusClientConfigError::UndeclaredKey {
-                    key: entry.key.clone(),
-                }));
-            };
-            if values.insert(key, entry.value.as_str()).is_some() {
-                return Err(Report::new(PrometheusClientConfigError::RepeatedKey {
-                    key,
-                }));
-            }
-        }
-
-        let Some(addr) = values.get(&PrometheusClientKey::Addr) else {
-            return Err(Report::new(PrometheusClientConfigError::MissingKey {
-                key: PrometheusClientKey::Addr,
-            }));
-        };
-        let root = match Self::parse(addr) {
-            Ok(root) => root,
-            Err(report) => {
-                // The key's error quotes the rule the value breaks, so its one message states the
-                // whole reason, and the parse's report stays beneath it.
-                let issue = *report.current_context();
-                return Err(
-                    report.change_context(PrometheusClientConfigError::InvalidAddress { issue })
-                );
-            }
-        };
-
-        let Some(timeout) = values.get(&PrometheusClientKey::TimeoutMs) else {
-            return Err(Report::new(PrometheusClientConfigError::MissingKey {
-                key: PrometheusClientKey::TimeoutMs,
-            }));
-        };
-        if let Err(report) = ClientDeadline::parse(timeout) {
-            let issue = *report.current_context();
-            return Err(
-                report.change_context(PrometheusClientConfigError::InvalidTimeout { issue })
-            );
-        }
-
-        let presents_certificate = values.contains_key(&PrometheusClientKey::TlsCertFile);
-        let presents_key = values.contains_key(&PrometheusClientKey::TlsKeyFile);
-        if presents_certificate != presents_key {
-            return Err(Report::new(
-                PrometheusClientConfigError::UnpairedTlsIdentity,
-            ));
-        }
-        Ok(root)
+        CLIENT_CONFIG
+            .validate(config)
+            .change_context(PrometheusClientConfigError::Schema)?;
+        let addr = config
+            .iter()
+            .find(|entry| entry.key == "addr")
+            .assured("the schema requires the address");
+        Self::parse(&addr.value).change_context(PrometheusClientConfigError::Address)
     }
 
     /// The URL of the root.
@@ -367,7 +287,6 @@ connector_ingestors! {
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
-    use strum::IntoEnumIterator as _;
 
     use super::*;
 
@@ -411,21 +330,6 @@ mod tests {
             .parse::<PayloadSizeLimit>()
             .assured("the declared default is a size literal");
         assert_eq!(declared, PROMETHEUS_DEFAULT_MAX_BODY_SIZE);
-    }
-
-    #[test]
-    fn every_declared_key_is_read_as_written_in_any_ascii_case() {
-        for key in PrometheusClientKey::iter() {
-            let written = key.as_ref();
-            assert_eq!(PrometheusClientKey::from_str(written), Ok(key));
-            assert_eq!(
-                PrometheusClientKey::from_str(&written.to_ascii_uppercase()),
-                Ok(key)
-            );
-            assert_eq!(key.to_string(), written);
-        }
-        assert!(PrometheusClientKey::from_str("url").is_err());
-        assert!(PrometheusClientKey::from_str("timeout").is_err());
     }
 
     #[test]
@@ -479,54 +383,17 @@ mod tests {
         assert_eq!(root.url().as_str(), "http://prometheus.example.com:9090/");
 
         let full = [
-            entry("ADDR", "https://prometheus.example.com/monitoring"),
-            entry("Timeout_Ms", "30000"),
+            entry("addr", "https://prometheus.example.com/monitoring"),
+            entry("timeout_ms", "30000"),
             entry("tls_ca_file", "{{ certs }}/ca.pem"),
             entry("tls_cert_file", "{{ certs }}/client.pem"),
             entry("tls_key_file", "{{ certs }}/client-key.pem"),
         ];
         let root = PrometheusApiRoot::of_client_config(&full)
-            .assured("every declared key is set once, in any case, with a valid value");
+            .assured("every declared key is set once with a valid value");
         assert_eq!(
             root.url().as_str(),
             "https://prometheus.example.com/monitoring"
-        );
-    }
-
-    #[test]
-    fn a_client_config_refuses_a_key_it_does_not_declare_or_sets_twice() {
-        let mut undeclared = minimal();
-        undeclared.push(entry("timeout", "5000"));
-        assert_eq!(
-            refusal(&undeclared).current_context(),
-            &PrometheusClientConfigError::UndeclaredKey {
-                key: "timeout".to_string(),
-            }
-        );
-
-        let mut repeated = minimal();
-        repeated.push(entry("TIMEOUT_MS", "1000"));
-        assert_eq!(
-            refusal(&repeated).current_context(),
-            &PrometheusClientConfigError::RepeatedKey {
-                key: PrometheusClientKey::TimeoutMs,
-            }
-        );
-    }
-
-    #[test]
-    fn a_client_config_requires_addr_and_timeout_ms() {
-        assert_eq!(
-            refusal(&[entry("timeout_ms", "5000")]).current_context(),
-            &PrometheusClientConfigError::MissingKey {
-                key: PrometheusClientKey::Addr,
-            }
-        );
-        assert_eq!(
-            refusal(&[entry("addr", "http://prometheus:9090")]).current_context(),
-            &PrometheusClientConfigError::MissingKey {
-                key: PrometheusClientKey::TimeoutMs,
-            }
         );
     }
 
@@ -538,49 +405,12 @@ mod tests {
         ]);
         assert_eq!(
             address.current_context(),
-            &PrometheusClientConfigError::InvalidAddress {
-                issue: PrometheusApiRootError::Query,
-            }
+            &PrometheusClientConfigError::Address
         );
         assert_eq!(
             address.downcast_ref::<PrometheusApiRootError>(),
             Some(&PrometheusApiRootError::Query)
         );
-        assert_eq!(
-            address.to_string(),
-            "'addr' is not an API root: the URL has a query string"
-        );
-
-        let timeout = refusal(&[
-            entry("addr", "http://prometheus:9090"),
-            entry("timeout_ms", "0"),
-        ]);
-        assert_eq!(
-            timeout.current_context(),
-            &PrometheusClientConfigError::InvalidTimeout {
-                issue: ClientDeadlineError::NotPositiveWholeMilliseconds,
-            }
-        );
-        assert_eq!(
-            timeout.downcast_ref::<ClientDeadlineError>(),
-            Some(&ClientDeadlineError::NotPositiveWholeMilliseconds)
-        );
-    }
-
-    #[test]
-    fn a_client_config_presents_a_tls_identity_only_as_a_pair() {
-        for half in ["tls_cert_file", "tls_key_file"] {
-            let mut config = minimal();
-            config.push(entry(half, "/etc/nervix/tls/client.pem"));
-            assert_eq!(
-                refusal(&config).current_context(),
-                &PrometheusClientConfigError::UnpairedTlsIdentity,
-                "{half}"
-            );
-        }
-        let mut trust_only = minimal();
-        trust_only.push(entry("tls_ca_file", "/etc/nervix/tls/ca.pem"));
-        PrometheusApiRoot::of_client_config(&trust_only)
-            .assured("a CA file alone trusts an authority without presenting an identity");
+        assert!(format!("{address:#}").contains("the URL has a query string"));
     }
 }

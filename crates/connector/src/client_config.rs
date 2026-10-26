@@ -29,6 +29,23 @@ use upon::Engine as TemplateEngine;
 
 pub type ClientConfigResult<T> = Result<T, Report<ClientConfigError>>;
 
+/// A network-free driver check refused configuration before a client could be committed.
+/// Driver causes remain beneath this context; public command projection renders only this
+/// key-bearing context because a driver error can quote credentials from its input.
+#[derive(Debug, Error)]
+pub enum OfflineClientConfigError {
+    #[error("invalid client config key '{key}'")]
+    InvalidKey { key: String },
+    #[error("the driver refused its client configuration")]
+    Configuration,
+}
+
+impl OfflineClientConfigError {
+    pub fn key(key: impl Into<String>) -> Self {
+        Self::InvalidKey { key: key.into() }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ClientConfigError {
     #[error("failed to compile client config template for key '{key}'")]

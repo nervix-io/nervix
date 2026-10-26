@@ -520,20 +520,11 @@ fn misconfigured(reason: impl std::fmt::Display) -> Report<EmitterWriteError> {
 
 impl OtelClientSettings {
     fn parse(config: &[ClientConfigEntry]) -> EmitterStartResult<Self> {
-        const ALLOWED_KEYS: &[&str] = &[
-            "endpoint",
-            "protocol",
-            "headers",
-            "compression",
-            "timeout_ms",
-            "tls_ca_file",
-            "tls_cert_file",
-            "tls_key_file",
-        ];
+        let schema = nervix_models::CreateClientOtel::<u64>::DECLARATION.config;
         let mut seen = HashSet::new();
         for entry in config {
-            let key = entry.key.to_ascii_lowercase();
-            if !ALLOWED_KEYS.contains(&key.as_str()) {
+            let key = entry.key.as_str();
+            if schema.key(key).is_none() {
                 return Err(invalid_configuration(format!(
                     "unsupported OTEL client config key '{}'",
                     entry.key
