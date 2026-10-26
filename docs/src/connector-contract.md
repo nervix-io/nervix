@@ -2051,10 +2051,7 @@ sequenceDiagram
   it stood before that lookup when it has no such record yet, and in an unpaced domain where the
   client's `auto.offset.reset` places it, `earliest` at its earliest retained record and `latest`
   at its end. The instance records that start before it reads, so a reconnect resumes there
-  instead of placing the partition again past records it has not acknowledged. A generation begun
-  with `START AT` currently reapplies its timestamp on every domain-offset resume and resets the
-  whole topic's offsets, so that generation can replay acknowledged records; it does not have the
-  saved-position resume guarantee of a plain `START`. Offset snapshots
+  instead of placing the partition again past records it has not acknowledged. Offset snapshots
   can lag a crash, so this mode remains at least once. Commits and start-point resets wait for the
   assigned state replicas within the native checkpoint bulk operation's thirty-second budget. A
   missing acknowledgement still fails the commit and follows the host's existing rejection and
