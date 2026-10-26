@@ -19,3 +19,6 @@
 
 pub mod pubsub;
 pub use pubsub::*;
+
+mod offline_config;
+pub use offline_config::validate_client_configuration;

@@ -5,8 +5,9 @@
 //! - **Owns.** The MQTT client Model, the topic source and emitter Models with their session,
 //!   quality-of-service and delivery modes, the topic filter a source subscribes to with the rules
 //!   MQTT holds it to, and what each entity declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
-//! - **Must not know.** The MQTT driver, its configuration keys, or how a topic filter is
+//! - **Must not know.** The MQTT driver, or how a topic filter is
 //!   subscribed or published to.
 
 #![cfg_attr(
@@ -39,7 +40,23 @@ use crate::{
     OptionForm, OptionPresence, PositionClass, RetryPolicy,
 };
 
-configured_client!(Mqtt: unpooled, config Nervix, CreateClientMqtt => MqttConfigEntry);
+configured_client!(Mqtt: unpooled, config CLIENT_CONFIG, CreateClientMqtt => MqttConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("addr", V::Url(&["mqtt", "mqtts"])),
+            K::optional("client_id", V::String),
+            K::TLS_CA.required_for_scheme("addr", "mqtts"),
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// The longest topic filter MQTT carries, in bytes.
 const MQTT_TOPIC_FILTER_MAX: usize = 65_535;

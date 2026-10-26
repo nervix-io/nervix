@@ -265,6 +265,12 @@ use.
 
 ## Commands And Execution Identity
 
+Treat client CONFIG validation refusals as ordinary failed commands under the rules below.
+Show their client/key diagnostic without retrying invalid input automatically. A refused queued
+statement leaves its transaction usable. `SHOW CREATE CLIENT` and structured-choice previews mask
+confidential configuration with `********`; do not use those inspection strings as a lossless
+configuration export. The backup contract carries complete configuration.
+
 - **E-1.** A client MUST create one execution reference per logical command before it first sends
   that command. The reference MUST be 1 to 128 bytes of ASCII letters, digits, `-`, `_`, and `.`.
   For every command that can be persistent or part of a transaction, which is every command except

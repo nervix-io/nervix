@@ -27,6 +27,7 @@
 mod bounds;
 mod clickhouse;
 mod client;
+mod config_schema;
 mod configured_client;
 mod deadline;
 mod declaration;
@@ -60,11 +61,11 @@ mod zeromq;
 use strum::{AsRefStr, Display, EnumIter, IntoStaticStr};
 
 pub use self::{
-    bounds::*, clickhouse::*, client::*, configured_client::*, deadline::*, declaration::*,
-    emitter::*, external_name::ExternalNameError, header_model::*, http::*, iceberg::*,
-    ingestor::*, ingestor_metadata::*, kafka::*, mapped_values::*, mongodb::*, mqtt::*, mysql::*,
-    nats::*, otel::*, postgres::*, prometheus::*, pulsar::*, rabbitmq::*, redis::*, sentry::*,
-    sqs::*, syslog::*, websockets::*, zeromq::*,
+    bounds::*, clickhouse::*, client::*, config_schema::*, configured_client::*, deadline::*,
+    declaration::*, emitter::*, external_name::ExternalNameError, header_model::*, http::*,
+    iceberg::*, ingestor::*, ingestor_metadata::*, kafka::*, mapped_values::*, mongodb::*, mqtt::*,
+    mysql::*, nats::*, otel::*, postgres::*, prometheus::*, pulsar::*, rabbitmq::*, redis::*,
+    sentry::*, sqs::*, syslog::*, websockets::*, zeromq::*,
 };
 pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, ingestor::AlteredIngestorEntity};
 

@@ -22,7 +22,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{OptionDeclaration, ResourceName};
+use crate::{ClientConfigSchema, ClientName, ConnectorKind, OptionDeclaration, ResourceName};
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -122,28 +122,21 @@ pub enum ClientPooling {
     Unpooled,
 }
 
-/// Who reads the keys of a client's `CONFIG { … }` block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClientConfigOwner {
-    /// Every key is Nervix's own configuration, which its connector reads.
-    Nervix,
-    /// Every key is the driver's, which Nervix passes through to it unread.
-    Driver,
-    /// The keys are Nervix's own, except the query options of the `addr` URL, which Nervix passes
-    /// through to the driver.
-    NervixWithAddressQuery,
-    /// The keys are Nervix's own, except the property namespaces of the object store or the
-    /// catalog, which Nervix passes through to the driver.
-    NervixWithPropertyNamespaces,
-}
-
 /// What every client of one connector declares, whatever its statement says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientDeclaration {
     pub pooling: ClientPooling,
-    pub config: ClientConfigOwner,
+    pub config: ClientConfigSchema,
     /// The options its statement writes after its kind, before its mount, in order.
     pub options: &'static [OptionDeclaration],
+}
+
+/// A borrowed view of the client fields shared by every configured connector kind.
+pub struct ConfiguredClientRef<'a, Version> {
+    pub connector: ConnectorKind,
+    pub name: &'a ClientName,
+    pub mount: Option<&'a ClientResourceMount<Version>>,
+    pub config: &'a [ClientConfigEntry],
 }
 
 /// Declares the client Model of one connector: its name, its mount and its configuration.
@@ -217,7 +210,7 @@ macro_rules! configured_client {
             /// What every client of this connector declares.
             pub const DECLARATION: $crate::ClientDeclaration = $crate::ClientDeclaration {
                 pooling: $crate::ClientPooling::$Pooling,
-                config: $crate::ClientConfigOwner::$Owner,
+                config: $Owner,
                 options: &[],
             };
         }
