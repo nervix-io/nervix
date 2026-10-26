@@ -163,6 +163,13 @@ relay. Do not use them to scan across branches.
 
 Client CONFIG keys follow the generated schema: lowercase, case-sensitive, present once, required keys supplied and TLS identity files paired. Only declared driver namespaces accept extra property names. Treat SHOW CREATE as a confidential inspection projection, and backups as complete secret-bearing configuration. Offline CREATE checks need no broker; runtime initialization still owns remote checks.
 
+For `ZEROMQ CLIENT`, use a `tcp://host:port` or `ipc://path` address. Set `'bind' = 'true'`
+on a socket that listens for peers and `'bind' = 'false'` on a socket that connects; omission
+also selects connect. The Boolean accepts those two values ignoring letter case. `ZEROMQ PULL`
+and `ZEROMQ PUSH` both use `MODE NO ACK`; only the first received frame is ingested, with no
+transport headers or peer metadata. Read the ZeroMQ sections of Ingestors and Emitters for the
+current connection, retry and deadline limits.
+
 - Every referenced name is declared in the active domain before use.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
   schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,

@@ -68,7 +68,7 @@ mirror = "The Prometheus query API is polled for samples; no Prometheus remote-w
 [entity."ZEROMQ PULL"]
 ingest_headers = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
 ingest_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
-metadata = "Payload frames have no broker position or typed transport metadata namespace."
+metadata = "The driver exposes no peer identity on receive. Only frame 0 is ingested, with no broker position or typed transport metadata namespace."
 mirror = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
 
 [entity."SQS QUEUE"]
@@ -101,7 +101,7 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 [entity."ZEROMQ PUSH"]
 emit_headers = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
 emit_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
-envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+envelope = "The PUSH socket sends one payload frame. Multipart envelopes and additional per-record envelope clauses are not offered."
 mirror = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 

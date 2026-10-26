@@ -53,6 +53,38 @@ it resolves through the node's resolver, as the sections below describe, and a d
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
 
+### Host test fixtures
+
+`nervix-connector-fake` is a test harness outside the product layer order and a server
+dev-dependency. Product code never names it. It implements the broker and paced ingestor
+boundaries and the record, mapped-row, row-request and HTTP-request emitter boundaries. Its
+family kinds use the vocabulary's existing entity declarations; it introduces no connector
+kind or Plexus statement.
+
+Finite publish scripts fail on an unexpected extra call. Repeating answers are explicit.
+Scripts distinguish accepted, rejected and unanswered members, infrastructure failures and
+typed retry hints. Queued and channel input retain message positions, ordered headers and
+typed metadata. Channel reads use the host's cancellation handle and detect a future dropped
+before its read completed. Resume, settlement and lifecycle scripts preserve the same host
+ordering assertions as the local fixtures they consolidate.
+
+Observations retain the complete current contract values: record identities, admission times,
+keys, groups, headers, payloads and HTTP request fields. Mapped-row observations share Arrow
+columns and retain column names and selected row order. Payload preparation and row-request
+preparation run through the real host adapters, as do staged writes and commits. A failed
+commit retains its staged work and acknowledgements until a successful commit.
+
+The fake's channels, synchronization and ownership come from `nervix-primitives`; the server's
+Shuttle and Loom features propagate through its dev-dependency. Host unit tests check policy
+and value retention. Its shared assertion logs serialize one synchronous observation update
+per callback, with guards released before waiting. Recurring contract implementations declare
+that bounded harness coordination beside their methods. The registered host Shuttle checks
+explore the production owners
+against scripted boundaries. These checks establish host behavior only. Driver confirmation,
+external delivery and transport-specific cancellation still need the real integration's
+owner tests and public scenarios. The fake adds no product synchronization protocol and does
+not change the applicability of the lifecycle Deloxide lanes.
+
 ### Declaration validation
 
 Each ingestor and emitter entity declares its accepted modes, quiesce forms, client kinds, payload
@@ -538,8 +570,9 @@ including when the waiting caller is cancelled or its thirty-second deadline exp
 refusals remain transient source failures; they never reject a record as invalid.
 
 librdkafka's producer flush still runs on the runtime's blocking pool as a declared owner outside
-the executor, bounded by the host's physical flush deadline. The producer's destruction does not:
-it is a connector storage job like a consumer's.
+the executor. The host's physical flush deadline bounds the caller's wait; a native flush step
+already running keeps its producer handle until the driver returns, even if the caller stops
+waiting. The producer's destruction is a connector storage job like a consumer's.
 [Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
@@ -567,12 +600,12 @@ to 100 milliseconds and any delivery report it is serving. rust-rdkafka then pur
 producer still queues or has in flight, flushes for up to 500 milliseconds so that their reports
 are served, and librdkafka joins its threads, a broker thread still resolving a name included.
 
-A ingestor or partition inspector shares its consumer with the driver jobs it admits, a emitter shares
-its producer with the flush its finish runs, and any of them can hold the last handle. A ingestor goes
+An ingestor or partition inspector shares its consumer with the driver jobs it admits, an emitter shares
+its producer with the flush its finish runs, and any of them can hold the last handle. An ingestor goes
 when its host's task ends after the ingestor's loop, or when composing its ingestor's instances fails;
 an inspector goes when its watch ends; a control job keeps running after its caller is cancelled,
 and a job the connector queue refuses lets its handle go unrun; and a consumer-group commit can be
-answered after its ingestor is gone. A emitter goes when its emitter's task ends after the emitter's finish,
+answered after its ingestor is gone. An emitter goes when its emitter's task ends after the emitter's finish,
 when a swap or `ALTER` replaces it, or when composing its emitter fails after the emitter started; and
 a flush keeps running on the runtime's blocking pool after its finish's caller stops waiting for it,
 until librdkafka's flush returns. Whichever of them lets the last handle go hands the client to its
@@ -711,10 +744,14 @@ an optional Redis subscription capacity passes the same range parser its ingesto
 Ingestor-only presence requirements stay with that plan.
 MQTT's representative first instance uses the same instance-template renderer as execution.
 Connector-owned offline parsers check librdkafka property names and values, sqlx and mysql_async
-options, Redis connection information, lapin AMQP URIs and NATS server addresses. They create no
-connection, consumer, producer, DNS lookup or remote side effect. Checks requiring the remote
-service still belong to client initialization. The registry names no connector crate and runtime
-receives entries and pinned mounts rather than a Model.
+options, Redis connection information, lapin AMQP URIs, NATS server addresses and ZeroMQ endpoints.
+They create no connection, consumer, producer, DNS lookup or remote side effect. Checks requiring
+the remote service still belong to client initialization. The registry names no connector crate
+and runtime receives entries and pinned mounts rather than a Model.
+
+ZeroMQ uses its socket driver's endpoint parser for both TCP and IPC addresses. Its `bind` key
+uses the shared Boolean parser at the connector boundary, so a malformed value is a configuration
+refusal before either a PULL or PUSH socket opens; an omitted value selects connect.
 
 Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
 exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed
@@ -1955,6 +1992,13 @@ sequenceDiagram
   transient error until the topic is provisioned.
   Partition inspectors preserve that typed outcome across their admitted control call so their
   watches observe an empty topology until provisioning, then publish the available partitions.
+  The consumer settings Nervix owns are reserved in client `CONFIG`. They select the statement's
+  `group.id`, disable partition EOF events and enable auto-commit only for consumer-group
+  `MODE NO ACK`. `auto.offset.reset` remains
+  the client's choice. Domain-offset consumers assign partitions directly and inspectors only
+  fetch metadata, so their Nervix-generated group identifiers create no broker-managed group or
+  stored group offsets. A user-named consumer group and its committed offsets remain on the broker
+  after its ingestor is dropped; Nervix does not delete the operator's group.
   Under `OFFSET BY CONSUMER GROUP` in an `ACK` mode, the source commits the latest offset of each
   partition of an acknowledged batch and waits for the coordinator's answer, one round trip per
   batch, which `ACK PARALLEL` amortizes over the batch. A commit the coordinator refuses fails the
@@ -2007,7 +2051,10 @@ sequenceDiagram
   it stood before that lookup when it has no such record yet, and in an unpaced domain where the
   client's `auto.offset.reset` places it, `earliest` at its earliest retained record and `latest`
   at its end. The instance records that start before it reads, so a reconnect resumes there
-  instead of placing the partition again past records it has not acknowledged. Offset snapshots
+  instead of placing the partition again past records it has not acknowledged. A generation begun
+  with `START AT` currently reapplies its timestamp on every domain-offset resume and resets the
+  whole topic's offsets, so that generation can replay acknowledged records; it does not have the
+  saved-position resume guarantee of a plain `START`. Offset snapshots
   can lag a crash, so this mode remains at least once. Commits and start-point resets wait for the
   assigned state replicas within the native checkpoint bulk operation's thirty-second budget. A
   missing acknowledgement still fails the commit and follows the host's existing rejection and
