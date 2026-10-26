@@ -2692,3 +2692,11 @@ captures its grant and each worker batch keeps that attachment's row bound; no r
 shared policy map. HTTP preparation captures its typed header-byte and field-count bounds once per publication.
 Snapshot owners observe changed intervals at the existing bounded replica-poll boundary, without
 a new wait/notify protocol or changes to checkpoint/acknowledgement ownership.
+
+A live node-unavailability interval change wakes the existing control-plane health watch. Retained
+watchers read the installed interval again when deriving their next deadline. The production-owner
+`cluster::peer_health_watcher::shuttle_tests::shuttle_a_policy_change_racing_a_retained_health_wait_is_never_missed`
+check, registered in the Shuttle inventory, races installation against wait registration without a
+peer deadline: a lost wake leaves it deadlocked. Paused-clock unit tests separately check elapsed
+transition timing and unchanged publication. This check establishes notification liveness under
+Shuttle; it makes no memory-ordering claim about the governed `ArcSwap` implementation.

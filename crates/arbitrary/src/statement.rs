@@ -97,7 +97,6 @@ const RESOURCE_BINDING_KINDS: [ModelKind; 7] = [
 /// coverage check can ask for each one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 pub enum StatementVariant {
-    AlterCluster,
     CreateDomain,
     AlterDomain,
     CreateUser,
@@ -156,6 +155,7 @@ pub enum StatementVariant {
     ShowTransactions,
     DescribeTransaction,
     DescribeCluster,
+    AlterCluster,
 }
 
 impl StatementVariant {

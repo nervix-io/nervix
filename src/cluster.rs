@@ -748,13 +748,13 @@ impl RetainedPeerHealth {
 /// Application-health failure becomes effective after an elapsed monotonic deadline without a
 /// retained-input change. The watcher owns that deadline so consumers can re-evaluate cluster state
 /// without sampling it on an interval.
-pub(crate) struct ClusterStateWatcher {
+pub(crate) struct ClusterStateWatcher<'a> {
     live_node_states:
         nervix_primitives::unmodeled::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>>,
-    peer_health_state: PeerHealthStateWatcher,
+    peer_health_state: PeerHealthStateWatcher<'a>,
 }
 
-impl ClusterStateWatcher {
+impl ClusterStateWatcher<'_> {
     pub(crate) fn wait_for_change_or_next_unavailability(
         &mut self,
     ) -> impl std::future::Future<Output = ()> + '_ {
@@ -1452,7 +1452,7 @@ impl ClusterHandle {
         watcher
     }
 
-    pub(crate) async fn subscribe_state_changes(&self) -> ClusterStateWatcher {
+    pub(crate) async fn subscribe_state_changes(&self) -> ClusterStateWatcher<'_> {
         ClusterStateWatcher {
             live_node_states: self.subscribe_live_node_states().await,
             peer_health_state: self.subscribe_peer_health_state(),
@@ -1865,10 +1865,10 @@ impl ClusterHandle {
             .collect()
     }
 
-    fn subscribe_peer_health_state(&self) -> PeerHealthStateWatcher {
+    fn subscribe_peer_health_state(&self) -> PeerHealthStateWatcher<'_> {
         PeerHealthStateWatcher::new(
             self.peer_health_state.subscribe(),
-            self.node_unavailability_timeout(),
+            &self.node_unavailability_timeout,
         )
     }
 }
@@ -2867,11 +2867,12 @@ mod tests {
         live_set.send_replace(BTreeMap::new());
         let (_peer_health_state, peer_health_state_receiver) =
             watch::channel(PeerHealthStateSnapshot::default());
+        let observation_freshness = ArcSwap::from_pointee(Duration::from_secs(10));
         let mut watcher = ClusterStateWatcher {
             live_node_states: ClusterHandle::live_node_changes_after(chitchat_receiver.clone()),
             peer_health_state: PeerHealthStateWatcher::new(
                 peer_health_state_receiver,
-                Duration::from_secs(10),
+                &observation_freshness,
             ),
         };
         let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
@@ -2894,11 +2895,12 @@ mod tests {
             nervix_primitives::unmodeled::sync::watch::channel(BTreeMap::new());
         let (peer_health_state, peer_health_state_receiver) =
             watch::channel(PeerHealthStateSnapshot::default());
+        let freshness_policy = ArcSwap::from_pointee(observation_freshness);
         let mut watcher = ClusterStateWatcher {
             live_node_states: live_state_receiver,
             peer_health_state: PeerHealthStateWatcher::new(
                 peer_health_state_receiver,
-                observation_freshness,
+                &freshness_policy,
             ),
         };
         peer_health_state.send_modify(|snapshot| {
@@ -2926,11 +2928,12 @@ mod tests {
             nervix_primitives::unmodeled::sync::watch::channel(BTreeMap::new());
         let (peer_health_state, peer_health_state_receiver) =
             watch::channel(PeerHealthStateSnapshot::default());
+        let freshness_policy = ArcSwap::from_pointee(observation_freshness);
         let mut watcher = ClusterStateWatcher {
             live_node_states: live_state_receiver,
             peer_health_state: PeerHealthStateWatcher::new(
                 peer_health_state_receiver,
-                observation_freshness,
+                &freshness_policy,
             ),
         };
         let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());

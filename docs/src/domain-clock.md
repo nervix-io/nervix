@@ -138,6 +138,10 @@ the node-unavailability interval and has not marked it unavailable. If that obse
 stale, the node follows gossip's liveness verdict. Duplicate observations for one node name
 collapse to the newest incarnation.
 
+Changing the committed node-unavailability interval wakes existing authority-reconciliation and
+clock-installation waits. They reevaluate availability and their next health transition using the
+installed interval without recreating their subscription.
+
 Selection is deterministic. Candidates are ordered by node name, the domain name is hashed, and
 the hash selects one position in that ordered set. Every leader presented with the same domain and
 candidate set therefore proposes the same owner, while domains can distribute across the voter

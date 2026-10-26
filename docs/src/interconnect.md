@@ -1849,6 +1849,10 @@ a peer unavailable and does not extend a previous run of failures. Only continuo
 for the configured node-unavailability interval produce unavailable status; a healthy observation
 resets that run. Consensus membership continues to use the cluster topology established by gossip.
 
+The node-unavailability interval is installed live from the committed cluster parameters. A changed
+interval wakes retained health waiters, which recompute their next monotonic transition using the
+installed value. Republishing an unchanged interval does not wake those waiters.
+
 Scheduling and runtime availability retain a previously discovered incarnation that gossip stops
 listing live only while its latest application observation is younger than the node-unavailability
 interval and has not made it unavailable. A healthy, briefly failing, or capacity-refused

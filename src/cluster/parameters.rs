@@ -25,10 +25,11 @@
 use std::time::Duration;
 
 use meticulous::ResultExt as _;
-use nervix_primitives::sync::StdArc;
 use tracing::warn;
 
-use super::{ClusterHandle, KEY_CLUSTER_PARAMETERS};
+use super::{
+    ClusterHandle, KEY_CLUSTER_PARAMETERS, peer_health_watcher::install_observation_freshness,
+};
 
 impl ClusterHandle {
     /// Publish a coherent committed/running pair; a joining node reads this live revision before
@@ -53,8 +54,11 @@ impl ClusterHandle {
         match next {
             Ok(next) => {
                 if let Some(applied) = next.running() {
-                    self.node_unavailability_timeout
-                        .store(StdArc::new(applied.values.node_unavailability_timeout()));
+                    install_observation_freshness(
+                        &self.node_unavailability_timeout,
+                        &self.peer_health_state,
+                        applied.values.node_unavailability_timeout(),
+                    );
                 }
                 state.set(
                     KEY_CLUSTER_PARAMETERS,
