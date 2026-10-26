@@ -116,7 +116,11 @@ impl KafkaDomainOffsetServices for UnreachedOffsets {
         panic!("the held broker has not returned the partitions yet")
     }
 
-    async fn reset(&self, _positions: Vec<KafkaOffsetPosition>) -> KafkaDomainOffsetResult<()> {
+    async fn reset(
+        &self,
+        _generation: u64,
+        _positions: Vec<KafkaOffsetPosition>,
+    ) -> KafkaDomainOffsetResult<()> {
         panic!("the held broker has not returned the partitions yet")
     }
 

@@ -2329,7 +2329,7 @@ impl SessionServiceImpl {
 
         let mut stale_keys = Vec::new();
         for (key, watcher) in tasks.iter() {
-            if desired.get(key) != Some(&watcher.spec) {
+            if desired.get(key) != Some(&watcher.spec) || watcher.task.handle.is_finished() {
                 stale_keys.push(key.clone());
             }
         }
@@ -2379,10 +2379,9 @@ impl SessionServiceImpl {
                     Err(error) => {
                         service.broadcast_error(format!(
                             "failed to create Kafka partition watcher for ingestor '{}' in domain \
-                             '{}': {}",
+                             '{}': {error:#}",
                             spec_for_task.ingestor.as_str(),
                             spec_for_task.domain.as_str(),
-                            error
                         ));
                         return;
                     }

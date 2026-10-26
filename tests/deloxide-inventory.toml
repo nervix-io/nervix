@@ -106,6 +106,8 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@kafka_start_generation",
+  "@kafka_start_generation_restore",
   "@wasm_reset_authority_recovery",
   "@wasm_reset_publication_failure",
   "@client_wire_pause_leadership",
@@ -3112,6 +3114,10 @@ workloads = [
 [[owner]]
 path = "src/runtime/state_store.rs"
 workloads = [
+  "scenario.kafka-start-generation",
+  "stress.kafka-start-generation",
+  "scenario.kafka-start-generation-restore",
+  "stress.kafka-start-generation-restore",
   "scenario.guest-save-backup",
   "scenario.kept-ingestor-offsets",
   "stress.kept-ingestor-offsets",
@@ -3483,3 +3489,43 @@ invariant = "Ordinary graph publications leave the reset fault pending; its deli
 invocation = "stress-scenarios"
 scenario = "A genuine reset publication failure retains its failed command outcome"
 selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Explicit timestamp and NOW starts on one and three nodes retain acknowledged Kafka offsets through codec quiescence, whole-cluster restart and partition growth, and reset only on a later explicit start. Lifecycle and state-store locks are tracked; assignment atomics and broker waits are untracked and have owner Shuttle evidence."
+examples = 4
+feature = "tests/features/runtime/domain_kafka_pacing.feature"
+id = "scenario.kafka-start-generation"
+invariant = "Each explicit domain start applies once across Kafka instances and retains the original timestamp for an unrecorded partition."
+invocation = "scenarios"
+scenario = "A START AT Kafka generation keeps acknowledged offsets when its instances resume on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: explicit Kafka starts across quiescence, restart and new partition assignment."
+examples = 4
+feature = "tests/features/runtime/domain_kafka_pacing.feature"
+id = "stress.kafka-start-generation"
+invariant = "Each explicit domain start applies once across Kafka instances and retains the original timestamp for an unrecorded partition."
+invocation = "stress-scenarios"
+scenario = "A START AT Kafka generation keeps acknowledged offsets when its instances resume on <cluster_size> nodes"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Quiesced backup of an explicitly started Kafka domain and fresh-cluster restoration preserve the applied-start marker and every partition position on one and three nodes, through tracked capture, storage and restore lifecycle locks."
+examples = 2
+feature = "tests/features/runtime/domain_kafka_pacing.feature"
+id = "scenario.kafka-start-generation-restore"
+invariant = "A restored START AT generation resumes its archived positions without rewinding acknowledged partitions."
+invocation = "scenarios"
+scenario = "A backup preserves the applied START AT Kafka generation on <cluster_size> nodes"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: explicit Kafka start identity through capture and fresh-cluster restoration."
+examples = 2
+feature = "tests/features/runtime/domain_kafka_pacing.feature"
+id = "stress.kafka-start-generation-restore"
+invariant = "A restored START AT generation resumes its archived positions without rewinding acknowledged partitions."
+invocation = "stress-restore-scenarios"
+scenario = "A backup preserves the applied START AT Kafka generation on <cluster_size> nodes"
+selections = ["deloxide-stress-restore"]

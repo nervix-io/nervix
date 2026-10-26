@@ -397,6 +397,15 @@ The runtime Kafka offset key remains schema-independent. A backup archive also r
 ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
 ingestor contract after publishing its target schedule.
 
+The Kafka checkpoint also carries an optional applied-start generation. Absence means no explicit
+start has been applied; generation zero is an ordinary present value. The marker and reset positions
+publish together under assignment authority. Repeated or delayed starts cannot replace offsets
+already acknowledged in the same or a later generation. Native checkpoint loading, replication,
+archive encoding and restore preserve the marker exactly; restore never infers it from the domain's
+latest start record.
+The native root has a required, verified format signature, so arbitrary bytes cannot supply an
+apparent absent generation when a checkpoint uses a different representation.
+
 Kafka replica catch-up describes revision state as `Current` or `Advanced(revision)`, with typed
 remote-operation failures for refusal. An advanced revision selects a bulk native checkpoint;
 its header must name a revision newer than the replica's request and no earlier than the described
