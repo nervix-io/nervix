@@ -175,6 +175,15 @@ resubmitting an outcome that might already have produced output.
 | Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards | The stallable TCP proxy in the cluster fixture, `tests/common/cluster.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
+The controlled NATS endpoint publishes a positive observation when it holds a complete publish
+and stops reading behind it. A connection-loss scenario waits for that observation, ends the
+active connections, and waits for a refused reconnect before forwarding again. The same fault
+can run beside STOP. These event boundaries establish the outage without a sleep or a negative
+observation window. The publication scenario requires every original sequence member, allowing
+the duplicates an uncertain Core NATS retry permits. The STOP scenario observes the pending-record
+uncertainty through a retained public session; terminal domain teardown may cancel unresolved
+host work under the source's existing acknowledgement contract.
+
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
 `just test-deloxide-stress` or `just test-deloxide-stress-restore` builds, starts its
 deadlock diagnostics in `main`, right after it configures the lifecycle of its test dependencies and
