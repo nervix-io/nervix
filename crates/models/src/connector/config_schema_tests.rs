@@ -30,6 +30,25 @@ fn mqtt() -> ClientConfigSchema {
 }
 
 #[test]
+fn sentry_checks_the_request_deadline_its_http_transport_reads() {
+    let schema = ConnectorKind::Sentry
+        .client()
+        .assured("Sentry declares a configured client")
+        .config;
+    let dsn = entry("dsn", "http://public@127.0.0.1:8000/1");
+    schema
+        .validate(&[dsn.clone(), entry("timeout_ms", "1500")])
+        .assured("Sentry accepts a bounded request deadline before transport initialization");
+    let refusal = schema
+        .validate(&[dsn, entry("timeout_ms", "0")])
+        .expect_err("a request deadline must be positive");
+    assert!(matches!(
+        refusal.current_context(),
+        ClientConfigSchemaError::InvalidValue { key, .. } if key == "timeout_ms"
+    ));
+}
+
+#[test]
 fn a_strict_schema_accepts_exactly_its_declared_keys_and_required_values() {
     let address = entry("addr", "mqtt://broker.example.com:1883");
     mqtt()

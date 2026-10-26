@@ -32,7 +32,13 @@ configured_client!(Sentry: unpooled, config CLIENT_CONFIG, CreateClientSentry =>
 const CLIENT_CONFIG: crate::ClientConfigSchema = {
     use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
     ClientConfigSchema::new(
-        &[K::required("dsn", V::Url(&["http", "https"])).secret()],
+        &[
+            K::required("dsn", V::Url(&["http", "https"])).secret(),
+            K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
         &[],
         &[],
     )
