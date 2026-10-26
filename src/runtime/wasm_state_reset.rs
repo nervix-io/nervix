@@ -6,7 +6,7 @@
 //!   supervisor, and durable initial checkpoints for a newly published state generation.
 //! - **Depends on.** Planned processor templates, branch runtimes, guest execution, and replicated
 //!   WASM state.
-//! - **Must not know.** NSPL text, consensus mutations, administrative protocols, or scheduling
+//! - **Must not know.** Plexus text, consensus mutations, administrative protocols, or scheduling
 //!   policy.
 
 #![cfg_attr(

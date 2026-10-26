@@ -629,15 +629,18 @@ impl TransportState {
             }
             return Ok(());
         }
-        if relay_owner.channel_busy(&attempt) {
-            return self
-                .refuse_relay_grant(respond, RelayGrantRefusal::ChannelBusy)
-                .await;
-        }
-        if !relay_owner.can_follow(&attempt) {
-            return self
-                .refuse_relay_grant(respond, RelayGrantRefusal::OutOfOrder)
-                .await;
+        match relay_owner.grant_position(&attempt) {
+            RelayGrantPosition::Next => {}
+            RelayGrantPosition::Busy => {
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::ChannelBusy)
+                    .await;
+            }
+            RelayGrantPosition::OutOfOrder => {
+                return self
+                    .refuse_relay_grant(respond, RelayGrantRefusal::OutOfOrder)
+                    .await;
+            }
         }
         let operation_bytes = grant
             .body_bytes

@@ -1,5 +1,7 @@
 # Errors And Diagnostics
 
+*Plexus, the Nervix graph definition language.*
+
 Connector-storage worker capacity crosses the typed node-capability setting boundary before
 executor construction. A claim exceeding the primitive's permit representation returns
 `ExecutionConfigError::WorkerCountTooLarge` with its class, requested count and maximum; the
@@ -50,7 +52,7 @@ chapter that owns its subsystem:
 | Planned and actual transaction impact diagnostics | [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) |
 | Stop and drain phases, and the outcomes a stopping node drops | [Shutdown And Recovery](./shutdown.md) |
 
-The NSPL forms for error routes are in [Message Errors](./processors.md#message-errors) and
+The Plexus forms for error routes are in [Message Errors](./processors.md#message-errors) and
 [Error Routes](./quickstart-error-routes.md).
 
 Emitter ALTER validation belongs to the vocabulary: its typed declared-kind and replacement-kind
@@ -248,7 +250,7 @@ subsections after the boundary table follow this order.
 | Layer | Error owners | What their callers receive |
 | --- | --- | --- |
 | Primitives | Modeled adapters keep the error types of the library they stand in for, such as the watch channel's `RecvError` and `SendError` | The library's own error shape, never a report |
-| Vocabulary | Model alteration errors, `CanonicalNsplError`, `ArchivedCountError`, `DurationTextError` and the name and value errors of the shared types | A report that names the Model, field or value refused, with nothing above it yet |
+| Vocabulary | Model alteration errors, `CanonicalPlexusError`, `ArchivedCountError`, `DurationTextError` and the name and value errors of the shared types | A report that names the Model, field or value refused, with nothing above it yet |
 | Language | `ParseFromSourceError` for the lexer and parser, `FormatError` for the formatter | A report whose context holds the stage, the rejected text and every diagnostic's byte span |
 | Engines and infrastructure | The VM's `CompileError`, `RuntimeError` and row errors; `UdfError`; `JaqProgramError` and `JaqFormatError`; `CodecError`; the WASM `ProtocolError`, `GuestError` and `WasmGuestError`; the connector contract's `IngestorError`, `EmitterOpenError`, `EmitterWriteError` and `EmitterFinishError` above each connector's own errors; `ConsensusError` and `StorageFailure`; the interconnect's `TransportError`, `RequestError` and `RemoteOperationFailure`; `DnsConfigurationError` and `DnsLookupError`; `AdmissionError` and `ExecutionError`; `ArchiveWriteError` and `ArchiveReadError` | A report, a typed per-row or per-record outcome, or a typed class of a remote result. An engine decides nothing about the graph, so its errors name no node policy |
 | Decisions | `RegistryError`, `RelocationPlanError`, `RestorePlanError` and `TransactionPlanningError` | A report that names the node, route, operation and fields of the refused model or plan |
@@ -260,8 +262,8 @@ subsections after the boundary table follow this order.
 
 | Boundary | Failure meaning it owns | What its caller can decide |
 | --- | --- | --- |
-| Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical NSPL cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
-| NSPL language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
+| Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical Plexus cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
+| Plexus language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
 | Bounded execution | A memory charge a class could not grant (`AdmissionError`), a job refused because its class's wait queue is full, a closed pool, a job that panicked on its worker (`ExecutionError`), and a job that stopped at a `Cancelled` check because its caller stopped waiting | The job's owner maps each to its own typed outcome. A refusal judged nothing, so it stays retryable: an emitter keeps its rows, an ingested payload fails its dispatch rather than its decode and an endpoint answers it as a retryable rejection, a credential check answers `UNAVAILABLE` rather than failing authentication, and a restore's deduplicator or window conversion releases what it holds and converts the refused window section or keyspace again, within a 30-second wait for room, rather than reporting archived state of another shape. The unfolding of a payload a quiesce buffer retained, or of a poll a paced ingestor handed over, is not refused at all: nothing could present it again, so it waits for a place. The job that admits one key group into a keyspace a restore is converting waits for a place too, because the keys admitted so far could be presented again only by converting the keyspace from its first group. So does a payload a source handed over without an acknowledgement, when its transport survives a held loop; any other such payload is refused, reported as an ingestor error and counted in `nervix_ingestor_unfolding_refused_total`. An Iceberg commit's read of the staged files its emitter already accepted waits for a place as well, while the bulk memory charge it takes first, without queueing, is refused when the class has no room and the emitter retries the commit with its policy. A panic is the job's own defect. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
@@ -311,7 +313,7 @@ its message renders as their phrases, such as `the stored ingestor reads HTTP EN
 KAFKA TOPIC INGESTOR cannot alter it`. An input, route, or dependency operation
 that junctions, deduplicators, reorderers, and reingestors share is reported in the altered
 processor's own error where it is detected, so the report begins at the failure rather than at a
-conversion. Canonical NSPL rendering refuses only a value the language has no spelling for: a NaN or
+conversion. Canonical Plexus rendering refuses only a value the language has no spelling for: a NaN or
 infinite `F64` literal, which the error carries, or a codec declaration its wire format cannot
 express, such as encoding rules on `SYSLOG` or a JAQ-transformed format without a program, which the
 error names by codec. The execution-graph description keeps the JSON encoder's or decoder's error
@@ -321,9 +323,9 @@ offsets fail batch preparation with the codec name. Required nulls identify thei
 write failures retain their source without quoting a payload value. Registry planning keeps an
 alteration's report beneath its invalid-model refusal of the named Model, and the refusal quotes the
 rejection's message, so a failed `ALTER` shows the same reason the vocabulary gave. `SHOW CREATE`
-answers a Model canonical NSPL cannot spell with a fixed diagnostic.
+answers a Model canonical Plexus cannot spell with a fixed diagnostic.
 
-### NSPL Language And Formatter
+### Plexus Language And Formatter
 
 The language layer reports rejected source the same way. Lexing and parsing each create the report
 at the stage that failed, and its context names that stage and holds the rejected text with every
@@ -385,6 +387,12 @@ codes and text. The host retains a typed guest-call cause beneath the failed ope
 runtime caller can still distinguish a resource limit, invalid emission, and a saved-state verdict
 without classifying a rendered string. Callback and checkpoint acknowledgement decisions stay the
 same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
+
+The reset coordinator preserves the typed `ConsensusError::LeadershipLost` beneath its publication
+error. Transaction application inspects that cause before rendering a diagnostic: authority loss
+leaves the durable reset step applying in both its first attempt and recovery. Other preparation,
+storage and publication failures keep their terminal failure behavior. A rendered message is not
+used to decide whether a reset can resume.
 
 A guest export answers the host with an integer, and the SDK renders a guest report only there. A
 guest's own failure puts the rendered chain on the global-error channel, latches the instance's
@@ -781,6 +789,16 @@ acknowledgement, rather than failures to decode a record. A control call that ex
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
 
+A domain-offset Kafka ingestor that must start a partition without a domain offset while its
+client's `auto.offset.reset` is `error` fails its resume with
+`KafkaTopicIngestorError::ResetRefused`, which names the topic and partition, beneath
+`IngestorError::Resume`; the host shows it as the ingestor's transient status and resumes again on
+its cadence. A timestamp lookup whose answer carries a partition error keeps that `KafkaError`
+beneath `KafkaTopicIngestorError::ResolveTimestampOffsets`. A consumer-group rebalance runs in the consumer's context, which has no caller to return a failure
+to: a rejected partition's floor that cannot be set on the assignment, and an assignment or
+revocation librdkafka refuses, are logged at `warn` with the driver's error, and the partition then
+starts where the group's committed offset or the client's reset policy places it.
+
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It
 fails the source's open or the partition inspector's start, as transiently as a refused control
@@ -893,7 +911,7 @@ plan while its VM program and delivery execute.
 ### Console Drafts
 
 The visual hash-map and Roto UDF forms validate incomplete drafts before rendering canonical
-NSPL. Missing resource versions, codec output fields, argument types, or source are shown as form
+Plexus. Missing resource versions, codec output fields, argument types, or source are shown as form
 validation errors while the draft stays editable. After submission, lookup loading and Roto
 compilation or test failures retain their server diagnostics; correcting the same draft starts a
 new command without claiming the failed creation succeeded.
@@ -901,7 +919,7 @@ new command without claiming the failed creation succeeded.
 Junction and reingestor drafts report the input, materialized dependency, route, or assignment
 whose required reference or expression is incomplete. A retained reference whose domain or
 upstream choice changed is reported as a changed context and must be selected again. These are
-local draft errors before canonical NSPL exists. A completed Model still passes through registry
+local draft errors before canonical Plexus exists. A completed Model still passes through registry
 validation, whose schema, branch, sensitivity, and graph diagnostics remain authoritative and
 appear in the editable form after a rejected submission.
 
@@ -1299,7 +1317,7 @@ Changing to immediate delivery or withdrawing the route also retires its buffere
 [decode rejections](#decode-rejections) of payloads that never reached a route. A WASM processor's node-wide `ON
 GLOBAL ERROR` handles guest failures outside an individual message route. Error delivery preserves
 the branch in which the operation failed; ingestor errors are unbranched. See [Runtime Node Error
-Policies](./nspl-overview.md#runtime-node-error-policies), [Message
+Policies](./plexus-overview.md#runtime-node-error-policies), [Message
 Errors](./processors.md#message-errors), and [Error Routes](./quickstart-error-routes.md) for the
 public behavior and syntax.
 
@@ -2122,7 +2140,7 @@ restore stream refuses what its frames get wrong with a typed `RestoreUploadFail
 plane's `RestoreRefusal` then names an archive the leader could not read, an unavailable or
 unaddressable retained preparation reservation (`MetadataAdmission`, with the executor's typed
 admission failure beneath it), one that does not verify, with the archive format's
-`ArchiveReadError` beneath it, a domain whose `models.nspl` does not parse, with the line and the
+`ArchiveReadError` beneath it, a domain whose `models.plexus` does not parse, with the line and the
 parser's diagnostic, a statement that creates no model, with its number and line, a restore that
 cannot apply to this cluster, and a domain whose models do not form a valid configuration, with the
 transaction planner's report beneath it.
@@ -2315,7 +2333,7 @@ in the type. A dependency that panics on input a caller can supply is such a fai
 refuses that input with a typed error before the dependency reads it, and that guarded read is the
 only way the rest of Nervix reaches the dependency. The vocabulary's duration parser,
 `parse_duration_text`, refuses text whose spans would overflow `humantime`'s duration arithmetic
-with `DurationTextError::TooLong`, and every reader of duration text uses it: NSPL literals, Model
+with `DurationTextError::TooLong`, and every reader of duration text uses it: Plexus literals, Model
 settings, window aggregate arguments, node command-line options and their environment variables,
 benchmark settings and test harnesses. Clippy rejects a direct call to `humantime::parse_duration`
 and any use of `humantime::Duration`, whose text conversion reads through the same parser. Arrow's
@@ -2576,8 +2594,8 @@ refuse, and unit tests beside each owner.
 | A branch is named by its fingerprint | `wasm_processor.feature`: the server error of a branch with a sensitive key carries the fingerprint and not the key value. The runtime's unit tests hold every branch-local context to the same rendering |
 | A consensus failure keeps its class at a client mutation | `consensus_failure_reports.feature`: creating a domain or a user, cordoning and draining a node, and queueing a transaction statement each report the failure that rejected the proposal |
 | A session ends with the status of its failure | `session_protocol.feature`, `authentication.feature` and `cli_session.feature` |
-| The formatter reports rejected source with its stage and exit status | `nspl_format.feature` |
-| Input a decoder must refuse fails with the owner's typed error and never panics | The registered Bolero targets `nspl-statement-text`, `models-duration-text`, `wasm-protocol-malformed`, `runtime-arrow-bodies-malformed`, `client-producer-batches-malformed`, `relay-wire-messages-malformed`, `client-discriminators`, `backup-malformed-records` and `consensus-state-corruption` |
+| The formatter reports rejected source with its stage and exit status | `plexus_format.feature` |
+| Input a decoder must refuse fails with the owner's typed error and never panics | The registered Bolero targets `plexus-statement-text`, `models-duration-text`, `wasm-protocol-malformed`, `runtime-arrow-bodies-malformed`, `client-producer-batches-malformed`, `relay-wire-messages-malformed`, `client-discriminators`, `backup-malformed-records` and `consensus-state-corruption` |
 
 Every registered Bolero property runs as an ordinary randomized and corpus test for each pull
 request. The sanitizer-backed fuzz campaign over the same targets runs in CI only for a pull
@@ -2631,7 +2649,7 @@ The model guarantees:
 - A decision is made from typed data: a current context, a typed context beneath it, a typed field,
   or the class of a remote result. No retry, redirect, acknowledgement or disposition is selected
   from rendered text.
-- A projection leaves its fixed outcome as it was. NSPL diagnostics and their spans, VM error
+- A projection leaves its fixed outcome as it was. Plexus diagnostics and their spans, VM error
   codes, wire and ABI results, retry and acknowledgement decisions and command dispositions do not
   depend on how many contexts a report holds.
 - A failure of one row or one record costs no report and no formatted message until a policy
@@ -2672,7 +2690,7 @@ The shipped code falls short of the model in these places:
   used by replica and WASM state operations retain that cause beneath their read context.
 - **A formatter defect without a statement.** A verification defect the formatter cannot attribute
   to a statement is reported at line 1.
-- **A literal canonical NSPL cannot spell.** A float literal too large for `F64` reads as infinity,
+- **A literal canonical Plexus cannot spell.** A float literal too large for `F64` reads as infinity,
   which canonical rendering then refuses.
 
 Connector terminology follows entity ownership: `IngestorError` and `EmitterOpenError` /

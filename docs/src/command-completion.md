@@ -1,6 +1,8 @@
 # Command Completion
 
-Nervix treats a successful NSPL administrative response as a completion boundary. When a command
+*Plexus, the Nervix graph definition language.*
+
+Nervix treats a successful Plexus administrative response as a completion boundary. When a command
 returns `OK`, its declared effect is durable, applied, and usable through every current live node
 that participates in that effect. A caller can issue the dependent command immediately through
 another session or node. Runtime data flow, subscription delivery, connector acknowledgements, and
@@ -54,6 +56,12 @@ transaction request whose transaction already finished answers each of its opera
 the finished transaction recorded: the same transaction for its opening, each append's recorded
 admission, and the transaction's terminal outcome for its commit or revert. The result it finalizes
 therefore describes the effects the interrupted attempt applied, and none of them applies again.
+
+A WASM state reset follows this rule in both its first application and recovery. A typed loss of
+Raft leadership during generation publication leaves the transaction step applying. The same
+reset request resumes against the committed schedule and completes only at `Ready`, without
+advancing an already published generation again. A genuine reset failure remains a retained
+failure; repeating its command reference returns that outcome.
 
 The retained history is bounded. Once it holds as many applying, finished, and expired executions as
 its capacity allows, a new reference is refused with an explicit capacity error. Admitted work is
@@ -411,6 +419,6 @@ outcomes. An expired reference produces an explicit result and never causes auto
 under a new identity.
 
 The public behavior is specified in
-[NSPL command completion](https://github.com/nervix-io/nervix/blob/main/docs/specifications/nspl-command-completion.md).
+[Plexus command completion](https://github.com/nervix-io/nervix/blob/main/docs/specifications/plexus-command-completion.md).
 The corresponding public scenario inventory is maintained in the repository's command-completion
 acceptance ledger.

@@ -2,11 +2,11 @@ Feature: Relay deduplication
   Scenario Outline: Deduplicator forwards the first message and suppresses duplicates
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         transaction_id STRING,
@@ -72,14 +72,14 @@ Feature: Relay deduplication
   Scenario Outline: Deduplicator accepts the same key again after MAX TIME expires
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     # Each message contains two required I64 values and accounts for 16B. The 32B boundary makes
     # each pair share one execution timestamp. Observing no second output for the same <max_time>
     # configured below puts the next pair at or beyond expiration; equality is expired.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         transaction_id I64,
@@ -154,11 +154,11 @@ Feature: Relay deduplication
   Scenario Outline: Deduplicator evaluates DEDUPLICATE ON function calls through the VM
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         tenant STRING,
@@ -237,11 +237,11 @@ Feature: Relay deduplication
   Scenario Outline: Describe deduplicator reports branch-local persistent state structure
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         tenant STRING,
@@ -320,11 +320,11 @@ Feature: Relay deduplication
   Scenario Outline: Deduplicator filter-map reads materialized relay state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         transaction_id STRING,
@@ -414,11 +414,11 @@ Feature: Relay deduplication
   Scenario Outline: Deduplicator creation rejects unknown deduplication fields
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "DEDUPLICATE ON compile failed"
+    When these Plexus commands fail with "DEDUPLICATE ON compile failed"
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -447,11 +447,11 @@ Feature: Relay deduplication
   Scenario Outline: Deduplicator routes read defaulted materialized state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         transaction_id STRING,

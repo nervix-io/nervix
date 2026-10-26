@@ -17,6 +17,12 @@ running service. A node publishes, carries and verifies its prerequisites as
 parameters are not committed through Raft and capability records are not announced: a node reads
 its cluster parameters from its own options, and its capabilities stay local claims.
 
+Changes to the server's command line, startup settings and initialization contract keep the shipped
+Kubernetes operator's generated startup command, chart and example current in the same delivery.
+The server-image [deployment checks](installation-kubernetes.md#deployment-qualification) qualify
+both native architectures before publication; the operator's own repository checks alone cannot
+detect server changes.
+
 ## Choose The Class
 
 Apply one test: does the value establish how a node reaches the cluster, what the cluster
@@ -81,7 +87,7 @@ It refuses to start at the first check that fails, exiting with status `1` and
    of its control group and the groups above it, in the unified hierarchy or the version 1 memory
    hierarchy, or its physical memory when no group limit is smaller. A platform that reports
    neither leaves the limit unknown, and the memory checks do not run. A known limit must hold all
-   of the executor's memory budgets together, 2,323 MiB by default, and the
+   of the executor's memory budgets together, 2,339 MiB by default, and the
    `--memory-high-watermark` when one is set.
 3. It creates its database directory and its temporary directory when they are absent, proves each
    writable with a probe file it removes again, and measures the total size of the volume each
@@ -98,7 +104,7 @@ Each refusal names the setting or directory it judged, with the values involved:
 
 | Check | Refusal |
 | --- | --- |
-| Memory budgets | `memory-limit (1GiB) cannot hold the node's memory budgets of 2.27GiB`, or `the detected memory limit of 2GiB cannot hold the node's memory budgets of 2.27GiB` |
+| Memory budgets | `memory-limit (1GiB) cannot hold the node's memory budgets of 2.28GiB`, or `the detected memory limit of 2GiB cannot hold the node's memory budgets of 2.28GiB` |
 | Memory watermark | `memory-high-watermark (4GiB) exceeds memory-limit (3GiB)` |
 | Directories | `the database directory <path> cannot be created`, `the temporary directory <path> is not writable` |
 | Volumes | `the capacity of the volume holding the database directory <path> cannot be read` |

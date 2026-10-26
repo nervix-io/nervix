@@ -48,7 +48,7 @@ use nervix_interconnect::{
     Transport, TransportClock, TransportIdentity, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, NodeEndpoint, TrustRootFingerprint};
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
 use nervix_primitives::{
     runtime::Handle,
     sync::{
@@ -2921,6 +2921,39 @@ impl Cluster {
 
     pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {
         self.fault_injection.fail_next_schedule_publication(domain);
+    }
+
+    pub(crate) fn lose_wasm_reset_publication_authority(&self, domain: &str, count: usize) {
+        self.fault_injection.lose_wasm_reset_publication_authority(
+            nervix_models::DomainName::parse(domain).expect("a scenario domain is valid"),
+            std::num::NonZeroUsize::new(count).expect("a refusal count is positive"),
+        );
+    }
+
+    pub(crate) fn fail_wasm_reset_publications(&self, domain: &str) {
+        self.fault_injection.fail_wasm_reset_publications(
+            nervix_models::DomainName::parse(domain).expect("a scenario domain is valid"),
+        );
+    }
+
+    pub(crate) fn clear_wasm_reset_publication_failure(&self, domain: &str) {
+        self.fault_injection.clear_wasm_reset_publication_failure(
+            &nervix_models::DomainName::parse(domain).expect("a scenario domain is valid"),
+        );
+    }
+
+    pub(crate) fn wasm_reset_publication_failure_delivered(&self, domain: &str) -> Option<bool> {
+        self.fault_injection
+            .wasm_reset_publication_failure_delivered(
+                &nervix_models::DomainName::parse(domain).expect("a scenario domain is valid"),
+            )
+    }
+
+    pub(crate) fn wasm_reset_publication_authority_losses(&self, domain: &str) -> Option<usize> {
+        self.fault_injection
+            .wasm_reset_publication_authority_losses(
+                &nervix_models::DomainName::parse(domain).expect("a scenario domain is valid"),
+            )
     }
 
     pub(crate) fn fail_ingestor_on_all_nodes(&self, ingestor: &str) {

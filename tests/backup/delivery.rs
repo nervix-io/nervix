@@ -263,7 +263,7 @@ async fn then_archive_is_the_recovered_backup(world: &mut ScenarioWorld, file: S
         .await
         .assured("the recovery session opens");
     let recovered = session
-        .run_command_result_with_reference(&recovery.to_canonical_nspl(), &reference)
+        .run_command_result_with_reference(&recovery.to_canonical_plexus(), &reference)
         .await
         .assured("the recovery is answered");
     assert_eq!(

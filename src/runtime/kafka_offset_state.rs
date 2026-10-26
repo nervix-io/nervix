@@ -4,7 +4,7 @@
 //! - **Owns.** Partition offsets, topic scheduling checkpoints, conservative revisions, native
 //!   capture and conversion, replica installation, persistence state and quorum observation.
 //! - **Depends on.** Placement vocabulary, assignment capabilities and execution primitives.
-//! - **Must not know.** Brokers, graph scheduling, NSPL or transfer framing.
+//! - **Must not know.** Brokers, graph scheduling, Plexus or transfer framing.
 
 #![cfg_attr(
     nervix_lint,

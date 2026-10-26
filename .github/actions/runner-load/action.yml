@@ -1,0 +1,54 @@
+name: Record runner load
+description: Sample the runner during a producer and retain its bounded load report.
+inputs:
+  phase:
+    description: Start sampling or finish and publish the report.
+    required: true
+  artifact-name:
+    description: Unique artifact name for this job or matrix entry.
+    default: runner-load
+runs:
+  using: composite
+  steps:
+    - name: Validate recorder phase
+      if: always()
+      shell: bash
+      env:
+        RECORDER_PHASE: ${{ inputs.phase }}
+      run: |
+        case "$RECORDER_PHASE" in
+          start|finish) ;;
+          *) echo "expected recorder phase start or finish" >&2; exit 2 ;;
+        esac
+
+    - name: Start recording
+      if: inputs.phase == 'start'
+      shell: bash
+      run: |
+        python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
+        echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+    - name: Finish recording
+      if: always() && inputs.phase == 'finish'
+      shell: bash
+      run: |
+        if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
+          kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
+        fi
+        for _ in {1..10}; do
+          [[ -s "${RUNNER_TEMP}/runner-load.md" ]] && break
+          sleep 1
+        done
+        test -s "${RUNNER_TEMP}/runner-load.md"
+        cat "${RUNNER_TEMP}/runner-load.md" >> "${GITHUB_STEP_SUMMARY}"
+
+    - name: Upload runner load
+      if: always() && inputs.phase == 'finish'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ runner.temp }}/runner-load.csv
+          ${{ runner.temp }}/runner-load.md
+          ${{ runner.temp }}/runner-load.log
+        if-no-files-found: error

@@ -3,11 +3,11 @@ Feature: Relay metrics
   Scenario Outline: DESCRIBE RELAY reports buffer metrics while Prometheus reports relay traffic metrics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -53,7 +53,7 @@ Feature: Relay metrics
       "user_id":42
       "user_id":43
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE RELAY notifications;
       """
@@ -74,7 +74,7 @@ Feature: Relay metrics
       """
       requires WHERE bindings
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE RELAY notifications WHERE (user_id = 42);
       """
@@ -133,11 +133,11 @@ Feature: Relay metrics
   Scenario Outline: DESCRIBE RELAY reports runtime buffer occupancy percentiles
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -206,11 +206,11 @@ Feature: Relay metrics
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -257,7 +257,7 @@ Feature: Relay metrics
       total=2
       domain_rate_per_sec=1
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DRAIN NODE node-1;
       DESCRIBE INGESTOR relay_metrics_drain_source;
@@ -280,11 +280,11 @@ Feature: Relay metrics
   Scenario Outline: Relay edge metrics are restored when a running domain process restarts
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -332,11 +332,11 @@ Feature: Relay metrics
       """
       total=2
       """
-    When these NSPL commands fail with "already running"
+    When these Plexus commands fail with "already running"
       """
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE INGESTOR relay_metrics_restart_source;
       """

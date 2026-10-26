@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Single-winner binding, routing generations and exact channel retirement.
 //! - **Depends on.** Primitive publication, subscription identities and ordered relay slots.
-//! - **Must not know.** Payloads, transport admission, graph planning or NSPL.
+//! - **Must not know.** Payloads, transport admission, graph planning or Plexus.
 
 #![cfg_attr(
     nervix_lint,

@@ -1,15 +1,15 @@
 Feature: Resource version bindings
   Scenario Outline: Every versioned resource binding requires an explicit VERSION clause
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "expected VERSION"
+    When these Plexus commands fail with "expected VERSION"
       """
       CREATE VHOST edge api.example.com WITH TLS tls_bundle;
       """
-    And these NSPL commands fail with "expected VERSION"
+    And these Plexus commands fail with "expected VERSION"
       """
       CREATE CODEC notification_codec
         FROM PROTOBUF USING RESOURCE proto_bundle
@@ -18,7 +18,7 @@ Feature: Resource version bindings
         TO SCHEMA notification
         WITH JAQ TRANSFORMATIONS ON INGESTION '{user_id: .user_id}';
       """
-    And these NSPL commands fail with "expected VERSION"
+    And these Plexus commands fail with "expected VERSION"
       """
       CREATE SIGNALING PROTOCOL protobuf_subscribe
         FORMAT PROTOBUF USING RESOURCE proto_bundle
@@ -30,7 +30,7 @@ Feature: Resource version bindings
         WAIT JAQ '.id == 1'
         TIMEOUT 5s;
       """
-    And these NSPL commands fail with "expected VERSION"
+    And these Plexus commands fail with "expected VERSION"
       """
       CREATE INFERENCER score_model FROM features
         USING RESOURCE fraud_model
@@ -43,7 +43,7 @@ Feature: Resource version bindings
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "expected VERSION"
+    And these Plexus commands fail with "expected VERSION"
       """
       CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
         USING RESOURCE wasm_filter
@@ -56,7 +56,7 @@ Feature: Resource version bindings
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
       """
-    And these NSPL commands fail with "expected VERSION"
+    And these Plexus commands fail with "expected VERSION"
       """
       CREATE HASH MAP lookup_by_id
         KEY id
@@ -64,7 +64,7 @@ Feature: Resource version bindings
         PATH 'lookup.jsonl'
         DECODE USING lookup_codec;
       """
-    And these NSPL commands fail with "expected VERSION"
+    And these Plexus commands fail with "expected VERSION"
       """
       CREATE HTTP CLIENT mounted_http
         MOUNT tls_bundle
@@ -96,11 +96,11 @@ Feature: Resource version bindings
         "lookup.jsonl": "{\"id\":\"one\",\"value\":1}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE tls_bundle;
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v1}}';
@@ -118,7 +118,7 @@ Feature: Resource version bindings
       UPLOAD RESOURCE lookup_bundle VERSION '{{lookup_dir}}';
       UPLOAD RESOURCE lookup_bundle VERSION '{{lookup_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE VHOST secure latest-{{test_id}}.example.com WITH TLS tls_bundle VERSION LATEST;
       """
@@ -126,7 +126,7 @@ Feature: Resource version bindings
       """
       resolved VERSION LATEST of resource 'tls_bundle' to version 2 for vhost 'secure'
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE CODEC notification_codec
@@ -172,7 +172,7 @@ Feature: Resource version bindings
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA lookup_entry ( id STRING, value I64 );
       CREATE WIRE JSON SCHEMA lookup_entry_wire MODE STRICT (
@@ -192,7 +192,7 @@ Feature: Resource version bindings
       """
       resolved VERSION LATEST of resource 'lookup_bundle' to version 2 for lookup 'lookup_by_id'
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE HTTP CLIENT mounted_http
         MOUNT tls_bundle VERSION LATEST
@@ -202,7 +202,7 @@ Feature: Resource version bindings
       """
       resolved VERSION LATEST of resource 'tls_bundle' to version 2 for client 'mounted_http'
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE VHOST secure;
       """
@@ -210,7 +210,7 @@ Feature: Resource version bindings
       """
       CREATE VHOST secure latest-{{test_id}}.example.com WITH TLS tls_bundle VERSION 2;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE CODEC notification_codec;
       """
@@ -218,7 +218,7 @@ Feature: Resource version bindings
       """
       PROTOBUF USING RESOURCE proto_bundle VERSION 2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE SIGNALING PROTOCOL protobuf_subscribe;
       """
@@ -226,7 +226,7 @@ Feature: Resource version bindings
       """
       PROTOBUF USING RESOURCE proto_bundle VERSION 2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INFERENCER score_model;
       """
@@ -234,7 +234,7 @@ Feature: Resource version bindings
       """
       USING RESOURCE fraud_model VERSION 2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE WASM PROCESSOR filter_even_rows;
       """
@@ -242,7 +242,7 @@ Feature: Resource version bindings
       """
       USING RESOURCE wasm_filter VERSION 2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE HASH MAP lookup_by_id;
       """
@@ -250,7 +250,7 @@ Feature: Resource version bindings
       """
       FROM RESOURCE lookup_bundle VERSION 2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE CLIENT mounted_http;
       """
@@ -258,7 +258,7 @@ Feature: Resource version bindings
       """
       MOUNT tls_bundle VERSION 2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE WASM PROCESSOR filter_even_rows;
       """
@@ -266,7 +266,7 @@ Feature: Resource version bindings
       """
       resource version: 2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       REBIND RESOURCE tls_bundle TO VERSION 1 FOR VHOST secure;
@@ -279,7 +279,7 @@ Feature: Resource version bindings
       """
       quiesce level: DYNAMIC
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE tls_bundle TO VERSION 1 FOR CLIENT mounted_http;
       """
@@ -291,7 +291,7 @@ Feature: Resource version bindings
       """
       quiesce level: DOMAIN_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE proto_bundle TO VERSION 1 FOR CODEC notification_codec, SIGNALING PROTOCOL protobuf_subscribe;
       """
@@ -307,7 +307,7 @@ Feature: Resource version bindings
       """
       quiesce level: DOMAIN_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE fraud_model TO VERSION 1 FOR INFERENCER score_model;
       """
@@ -319,7 +319,7 @@ Feature: Resource version bindings
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE wasm_filter TO VERSION 1 FOR WASM PROCESSOR filter_even_rows;
       """
@@ -331,7 +331,7 @@ Feature: Resource version bindings
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE lookup_bundle TO VERSION 1 FOR HASH MAP lookup_by_id;
       """
@@ -373,18 +373,18 @@ Feature: Resource version bindings
         "processors/filter_even.wasm": "not a WebAssembly module"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE proto_bundle;
       UPLOAD RESOURCE proto_bundle VERSION '{{proto_v1}}';
       CREATE RESOURCE wasm_bundle;
       UPLOAD RESOURCE wasm_bundle VERSION '{{wasm_v1}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE CODEC notification_codec
@@ -417,12 +417,12 @@ Feature: Resource version bindings
         ON GLOBAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE proto_bundle VERSION '{{proto_v2}}';
       UPLOAD RESOURCE wasm_bundle VERSION '{{wasm_v2}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       ALTER RELAY filtered_metrics SET CAPACITY 32;
       """
@@ -430,7 +430,7 @@ Feature: Resource version bindings
       """
       quiesce level: DYNAMIC
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE CODEC notification_codec;
       """
@@ -438,7 +438,7 @@ Feature: Resource version bindings
       """
       PROTOBUF USING RESOURCE proto_bundle VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE SIGNALING PROTOCOL protobuf_subscribe;
       """
@@ -446,7 +446,7 @@ Feature: Resource version bindings
       """
       PROTOBUF USING RESOURCE proto_bundle VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE WASM PROCESSOR filter_even_rows;
       """
@@ -457,7 +457,7 @@ Feature: Resource version bindings
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports status containing "{{domain}} status=Running"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE CODEC notification_codec;
       """
@@ -465,7 +465,7 @@ Feature: Resource version bindings
       """
       PROTOBUF USING RESOURCE proto_bundle VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE SIGNALING PROTOCOL protobuf_subscribe;
       """
@@ -473,7 +473,7 @@ Feature: Resource version bindings
       """
       PROTOBUF USING RESOURCE proto_bundle VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE WASM PROCESSOR filter_even_rows;
       """
@@ -481,7 +481,7 @@ Feature: Resource version bindings
       """
       USING RESOURCE wasm_bundle VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE WASM PROCESSOR filter_even_rows;
       """
@@ -510,7 +510,7 @@ Feature: Resource version bindings
         "lookup.jsonl": "{\"id\":\"one\",\"value\":2}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE lookup_bundle;
@@ -525,7 +525,7 @@ Feature: Resource version bindings
         DECODE USING lookup_codec;
       UPLOAD RESOURCE lookup_bundle VERSION '{{lookup_v2}}';
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE lookup_bundle TO VERSION LATEST;
       """
@@ -541,7 +541,7 @@ Feature: Resource version bindings
       """
       - kind=hash_map name=lookup_by_id from=1 to=2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE HASH MAP lookup_by_id;
       """
@@ -549,7 +549,7 @@ Feature: Resource version bindings
       """
       FROM RESOURCE lookup_bundle VERSION 2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LOOKUP lookup_by_id KEY 'one';
       """
@@ -557,7 +557,7 @@ Feature: Resource version bindings
       """
       "value":2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE lookup_bundle;
       """
@@ -566,7 +566,7 @@ Feature: Resource version bindings
       usages:
       - kind=hash_map name=lookup_by_id version=2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE lookup_bundle VERSION 1;
       """
@@ -575,7 +575,7 @@ Feature: Resource version bindings
       usages:
       - none
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE lookup_bundle VERSION 2;
       """
@@ -584,7 +584,7 @@ Feature: Resource version bindings
       usages:
       - kind=hash_map name=lookup_by_id version=2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE lookup_bundle TO VERSION 2;
       """
@@ -607,11 +607,11 @@ Feature: Resource version bindings
     And node "node-1" has TLS resource directory "tls_v1" for hosts "commit-{{test_id}}.example.com"
     And node "node-1" has TLS resource directory "tls_v2" for hosts "commit-{{test_id}}.example.com"
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE tls_bundle;
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v1}}';
@@ -619,7 +619,7 @@ Feature: Resource version bindings
       """
     Given client "owner" is connected to the leader node
     And client "uploader" is connected to the leader node
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       REBIND RESOURCE tls_bundle TO VERSION LATEST FOR VHOST edge;
@@ -637,7 +637,7 @@ Feature: Resource version bindings
     And client "owner" attempts to commit its transaction
     Then client "owner" commit was refused because its expected preview is stale
     And transaction "{{transaction_id}}" eventually has state "OPEN"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE TRANSACTION OPERATION 1 FORMAT JSON;
       """
@@ -647,7 +647,7 @@ Feature: Resource version bindings
       /operation = 1
       /report/position = 1
       """
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       COMMIT;
       """
@@ -656,7 +656,7 @@ Feature: Resource version bindings
       resolved VERSION LATEST of resource 'tls_bundle' to version 2 for vhost 'edge'
       """
     And transaction "{{transaction_id}}" eventually has state "COMMITTED"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE VHOST edge;
       """
@@ -674,7 +674,7 @@ Feature: Resource version bindings
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has TLS resource directory "tls_v1" for hosts "select-{{test_id}}.example.com"
     And node "node-1" has TLS resource directory "tls_v2" for hosts "select-{{test_id}}.example.com"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE tls_bundle;
@@ -688,7 +688,7 @@ Feature: Resource version bindings
       CREATE HTTP CLIENT spare MOUNT tls_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
       CREATE HTTP CLIENT foreign MOUNT other_bundle VERSION 1 CONFIG {'endpoint' = 'http://127.0.0.1:1'};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE tls_bundle TO VERSION LATEST FOR CLIENT primary;
       """
@@ -700,7 +700,7 @@ Feature: Resource version bindings
       """
       - kind=client name=primary from=1 to=2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE tls_bundle TO VERSION 2 FOR CLIENT secondary, VHOST edge, CLIENT primary;
       """
@@ -720,11 +720,11 @@ Feature: Resource version bindings
       """
       - kind=client name=secondary from=1 to=2
       """
-    When these NSPL commands fail with "CLIENT 'foreign' does not bind resource 'tls_bundle'"
+    When these Plexus commands fail with "CLIENT 'foreign' does not bind resource 'tls_bundle'"
       """
       REBIND RESOURCE tls_bundle TO VERSION 2 FOR CLIENT foreign;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE CLIENT spare;
       """
@@ -732,7 +732,7 @@ Feature: Resource version bindings
       """
       MOUNT tls_bundle VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE CLIENT foreign;
       """
@@ -754,14 +754,14 @@ Feature: Resource version bindings
         "unused.txt": "present"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE orphan;
       UPLOAD RESOURCE orphan VERSION '{{orphan_v1}}';
       CREATE RESOURCE empty;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE orphan TO VERSION 1;
       """
@@ -770,19 +770,19 @@ Feature: Resource version bindings
       rebound 0 of 0 usage(s) of resource 'orphan' to version 1
       quiesce level: DYNAMIC
       """
-    When these NSPL commands fail with "resource 'missing' does not exist"
+    When these Plexus commands fail with "resource 'missing' does not exist"
       """
       REBIND RESOURCE missing TO VERSION 1;
       """
-    And these NSPL commands fail with "resource 'orphan@2' does not exist in domain '{{domain}}'"
+    And these Plexus commands fail with "resource 'orphan@2' does not exist in domain '{{domain}}'"
       """
       REBIND RESOURCE orphan TO VERSION 2;
       """
-    And these NSPL commands fail with "resource 'empty' has no completed versions in domain '{{domain}}'"
+    And these Plexus commands fail with "resource 'empty' has no completed versions in domain '{{domain}}'"
       """
       REBIND RESOURCE empty TO VERSION LATEST;
       """
-    And these NSPL commands fail with "VHOST 'missing' does not exist in domain '{{domain}}'"
+    And these Plexus commands fail with "VHOST 'missing' does not exist in domain '{{domain}}'"
       """
       REBIND RESOURCE orphan TO VERSION 1 FOR VHOST missing;
       """
@@ -808,7 +808,7 @@ Feature: Resource version bindings
         "lookup.jsonl": "{\"id\":\"one\",\"value\":2}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE shared_bundle;
@@ -837,11 +837,11 @@ Feature: Resource version bindings
         DECODE USING lookup_codec;
       UPLOAD RESOURCE shared_bundle VERSION '{{shared_v2}}';
       """
-    When these NSPL commands fail with "INFERENCER 'score_model' binding validation failed"
+    When these Plexus commands fail with "INFERENCER 'score_model' binding validation failed"
       """
       REBIND RESOURCE shared_bundle TO VERSION 2;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INFERENCER score_model;
       """
@@ -849,7 +849,7 @@ Feature: Resource version bindings
       """
       USING RESOURCE shared_bundle VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE HASH MAP lookup_by_id;
       """
@@ -857,7 +857,7 @@ Feature: Resource version bindings
       """
       FROM RESOURCE shared_bundle VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LOOKUP lookup_by_id KEY 'one';
       """
@@ -879,18 +879,18 @@ Feature: Resource version bindings
     And node "node-1" has TLS resource directory "tls_v2" for hosts "drift-{{test_id}}.example.com"
     And node "node-1" has ONNX fixture resource directory "onnx_v1"
     And node "node-1" has ONNX fixture resource directory "onnx_v2" with "models/simple_score.onnx" copied from fixture "alternate_score.onnx"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE tls_bundle;
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v1}}';
       CREATE RESOURCE fraud_model;
       UPLOAD RESOURCE fraud_model VERSION '{{onnx_v1}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA features ( vector <vector_type> );
       CREATE SCHEMA scored ( score <score_type> );
@@ -930,12 +930,12 @@ Feature: Resource version bindings
       """
       {"score":[0.875]}
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v2}}';
       UPLOAD RESOURCE fraud_model VERSION '{{onnx_v2}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       ALTER RELAY scored SET CAPACITY 32;
       """
@@ -943,7 +943,7 @@ Feature: Resource version bindings
       """
       quiesce level: DYNAMIC
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE VHOST edge;
       """
@@ -951,7 +951,7 @@ Feature: Resource version bindings
       """
       CREATE VHOST edge drift-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INFERENCER score_model;
       """
@@ -969,7 +969,7 @@ Feature: Resource version bindings
       """
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE VHOST edge;
       """
@@ -977,7 +977,7 @@ Feature: Resource version bindings
       """
       CREATE VHOST edge drift-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INFERENCER score_model;
       """
@@ -985,7 +985,7 @@ Feature: Resource version bindings
       """
       USING RESOURCE fraud_model VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION scored_subscription TO scored;
       """
@@ -997,7 +997,7 @@ Feature: Resource version bindings
       """
       {"score":[0.875]}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE tls_bundle TO VERSION LATEST FOR VHOST edge;
       """
@@ -1009,7 +1009,7 @@ Feature: Resource version bindings
       """
       quiesce level: DYNAMIC
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE fraud_model TO VERSION LATEST FOR INFERENCER score_model;
       """
@@ -1029,7 +1029,7 @@ Feature: Resource version bindings
       """
       {"score":[0.25]}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE tls_bundle TO VERSION 1 FOR VHOST edge;
       REBIND RESOURCE fraud_model TO VERSION 1 FOR INFERENCER score_model;

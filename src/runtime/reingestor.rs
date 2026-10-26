@@ -4,7 +4,7 @@
 //! - **Owns.** Reingestor input evaluation, branch construction and route-local buffering.
 //! - **Depends on.** Decision-layer reingestor plans, their bound programs, Arrow batches,
 //!   materialized state and bound clocks.
-//! - **Must not know.** NSPL parsing, placement selection or source transport lifecycle.
+//! - **Must not know.** Plexus parsing, placement selection or source transport lifecycle.
 
 #![cfg_attr(
     nervix_lint,
@@ -1856,6 +1856,9 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn reingestor_force_and_shutdown_flush_buffered_routes() {
+        use futures_util::FutureExt as _;
+        use nervix_models::{DomainClockState, DomainTimeRate};
+
         let runtime = Runtime::default();
         let domain = domain("default");
         let input_relay = named::<RelayName>("orders");
@@ -1865,13 +1868,27 @@ mod tests {
             ("tenant", ParseAsType::String),
             ("user_id", ParseAsType::U32),
         ]);
+        // Actual UTC stays before the mapping's origin, so logical time holds still: the route's
+        // 10s cadence never comes due, and only the force flush or the shutdown can release what
+        // the reingestor buffers.
+        let clock_lifecycle = DomainClockLifecycle::new(domain.clone());
+        clock_lifecycle.install_paced(
+            0,
+            DomainClockState::new(
+                Timestamp::from_unix_nanos(i64::MAX),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
         let (execution_shutdown, _) = watch::channel(false);
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
-                domain_clock: test_domain_clock(&domain),
+                domain_clock: clock_lifecycle
+                    .bind()
+                    .expect("the fixture installs its controlled domain clock"),
                 shutdown: execution_shutdown,
                 routing: runtime.stage_domain_routing(
                     &domain,
@@ -1939,6 +1956,8 @@ mod tests {
         let input = ExecutionBuildDeps::from_routing(&domain, &routing)
             .bind_reingestor_input(&plan, &plan.inputs[0])
             .expect("the planned reingestor input binds");
+        let output_counters = runtime
+            .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Reingestor, &reingestor));
         let task = runtime.spawn_reingestor_task(
             &domain,
             &shutdown_tx,
@@ -1969,41 +1988,44 @@ mod tests {
             .await
             .expect("first input should broadcast");
         first_acks.ack_success();
+        wait_until_one_output_is_buffered(&clock_lifecycle, &output_counters).await;
         assert!(
-            timeout(Duration::from_millis(20), output_rx.recv())
-                .await
-                .is_err(),
+            output_rx.recv().now_or_never().is_none(),
             "long-cadence reingestor output must remain buffered"
         );
         assert!(
-            timeout(Duration::from_millis(1), &mut first_completion)
-                .await
-                .is_err(),
+            first_completion.as_mut().now_or_never().is_none(),
             "force-flush input ACK must remain pending with buffered output"
         );
 
         runtime.force_flush_domain(&domain);
-        let forced = timeout(Duration::from_secs(1), output_rx.recv())
+        let forced = timeout(Duration::from_secs(10), output_rx.recv())
             .await
             .expect("force flush should publish buffered output")
             .expect("reingestor output should remain open");
+        let forced_row = forced
+            .runtime_row(0)
+            .expect("forced output should contain an Arrow row");
         assert_eq!(
-            row_value(
-                &forced
-                    .runtime_row(0)
-                    .expect("forced output should contain an Arrow row"),
-                "user_id",
-            ),
+            row_value(&forced_row, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
+        );
+        assert_eq!(
+            row_value(&forced_row, "user_id"),
             Some(RuntimeValue::U32(1))
+        );
+        assert!(
+            first_completion.as_mut().now_or_never().is_none(),
+            "the input ACK must wait for the forced output's own acknowledgement"
         );
         forced.ack_success();
         assert_eq!(
-            timeout(Duration::from_secs(1), &mut first_completion)
+            timeout(Duration::from_secs(10), &mut first_completion)
                 .await
                 .expect("force-flushed ACK should resolve"),
             AckOutcome::Ack
         );
-        timeout(Duration::from_secs(1), async {
+        timeout(Duration::from_secs(10), async {
             loop {
                 nervix_primitives::task::consume_budget().await;
                 let pending = runtime
@@ -2020,6 +2042,16 @@ mod tests {
         })
         .await
         .expect("force-flush generation should complete after output publication");
+        assert_eq!(
+            output_counters.admitted_work(),
+            0,
+            "the force flush must release everything the reingestor buffered"
+        );
+        assert_eq!(
+            clock_lifecycle.notification_receivers(),
+            0,
+            "with nothing buffered the reingestor must wait for no flush deadline"
+        );
 
         let (second_acks, second_completion) = AckSet::root();
         let mut second_completion = Box::pin(second_completion.wait());
@@ -2028,45 +2060,75 @@ mod tests {
             .await
             .expect("second input should broadcast");
         second_acks.ack_success();
+        wait_until_one_output_is_buffered(&clock_lifecycle, &output_counters).await;
         assert!(
-            timeout(Duration::from_millis(20), &mut second_completion)
-                .await
-                .is_err(),
+            output_rx.recv().now_or_never().is_none(),
+            "shutdown output must remain buffered until the reingestor stops"
+        );
+        assert!(
+            second_completion.as_mut().now_or_never().is_none(),
             "shutdown input ACK must remain pending while its output is buffered"
         );
         shutdown_tx
             .send(true)
             .expect("reingestor shutdown receiver should remain open");
-        timeout(Duration::from_secs(1), task)
+        timeout(Duration::from_secs(10), task)
             .await
             .expect("reingestor should stop after draining input")
             .expect("reingestor task should not panic");
-        let stopped = timeout(Duration::from_secs(1), output_rx.recv())
+        let stopped = timeout(Duration::from_secs(10), output_rx.recv())
             .await
             .expect("shutdown should publish buffered output")
             .expect("reingestor output should remain open");
+        let stopped_row = stopped
+            .runtime_row(0)
+            .expect("shutdown output should contain an Arrow row");
         assert_eq!(
-            row_value(
-                &stopped
-                    .runtime_row(0)
-                    .expect("shutdown output should contain an Arrow row"),
-                "user_id",
-            ),
+            row_value(&stopped_row, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
+        );
+        assert_eq!(
+            row_value(&stopped_row, "user_id"),
             Some(RuntimeValue::U32(2))
+        );
+        assert!(
+            second_completion.as_mut().now_or_never().is_none(),
+            "the input ACK must wait for the shutdown output's own acknowledgement"
         );
         stopped.ack_success();
         assert_eq!(
-            timeout(Duration::from_secs(1), &mut second_completion)
+            timeout(Duration::from_secs(10), &mut second_completion)
                 .await
                 .expect("shutdown-flushed ACK should resolve"),
             AckOutcome::Ack
         );
         assert_eq!(
-            runtime
-                .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Reingestor, &reingestor))
-                .admitted_work(),
+            output_counters.admitted_work(),
             0,
             "reingestor output gauge must be cleared when the task exits"
+        );
+    }
+
+    /// Waits until the reingestor holds one admitted output batch and waits for that batch's flush
+    /// deadline. Its loop waits on the logical clock only after a processed input entered an output
+    /// buffer, so the clock's one waiter shows the reingestor finished producing that output, which
+    /// a window of silence cannot show.
+    async fn wait_until_one_output_is_buffered(
+        clock: &DomainClockLifecycle,
+        counters: &NodeQuiesceCounters,
+    ) {
+        timeout(Duration::from_secs(10), async {
+            while clock.notification_receivers() != 1 {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reingestor buffers its output and waits for that output's flush deadline");
+        assert_eq!(
+            counters.admitted_work(),
+            1,
+            "the reingestor must hold exactly the buffered output batch"
         );
     }
 

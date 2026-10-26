@@ -66,7 +66,7 @@ use nervix_models::{
     DomainName, FieldName, ParseAsType, RelayName, ScheduledModel, SchemaName, SubscriptionBinding,
     SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, UserName,
 };
-use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
+use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{
         Arc,

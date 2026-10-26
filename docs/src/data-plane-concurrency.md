@@ -1,5 +1,7 @@
 # Data-Plane Concurrency
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix keeps the paths that carry records, batches, remote relay frames, and acknowledgements free
 from shared coordination that is unrelated to the record being processed. This is the
 contentionless data-plane rule. It applies after a runtime task has started and its graph, routing,
@@ -133,7 +135,8 @@ owns the capacities, grace periods and reconciliation deadlines.
 Production-owner Shuttle checks cover delayed events against a reused position, registration
 against shutdown, admission waiter drop against a reply, final silence sweeps against terminal and
 Alive reports, a first claim against a sweep, a sweep that completes while an unclaimed position's
-guard is held, body claim against cancellation, admission against peer ending, and another peer's
+guard is held, body claim against cancellation, admission against peer ending, a channel's next
+grant against the return of the outcome delivery of the attempt before it, and another peer's
 progress while one peer holds its guard. The production admission choice has a Loom model for one
 irreversible verdict; replacing its compare-and-exchange with an overwriting swap must fail and
 replay. ArcSwap, queues and external semaphore internals remain outside that atomic claim.
@@ -622,6 +625,32 @@ shared pointer's own count decides which drop is the last, and the job enters th
 its existing wait for a place. Native broker waits, the destruction's included, are outside Shuttle
 and Deloxide's lock detector; the ordinary connector and retirement regressions and the
 one-/three-node stalled-broker and retirement scenarios own that evidence.
+
+### Kafka source rejection floors
+
+A Kafka source under `OFFSET BY CONSUMER GROUP` records the earliest rejected record of every
+partition it rejects in its consumer's context, before it seeks the partitions the consumer is
+still assigned. The context's rebalance handling starts each partition the group assigns at its
+floor, so a revocation that loses the seek, from a rebalance, the host leaving and rejoining the
+group, or a lapsed group session, never resumes the partition past the rejected record. A commit
+that passes the record forgets the floor, and an eager assignment that omits a partition forgets
+its floor, since another member now resumes it from the committed offset. The floors sit behind one
+thread-blocking lock per consumer: the source takes it once per rejection and, while a floor is
+outstanding, once per acknowledged batch, and the rebalance handling takes it once per assignment.
+librdkafka serves a rebalance only while the source polls for its next batch, and the host never
+polls while it rejects or acknowledges, so the lock is never contended. No guard is held across an
+await or a driver call that waits on the broker: under it, the rebalance handling only sets the
+start offsets of the assignment list in memory. The registered
+`topic::ingestor::rejection::shuttle_tests::shuttle_a_rejected_record_is_read_again_whenever_its_group_takes_the_partition_away`
+and
+`topic::ingestor::rejection::shuttle_tests::shuttle_a_commit_past_the_rejected_record_lets_the_group_resume_from_the_committed_offset`
+checks let a coordinator task decide a revocation and an assignment at any point of a rejection,
+serve them in the source's polls as librdkafka does, and hold that the first record read again
+from the partition is the rejected one, and that once a commit passes it the record after the
+committed one is read next. Native consumer-group traffic is outside Shuttle. Deloxide's detector
+tracks the floors' lock, which the lane's refused-commit shutdown workloads reach at assignment, at
+the rejection of the refused batch and at the commit that reads it again; the mock-cluster
+regressions and the one- and three-node broker restart scenario own the driver evidence.
 
 ### Kafka producer retention
 
@@ -1378,6 +1407,10 @@ it:
   lock scoped to that entity, one newest announcement per branch, and taken all at once by the
   entity's one replica task, never across an await; see [Replica catch-up](#replica-catch-up)
 - an ACK root locks only its single terminal sender transition
+- a Kafka consumer-group source's rejected-partition floors sit behind one lock per consumer, taken
+  once per rejection, once per acknowledged batch while a floor is outstanding, and once per
+  rebalance, never across an await or a driver call that waits on the broker; see
+  [Kafka source rejection floors](#kafka-source-rejection-floors)
 
 These sites are accepted for the contract and bound named above. A lock that merely makes shared
 state convenient, protects immutable configuration, or repeats registry discovery on every batch
@@ -2062,6 +2095,17 @@ observations and transport waits remain outside Deloxide; the public outcomes an
 state-machine regressions cover the retention decision. No synchronization protocol or memory
 ordering changes at this boundary.
 
+The WASM reset publication workloads reach tracked transaction state and impact recording during
+initial application and recovery on one- and three-node clusters. Ordinary, order-analysis and
+stressed selections distinguish typed loss of publication leadership from a retained genuine
+failure, preserve the reset's execution identity and generation, and check sibling branch state.
+The genuine-failure control is armed before ordinary graph publications and observed pending until
+reset preparation has been aborted, so another scheduling path cannot consume it. It remains
+enabled until a known failed outcome is observed, then is cleared before exact replay verifies
+retention independently of the injected condition.
+The test fault maps, asynchronous entity gates and consensus/network waits are untracked;
+the injected refusal establishes no claim about Raft election interleavings or memory ordering.
+
 The WebSocket ingestor lifecycle workloads drop an ingestor, move its owner and recover from repeated
 peer closes. Their ordinary and stressed selections reach tracked quiesce, schedule and teardown
 locks. Socket I/O, close-handshake deadlines and reconnect timers remain outside Deloxide's
@@ -2210,6 +2254,15 @@ artifacts. The evidence observes each process up to its kill, pause, stop or the
 upstream flush barrier, and only its tracked thread-blocking locks; recovery, ledger and timing
 verdicts stay the scenarios' own, with the product's deadlines and the suite's budgets unchanged.
 
+The evidence verdict and the scenario verdict are separate. A run can retain qualifying evidence
+from every process and still fail its ledger, recovery checks or controller budget. A soak
+qualification requires both suite verdicts to pass, with every configured entry complete on the
+ordinary and diagnostic images of the same revision. The owning task records the revision, both
+immutable image digests, every shard verdict and the diagnostic process-start and evidence-file
+counts, together with failed attempts and their owning corrections. Per-process evidence qualifies
+the tracked lock activity that was recorded; the complete scenario verdict also establishes the
+delivery and recovery behavior that the external runner observes.
+
 ## Deterministic Concurrency Verification
 
 The relay interaction's ordinary output-wake test stages a collected batch through the production
@@ -2322,7 +2375,7 @@ both random and PCT schedules, and the failing schedule replays.
 Shuttle explores sequentially consistent schedules. It cannot prove that a chosen `Relaxed`,
 `Acquire`, or `Release` ordering is sufficient on weak-memory hardware; a claim that depends on one
 is a Loom model, described under [Memory-ordering models](#memory-ordering-models). Cucumber
-remains the public behavior test: when a scheduling defect affects an NSPL operation, runtime
+remains the public behavior test: when a scheduling defect affects a Plexus operation, runtime
 output, or process outcome, its Shuttle regression is paired with a scenario through that
 interface. A scenario cannot exhaust the interleavings of an in-process protocol, and neither a
 Shuttle check nor a Loom model can verify the whole cluster, socket, disk, or browser path.

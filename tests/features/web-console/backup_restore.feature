@@ -3,7 +3,7 @@ Feature: Web console backup and restore
   Scenario Outline: A console backup downloads a verified archive whose manifest lists the backed-up domains
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -39,7 +39,7 @@ Feature: Web console backup and restore
   Scenario Outline: A console backup download interrupted by a page reload resumes after the reload
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -71,7 +71,7 @@ Feature: Web console backup and restore
   Scenario: A console backup download interrupted by a page reload resumes after leadership moved under the backup
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -102,7 +102,7 @@ Feature: Web console backup and restore
   Scenario Outline: A page reload forgets a pending backup record the console did not write and resumes nothing
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -125,7 +125,7 @@ Feature: Web console backup and restore
   Scenario Outline: A console restore uploads its archive with progress, shows the dry run, and restores the domain
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -155,7 +155,7 @@ Feature: Web console backup and restore
     And selector ".restore-result" contains "create domain '{{domain}}_copy': applied"
     And selector ".restore-result" contains "apply models of domain '{{domain}}_copy': applied"
     And selector ".terminal" contains "RESTORE DOMAIN {{domain}} AS {{domain}}_copy FROM 'source.nvxb';"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -179,13 +179,13 @@ Feature: Web console backup and restore
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
@@ -219,7 +219,7 @@ Feature: Web console backup and restore
     And selector ".restore-result" contains "create domain '{{domain}}_copy': applied"
     And selector ".restore-result" contains "import resource versions of domain '{{domain}}_copy': applied"
     And selector ".restore-result" contains "apply models of domain '{{domain}}_copy': failed"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -237,7 +237,7 @@ Feature: Web console backup and restore
   Scenario Outline: A console restore lists the archived state it skipped beside its result
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( tenant STRING, latency I64 );
@@ -307,7 +307,7 @@ Feature: Web console backup and restore
   Scenario: The REPL and the backup controls share one console session and its leader redirect
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -336,7 +336,7 @@ Feature: Web console backup and restore
     And the web console never held two session connections at once
     And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}"
     And the web console's backup downloads and restores reached node "{{leader}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -349,7 +349,7 @@ Feature: Web console backup and restore
   Scenario: The REPL's backup keeps one console session and its leader redirect when the session's connection is lost
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -383,7 +383,7 @@ Feature: Web console backup and restore
     And the web console never held two session connections at once
     And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}"
     And the web console's backup downloads and restores reached node "{{leader}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """

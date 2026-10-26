@@ -2,11 +2,11 @@ Feature: ZeroMQ ingestion
   Scenario Outline: ZeroMQ ingestor delivers JSON payloads to a subscribed relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -57,12 +57,12 @@ Feature: ZeroMQ ingestion
   Scenario Outline: ZeroMQ ingestor reports transient source failures and recovers
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     When ingestor "zeromq_notifications" enters fault mode
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -132,16 +132,16 @@ Feature: ZeroMQ ingestion
         "feed.txt": "ZeroMQ notifications feed\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE zeromq_feed;
       UPLOAD RESOURCE zeromq_feed VERSION '{{zeromq_feed_dir}}';
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -187,7 +187,7 @@ Feature: ZeroMQ ingestion
       "user_id":44
       """
     And the last relay subscription payload contains key fragment '{"user_id":44}'
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE zeromq_feed;
       """
@@ -209,11 +209,11 @@ Feature: ZeroMQ ingestion
   Scenario Outline: A ZeroMQ ingestor binds a fresh port when another socket took the port the scenario drew for it
     Given a <cluster_size> node nervix cluster is started
     And another socket listens on the port the scenario drew for its ZeroMQ ingest address
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64

@@ -373,7 +373,7 @@ mod tests {
     use nervix_models::{
         CreateStatement, Model, RequestedResourceVersion, ResourceName, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{
         SignalingDraft, SignalingDraftError, SignalingFormatDraft, SignalingFormatKind,
@@ -413,7 +413,7 @@ mod tests {
             )),
             draft.if_not_exists,
         ));
-        let source = statement.to_canonical_nspl().assured("protocol renders");
+        let source = statement.to_canonical_plexus().assured("protocol renders");
         assert_eq!(
             parse_client_statement(&source).assured("canonical protocol parses"),
             ClientStatement::Server(statement),

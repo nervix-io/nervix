@@ -1,7 +1,9 @@
 # Connector Crates And The Connector Contract
 
+*Plexus, the Nervix graph definition language.*
+
 An external integration meets Nervix at a data-plane boundary. The [ingestor](./ingestors.md)
-and [emitter](./emitters.md) manuals define its NSPL surface and delivery options. This chapter
+and [emitter](./emitters.md) manuals define its Plexus surface and delivery options. This chapter
 defines who owns the work after validation: the shared connector contract, each integration's
 transport, and the host that drives it. [Data Plane](./data-plane.md) describes what happens to
 the resulting Arrow batches inside the graph.
@@ -19,7 +21,7 @@ outbound request, from Arrow preparation to response and recovery.
 | Decision and composition | Convert a validated Model into a typed source or emitter start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define ingestor and emitter operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the ingestor contract, the emitter contract, or both. |
-| Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse NSPL or read a Model during data-plane execution. |
+| Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse Plexus or read a Model during data-plane execution. |
 
 The contract may name shared vocabulary types, Arrow, the async and error facilities needed by its
 boundary, the node's bounded executor, and configuration helpers for TLS, HTTP clients, service
@@ -479,12 +481,12 @@ every external collector's availability.
 
 ```mermaid
 sequenceDiagram
-    participant NSPL as NSPL and Models
+    participant Plexus as Plexus and Models
     participant Registry as Registry and decisions
     participant Host as Server host
     participant Driver as Connector crate
     participant Graph as Runtime graph
-    NSPL->>Registry: Semantic Model
+    Plexus->>Registry: Semantic Model
     Registry->>Registry: Validate capabilities and references
     Registry->>Host: Validated typed start plan
     Host->>Driver: Open with resolved configuration
@@ -974,7 +976,7 @@ entity declares, which states what its positions still mean once their connectio
 | --- | --- | --- |
 | `broker_redelivered` | `MQTT TOPIC`, `RABBITMQ QUEUE`, `SQS QUEUE` | The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one. |
 | `none` | `CLIENT PRODUCER`, `HTTP REQUEST`, `HTTP ENDPOINT`, `NATS SUBJECT`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, `SYSLOG LISTENER` | Nothing is pending. The host keeps no position and reads again after its retry delay. |
-| `replayable` | `KAFKA TOPIC`, `PULSAR TOPIC` | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore does not seek a partition that a consumer-group rebalance has moved away, because only a poll can assign that partition again. |
+| `replayable` | `KAFKA TOPIC`, `PULSAR TOPIC` | The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore seeks each rejected partition it is assigned at once, and starts every other one at its earliest rejected record when its consumer group assigns it again, until a commit passes that record. |
 <!-- connector-matrix:position:end -->
 
 The broker host applies the same retry backoff to a failed resume, a failed read and a requested
@@ -997,7 +999,7 @@ host rejects the positions, that rejection fails on the same lost connection, an
 A `broker_redelivered` source therefore delivers at least once across a reconnect, and a message
 whose acknowledgement the broker never received is ingested again. A transport without an
 acknowledged delivery mode has no redelivery guarantee from Nervix. The
-sequence below shows an acknowledged broker policy. The precise source-specific effects and NSPL
+sequence below shows an acknowledged broker policy. The precise source-specific effects and Plexus
 modes are in [Ingestors](./ingestors.md) and
 [Shutdown And Recovery](./shutdown.md#connector-contracts).
 
@@ -1921,17 +1923,34 @@ sequenceDiagram
   that same job. In `MODE NO ACK` the driver commits on its
   own cadence, and suspending or closing the source commits what it delivered since.
   A rejection seeks each rejected partition the consumer is still assigned back to its earliest
-  unacknowledged record. A consumer-group rebalance can move a partition to another group member
-  while its batch is in flight, and Kafka cannot seek a partition the consumer no longer fetches.
-  That partition needs no seek: whichever member is assigned it next, this consumer included,
-  resumes it from the committed offset, which never passes an unacknowledged record.
+  unacknowledged record. Under `OFFSET BY CONSUMER GROUP` the group can revoke that partition
+  before the record is read again: a rebalance moves it while its batch is in flight, the host's
+  suspend and resume after a failed rejection leaves and rejoins the group, and a broker outage
+  that outlasts the group session takes it away. Each revocation loses the seek, and the next
+  assignment resumes the partition from the group's committed offset, or, where the group
+  committed none, from where the client's `auto.offset.reset` starts it, which `latest` places
+  past the rejected record. The source therefore records each rejected partition's earliest
+  rejected record in its consumer's context before it seeks, and the context starts the partition
+  there whenever the group assigns it to this consumer again, until a commit that passes the
+  record forgets it. A retried rejection depends on no poll: it records the floor and seeks what
+  the consumer holds. An eager assignment lists every partition the group gives the consumer, so
+  a floor it omits is forgotten, and the member it went to resumes the partition from the
+  committed offset; a cooperative assignment lists only what it adds and forgets nothing.
   With `OFFSET BY DOMAIN`, the host supplies typed access to replicated next-offset state and a
   committed partition schedule. The leader observes partition topology and commits assignments;
-  executing sources follow that schedule. Offset snapshots can lag a crash, so this mode remains
-  at least once. Commits and start-point resets wait for the assigned state replicas within the
-  native checkpoint bulk operation's thirty-second budget. A missing acknowledgement still fails
-  the commit and follows the host's existing rejection and retry policy.
-  [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
+  executing sources follow that schedule. The domain offsets record only acknowledged positions and
+  the start of each partition an instance took up without one, so whichever instance the schedule
+  assigns a rejected partition resumes it at or before the rejected record. A partition without a
+  domain offset starts at a concrete offset the instance resolves when it takes the partition up:
+  in a paced domain its first record at or after the domain's current logical time, or its end as
+  it stood before that lookup when it has no such record yet, and in an unpaced domain where the
+  client's `auto.offset.reset` places it, `earliest` at its earliest retained record and `latest`
+  at its end. The instance records that start before it reads, so a reconnect resumes there
+  instead of placing the partition again past records it has not acknowledged. Offset snapshots
+  can lag a crash, so this mode remains at least once. Commits and start-point resets wait for the
+  assigned state replicas within the native checkpoint bulk operation's thirty-second budget. A
+  missing acknowledgement still fails the commit and follows the host's existing rejection and
+  retry policy. [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
   Replica ACKs reach that installed offset state through a resolved, retired-on-ending route and
   the existing assignment publication. The host's announcer retains its route and follows replica
   assignment changes without reading node-wide state or execution registries. The Kafka commit and
@@ -2293,7 +2312,7 @@ drain boundary. This chapter does not redefine those output formats.
    capability in the [capability inventory](#capability-inventory). Confirm the crate boundary and
    run the repository's validation and connector tests.
 5. Update the [Ingestors](./ingestors.md) or [Emitters](./emitters.md) manual, relevant client and
-   metric documentation, and the [Plexus skill](https://github.com/nervix-io/nervix/blob/main/.agents/skills/nspl/SKILL.md) routing when its
+   metric documentation, and the [Plexus skill](https://github.com/nervix-io/nervix/blob/main/.agents/skills/plexus/SKILL.md) routing when its
    user-facing guidance changes. Regenerate the book.
 
 The connector split was functionally qualified across 46 integration feature files and 359

@@ -6,7 +6,7 @@ Feature: Ingestor quiesce engagement during dispatch
     And the production sticky scheduler is configured
     And a <nodes> node nervix cluster is started
     And Kafka topic "quiesce_dispatch_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA quiesce_event ( id I64 );
@@ -33,7 +33,7 @@ Feature: Ingestor quiesce engagement during dispatch
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "ingestor" "quiesce_source" is saved as placeholder "source_owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION quiesce_seen TO quiesce_output;
       """
@@ -44,7 +44,7 @@ Feature: Ingestor quiesce engagement during dispatch
       """
     Then ingestor "quiesce_source" reaches the dispatch pause
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       <operation>
       """
@@ -60,7 +60,7 @@ Feature: Ingestor quiesce engagement during dispatch
       """
     And the relay subscription does not receive a payload within "2s"
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
 
     Examples:
       | nodes | operation                                                                           |

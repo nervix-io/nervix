@@ -10,7 +10,7 @@ Feature: Restore configuration, users and resources from a backup archive
       }
       """
     And node "node-1" has TLS resource directory "tls_dir" for hosts "restored-{{test_id}}.example.com"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       CREATE USER restored_reader WITH PASSWORD 'reader-password';
@@ -24,7 +24,7 @@ Feature: Restore configuration, users and resources from a backup archive
     And client "uploader" is connected to the leader node
     When client "uploader" selects domain "{{domain}}"
     And client "uploader" upload of resource "zip_codes" from "{{zip_codes_dir}}" with identity "failed-version" fails with "for version 2 failed"
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
@@ -32,7 +32,7 @@ Feature: Restore configuration, users and resources from a backup archive
       """
       uploaded resource version 3
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
@@ -61,7 +61,7 @@ Feature: Restore configuration, users and resources from a backup archive
     And the SHOW CREATE output of every model saved as "source" is the same in domain "{{domain}}" on node "{{leader}}"
     And DESCRIBE RESOURCE "zip_codes" in domain "{{domain}}" on node "{{leader}}" prints the details saved as "zip_codes"
     And DESCRIBE RESOURCE "tls_bundle" in domain "{{domain}}" on node "{{leader}}" prints the details saved as "tls_bundle"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -69,7 +69,7 @@ Feature: Restore configuration, users and resources from a backup archive
       """
       {{domain}} pace=PACED status=STOPPED
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE zip_codes;
       """
@@ -78,7 +78,7 @@ Feature: Restore configuration, users and resources from a backup archive
       latest: 3
       versions: 1,3
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
@@ -91,7 +91,7 @@ Feature: Restore configuration, users and resources from a backup archive
       """
       raft.current_leader:
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LOOKUP zip_codes_by_zip KEY '60601';
       """
@@ -115,13 +115,13 @@ Feature: Restore configuration, users and resources from a backup archive
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
@@ -137,7 +137,7 @@ Feature: Restore configuration, users and resources from a backup archive
     Then the CLI dry run planned domain "{{domain}}_copy" with 1 resource versions and 5 models
     When the CLI restores "domain {{domain}}" from "domain.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "domain '{{domain}}' already exists; restore it AS another name"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -149,7 +149,7 @@ Feature: Restore configuration, users and resources from a backup archive
     Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 1 resource versions and 5 models
     And the SHOW CREATE output of every model saved as "original" is the same in domain "{{domain}}_copy" on node "{{leader}}"
     And the SHOW CREATE output of every model saved as "original" is the same in domain "{{domain}}" on node "{{leader}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -168,7 +168,7 @@ Feature: Restore configuration, users and resources from a backup archive
   Scenario Outline: A cluster restore decides by its user policy what becomes of a user the cluster has
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE USER alice WITH PASSWORD 'archived-password';
       CREATE USER bob WITH PASSWORD 'bob-password';
@@ -178,7 +178,7 @@ Feature: Restore configuration, users and resources from a backup archive
     Then the CLI backup succeeded with a JSON report naming no domain
     Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
     Then the current leader node is saved as placeholder "leader"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE USER alice WITH PASSWORD 'current-password';
       """
@@ -223,13 +223,13 @@ Feature: Restore configuration, users and resources from a backup archive
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE RELAY zip_codes_seen SCHEMA zip_code_entry UNBRANCHED;
@@ -245,7 +245,7 @@ Feature: Restore configuration, users and resources from a backup archive
     Given backup archive "domain.nvxb" is copied to "unparsed.nvxb" with "CREATE RELAY" replaced by "CREATE RELAYS" in the models of domain "{{domain}}"
     When the CLI restores "domain {{domain}} --as {{domain}}_copy" from "unparsed.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_REFUSED" and a message containing "the models of domain '{{domain}}' do not parse at line"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -268,13 +268,13 @@ Feature: Restore configuration, users and resources from a backup archive
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
@@ -290,7 +290,7 @@ Feature: Restore configuration, users and resources from a backup archive
     And the CLI restore report shows step "create domain '{{domain}}_copy'" as "applied"
     And the CLI restore report shows step "import resource versions of domain '{{domain}}_copy'" as "applied"
     And the CLI restore report shows step "apply models of domain '{{domain}}_copy'" as "failed"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -299,7 +299,7 @@ Feature: Restore configuration, users and resources from a backup archive
       {{domain}}_copy pace=UNPACED status=STOPPED
       """
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE zip_codes;
       """
@@ -308,7 +308,7 @@ Feature: Restore configuration, users and resources from a backup archive
       latest: 1
       versions: 1
       """
-    When these NSPL commands fail with "does not exist"
+    When these Plexus commands fail with "does not exist"
       """
       SHOW CREATE SCHEMA zip_code_entry;
       """
@@ -322,7 +322,7 @@ Feature: Restore configuration, users and resources from a backup archive
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And node "node-1" has resource directory "bulk_dir" holding a 2 MiB file
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE bulk;
@@ -333,7 +333,7 @@ Feature: Restore configuration, users and resources from a backup archive
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "bulk.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference" and abandoned after 2 chunks
     Then the restore stream was abandoned
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -344,7 +344,7 @@ Feature: Restore configuration, users and resources from a backup archive
     When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "bulk.nvxb" is streamed to node "{{leader}}" under execution reference "restore_reference"
     Then the restore stream's outcome is "completed" as "executed"
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE bulk;
       """
@@ -367,7 +367,7 @@ Feature: Restore configuration, users and resources from a backup archive
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE zip_codes;
@@ -403,13 +403,13 @@ Feature: Restore configuration, users and resources from a backup archive
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
@@ -426,21 +426,21 @@ Feature: Restore configuration, users and resources from a backup archive
     Given the path of backup archive "domain.nvxb" is saved as placeholder "archive"
     And restore step "import resources" of domain "{{domain}}_copy" on node "{{leader}}" pauses before it applies
     And client "operator" is connected to the leader node
-    When client "operator" begins executing these NSPL commands in the background
+    When client "operator" begins executing these Plexus commands in the background
       """
       RESTORE DOMAIN {{domain}} AS {{domain}}_copy FROM '{{archive}}';
       """
     Then the restore pauses at step "import resources" of domain "{{domain}}_copy" on node "{{leader}}"
     When leadership is transferred to node "{{follower}}"
     And the restore step pause on node "{{leader}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And the last command output contains
       """
       restored domain '{{domain}}' as '{{domain}}_copy'
       """
     And the SHOW CREATE output of every model saved as "original" is the same in domain "{{domain}}_copy" on node "{{follower}}"
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on node "{{follower}}"
+    When these Plexus commands are executed on node "{{follower}}"
       """
       DESCRIBE RESOURCE zip_codes;
       LOOKUP zip_codes_by_zip KEY '60601';

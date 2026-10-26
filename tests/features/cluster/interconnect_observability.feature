@@ -45,7 +45,7 @@ Feature: Interconnection observability
       """
       class="management"
       """
-    And within "10s" these NSPL commands complete on node "node-2"
+    And within "10s" these Plexus commands complete on node "node-2"
       """
       CREATE DOMAIN interconnect_observability;
       """
@@ -56,14 +56,14 @@ Feature: Interconnection observability
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       CREATE UNPACED DOMAIN {{domain}};
       """
     Given the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -86,7 +86,7 @@ Feature: Interconnection observability
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -114,7 +114,7 @@ Feature: Interconnection observability
     And node "node-1" has resource directory "large_resource" with file "model.bin" of 48 MiB
     And node "node-1" eventually reports leader "node-1"
     And node "node-3" is stopped
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE large_model;

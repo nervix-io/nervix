@@ -341,6 +341,24 @@ impl Runtime {
             .take_handoff_engagement_transport_failure(domain)
     }
 
+    pub(crate) fn take_wasm_reset_publication_authority_loss(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_wasm_reset_publication_authority_loss(domain)
+    }
+
+    pub(crate) fn wasm_reset_publication_failure_is_enabled(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .wasm_reset_publication_failure_is_enabled(domain)
+    }
+
+    pub(crate) fn deliver_wasm_reset_publication_failure(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .deliver_wasm_reset_publication_failure(domain);
+    }
+
     #[cfg(feature = "testing")]
     pub(crate) fn loses_handoff_gate_engagement(
         &self,

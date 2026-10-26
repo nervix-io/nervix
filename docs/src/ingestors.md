@@ -1,10 +1,12 @@
 # Ingestors
 
+*Plexus, the Nervix graph definition language.*
+
 Ingestors are the entry points into the runtime graph.
 
 A typical ingestor:
 
-```nspl
+```plexus
 CREATE BRANCH by_user
   SCHEMA user_branch TTL 5m;
 
@@ -35,7 +37,7 @@ alteration never changes what an ingestor reads; to read another connector or en
 ingestor and create it again. `DROP INGESTOR`, `DESCRIBE INGESTOR`, `SHOW CREATE INGESTOR`,
 `SHOW INGESTORS`, and relocation address an ingestor by its name alone.
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] <CONNECTOR> <ENTITY> INGESTOR <name>
   FROM <body>
   [DECODE USING <codec>]
@@ -70,7 +72,7 @@ Every ingestor defines:
 - optional node-level `FILTER WHERE` and route-local `INHERIT` / `SET` / `WHERE`
 
 `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` or `FLUSH IMMEDIATE` is required after every `TO
-<relay>`. The [NSPL Overview](nspl-overview.md) defines the system-owned 100 µs minimum batching
+<relay>`. The [Plexus Overview](plexus-overview.md) defines the system-owned 100 µs minimum batching
 window for `FLUSH IMMEDIATE`. It has no size boundary. Every route also requires its own
 `ON MESSAGE ERROR <policy>`. Each route buffers and handles message-specific construction failures
 independently. `ON MESSAGE ERROR SEND TO` uses that same route's interval and maximum batch-size
@@ -95,7 +97,7 @@ At runtime, the ingestor:
 - resolves the concrete branch group from the referenced `CREATE BRANCH`
 - accumulates decoded rows independently for every matching destination and branch group
 - writes each route's buffered rows when its configured interval or size boundary fires, when the
-  documented [`FLUSH IMMEDIATE` system timeout](nspl-overview.md) expires, or when the domain is
+  documented [`FLUSH IMMEDIATE` system timeout](plexus-overview.md) expires, or when the domain is
   force-flushed by a model alteration, a domain pause, or a planned ownership handoff
 
 Branch execution receives these completed Arrow batches and does not buffer them behind another
@@ -163,7 +165,7 @@ closes them; see [Shutdown And Recovery](shutdown.md#connector-contracts).
 `ALTER` names the connector and entity of the stored ingestor in its head and applies one or more
 comma-separated operations in written order:
 
-```nspl,ignore
+```plexus,ignore
 ALTER <CONNECTOR> <ENTITY> INGESTOR <ingestor>
     SET FROM <complete body of the head's connector and entity>
   | SET QUIESCE <quiesce body>
@@ -425,7 +427,7 @@ Client-backed ingestors can use resource-mounted client config values for TLS ma
 
 Ingestors may declare an optional arrival filter and per-route construction clauses:
 
-```nspl
+```plexus
 CREATE BRANCH by_tenant
   SCHEMA tenant_branch TTL 5m;
 
@@ -467,7 +469,7 @@ General notes:
 - all node expressions use explicit typing; there is no implicit cast insertion
 - nested predicates and nested/chained builtin calls are supported
 - leader-side validation requires every required output and branch field to be initialized
-- public Models store structured expressions; the runtime never reparses NSPL
+- public Models store structured expressions; the runtime never reparses Plexus
 - source-specific transport metadata may be exposed through `metadata.<field>` when the ingestor
   supports it; `KAFKA TOPIC` provides `metadata.topic`, `metadata.partition`, and
   `metadata.offset`, while `SYSLOG LISTENER` provides `metadata.peer_addr`
@@ -549,7 +551,7 @@ The same captured source envelope remains available while a supported ingestor c
 Header values are non-sensitive strings and do not propagate through relays unless explicitly
 assigned to schema-backed fields:
 
-```nspl,ignore
+```plexus,ignore
 SET route = read_header(lower(input.route_header))
 WHERE read_header("tenant") = output.tenant
 ```
@@ -564,7 +566,7 @@ For outbound ingestor clients, TLS is configured on the `CLIENT`, not on the `IN
 
 General pattern:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] <kind> CLIENT <name>
   MOUNT <tls_resource> VERSION <n>|LATEST
   CONFIG {
@@ -601,7 +603,7 @@ an `mqtts` broker certificate against that host; see [MQTT](#mqtt).
 
 Example Kafka TLS client:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS KAFKA CLIENT kafka_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
@@ -613,7 +615,7 @@ CREATE IF NOT EXISTS KAFKA CLIENT kafka_tls
 
 Example HTTP TLS client:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS HTTP CLIENT http_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
@@ -675,7 +677,7 @@ submit through a Nervix session instead of reading an external system. There is 
 external connector client, codec, `DECODE USING`, transport header, or `NO ACK` mode: a submitted batch
 already carries the ingestor's input schema, and every batch is acknowledged.
 
-```nspl
+```plexus
 CREATE SCHEMA order_in (
   region STRING, order_id STRING, amount I64, card STRING SENSITIVE
 );
@@ -1007,7 +1009,8 @@ Offset modes:
 
 Kafka client configuration is passed through to librdkafka. Nervix does not override
 `auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
-read records that may already exist.
+read records that may already exist. Under `OFFSET BY DOMAIN` in an unpaced domain the same
+setting places a partition that has no domain offset yet.
 
 A Kafka ingestor never creates the topic it reads. Every consumer Nervix runs for it sets
 `allow.auto.create.topics` to `false`, whatever the broker allows, and `CREATE KAFKA CLIENT` refuses a
@@ -1016,14 +1019,20 @@ exists, `DESCRIBE INGESTOR` reports `transient error: Kafka topic '<topic>' does
 ingestor starts reading once the topic is created.
 
 In an ACK mode, Nervix commits a Kafka position only after its downstream acknowledgement
-completes. If downstream work rejects a record, the ingestor seeks back to it. A consumer-group
-rebalance can move the record's partition to another group member while its batch is in flight.
-The ingestor then does not seek: whichever member is assigned the partition next, this ingestor
-included, resumes it from the committed offset, which never passes a rejected record. If Kafka
-cannot seek back on a partition the ingestor still holds, the ingestor stops polling, refreshes
-its assignment, and retries that seek. It cannot commit a later offset while the rejected
-position remains unresolved. Replays after a crash or assignment change may repeat records whose
-output was already written.
+completes. If downstream work rejects a record, the ingestor seeks back to it. If Kafka cannot
+seek back on a partition the ingestor still holds, the ingestor stops polling, refreshes its
+assignment, and retries that seek. It cannot commit a later offset while the rejected position
+remains unresolved. Under `OFFSET BY CONSUMER GROUP` the group can take the partition away before
+the rejected record is read again: a rebalance can move it to another member while its batch is
+in flight, refreshing the assignment leaves and rejoins the group, and a broker outage that
+outlasts the group session revokes it. Whenever the group assigns the partition to the ingestor
+again, the ingestor starts it at its earliest rejected record, until a commit passes that record,
+rather than at the group's committed offset or, for a group that committed nothing, where
+`auto.offset.reset` would start it. Another member that takes the partition resumes it from the
+committed offset, which never passes a rejected record; where the group has committed nothing for
+the partition, that member's `auto.offset.reset` decides, and `latest` skips the rejected
+records. Replays after a crash or assignment change may repeat records whose output was already
+written.
 
 Under `OFFSET BY CONSUMER GROUP` in an ACK mode, the ingestor commits each acknowledged batch's
 positions and reports progress for the batch only once the group's coordinator answered the commit.
@@ -1054,6 +1063,11 @@ their downstream work completed. Suspending or stopping the ingestor commits the
 read since the last of those commits, and waits for the broker's answer before the consumer leaves
 its group.
 
+`MODE NO ACK` declares no retry policy, so a Kafka ingestor in that mode that fails to resume or to
+read reconnects on the host's reconnect cadence: it waits 250 ms after its first failure and
+doubles the wait after each further one, up to 30 seconds, until a batch is read again.
+`DESCRIBE INGESTOR` shows the current wait as its reconnect backoff.
+
 `OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
 
 A commit or start-point reset waits for its replica acknowledgements within the native checkpoint
@@ -1064,7 +1078,8 @@ disk staging and transfer chunks, so checkpoint length is independent of the Bul
 Offset recovery details:
 
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
-- if a partition appears later and has no stored domain offset yet, unpaced domains start from the normal default behavior, while paced domains seek from the domain's current logical time
+- a partition without a stored domain offset, such as one added to the topic or any partition on a domain's first `START`, starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
+- the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
 
 Quiescing leaves a consumer group, or unassigns domain-owned partitions, and resume continues from
 committed offsets. Topic time and size retention continue during the pause. For consumer-group
@@ -1804,7 +1819,7 @@ The ingestor reads through a `PROMETHEUS CLIENT`. Every key of its `CONFIG` is N
 | `tls_ca_file` | No | A PEM certificate authority that HTTPS trusts in addition to the roots the client already trusts. |
 | `tls_cert_file`, `tls_key_file` | Together | The PEM certificate chain and private key the client presents to authenticate over HTTPS. |
 
-```nspl
+```plexus
 CREATE PROMETHEUS CLIENT prom_main
   CONFIG {
     'addr' = 'https://prometheus.example.com/monitoring',
@@ -1974,7 +1989,7 @@ Server-side endpoints are hosted under a `VHOST`. A plain VHOST serves HTTP and 
 
 TLS is configured on the VHOST itself:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
   WITH TLS tls_bundle VERSION 3;
 ```
@@ -1982,7 +1997,7 @@ CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
 `WITH TLS` requires a version. `VERSION LATEST` binds the highest completed version of the bundle
 when the statement is applied:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS VHOST edge api.example.com, ws.example.com
   WITH TLS tls_bundle VERSION LATEST;
 ```
@@ -2115,7 +2130,7 @@ after `TYPE WEBSOCKETS`.
 A signaling protocol declares a wire format and expresses the whole handshake as
 [JAQ](./schemas-and-codecs.md#jaq-transformations) programs:
 
-```nspl
+```plexus
 CREATE SIGNALING PROTOCOL bybit_subscribe
   FORMAT JSON
   ON CONNECT
@@ -2161,7 +2176,7 @@ diagnostic. A failed handshake delivers no frame to the relay.
 Peers commonly start streaming before they finish acknowledging. `ACCEPT DATA`
 says where payload starts flowing to the relay:
 
-```nspl,ignore
+```plexus,ignore
 ON CONNECT ACCEPT DATA                                  -- from the first frame
 WAIT JAQ '<matcher>' [FAIL JAQ '<matcher>'] [CAPTURE '<program>'] ACCEPT DATA
 ```
@@ -2182,7 +2197,7 @@ reaches a relay from a connection that was never established. Without
 `CAPTURE` records values from the frame that satisfied its matcher, and every
 program can read what has been captured so far through the `$state` variable:
 
-```nspl
+```plexus
 CREATE SIGNALING PROTOCOL exchange_login
   FORMAT JSON
   ON CONNECT
@@ -2204,7 +2219,7 @@ frame that matched.
 A handshake may wait before it sends anything, which is how a server-initiated
 challenge is answered — wait for the challenge, capture it, then reply:
 
-```nspl
+```plexus
 CREATE SIGNALING PROTOCOL challenge_response
   FORMAT JSON
   ON CONNECT
@@ -2220,7 +2235,7 @@ only for its duration — it is never logged, and does not reach ingestion.
 `PROTOBUF` signaling declares its resource, the version it compiles, and one message type per
 direction:
 
-```nspl,ignore
+```plexus,ignore
 CREATE SIGNALING PROTOCOL protobuf_subscribe
   FORMAT PROTOBUF USING RESOURCE proto_bundle VERSION 1
     CONFIG {'file' = 'signaling.proto', 'include' = '.'}

@@ -163,6 +163,19 @@ impl PeerFixture {
             ),
             "channel {channel} is admitted at {sequence}"
         );
+        let delivering = self.admit_with_outcome_in_flight(&record, grant_id);
+        self.owner
+            .retire(&delivering, RelayAdmissionStatus::Admitted);
+    }
+
+    /// Claim `record`'s grant, admit its batch and start delivering its terminal outcome, as a
+    /// receiver does before that delivery returns. Returns the record the returned delivery
+    /// retires.
+    fn admit_with_outcome_in_flight(
+        &self,
+        record: &StdArc<RelayAdmissionRecord>,
+        grant_id: u64,
+    ) -> StdArc<RelayAdmissionRecord> {
         let claimed = self
             .owner
             .claim_grant(grant_id, 101, 201, Instant::now())
@@ -175,8 +188,10 @@ impl PeerFixture {
             .admit(),
             RelayAdmissionDecision::Admitted
         );
-        self.owner.retire(&record, RelayAdmissionStatus::Admitted);
         drop(claimed);
+        self.owner
+            .completed_admission(&record.admission_key, &RemoteAckOutcome::Ack)
+            .assured("the terminal outcome names the delivery's exact admission")
     }
 
     /// How the owner answers a grant request repeated for `channel` at `sequence`.
@@ -370,6 +385,155 @@ fn cancellation_before_a_grant_and_lost_terminal_replies_retain_channel_order() 
     assert_eq!(
         fixture.owner.control(&superseded, false).0,
         RelayAdmissionStatus::Retired
+    );
+}
+
+/// A receiver retires an attempt once the delivery of its terminal outcome returns, but its sender
+/// continues the channel as soon as that outcome reaches it, so the grant for the channel's next
+/// position can arrive first. That grant takes the position and retires the resolved attempt,
+/// whose outcome the channel's watermark keeps, and the late return of the outcome's delivery
+/// retires nothing more.
+#[test]
+fn the_next_grant_takes_its_position_before_the_outcome_of_the_one_before_returns() {
+    let fixture = PeerFixture::new(2);
+    let first = fixture.register(1, 1);
+    let delivering = fixture.admit_with_outcome_in_flight(&first, 1);
+    let ReservedAttempt {
+        record: second,
+        grant,
+    } = fixture.reserve(1, 1, 2, 101);
+    assert!(
+        matches!(
+            fixture.owner.register(2, grant),
+            RelayGrantRegistration::Registered
+        ),
+        "the next grant takes its position while the outcome before it is in flight"
+    );
+    assert_eq!(fixture.owner.snapshot().attempts, 1);
+    assert_eq!(fixture.items.available_permits(), 1);
+    assert_eq!(fixture.terminals.available_permits(), 1);
+    assert_eq!(
+        fixture.owner.control(&first.attempt, false).0,
+        RelayAdmissionStatus::Admitted
+    );
+
+    fixture.owner.retire(&delivering, delivering.status());
+    assert_eq!(fixture.owner.snapshot().attempts, 1);
+    assert_eq!(fixture.items.available_permits(), 1);
+    assert_eq!(
+        fixture.owner.control(&first.attempt, false).0,
+        RelayAdmissionStatus::Admitted
+    );
+
+    second.mark_admitted();
+    fixture
+        .owner
+        .retire(&second, RelayAdmissionStatus::Admitted);
+    assert_eq!(
+        fixture.owner.control(&first.attempt, false).0,
+        RelayAdmissionStatus::Retired
+    );
+    fixture.deliver(1, 2, 3);
+    assert_eq!(fixture.items.available_permits(), 2);
+    assert_eq!(fixture.terminals.available_permits(), 2);
+}
+
+/// A cancellation of a channel's next position that arrives before its grant fences that position
+/// while the outcome of the attempt before it is still in flight, as it does once that attempt has
+/// retired.
+#[test]
+fn a_cancellation_fences_the_next_position_before_the_outcome_of_the_one_before_returns() {
+    let fixture = PeerFixture::new(2);
+    let first = fixture.register(1, 1);
+    let delivering = fixture.admit_with_outcome_in_flight(&first, 1);
+    assert_eq!(
+        fixture.owner.control(&PeerFixture::attempt(1, 1), true).0,
+        RelayAdmissionStatus::Cancelled
+    );
+    assert_eq!(fixture.owner.snapshot().attempts, 0);
+    assert_eq!(fixture.items.available_permits(), 2);
+
+    fixture.owner.retire(&delivering, delivering.status());
+    assert!(matches!(
+        fixture.regrant(1, 1, 2),
+        RelayGrantRegistration::Retired(RelayGrantDisposition::Cancelled)
+    ));
+    assert_eq!(
+        fixture.owner.control(&first.attempt, false).0,
+        RelayAdmissionStatus::Retired
+    );
+    fixture.deliver(1, 2, 3);
+    assert_eq!(fixture.items.available_permits(), 2);
+}
+
+/// Retiring a resolved attempt for its channel's next grant or cancellation records the attempt's
+/// outcome as any retirement does, so a full watermark budget forgets its least recently used
+/// watermark for it and counts that, on the registration and the cancellation path alike.
+#[test]
+fn retiring_a_resolved_attempt_for_the_next_position_counts_a_forgotten_watermark() {
+    let fixture = PeerFixture::with_capacity(RelayPeerCapacity {
+        attempts: 2,
+        watermarks: 3,
+    });
+    fixture.deliver(1, 0, 1);
+    fixture.deliver(2, 0, 2);
+    fixture.deliver(3, 0, 3);
+    assert_eq!(fixture.evicted(), 0);
+
+    let granted = fixture.register(4, 4);
+    let _granted_delivery = fixture.admit_with_outcome_in_flight(&granted, 4);
+    let ReservedAttempt { record: _, grant } = fixture.reserve(4, 1, 5, 101);
+    assert!(matches!(
+        fixture.owner.register(5, grant),
+        RelayGrantRegistration::Registered
+    ));
+    assert_eq!(fixture.evicted(), 1);
+    assert_eq!(
+        fixture.owner.control(&PeerFixture::attempt(1, 0), false).0,
+        RelayAdmissionStatus::Retired
+    );
+
+    let cancelled = fixture.register(5, 6);
+    let _cancelled_delivery = fixture.admit_with_outcome_in_flight(&cancelled, 6);
+    assert_eq!(
+        fixture.owner.control(&PeerFixture::attempt(5, 1), true).0,
+        RelayAdmissionStatus::Cancelled
+    );
+    assert_eq!(fixture.evicted(), 2);
+    assert_eq!(
+        fixture.owner.control(&PeerFixture::attempt(5, 2), false).0,
+        RelayAdmissionStatus::Unknown
+    );
+    assert_eq!(fixture.owner.snapshot().watermarks, 3);
+}
+
+/// Only the next position retires a resolved attempt. A grant for it while the attempt before is
+/// still unadmitted, and a grant that skips a position after a resolved one, are refused and leave
+/// the attempt as it was.
+#[test]
+fn an_unresolved_or_skipped_predecessor_keeps_its_attempt() {
+    let fixture = PeerFixture::new(3);
+    let first = fixture.register(1, 1);
+    assert!(matches!(
+        fixture.regrant(1, 1, 2),
+        RelayGrantRegistration::InvalidSequence
+    ));
+    assert_eq!(first.status(), RelayAdmissionStatus::Reserved);
+    assert_eq!(fixture.owner.snapshot().attempts, 1);
+
+    let _delivering = fixture.admit_with_outcome_in_flight(&first, 1);
+    assert!(matches!(
+        fixture.regrant(1, 2, 3),
+        RelayGrantRegistration::InvalidSequence
+    ));
+    assert_eq!(
+        fixture.owner.control(&PeerFixture::attempt(1, 2), true).0,
+        RelayAdmissionStatus::Unknown
+    );
+    assert_eq!(fixture.owner.snapshot().attempts, 1);
+    assert_eq!(
+        fixture.owner.control(&first.attempt, false).0,
+        RelayAdmissionStatus::Admitted
     );
 }
 
@@ -763,6 +927,72 @@ fn shuttle_peer_retirement_racing_runtime_admission_releases_the_exact_intake() 
     });
 }
 
+/// The return of an admitted attempt's terminal outcome delivery races the grant for its channel's
+/// next position, which asks for its place, reserves the peer's only capacity and registers as the
+/// receiver's grant path does. In every order the grant takes the next position with the capacity
+/// the resolved attempt held, the resolved attempt's outcome stays reconcilable until the next one
+/// retires, and every permit returns.
+#[cfg(feature = "shuttle")]
+#[test]
+fn shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_position() {
+    use nervix_model_harness::shuttle::check_interleavings;
+    use nervix_primitives::thread;
+
+    /// How the grant for the channel's next position was registered.
+    struct NextGrant {
+        registration: RelayGrantRegistration,
+        record: StdArc<RelayAdmissionRecord>,
+    }
+
+    check_interleavings(|| {
+        let fixture = StdArc::new(PeerFixture::new(1));
+        let first = fixture.register(1, 1);
+        let delivering = fixture.admit_with_outcome_in_flight(&first, 1);
+        let returning = fixture.owner.clone();
+        let returned = thread::spawn(move || {
+            returning.retire(&delivering, delivering.status());
+        });
+        let granting = StdArc::clone(&fixture);
+        let granted = thread::spawn(move || {
+            assert_eq!(
+                granting.owner.grant_position(&PeerFixture::attempt(1, 1)),
+                RelayGrantPosition::Next,
+                "the next grant takes its position whether or not the outcome before it returned"
+            );
+            let ReservedAttempt { record, grant } = granting.reserve(1, 1, 2, 101);
+            let registration = granting.owner.register(2, grant);
+            NextGrant {
+                registration,
+                record,
+            }
+        });
+        returned
+            .join()
+            .assured("the outcome delivery's return joined");
+        let next = granted.join().assured("the next grant joined");
+        assert!(matches!(
+            next.registration,
+            RelayGrantRegistration::Registered
+        ));
+        assert_eq!(fixture.owner.snapshot().attempts, 1);
+        assert_eq!(
+            fixture.owner.control(&first.attempt, false).0,
+            RelayAdmissionStatus::Admitted
+        );
+        next.record.mark_admitted();
+        fixture
+            .owner
+            .retire(&next.record, RelayAdmissionStatus::Admitted);
+        assert_eq!(
+            fixture.owner.control(&first.attempt, false).0,
+            RelayAdmissionStatus::Retired
+        );
+        assert_eq!(fixture.items.available_permits(), 1);
+        assert_eq!(fixture.terminals.available_permits(), 1);
+        assert_eq!(fixture.owner.snapshot().attempts, 0);
+    });
+}
+
 /// A full watermark budget forgets the least recently used watermark, so the peer's next channel is
 /// admitted however many of its channels have turned over.
 #[test]
@@ -973,150 +1203,264 @@ struct TurnoverIdentity {
 /// What the turnover model knows of one channel.
 struct TurnoverChannel {
     next_sequence: u64,
-    outstanding: bool,
+    /// The channel's latest attempt has no decided outcome yet.
+    undecided: bool,
     /// The owner answered the channel as forgotten, so its sender opens a new one instead.
     abandoned: bool,
 }
 
-struct OutstandingTurnoverAttempt {
+/// An attempt the turnover model's peer owner retains.
+struct RetainedTurnoverAttempt {
     channel: u8,
     record: StdArc<RelayAdmissionRecord>,
 }
 
-#[test]
-fn bolero_relay_channel_turnover_never_admits_an_identity_twice() {
+/// The turnover model: a peer owner whose three watermarks are fewer than its turnover, and what
+/// its sender knows of every channel it opened.
+struct TurnoverModel {
+    fixture: PeerFixture,
+    registered: BTreeSet<TurnoverIdentity>,
+    channels: Vec<TurnoverChannel>,
+    /// Attempts whose outcome is not decided yet.
+    undecided: Vec<RetainedTurnoverAttempt>,
+    /// Attempts whose outcome is decided while the delivery of that outcome has not returned.
+    delivering: Vec<RetainedTurnoverAttempt>,
+    grant_id: u64,
+}
+
+impl TurnoverModel {
     const CAPACITY: RelayPeerCapacity = RelayPeerCapacity {
         attempts: 2,
         watermarks: 3,
     };
+
+    fn new() -> Self {
+        Self {
+            fixture: PeerFixture::with_capacity(Self::CAPACITY),
+            registered: BTreeSet::new(),
+            channels: Vec::new(),
+            undecided: Vec::new(),
+            delivering: Vec::new(),
+            grant_id: 0,
+        }
+    }
+
+    fn apply(&mut self, byte: u8) {
+        self.grant_id = self
+            .grant_id
+            .checked_add(1)
+            .assured("the operation sequence has at most 96 positions");
+        let choice = usize::from(byte / 6);
+        match byte % 6 {
+            0 => self.open(),
+            1 => self.decide(choice),
+            2 => self.continue_channel(choice),
+            3 => self.repeat(choice),
+            4 => self.sweep(),
+            _ => self.return_outcome(choice),
+        }
+        assert!(self.fixture.owner.snapshot().watermarks <= Self::CAPACITY.watermarks);
+    }
+
+    fn room(&self) -> bool {
+        self.fixture.items.available_permits() > 0
+    }
+
+    /// The sender opens a channel after every channel it opened before.
+    fn open(&mut self) {
+        if !self.room() {
+            return;
+        }
+        let channel = u8::try_from(self.channels.len() + 1)
+            .assured("the operation sequence opens at most 96 channels");
+        let ReservedAttempt { record, grant } =
+            self.fixture.reserve(channel, 0, self.grant_id, 101);
+        assert!(
+            matches!(
+                self.fixture.owner.register(self.grant_id, grant),
+                RelayGrantRegistration::Registered
+            ),
+            "channel {channel} opened after every forgotten one is admitted"
+        );
+        assert!(self.registered.insert(TurnoverIdentity {
+            channel,
+            sequence: 0
+        }));
+        self.channels.push(TurnoverChannel {
+            next_sequence: 1,
+            undecided: true,
+            abandoned: false,
+        });
+        self.undecided
+            .push(RetainedTurnoverAttempt { channel, record });
+    }
+
+    /// An undecided attempt's outcome is decided, and the delivery of that outcome returns at once
+    /// or stays in flight.
+    fn decide(&mut self, choice: usize) {
+        if self.undecided.is_empty() {
+            return;
+        }
+        let attempt = self.undecided.swap_remove(choice % self.undecided.len());
+        let status = match choice % 3 {
+            0 => {
+                attempt.record.mark_admitted();
+                RelayAdmissionStatus::Admitted
+            }
+            1 => {
+                attempt.record.reject("refused".to_string());
+                RelayAdmissionStatus::Rejected("refused".to_string())
+            }
+            _ => attempt.record.cancel(),
+        };
+        let index = usize::from(attempt.channel)
+            .checked_sub(1)
+            .assured("the model numbers channels from one");
+        self.channels[index].undecided = false;
+        if (choice / 3).is_multiple_of(2) {
+            self.fixture.owner.retire(&attempt.record, status);
+        } else {
+            self.delivering.push(attempt);
+        }
+    }
+
+    /// The sender continues a channel whose latest outcome is decided, in the receiver's grant
+    /// order: a forgotten channel is answered first, then the position, the reservation and the
+    /// registration.
+    fn continue_channel(&mut self, choice: usize) {
+        if self.channels.is_empty() {
+            return;
+        }
+        let index = choice % self.channels.len();
+        if self.channels[index].undecided || self.channels[index].abandoned {
+            return;
+        }
+        let channel =
+            u8::try_from(index + 1).assured("the operation sequence opens at most 96 channels");
+        let identity = TurnoverIdentity {
+            channel,
+            sequence: self.channels[index].next_sequence,
+        };
+        let attempt = PeerFixture::attempt(channel, identity.sequence);
+        if let Some(status) = self.fixture.owner.retired_status(&attempt) {
+            assert_eq!(
+                status,
+                RelayAdmissionStatus::Retired,
+                "a continued channel is answered only as forgotten, at {identity:?}"
+            );
+            self.channels[index].abandoned = true;
+            return;
+        }
+        assert_eq!(
+            self.fixture.owner.grant_position(&attempt),
+            RelayGrantPosition::Next,
+            "a channel whose latest outcome is decided takes its next position, at {identity:?}"
+        );
+        if !self.room() {
+            return;
+        }
+        let ReservedAttempt { record, grant } =
+            self.fixture
+                .reserve(channel, identity.sequence, self.grant_id, 101);
+        assert!(
+            matches!(
+                self.fixture.owner.register(self.grant_id, grant),
+                RelayGrantRegistration::Registered
+            ),
+            "{identity:?} is registered at the position it was given"
+        );
+        assert!(
+            self.registered.insert(identity),
+            "{identity:?} admitted twice"
+        );
+        let model = &mut self.channels[index];
+        model.next_sequence = identity
+            .sequence
+            .checked_add(1)
+            .assured("a channel holds at most 96 positions");
+        model.undecided = true;
+        self.undecided
+            .push(RetainedTurnoverAttempt { channel, record });
+    }
+
+    /// A delayed or repeated request for an identity the owner registered. The model holds at most
+    /// 96 identities, which bounds this lookup.
+    fn repeat(&mut self, choice: usize) {
+        if !self.room() || self.registered.is_empty() {
+            return;
+        }
+        let identity = *self
+            .registered
+            .iter()
+            .nth(choice % self.registered.len())
+            .verified("the index is below the set's length");
+        let ReservedAttempt { record: _, grant } =
+            self.fixture
+                .reserve(identity.channel, identity.sequence, self.grant_id, 101);
+        assert!(
+            !matches!(
+                self.fixture.owner.register(self.grant_id, grant),
+                RelayGrantRegistration::Registered
+            ),
+            "{identity:?} is never admitted twice"
+        );
+    }
+
+    /// The idle sweep passes the retention of every watermark and of every retained attempt whose
+    /// outcome is decided.
+    fn sweep(&mut self) {
+        if !self.undecided.is_empty() {
+            return;
+        }
+        let expiry = Instant::now()
+            .checked_add(RELAY_CHANNEL_RETENTION)
+            .assured("the fixture retention fits the monotonic clock");
+        self.fixture.owner.sweep(expiry);
+    }
+
+    /// The delivery of a decided attempt's outcome returns.
+    fn return_outcome(&mut self, choice: usize) {
+        if self.delivering.is_empty() {
+            return;
+        }
+        let attempt = self.delivering.swap_remove(choice % self.delivering.len());
+        let status = attempt.record.status();
+        self.fixture.owner.retire(&attempt.record, status);
+    }
+
+    /// Every undecided attempt is cancelled and every outcome delivery returns, and the ended peer
+    /// gives back every permit.
+    fn finish(self) {
+        for attempt in self.undecided {
+            let status = attempt.record.cancel();
+            self.fixture.owner.retire(&attempt.record, status);
+        }
+        for attempt in self.delivering {
+            let status = attempt.record.status();
+            self.fixture.owner.retire(&attempt.record, status);
+        }
+        self.fixture.owner.end();
+        assert_eq!(
+            self.fixture.items.available_permits(),
+            Self::CAPACITY.attempts
+        );
+        assert_eq!(
+            self.fixture.terminals.available_permits(),
+            Self::CAPACITY.attempts
+        );
+    }
+}
+
+#[test]
+fn bolero_relay_channel_turnover_never_admits_an_identity_twice() {
     bolero::check!()
         .with_iterations(256)
         .with_max_len(96)
         .for_each(|bytes: &[u8]| {
-            let fixture = PeerFixture::with_capacity(CAPACITY);
-            let mut registered = BTreeSet::<TurnoverIdentity>::new();
-            let mut channels = Vec::<TurnoverChannel>::new();
-            let mut outstanding = Vec::<OutstandingTurnoverAttempt>::new();
-            let mut grant_id = 0_u64;
+            let mut model = TurnoverModel::new();
             for byte in bytes {
-                grant_id = grant_id
-                    .checked_add(1)
-                    .assured("the operation sequence has at most 96 positions");
-                let choice = usize::from(byte / 5);
-                let room = fixture.items.available_permits() > 0;
-                match byte % 5 {
-                    // The sender opens a channel after every channel it opened before.
-                    0 if room => {
-                        let channel = u8::try_from(channels.len() + 1)
-                            .assured("the operation sequence opens at most 96 channels");
-                        let ReservedAttempt { record, grant } =
-                            fixture.reserve(channel, 0, grant_id, 101);
-                        assert!(
-                            matches!(
-                                fixture.owner.register(grant_id, grant),
-                                RelayGrantRegistration::Registered
-                            ),
-                            "channel {channel} opened after every forgotten one is admitted"
-                        );
-                        assert!(registered.insert(TurnoverIdentity {
-                            channel,
-                            sequence: 0
-                        }));
-                        channels.push(TurnoverChannel {
-                            next_sequence: 1,
-                            outstanding: true,
-                            abandoned: false,
-                        });
-                        outstanding.push(OutstandingTurnoverAttempt { channel, record });
-                    }
-                    // An outstanding attempt resolves.
-                    1 if !outstanding.is_empty() => {
-                        let attempt = outstanding.swap_remove(choice % outstanding.len());
-                        let status = match choice % 3 {
-                            0 => {
-                                attempt.record.mark_admitted();
-                                RelayAdmissionStatus::Admitted
-                            }
-                            1 => {
-                                attempt.record.reject("refused".to_string());
-                                RelayAdmissionStatus::Rejected("refused".to_string())
-                            }
-                            _ => attempt.record.cancel(),
-                        };
-                        fixture.owner.retire(&attempt.record, status);
-                        let index = usize::from(attempt.channel)
-                            .checked_sub(1)
-                            .assured("the model numbers channels from one");
-                        channels[index].outstanding = false;
-                    }
-                    // The sender continues a channel that has nothing outstanding.
-                    2 if room && !channels.is_empty() => {
-                        let index = choice % channels.len();
-                        let model = &mut channels[index];
-                        if model.outstanding || model.abandoned {
-                            continue;
-                        }
-                        let channel = u8::try_from(index + 1)
-                            .assured("the operation sequence opens at most 96 channels");
-                        let identity = TurnoverIdentity {
-                            channel,
-                            sequence: model.next_sequence,
-                        };
-                        let ReservedAttempt { record, grant } =
-                            fixture.reserve(channel, identity.sequence, grant_id, 101);
-                        match fixture.owner.register(grant_id, grant) {
-                            RelayGrantRegistration::Registered => {
-                                assert!(registered.insert(identity), "{identity:?} admitted twice");
-                                model.next_sequence = identity
-                                    .sequence
-                                    .checked_add(1)
-                                    .assured("a channel holds at most 96 positions");
-                                model.outstanding = true;
-                                outstanding.push(OutstandingTurnoverAttempt { channel, record });
-                            }
-                            RelayGrantRegistration::Retired(RelayGrantDisposition::Retired) => {
-                                model.abandoned = true;
-                            }
-                            _ => panic!(
-                                "a continued channel is admitted or answered as forgotten, at \
-                                 {identity:?}"
-                            ),
-                        }
-                    }
-                    // A delayed or repeated request for an identity the owner registered. The
-                    // model holds at most 96 identities, which bounds this lookup.
-                    3 if room && !registered.is_empty() => {
-                        let identity = *registered
-                            .iter()
-                            .nth(choice % registered.len())
-                            .verified("the index is below the set's length");
-                        let ReservedAttempt { record: _, grant } =
-                            fixture.reserve(identity.channel, identity.sequence, grant_id, 101);
-                        assert!(
-                            !matches!(
-                                fixture.owner.register(grant_id, grant),
-                                RelayGrantRegistration::Registered
-                            ),
-                            "{identity:?} is never admitted twice"
-                        );
-                    }
-                    // The idle sweep passes the retention of every watermark.
-                    4 if outstanding.is_empty() => {
-                        let expiry = Instant::now()
-                            .checked_add(RELAY_CHANNEL_RETENTION)
-                            .assured("the fixture retention fits the monotonic clock");
-                        fixture.owner.sweep(expiry);
-                    }
-                    _ => {}
-                }
-                assert!(fixture.owner.snapshot().watermarks <= CAPACITY.watermarks);
+                model.apply(*byte);
             }
-            for attempt in outstanding {
-                let status = attempt.record.cancel();
-                fixture.owner.retire(&attempt.record, status);
-            }
-            fixture.owner.end();
-            assert_eq!(fixture.items.available_permits(), CAPACITY.attempts);
-            assert_eq!(fixture.terminals.available_permits(), CAPACITY.attempts);
+            model.finish();
         });
 }

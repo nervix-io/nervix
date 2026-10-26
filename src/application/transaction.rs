@@ -35,7 +35,7 @@ use nervix_models::{
     TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
     TransactionResolvedDomainStart, TransactionStatus, UserName,
 };
-use nervix_nspl::client_statement::ClientStatement;
+use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::sync::{
     OwnedMutexGuard, Semaphore, StdArc, blocking::Mutex as ParkingMutex,
 };
@@ -2313,6 +2313,14 @@ impl SessionServiceImpl {
                     .apply_transaction_wasm_state_reset(&advanced, reset, request)
                     .await
             {
+                if matches!(
+                    error.downcast_ref::<ConsensusError>(),
+                    Some(ConsensusError::LeadershipLost { .. })
+                ) {
+                    // The reset step is durable. Its next attempt rechecks leadership and uses
+                    // the same request to resume the committed generation, if any.
+                    return Ok(advanced);
+                }
                 application_failure = Some(format!(
                     "transaction '{}' committed the WASM state reset, but it did not become \
                      usable: {error:#}",
@@ -2453,7 +2461,7 @@ impl SessionServiceImpl {
                     warn!(
                         transaction_id = id,
                         error = %error,
-                        "failed to resume replicated NSPL commit"
+                        "failed to resume replicated Plexus commit"
                     );
                 }
             });
@@ -2497,7 +2505,7 @@ impl SessionServiceImpl {
                             info!(
                                 transaction_id = transaction.id,
                                 owner = transaction.owner.as_str(),
-                                "expired inactive NSPL transaction"
+                                "expired inactive Plexus transaction"
                             );
                         }
                         Ok(_) => {}
@@ -2505,7 +2513,7 @@ impl SessionServiceImpl {
                             warn!(
                                 transaction_id = transaction.id,
                                 error = %error,
-                                "failed to expire inactive NSPL transaction"
+                                "failed to expire inactive Plexus transaction"
                             );
                         }
                     }

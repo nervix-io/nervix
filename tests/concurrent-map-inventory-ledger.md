@@ -362,6 +362,8 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::handoff_engagement_transport_failures` | Armed by a drain scenario; a testing build's coordinator looks its domain up before each remote ownership-handoff gate engagement request and delivers the failure once, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only handoff transport fault control |
 | `FaultInjectionState::lost_handoff_gate_engagements` | Armed by a drain scenario for one coordinator-to-node link; a testing build's coordinator looks that link up before each attempt to send it an ownership-handoff gate engagement request, loses and counts every such request, and the count stays for the scenario's assertion; absent from product builds | test-only handoff link fault control |
 | `FaultInjectionState::owner_relay_fanout_delays` | Armed by the slow busy relay scenario; a testing build's relay owner looks its domain up before every batch it fans out and waits the armed delay; absent from product builds | test-only relay delivery fault control |
+| `FaultInjectionState::wasm_reset_publication_authority_losses` | Armed for one scenario domain; looked up once before a generation publication and by explicit harness observations; its bounded remaining/delivered counts remain until that world's injector is dropped; absent from product builds | test-only WASM publication fault control |
+| `FaultInjectionState::failed_wasm_reset_publications` | Armed before ordinary graph publications; only reset generation publication reads it, and delivery is recorded after unpublished preparation is aborted; it stays enabled through uncertain outcome recording, then is explicitly cleared before exact replay; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped WASM publication failure in `fault_injection/wasm_reset_publication.rs` |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
 
 A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in
@@ -473,7 +475,7 @@ passed its 282 Python checks and documentation build. Fresh server and Python re
 Shuttle evidence above were collected before this integration; unchanged endpoint HTTP edge
 paths are exercised by the full PR scenario gate as well.
 
-The final pre-push integration also preserves the subsequent NSPL repairs and Typed Ratchet 13's
+The final pre-push integration also preserves the subsequent Plexus repairs and Typed Ratchet 13's
 checkpoint-replication publication. Endpoint owner and HTTP edge code are unchanged by that merge;
 server Clippy across all targets with `testing`, formatting, the 30 runner tests and the debt
 ratchet passed. The inventory now has 27 Bolero targets, and the combined recurring-lock count is

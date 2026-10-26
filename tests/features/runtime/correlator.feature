@@ -2,11 +2,11 @@ Feature: Relay correlation
   Scenario Outline: Correlator matches records inside one branch across independent output routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA left_profile (
         tenant STRING,
@@ -138,7 +138,7 @@ Feature: Relay correlation
         CREATE SUBSCRIPTION correlation_audits_subscription TO correlation_audits WHERE tenant = 'acme';
         START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE CORRELATOR correlate_profiles;
       """

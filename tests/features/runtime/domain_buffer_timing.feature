@@ -3,11 +3,11 @@ Feature: Domain-paced branch buffering
   Scenario Outline: Paced branch collection and flush follow logical time while Immediate and source idle remain physical
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA timed_event (
         tenant STRING,
@@ -86,11 +86,11 @@ Feature: Domain-paced branch buffering
   Scenario Outline: Immediate flush keeps its physical minimum in a slow historical domain
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA timed_event (
         tenant STRING,
@@ -158,11 +158,11 @@ Feature: Domain-paced branch buffering
   Scenario Outline: Reingestor collection keeps separate logical deadlines for slow branches
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA timed_event (
         tenant STRING,
@@ -228,11 +228,11 @@ Feature: Domain-paced branch buffering
   Scenario Outline: Retained task handles force-flush interleaved branches under slow domain time
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA timed_event (
         tenant STRING,
@@ -301,7 +301,7 @@ Feature: Domain-paced branch buffering
       """
       {"tenant":"beta","sequence":2,"path":"held"}
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE INGESTOR held_buffering_source;
       """
@@ -313,7 +313,7 @@ Feature: Domain-paced branch buffering
       """
       transient error: -
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       ALTER HTTP ENDPOINT INGESTOR gate_buffering_source SET QUIESCE BUFFER MAX SIZE 2MiB;
       """

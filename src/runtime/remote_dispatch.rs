@@ -6,7 +6,7 @@
 //!   cancellation, progress handling, and remote acknowledgement correlation.
 //! - **Depends on.** Branch-local relay boundaries, execution admission, cluster membership, and
 //!   the authenticated interconnect.
-//! - **Must not know.** NSPL text, transactions, scheduling policy, or connector internals.
+//! - **Must not know.** Plexus text, transactions, scheduling policy, or connector internals.
 
 #![cfg_attr(
     nervix_lint,

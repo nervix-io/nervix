@@ -5,7 +5,7 @@ Feature: Domain clock contract regressions
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD <period> SKEW 100ms;
       CREATE SCHEMA http2_clock_request (
@@ -42,7 +42,7 @@ Feature: Domain clock contract regressions
       CREATE SUBSCRIPTION http2_clock_subscription TO http2_clock_observations;
       """
     When bulk execution on node "node-2" is occupied
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE <time_rate>;
       """
@@ -100,7 +100,7 @@ Feature: Domain clock contract regressions
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 2 node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       CREATE SCHEMA authority_clock_request (
@@ -137,14 +137,14 @@ Feature: Domain clock contract regressions
       CREATE SUBSCRIPTION authority_clock_subscription TO authority_clock_observations;
       """
     And domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     And node "node-3" is added to the cluster
     Then node "node-1" eventually reports raft voters "node-1,node-2,node-3"
     Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       STOP;
       START AT '2010-01-01T00:00:00Z' TIME RATE 1.0;
@@ -171,7 +171,7 @@ Feature: Domain clock contract regressions
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
@@ -203,7 +203,7 @@ Feature: Domain clock contract regressions
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
@@ -231,7 +231,7 @@ Feature: Domain clock contract regressions
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
@@ -268,7 +268,7 @@ Feature: Domain clock contract regressions
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
@@ -301,12 +301,12 @@ Feature: Domain clock contract regressions
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       """
     And domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
@@ -341,17 +341,17 @@ Feature: Domain clock contract regressions
     Given the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 1m;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     And node "node-2" is added to the cluster
     And the cluster is restarted
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA joined_clock_request (
         sequence I64
@@ -402,11 +402,11 @@ Feature: Domain clock contract regressions
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA clock_source_record (
         user_id I64
@@ -454,11 +454,11 @@ Feature: Domain clock contract regressions
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA cadence_source_record (
         user_id I64
@@ -503,11 +503,11 @@ Feature: Domain clock contract regressions
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA cadence_sample (
         source STRING,
@@ -561,11 +561,11 @@ Feature: Domain clock contract regressions
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA rebound_sample (
         source STRING,
@@ -608,7 +608,7 @@ Feature: Domain clock contract regressions
       """
     And physical time passes for "300ms"
     Then within "50ms" clock source recorder "{{test_id}}" records 0 requests
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       STOP;
       START AT '2010-01-01T00:00:00Z' TIME RATE 20.0;
@@ -624,12 +624,12 @@ Feature: Domain clock contract regressions
   Scenario Outline: Delayed clock progress cannot move observed logical time backwards
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD <clock_interval> SKEW <clock_interval>;
       """
     And domain clock progress for domain "{{domain}}" is paused before delivery
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA clock_request (
         sequence I64
@@ -663,7 +663,7 @@ Feature: Domain clock contract regressions
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION clock_observations_subscription TO clock_observations;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -698,15 +698,15 @@ Feature: Domain clock contract regressions
   Scenario Outline: Out-of-range paced starts and projections return typed timestamp diagnostics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       """
-    When these NSPL commands fail with "outside the signed Unix-nanosecond range"
+    When these Plexus commands fail with "outside the signed Unix-nanosecond range"
       """
       START AT '<outside_timestamp>' TIME RATE 1.0;
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA clock_diagnostic (
         sequence I64
@@ -714,7 +714,7 @@ Feature: Domain clock contract regressions
       CREATE RELAY clock_diagnostics SCHEMA clock_diagnostic UNBRANCHED;
       CREATE SUBSCRIPTION clock_diagnostics_subscription TO clock_diagnostics;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START AT '2262-04-11T23:47:16.854775807Z' TIME RATE 1.0;
       """
@@ -743,11 +743,11 @@ Feature: Domain clock contract regressions
   Scenario Outline: A paced domain admits an event at its historical logical origin
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA historical_event (
         sequence I64,
@@ -779,7 +779,7 @@ Feature: Domain clock contract regressions
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION historical_events_subscription TO historical_events;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
@@ -801,11 +801,11 @@ Feature: Domain clock contract regressions
   Scenario Outline: uuid_v7 encodes paced logical time from the Unix epoch and fails before it
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA stamp_request (
         sequence I64
@@ -855,7 +855,7 @@ Feature: Domain clock contract regressions
       CREATE SUBSCRIPTION stamped_requests_subscription TO stamped_requests;
       CREATE SUBSCRIPTION stamp_errors_subscription TO stamp_errors;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '<logical_start>' TIME RATE 0.001;
       """

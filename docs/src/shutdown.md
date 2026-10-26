@@ -1,5 +1,7 @@
 # Shutdown And Recovery
 
+*Plexus, the Nervix graph definition language.*
+
 Shutdown is the ordered transition from a running node to a stopped process. It has one owner, three
 phases, and one deadline. The owner establishes that the node is terminating, stops new intake,
 keeps the services that admitted work depends on alive until that work finishes, and only then tears
@@ -29,7 +31,7 @@ A node begins shutting down for exactly three reasons:
   [Prerequisites At Join](./node-settings.md#prerequisites-at-join) describes each. The refused
   node requests its own stop; a node that has joined never stops because of a newcomer.
 
-There is no NSPL statement, API call, or cluster command that stops a node. `CORDON NODE`,
+There is no Plexus statement, API call, or cluster command that stops a node. `CORDON NODE`,
 `DRAIN NODE`, `RELOCATE`, and `DROP NODE` move work and change eligibility; none of them ends a
 process. Stopping a process is an operator or supervisor action delivered as a signal.
 
@@ -510,7 +512,7 @@ and activation finish. Runtime checkpoint observations from a replaced generatio
 and a restored checkpoint reports unknown prior replica confirmation when that boundary cannot
 be reconstructed. Inspection never settles an uncertain transaction outcome or resumes a reset.
 
-An admitted NSPL reset is recorded as an ordered transaction effect. If shutdown interrupts the
+An admitted Plexus reset is recorded as an ordered transaction effect. If shutdown interrupts the
 command after its effect is recorded, recovery resumes it with the original execution reference;
 it does not admit the text as a fresh reset. The client receives success only after the replacement
 is usable, or a retained failure when that cannot be established.

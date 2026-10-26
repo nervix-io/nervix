@@ -7,7 +7,7 @@
 //! - **Depends on.** The branch instance registry, vocabulary timestamps, the primitive publication
 //!   boundary, and persistent hash sets.
 //! - **Must not know.** What a branch instance holds, who observes the membership, relays,
-//!   payloads, or NSPL.
+//!   payloads, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

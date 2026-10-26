@@ -27,7 +27,7 @@ One live branch instance can hold the following at each graph node that belongs 
 
 `FLUSH EACH` has a configured byte boundary. `FLUSH IMMEDIATE` has no size boundary; its pending
 depth depends on arrivals during the system-owned 100 µs window. See the
-[authoritative flush rule and tuning guidance](nspl-overview.md).
+[authoritative flush rule and tuning guidance](plexus-overview.md).
 
 WASM code compilation is shared while mutable guest state is not. See
 [Module Sharing And Branch Memory](wasm-processor-guests.md#module-sharing-and-branch-memory).
@@ -134,7 +134,7 @@ cannot hold it:
 - **Memory.** The node's memory limit is `--memory-limit` (`NERVIX_MEMORY_LIMIT`) when given, and
   otherwise the smallest memory limit of its control group and the groups above it, or its
   physical memory when no group limit is smaller. It must hold every execution budget at once: the
-  275 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,323 MiB in all,
+  291 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,339 MiB in all,
   and a `--memory-high-watermark` when one is set. A container limited to 2 GiB therefore cannot
   start a node. Size the limit above the budgets by the process memory a running graph holds, which
   the memory-pressure watermarks govern.
@@ -171,7 +171,7 @@ memory limit, its budgets, the size of its volumes and the restore-staging quota
 - Route `FLUSH EACH` interval and `MAX BATCH SIZE` bound how long rows wait and how much a route
   buffers. `MAX BATCH SIZE` only clamps a batch and never grows one: the batch a route emits is
   roughly arrival rate × interval, up to the byte cap. Larger batches reduce per-batch cost only
-  at boundaries that work per batch; see the [flush tuning guidance](nspl-overview.md) for which
+  at boundaries that work per batch; see the [flush tuning guidance](plexus-overview.md) for which
   emitters those are. `FLUSH IMMEDIATE` minimizes configured wait but still micro-batches.
 - Cluster interconnect carries each relay batch as one Arrow IPC body with a fixed 32 MiB limit.
   It reserves one unadmitted batch and one terminal outcome per active logical channel. Channels
@@ -206,7 +206,7 @@ memory limit, its budgets, the size of its volumes and the restore-staging quota
 - Source `INSTANCES` trades source parallelism against concurrent admission pressure. It does not
   reduce the cost of any branch instance that becomes live.
 
-See the existing [FLUSH tuning guidance](nspl-overview.md) instead of treating example values as
+See the existing [FLUSH tuning guidance](plexus-overview.md) instead of treating example values as
 defaults.
 
 ## What To Watch

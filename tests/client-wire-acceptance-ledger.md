@@ -6,7 +6,7 @@ This is the executable acceptance ledger for [Client Wire
 later Client Wire tasks own, the deterministic seams that reproduce them, and the end-to-end
 protobuf baseline that task 16 will compare with FlatBuffers.
 
-The public scenarios use native gRPC sessions and NSPL commands. The console probe and graph
+The public scenarios use native gRPC sessions and Plexus commands. The console probe and graph
 baseline use the console WebSocket session. Process recovery starts the actual `nervix-server`
 binary, sends `SIGKILL`, and reopens the same database and ports. Focused unit probes are used only
 where a public client cannot observe the dispatcher's waiter identity or the server's internal

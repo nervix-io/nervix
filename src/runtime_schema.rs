@@ -3395,7 +3395,7 @@ impl<'a> ArrowCodecValue<'a> {
             ParseAsType::Array { element, len } => {
                 let array = self.typed::<FixedSizeListArray>()?;
                 let expected_length = i32::try_from(len.get())
-                    .assured("an NSPL ARRAY length is bounded by Arrow's signed i32 length");
+                    .assured("a Plexus ARRAY length is bounded by Arrow's signed i32 length");
                 if array.value_length() != expected_length {
                     return Err(Report::new(RuntimeSchemaError::ArrowArrayLengthMismatch {
                         field: self.field.to_string(),
@@ -5005,7 +5005,7 @@ pub(crate) fn runtime_value_from_arrow_array(
         ParseAsType::Array { element, len } => {
             let array = typed_arrow_array::<FixedSizeListArray>(array, ty, field)?;
             let expected_length = i32::try_from(len.get())
-                .assured("an NSPL ARRAY length is bounded by Arrow's signed i32 length");
+                .assured("a Plexus ARRAY length is bounded by Arrow's signed i32 length");
             if array.value_length() != expected_length {
                 return Err(Report::new(RuntimeSchemaError::ArrowArrayLengthMismatch {
                     field: field.to_string(),

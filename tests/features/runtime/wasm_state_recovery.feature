@@ -8,16 +8,16 @@ Feature: Recovery from a rejected WASM guest snapshot
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "state restore" failing WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_recovering_guest;
       UPLOAD RESOURCE wasm_recovering_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -107,16 +107,16 @@ Feature: Recovery from a rejected WASM guest snapshot
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "state restore" failing WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_recovering_guest;
       UPLOAD RESOURCE wasm_recovering_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -204,16 +204,16 @@ Feature: Recovery from a rejected WASM guest snapshot
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "state restore" failing WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_recovering_guest;
       UPLOAD RESOURCE wasm_recovering_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -277,7 +277,7 @@ Feature: Recovery from a rejected WASM guest snapshot
     When fresh WASM reset guest initialization succeeds again on every node
     And the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION limited_events_subscription TO limited_events;
       """

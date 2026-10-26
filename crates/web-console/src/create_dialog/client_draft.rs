@@ -353,7 +353,7 @@ mod tests {
         ClientName, CreateStatement, ModelKind, ModelName, NodeRef, RequestedResourceVersion,
         ResourceName, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{ClientConfigDraft, ClientDraft, ClientDraftError, ClientTransport};
 
@@ -389,7 +389,7 @@ mod tests {
             );
             let statement =
                 Statement::Create(CreateStatement::new(Box::new(completed.actual), false));
-            let source = statement.to_canonical_nspl().assured("client renders");
+            let source = statement.to_canonical_plexus().assured("client renders");
             assert!(source.starts_with(&format!("CREATE {} visual_client", transport.label())));
             assert_eq!(
                 parse_client_statement(&source).assured("canonical client must parse"),
@@ -404,7 +404,7 @@ mod tests {
             .with_iterations(128)
             .with_max_len(1024)
             .for_each(|bytes: &[u8]| {
-                let mut arbitrary = Arbitrary::new(bytes, Domain::Nspl);
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
                 for transport in ClientTransport::ALL {
                     let mut draft = ready(transport);
                     draft.name = arbitrary.name::<ClientName>().as_str().to_string();
@@ -443,7 +443,7 @@ mod tests {
                         let statement =
                             Statement::Create(CreateStatement::new(Box::new(model), false));
                         let text = statement
-                            .to_canonical_nspl()
+                            .to_canonical_plexus()
                             .assured("every client Model renders");
                         let head = format!("CREATE {} ", transport.label());
                         assert!(text.starts_with(&head), "{text}");
@@ -502,13 +502,13 @@ mod tests {
         draft.config[0].value = "private value".to_string();
         let completed = draft.build().assured("client has mount and configuration");
         let actual = Statement::Create(CreateStatement::new(Box::new(completed.actual), false))
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .assured("actual client renders");
         let presented = Statement::Create(CreateStatement::new(
             Box::new(completed.presentation),
             false,
         ))
-        .to_canonical_nspl()
+        .to_canonical_plexus()
         .assured("presented client renders");
         assert!(actual.contains("MOUNT tls_bundle VERSION 3"));
         assert!(actual.contains("WITH SIGNALING PROTOCOL handshake"));

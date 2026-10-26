@@ -1,5 +1,7 @@
 # HTTP emitter
 
+*Plexus, the Nervix graph definition language.*
+
 Status: implemented. This document defines the current contract of the HTTP emitter.
 [The acceptance ledger](../../tests/http-emitter-acceptance-ledger.md) maps every criterion below to
 its owning task and records the public evidence that qualified it.
@@ -22,7 +24,7 @@ provisioning or probe request against the destination.
 
 The HTTP emitter has this form:
 
-```nspl,ignore
+```plexus,ignore
 CREATE HTTP REQUEST EMITTER <name> FROM <relays> TO <client>
   METHOD <string_expression>
   PATH <string_expression>
@@ -49,7 +51,7 @@ Method names are string values: `METHOD 'POST'` is a constant expression.
 The following configuration consumes records supplied to `outgoing` by an application graph.
 `api.example.com` is a deployment placeholder for an already provisioned endpoint.
 
-```nspl,ignore
+```plexus,ignore
 CREATE UNPACED DOMAIN delivery;
 USE delivery;
 
@@ -99,7 +101,7 @@ object containing only `event_id` and `payload`. Transport fields need not appea
 
 An alternative emitter definition, using the domain, client, and relay from the first example:
 
-```nspl,ignore
+```plexus,ignore
 CREATE HTTP REQUEST EMITTER delete_event
   FROM outgoing WHERE input.request_method = 'DELETE'
   TO api
@@ -371,7 +373,7 @@ the ordinary configuration-entity lifecycle.
 
 For example, this replacement makes the JSON emitter above use a fixed method and path:
 
-```nspl,ignore
+```plexus,ignore
 ALTER HTTP REQUEST EMITTER deliver_event
   SET TO api
     METHOD 'POST'
@@ -436,7 +438,7 @@ retries and resolved once by its outcome.
 
 ## Acceptance criteria
 
-Observable runtime criteria run through NSPL and an external HTTP receiver on both one-node and
+Observable runtime criteria run through Plexus and an external HTTP receiver on both one-node and
 three-node clusters.
 
 1. Constant and computed methods and paths, including a query, reach the receiver with the exact

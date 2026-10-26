@@ -4,7 +4,7 @@
 //! - **Owns.** Describing an exact checkpoint, sending bounded chunks, and verifying all bytes
 //!   before a replica or handoff destination may install them.
 //! - **Depends on.** Assigned state handles, the execution memory budget and bulk streams.
-//! - **Must not know.** Placement policy, NSPL, or how a state kind decodes its checkpoint.
+//! - **Must not know.** Placement policy, Plexus, or how a state kind decodes its checkpoint.
 
 #![cfg_attr(
     nervix_lint,

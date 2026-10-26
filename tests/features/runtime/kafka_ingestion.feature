@@ -5,11 +5,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ingestor delivers JSON payloads to a subscribed relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -64,14 +64,14 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka emitter forwards a multi-chunk unbranched batch with exact count parity
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "forwarding_input_{{test_id}}" exists with 1 partitions
     And Kafka topic "forwarding_output_{{test_id}}" exists with 1 partitions
     And Kafka topic "forwarding_output_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA forwarding_event (
         user_id I64
@@ -122,12 +122,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka NO ACK executes ingestor programs once for a collected ingest group
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "grouped_program_input_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA grouped_event (
         user_id I64
@@ -164,7 +164,7 @@ Feature: Kafka ingestion
       CREATE SUBSCRIPTION grouped_events_subscription TO grouped_events;
       """
     And 16 JSON messages with user id 42 are rapidly published to "KAFKA" input "grouped_program_input_{{test_id}}"
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -178,12 +178,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka NO ACK keeps the rest of a collected ingest group when one message fails to decode
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "mixed_group_input_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA mixed_event (
         tenant STRING,
@@ -222,7 +222,7 @@ Feature: Kafka ingestion
       {"tenant":"beta","user_id":3}
       {"tenant":"beta","user_id":4}
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -242,12 +242,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka NO ACK keeps the nested lists of a collected ingest group exact when a <wire_format> message is refused inside one
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "nested_group_input_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA nested_event (
         tenant STRING,
@@ -289,7 +289,7 @@ Feature: Kafka ingestion
       {"tenant":"acme","matrix":[[6],[7,8]]}
       {"tenant":"beta","matrix":[[9],[10,11]]}
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -312,12 +312,12 @@ Feature: Kafka ingestion
   Scenario Outline: A Kafka <mode_name> ingestor consumes a payload its codec refuses, reports its record and delivers the next one
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "poison_input_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA poison_event (
         tenant STRING,
@@ -354,7 +354,7 @@ Feature: Kafka ingestion
       {"tenant":"acme","user_id":"one"}
       {"tenant":"acme","user_id":2}
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -391,12 +391,12 @@ Feature: Kafka ingestion
   Scenario Outline: A Kafka ingestor that ignores general errors consumes a payload its codec refuses without reporting it, and counts it
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "ignored_poison_input_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA poison_event (
         tenant STRING,
@@ -433,7 +433,7 @@ Feature: Kafka ingestion
       {"tenant":"acme","user_id":"one"}
       {"tenant":"acme","user_id":2}
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -461,12 +461,12 @@ Feature: Kafka ingestion
   Scenario Outline: A Kafka ACK SEQUENTIAL ingestor presents again a payload the node could not unfold, and counts no decode rejection
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "unfolded_input_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA unfolded_event ( user_id I64 );
       CREATE CODEC unfolded_codec FROM JSON TO SCHEMA unfolded_event
@@ -495,7 +495,7 @@ Feature: Kafka ingestion
       """
       {"user_id":42}
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -525,12 +525,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ingestor reports transient source failures and recovers
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     When ingestor "kafka_notifications" enters fault mode
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -585,16 +585,63 @@ Feature: Kafka ingestion
       | 1            | 0             |
       | 3            | 1             |
 
+  @kafka_no_ack_reconnect
+  Scenario Outline: A NO ACK Kafka ingestor whose broker is down reconnects on the doubling reconnect cadence on <cluster_size> nodes
+    Given a mock Kafka broker serves topic "no_ack_down_{{test_id}}"
+    And the mock Kafka broker goes down
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    # The broker is down when the ingestor starts, so every attempt to take up the topic's
+    # partitions fails within the client's half-second socket timeout.
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA down_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA down_wire MODE STRICT ( seq integer );
+      CREATE CODEC down_codec FROM WIRE JSON SCHEMA down_wire TO SCHEMA down_event;
+      CREATE RELAY down_events SCHEMA down_event UNBRANCHED;
+      CREATE KAFKA CLIENT down_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'auto.offset.reset' = 'earliest',
+        'socket.timeout.ms' = '500'
+      };
+      CREATE KAFKA TOPIC INGESTOR down_source
+        FROM down_kafka TOPIC 'no_ack_down_{{test_id}}'
+        OFFSET BY DOMAIN MODE NO ACK
+        ON QUIESCE SUSPEND DECODE USING down_codec
+        TO down_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION down_subscription TO down_events;
+      START;
+      """
+    # Without a declared retry policy the ingestor waits 250 ms after its first failure and doubles
+    # the wait after each one, so the wait reaches two seconds after four failures.
+    Then within "60s" DESCRIBE INGESTOR "down_source" on the leader node reports a reconnect backoff of at least "2s"
+    When the mock Kafka broker comes back up
+    And mock Kafka message is published to topic "no_ack_down_{{test_id}}"
+      """
+      {"seq":1}
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @kafka_refused_commit
   Scenario Outline: A Kafka ingestor on <cluster_size> nodes reports a commit its broker refuses as a transient status and reports progress only once the broker commits
     Given a mock Kafka broker serves topic "refused_commit_{{test_id}}"
     And the mock Kafka broker refuses every offset commit
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA refused_commit_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA refused_commit_wire MODE STRICT ( event_id integer );
@@ -728,11 +775,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK PARALLEL applies FILTER WHERE and route WHERE across a whole batch of interleaved branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA event (
         user_id I64,
@@ -803,7 +850,7 @@ Feature: Kafka ingestion
     # ACK PARALLEL poll fills one batch of six rather than six batches of one. That is
     # what puts records from both branches, both filter stages and both surviving and
     # dropped rows into a single dispatched group.
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -825,12 +872,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK PARALLEL reads source metadata and headers for every message of a batch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "sourced_events_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA sourced_event (
         user_id I64
@@ -888,7 +935,7 @@ Feature: Kafka ingestion
     # The whole corpus is already on the topic when the consumer joins, so one ACK PARALLEL
     # poll holds all three messages at once and every metadata row is appended from the
     # batch of source messages the group still owns.
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -908,12 +955,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK PARALLEL blocks downstream publish after immediate NoAck
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -968,12 +1015,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK PARALLEL blocks downstream publish after ack timeout
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -1029,12 +1076,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK ingestor waits while an attached emitter is stalled
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -1091,11 +1138,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK PARALLEL waits for batch timeout before dispatching a partial batch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -1144,11 +1191,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK SEQUENTIAL ignores detached emitter failures
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -1204,11 +1251,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK SEQUENTIAL replays on attached emitter failure
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -1267,11 +1314,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK SEQUENTIAL ignores detached deduplicator branch failures
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -1340,11 +1387,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK SEQUENTIAL replays on attached deduplicator branch failure
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64

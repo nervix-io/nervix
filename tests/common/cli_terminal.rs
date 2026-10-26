@@ -7,7 +7,7 @@
 //!   directory that holds the REPL's history file, the task that plays the terminal on the master
 //!   side, and the bounded record of what the terminal displayed.
 //! - **Depends on.** Tokio's processes and descriptor readiness, and `nix` for the pseudo-terminal.
-//! - **Must not know.** Scenario state, nodes, NSPL, or what the CLI prints.
+//! - **Must not know.** Scenario state, nodes, Plexus, or what the CLI prints.
 //!
 //! # Playing the terminal
 //!

@@ -71,7 +71,7 @@ pub(crate) use self::{entity_union::ALTERED_PAIR_CHECKED, ingestor::AlteredInges
 /// The kind of external system, or of Nervix-served boundary, that a client connects to and a
 /// ingestor or emitter exchanges data with.
 ///
-/// The keyword of a kind is how NSPL spells it, and it is what diagnostics name a client by and
+/// The keyword of a kind is how Plexus spells it, and it is what diagnostics name a client by and
 /// what the phrase naming a ingestor or an emitter starts with. A kind displays as its keyword.
 #[derive(
     Debug,
@@ -130,7 +130,7 @@ pub enum ConnectorKind {
 }
 
 impl ConnectorKind {
-    /// How NSPL spells this kind.
+    /// How Plexus spells this kind.
     pub fn keyword(self) -> &'static str {
         self.into()
     }

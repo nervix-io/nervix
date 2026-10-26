@@ -3,12 +3,12 @@ Feature: SQS ingestion
     Given SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "notifications_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -63,13 +63,13 @@ Feature: SQS ingestion
     Given SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "notifications_reconnect_{{test_id}}" exists
     When ingestor "sqs_notifications" enters fault mode
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -130,13 +130,13 @@ Feature: SQS ingestion
     And a <cluster_size> node nervix cluster is started
     And SQS is forwarded as "sqs.nervix.test" from the fixture addresses "127.0.5.1"
     And the DNS fixture answers "sqs.nervix.test" with addresses "127.0.5.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "outage_{{test_id}}" exists
     When the TCP forwarder at "127.0.5.1" stops
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -185,11 +185,11 @@ Feature: SQS ingestion
   Scenario Outline: An SQS ingestor created for a queue that does not exist reports the queue by name
     Given SQS is running
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -228,13 +228,13 @@ Feature: SQS ingestion
     And entity gate deadline is configured as "120s"
     And a <cluster_size> node nervix cluster is started
     And SQS is reached through a forwarder that can hold an answer
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "held_{{test_id}}" exists with a visibility timeout of "600s"
     And the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA held_event (marker STRING);
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT (marker string);
@@ -264,7 +264,7 @@ Feature: SQS ingestion
       {"marker":"held-{{test_id}}"}
       """
     Then the SQS forwarder holds that answer
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       ALTER SQS QUEUE INGESTOR sqs_in SET DECODE USING held_event_codec_v2;
       """
@@ -274,7 +274,7 @@ Feature: SQS ingestion
       "marker":"held-
       """
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
 
     Examples:
       | cluster_size |

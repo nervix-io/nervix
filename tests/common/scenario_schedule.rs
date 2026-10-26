@@ -21,7 +21,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::sync::{StdArc, blocking::Mutex, oneshot, watch};
 
 pub(crate) const WEB_CONSOLE_FEATURE_NAMES: [&str; 4] = [
-    "Web console NSPL REPL",
+    "Web console Plexus REPL",
     "Web console execution graph",
     "Web console transaction inspector",
     "Web console domain clock",

@@ -6,11 +6,11 @@ Feature: Sentry emission
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the Sentry endpoint is published under fixture DNS
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA error_event (
         message STRING,
@@ -85,11 +85,11 @@ Feature: Sentry emission
       """
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA retry_event (message STRING, environment STRING);
       CREATE CODEC retry_ingest FROM JSON TO SCHEMA retry_event
@@ -152,11 +152,11 @@ Feature: Sentry emission
       """
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA retry_event (message STRING, environment STRING, event_id STRING, timestamp STRING, platform STRING);
       CREATE CODEC retry_ingest FROM JSON TO SCHEMA retry_event
