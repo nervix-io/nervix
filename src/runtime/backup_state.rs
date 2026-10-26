@@ -249,6 +249,10 @@ pub(crate) struct NativeKafkaCheckpoint {
 }
 
 impl NativeKafkaCheckpoint {
+    pub(crate) fn applied_start_generation(&self) -> Option<u64> {
+        self.offsets.applied_start_generation()
+    }
+
     /// Validates the Kafka offset checkpoint of `entity` read into alignment, and orders its
     /// partitions.
     pub(in crate::runtime) fn validate(
@@ -600,7 +604,7 @@ impl Runtime {
         if self
             .inner
             .fault_injection
-            .durable_restore_publication_fails(domain)
+            .restore_state_publication_fails(domain)
         {
             return Err(Report::new(BackupStateCaptureError::Storage));
         }
@@ -1082,11 +1086,12 @@ pub(crate) fn decode_backup_kafka_offsets(
 }
 
 pub(crate) fn write_restored_kafka_offsets(
+    applied_start_generation: Option<u64>,
     offsets: impl ExactSizeIterator<Item = (String, i32, i64)> + Clone,
     writer: &mut dyn Write,
     cancellation: &Cancellation,
 ) -> error_stack::Result<(), BackupStateCaptureError> {
-    write_offset_payload(offsets, writer, cancellation)
+    write_offset_payload(applied_start_generation, offsets, writer, cancellation)
         .change_context(BackupStateCaptureError::Storage)
 }
 

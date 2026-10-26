@@ -53,6 +53,38 @@ it resolves through the node's resolver, as the sections below describe, and a d
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
 
+### Host test fixtures
+
+`nervix-connector-fake` is a test harness outside the product layer order and a server
+dev-dependency. Product code never names it. It implements the broker and paced ingestor
+boundaries and the record, mapped-row, row-request and HTTP-request emitter boundaries. Its
+family kinds use the vocabulary's existing entity declarations; it introduces no connector
+kind or Plexus statement.
+
+Finite publish scripts fail on an unexpected extra call. Repeating answers are explicit.
+Scripts distinguish accepted, rejected and unanswered members, infrastructure failures and
+typed retry hints. Queued and channel input retain message positions, ordered headers and
+typed metadata. Channel reads use the host's cancellation handle and detect a future dropped
+before its read completed. Resume, settlement and lifecycle scripts preserve the same host
+ordering assertions as the local fixtures they consolidate.
+
+Observations retain the complete current contract values: record identities, admission times,
+keys, groups, headers, payloads and HTTP request fields. Mapped-row observations share Arrow
+columns and retain column names and selected row order. Payload preparation and row-request
+preparation run through the real host adapters, as do staged writes and commits. A failed
+commit retains its staged work and acknowledgements until a successful commit.
+
+The fake's channels, synchronization and ownership come from `nervix-primitives`; the server's
+Shuttle and Loom features propagate through its dev-dependency. Host unit tests check policy
+and value retention. Its shared assertion logs serialize one synchronous observation update
+per callback, with guards released before waiting. Recurring contract implementations declare
+that bounded harness coordination beside their methods. The registered host Shuttle checks
+explore the production owners
+against scripted boundaries. These checks establish host behavior only. Driver confirmation,
+external delivery and transport-specific cancellation still need the real integration's
+owner tests and public scenarios. The fake adds no product synchronization protocol and does
+not change the applicability of the lifecycle Deloxide lanes.
+
 ### Declaration validation
 
 Each ingestor and emitter entity declares its accepted modes, quiesce forms, client kinds, payload
@@ -712,10 +744,14 @@ an optional Redis subscription capacity passes the same range parser its ingesto
 Ingestor-only presence requirements stay with that plan.
 MQTT's representative first instance uses the same instance-template renderer as execution.
 Connector-owned offline parsers check librdkafka property names and values, sqlx and mysql_async
-options, Redis connection information, lapin AMQP URIs and NATS server addresses. They create no
-connection, consumer, producer, DNS lookup or remote side effect. Checks requiring the remote
-service still belong to client initialization. The registry names no connector crate and runtime
-receives entries and pinned mounts rather than a Model.
+options, Redis connection information, lapin AMQP URIs, NATS server addresses and ZeroMQ endpoints.
+They create no connection, consumer, producer, DNS lookup or remote side effect. Checks requiring
+the remote service still belong to client initialization. The registry names no connector crate
+and runtime receives entries and pinned mounts rather than a Model.
+
+ZeroMQ uses its socket driver's endpoint parser for both TCP and IPC addresses. Its `bind` key
+uses the shared Boolean parser at the connector boundary, so a malformed value is a configuration
+refusal before either a PULL or PUSH socket opens; an omitted value selects connect.
 
 The MySQL offline check also applies the vocabulary's pooled-client reserved-key declaration to
 URL query parameters. A pool override is a value-free refusal naming `POOL SIZE`, before storage
@@ -2002,10 +2038,27 @@ sequenceDiagram
   committed offset; a cooperative assignment lists only what it adds and forgets nothing.
   With `OFFSET BY DOMAIN`, the host supplies typed access to replicated next-offset state and a
   committed partition schedule. The leader observes partition topology and commits assignments;
-  executing sources follow that schedule. The domain offsets record only acknowledged positions and
+  executing sources follow that schedule. An explicit `START AT` resolves every partition once per
+  domain generation. The host stores that
+  generation with the offset checkpoint, and serializes the first reset against concurrent
+  instances. A later resume uses recorded positions and the original timestamp for an unrecorded
+  partition. The reset and a retry after interrupted persistence complete their persistence and
+  replica boundary before the source polls. Native replication and backups preserve the exact
+  optional applied-start generation.
+  After submitting an explicit start, the connector rereads the host's canonical positions and
+  assigns from them before polling. A late initializer's independently resolved timestamp lookup
+  cannot substitute its own positions for the start another instance already accepted.
+  This handoff accepts one explicit start and then requires a canonical resume. A further explicit
+  start ends that resume attempt with typed generation context, allowing the host to retry it.
+  The leader reconciles its partition watcher on the existing bounded cadence. If startup
+  admission fails and the watcher ends, the next reconciliation replaces that finished task,
+  retaining the full admission report for diagnostics; a matching configuration alone does not
+  establish that a watcher is still running.
+  The domain offsets record only acknowledged positions and
   the start of each partition an instance took up without one, so whichever instance the schedule
   assigns a rejected partition resumes it at or before the rejected record. A partition without a
-  domain offset starts at a concrete offset the instance resolves when it takes the partition up:
+  domain offset in a generation begun with plain `START` starts at a concrete offset the instance
+  resolves when it takes the partition up:
   in a paced domain its first record at or after the domain's current logical time, or its end as
   it stood before that lookup when it has no such record yet, and in an unpaced domain where the
   client's `auto.offset.reset` places it, `earliest` at its earliest retained record and `latest`

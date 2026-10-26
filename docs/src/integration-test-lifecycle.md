@@ -80,6 +80,14 @@ same oracle runs on one and three nodes. The broker's native round-trip control 
 in the scenario and again during teardown before diagnostics or node drain, including after a
 failed assertion. It does not change a product deadline or use a readiness sleep.
 
+The Kafka explicit-start scenarios use a provisioned real topic and an independent broker observer.
+Their exact payload sets distinguish new work from acknowledged records replayed after a codec
+quiescence, full-cluster restart or partition growth. A later explicit start must replay its selected
+history. The restore outline captures the running domain, replaces the cluster with fresh stores,
+and requires only new records after `RESUME`. Both topologies use the production sticky scheduler
+for recovery from persisted state. Their diagnostic inventory includes active/order execution and
+the corresponding lifecycle or restore stress selection. No phase or suite budget changes.
+
 The Kafka consumer-retirement scenario holds the same broker's replies before it drops an ingestor
 whose eight instances joined their group, so destroying each consumer waits for its LeaveGroup
 answer. It waits for a running connector-storage job before sending a record through an HTTP
@@ -846,6 +854,18 @@ The harness keeps these boundaries explicit.
   scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
   released observations. The scenario asserts the original execution reference's outcome and a
   dependent command through the public session protocol; it adds no setup delay or request retry.
+- **Restore publication failures.** A durable state publication failure armed for a restored
+  domain fails every publication of that domain's restored state, on whichever node publishes and
+  after the store has made the publication durable, until the scenario clears it. A failure that
+  the first publication consumed would let a leader that resumes the restore, because the failed
+  outcome was never recorded, publish again and complete the restore. The control keeps whether a
+  publication met it, so a scenario asserts the failure as pending before the restore and as
+  delivered once the restore failed, instead of inferring delivery from a successful publication.
+  Clearing it ends the condition without changing a recorded outcome, and the scenarios clear it
+  before asserting that the incomplete-state gate, not the injected failure, refuses `START`. The
+  three-node regression holds the first coordinator's failed outcome before it is recorded, moves
+  leadership, and requires recovery under the same execution reference to end failed and stay
+  failed once the condition is cleared.
 - **Console backup download pauses.** The console reload scenarios hold the archive's first
   download before it streams, so the reload interrupts a download in progress. The archive is
   assembled and served by the leader that completes the backup. A leadership move while the backup

@@ -199,6 +199,7 @@ pub(crate) struct KafkaOffsetsWire {
     pub(crate) entity: String,
     pub(crate) schema: [u8; 32],
     pub(crate) revision: u64,
+    pub(crate) applied_start_generation: Option<u64>,
     pub(crate) offsets: Vec<KafkaPartitionWire>,
 }
 

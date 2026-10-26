@@ -57,6 +57,9 @@ mod pause;
 mod relay_memory;
 mod relocation_commit;
 mod restarted_voter;
+mod restore_publication;
+#[cfg(test)]
+mod restore_publication_tests;
 mod shutdown_handoff;
 mod standalone_transaction;
 #[cfg(test)]
@@ -75,6 +78,7 @@ use pause::TestPause;
 use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
+use restore_publication::RestorePublicationFailure;
 pub use standalone_transaction::StandaloneTransactionBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 
@@ -175,7 +179,10 @@ struct FaultInjectionState {
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot failures after earlier restore checkpoints have reached the receiving node.
-    failed_restore_state_installations: DashMap<DomainName, RestoreStateFailure, RandomState>,
+    failed_restore_state_installations: DashMap<DomainName, RestoreStagingFailure, RandomState>,
+    /// Failures of every durable publication of a restored domain's state until cleared, each
+    /// keeping whether a publication met it.
+    failed_restore_state_publications: DashMap<DomainName, RestorePublicationFailure, RandomState>,
     /// One-shot interruptions of a backup's next native metadata section of an entity, after
     /// this many of its entries.
     native_metadata_interruptions: DashMap<CapturedStateOwner, u64, RandomState>,
@@ -480,6 +487,7 @@ impl Default for FaultInjection {
                 delayed_stopped_branch_state_writes: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 failed_restore_state_installations: DashMap::default(),
+                failed_restore_state_publications: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
                 guest_save_interruptions: DashMap::default(),
                 failed_https_listener_installations: DashMap::default(),
@@ -529,31 +537,30 @@ impl Default for FaultInjection {
     }
 }
 
-/// One precise failure boundary of a stopped-domain restore installation.
+/// One precise checkpoint staging boundary of a stopped-domain restore installation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RestoreStateFailure {
-    GuestStaging,
-    MaterializedStaging,
-    BranchStateStaging,
-    DurablePublication,
+enum RestoreStagingFailure {
+    Guest,
+    Materialized,
+    BranchState,
 }
 
 impl FaultInjection {
     pub fn fail_restored_materialized_checkpoint(&self, domain: DomainName) {
         self.inner
             .failed_restore_state_installations
-            .insert(domain, RestoreStateFailure::MaterializedStaging);
+            .insert(domain, RestoreStagingFailure::Materialized);
     }
     pub fn fail_restored_wasm_checkpoint(&self, domain: DomainName) {
         self.inner
             .failed_restore_state_installations
-            .insert(domain, RestoreStateFailure::GuestStaging);
+            .insert(domain, RestoreStagingFailure::Guest);
     }
 
     pub fn fail_restored_branch_state_checkpoint(&self, domain: DomainName) {
         self.inner
             .failed_restore_state_installations
-            .insert(domain, RestoreStateFailure::BranchStateStaging);
+            .insert(domain, RestoreStagingFailure::BranchState);
     }
 
     /// Interrupt the next branch lifecycle or Kafka offset section of `entity` that a backup of
@@ -575,12 +582,6 @@ impl FaultInjection {
         self.inner
             .guest_save_interruptions
             .insert(CapturedStateOwner { domain, entity }, chunks);
-    }
-
-    pub fn fail_after_durable_restore_publication(&self, domain: DomainName) {
-        self.inner
-            .failed_restore_state_installations
-            .insert(domain, RestoreStateFailure::DurablePublication);
     }
 
     /// Hold the restore of `domain` after its models are applied and its branch lifecycles are
@@ -733,9 +734,7 @@ impl FaultInjection {
     pub(crate) fn restored_wasm_checkpoint_fails(&self, domain: &DomainName) -> bool {
         self.inner
             .failed_restore_state_installations
-            .remove_if(domain, |_, fault| {
-                *fault == RestoreStateFailure::GuestStaging
-            })
+            .remove_if(domain, |_, fault| *fault == RestoreStagingFailure::Guest)
             .is_some()
     }
 
@@ -743,7 +742,7 @@ impl FaultInjection {
         self.inner
             .failed_restore_state_installations
             .remove_if(domain, |_, fault| {
-                *fault == RestoreStateFailure::MaterializedStaging
+                *fault == RestoreStagingFailure::Materialized
             })
             .is_some()
     }
@@ -752,16 +751,7 @@ impl FaultInjection {
         self.inner
             .failed_restore_state_installations
             .remove_if(domain, |_, fault| {
-                *fault == RestoreStateFailure::BranchStateStaging
-            })
-            .is_some()
-    }
-
-    pub(crate) fn durable_restore_publication_fails(&self, domain: &DomainName) -> bool {
-        self.inner
-            .failed_restore_state_installations
-            .remove_if(domain, |_, fault| {
-                *fault == RestoreStateFailure::DurablePublication
+                *fault == RestoreStagingFailure::BranchState
             })
             .is_some()
     }

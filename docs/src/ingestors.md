@@ -1095,8 +1095,9 @@ disk staging and transfer chunks, so checkpoint length is independent of the Bul
 
 Offset recovery details:
 
+- `START AT <timestamp>` and `START AT NOW` apply once per domain start generation across all instances. The first initialization persists the resolved partition positions and the applied generation together before reading. Quiescence, reconnects, rebalances, ownership changes and restarts in that generation resume acknowledged positions; they do not apply the timestamp again. A new partition without a recorded position starts at that generation's original timestamp. A later explicit `START AT` begins a new generation and replaces the positions again.
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
-- a partition without a stored domain offset, such as one added to the topic or any partition on a domain's first `START`, starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
+- in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
 - the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
 
 Quiescing leaves a consumer group, or unassigns domain-owned partitions. In a generation begun
@@ -1605,7 +1606,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: Payload frames have no broker position or typed transport metadata namespace. |
+| Metadata | Not offered: The driver exposes no peer identity on receive. Only frame 0 is ingested, with no broker position or typed transport metadata namespace. |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -1619,11 +1620,17 @@ See the [ZEROMQ PULL capability and mirror reference](connector-capabilities.md#
 
 The source is a PULL socket on the client's `addr`, a `tcp://<host>:<port>` or `ipc://<path>`
 endpoint. With `'bind' = 'true'` the socket binds that address and pushing peers connect to it;
-otherwise it connects to a peer bound there. Every value of the client's `CONFIG` is rendered the
-way an emitter renders it, so it can name the client's `MOUNT`, and the ingestor keeps the mount
-for as long as it runs; see [Client Config Mounts](resources.md#client-config-mounts). A value that
-does not render, or a mount the node cannot provide, keeps the ingestor from starting, and
-`DESCRIBE INGESTOR` shows that failure as its transient error, naming the entry or the resource.
+with `'bind' = 'false'`, or when `bind` is omitted, it connects to a peer bound there. `bind`
+accepts only `true` or `false`, ignoring letter case; any other value is refused at `CREATE CLIENT`.
+`CREATE CLIENT` also checks `addr` with the socket driver's TCP/IPC endpoint parser before storing
+the configuration. Rendered address templates pass that same check before commit; it opens no
+socket and performs no name lookup.
+Every value of the client's `CONFIG` can name its pinned `MOUNT`. The ingestor's plan resolves
+those values and keeps the mount for as long as the ingestor runs; see
+[Client Config Mounts](resources.md#client-config-mounts). A node that cannot provide the mount or
+render its values cannot start the ingestor, and `DESCRIBE INGESTOR` shows that failure as its
+transient error, naming the entry or the resource. A refusal during pre-commit validation is
+returned by `CREATE CLIENT` instead.
 
 The ingestor reads no deadline key: a `ZEROMQ` client's `timeout_ms` and `connect_timeout_ms` bound
 only an emitter's waits. A connecting socket connects when the ingestor starts. The driver retries a
