@@ -28,6 +28,7 @@ checks = [
   "connection::relay_owner::tests::shuttle_peer_retirement_racing_runtime_admission_releases_the_exact_intake",
   "connection::relay_owner::tests::shuttle_a_claimed_body_racing_cancellation_keeps_one_reconcilable_verdict",
   "connection::relay_owner::tests::shuttle_another_peer_progresses_while_one_peer_holds_its_protocol_guard",
+  "connection::relay_owner::tests::shuttle_the_next_grant_racing_the_outcome_return_before_it_takes_the_next_position",
   "connection::stream_slots::shuttle_checks::bulk_drain_stops_leasing_and_waits_for_every_leased_slot",
   "connection::stream_slots::shuttle_checks::management_drain_stops_leasing_and_waits_for_every_leased_slot",
   "connection::stream_slots::shuttle_checks::relay_drain_stops_leasing_and_waits_for_every_leased_slot",
@@ -69,6 +70,8 @@ name = "nervix-connector"
 checks = [
   "topic::delivery::shuttle_tests::shuttle_a_publish_that_reads_a_report_finds_its_record_no_longer_retained",
   "topic::delivery::shuttle_tests::shuttle_the_count_holds_every_record_until_its_report_is_served",
+  "topic::ingestor::rejection::shuttle_tests::shuttle_a_commit_past_the_rejected_record_lets_the_group_resume_from_the_committed_offset",
+  "topic::ingestor::rejection::shuttle_tests::shuttle_a_rejected_record_is_read_again_whenever_its_group_takes_the_partition_away",
 ]
 name = "nervix-connector-kafka"
 

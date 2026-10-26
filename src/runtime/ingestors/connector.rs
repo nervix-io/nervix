@@ -201,13 +201,6 @@ impl<P> BrokerIngestorStart<'_, P> {
             &ingestor.name,
             acknowledgement,
         )?;
-        // An acknowledged mode retries by its declared policy; a ingestor without one reopens on
-        // the host's reconnect cadence.
-        let retry = match acknowledgement {
-            IngestorAckPolicy::None => INGESTOR_RECONNECT_POLICY,
-            IngestorAckPolicy::Sequential { retry, .. }
-            | IngestorAckPolicy::Parallel { retry, .. } => retry,
-        };
         let plan = IngestorPlan {
             connector,
             capabilities: ingestor.ingestor_capabilities(instances, acknowledgement.support()),
@@ -222,11 +215,10 @@ impl<P> BrokerIngestorStart<'_, P> {
                 .change_context_lazy(|| ingestor.initialize_failure())?;
             opened.push(Box::new(BrokerIngestorInstance {
                 source,
-                policy: BrokerIngestorPolicy {
-                    acknowledgement: plan.acknowledgement,
-                    retry,
-                    position_class: plan.capabilities.position_class(),
-                },
+                policy: BrokerIngestorPolicy::new(
+                    plan.acknowledgement,
+                    plan.capabilities.position_class(),
+                ),
             }));
         }
         Ok(IngestorStart {
@@ -258,6 +250,24 @@ pub(super) struct BrokerIngestorPolicy {
     /// What its positions mean once the connection that delivered them is gone, which decides
     /// what the host does with a rejection the ingestor could not complete.
     pub(super) position_class: PositionClass,
+}
+
+impl BrokerIngestorPolicy {
+    /// How the host drives a broker ingestor whose declared delivery mode is `acknowledgement` and
+    /// whose positions are of `position_class`: an acknowledged mode retries by its declared
+    /// policy, and an ingestor without one reopens on the host's reconnect cadence.
+    pub(super) fn new(acknowledgement: IngestorAckPolicy, position_class: PositionClass) -> Self {
+        let retry = match acknowledgement {
+            IngestorAckPolicy::None => INGESTOR_RECONNECT_POLICY,
+            IngestorAckPolicy::Sequential { retry, .. }
+            | IngestorAckPolicy::Parallel { retry, .. } => retry,
+        };
+        Self {
+            acknowledgement,
+            retry,
+            position_class,
+        }
+    }
 }
 
 impl<C> IngestorInstance for BrokerIngestorInstance<C>

@@ -293,7 +293,8 @@ relay. Do not use them to scan across branches.
   an ingestor's `NO ACK` or an emitter's `NO ACK`.
 - Every Kafka client states the required `auto.offset.reset` policy explicitly when a new consumer
   group may need records that already exist; Nervix passes the setting through and does not supply
-  a hidden default.
+  a hidden default. Under `OFFSET BY DOMAIN` in an unpaced domain the same policy places a
+  partition that has no domain offset yet, such as one added to the topic.
 - A Kafka client never sets `allow.auto.create.topics`; `CREATE KAFKA CLIENT` refuses it. Provision each
   topic a Kafka ingestor reads: an ingestor never creates its topic and reports it as missing until
   it exists.

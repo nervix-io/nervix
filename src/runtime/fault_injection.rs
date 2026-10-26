@@ -26,6 +26,22 @@ use crate::ConfiguredFaultInjection;
 
 #[cfg(not(feature = "testing"))]
 impl ConfiguredFaultInjection {
+    pub(in crate::runtime) fn wasm_reset_publication_failure_is_enabled(
+        &self,
+        _domain: &DomainName,
+    ) -> bool {
+        false
+    }
+
+    pub(in crate::runtime) fn deliver_wasm_reset_publication_failure(&self, _domain: &DomainName) {}
+
+    pub(in crate::runtime) fn take_wasm_reset_publication_authority_loss(
+        &self,
+        _domain: &DomainName,
+    ) -> bool {
+        false
+    }
+
     pub(in crate::runtime) async fn pause_ingestor_route_poll_if_armed(
         &self,
         _domain: &DomainName,
