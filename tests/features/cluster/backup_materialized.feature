@@ -24,6 +24,10 @@ Feature: Materialized backup and archived lifecycle resumption
       """
       class="relay"
       """
+    And within "30s" node "node-2" observability metric "nervix_execution_memory_capacity_bytes" with labels eventually equals 201326592
+      """
+      class="state_read"
+      """
     When round 2 of 64 KiB materialized rows is submitted for 2 tenants
     Then within "30s" the materialized generators report round 2, 64 KiB, 1 relays and 2 tenants
     When the materialized summary subscription "repeated_summaries" is closed

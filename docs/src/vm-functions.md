@@ -489,7 +489,7 @@ Retained input keys may repeat, and argument rows are unbranched. The relay rest
 applies one-record-per-concrete-branch validation after this shared decoder; that relay invariant
 does not restrict retained window rows. A relay's restored row views stay within its 8 MiB metadata
 ceiling, while a branch reopening its window charges the row views of every retained row to the
-relay memory class, so a window retaining more rows than that ceiling reopens after a restart or a
+independent `state_read` memory class, whose capacity equals the relay pool's, so a window retaining more rows than that ceiling reopens after a restart or a
 restore. Relay snapshot transfers use quota-owned files independently of the window's encoding.
 
 ## Worked Example: `clamp`

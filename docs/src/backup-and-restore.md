@@ -878,7 +878,7 @@ that compare restored and re-exported state.
 | One archived deduplicator keyspace or window | Not bounded by the bulk budget. A keyspace's key parts and values are charged to `restore_metadata` while it converts, beside the fixed per-key share admitted with the description; a window conversion holds one archived section at a time |
 | Window checkpoint identity record | 1 MiB of row identities; a larger archived group splits into groups that fit |
 | Restore conversion admission wait | 30 seconds after the node first refuses one unit for room: a window section, a window while its checkpoint is finished, or a keyspace. The unit is converted again every 50 ms |
-| Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the relay memory class while the branch reopens the window |
+| Restored window rows a branch reopens | No row ceiling of their own; their row views are charged to the independent state-read memory class while the branch reopens the window |
 | Physical checkpoint placement encoding | 60 KiB, including domain and installation namespace |
 | Unpublished restore checkpoint keys and values per node | The smaller of 128 GiB and the size of the volume that holds the node database by default; configurable with `--restore-staging-max-bytes`, up to that size |
 | Freeze of one running domain | From its pause until its owners have staged their state, at most the backup's `TIMEOUT`, or the 60-second domain drain timeout when none is given; archive assembly and the download follow the resume |

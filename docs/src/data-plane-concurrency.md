@@ -1001,9 +1001,11 @@ not keep Snapshot request or connection-stream permits while waiting for executo
 A generator task retains at most one decoded remote source generation, including its metadata and
 column admission charges. Optional retention first reserves the complete charge from the
 independent `state_read_cache` pool, whose capacity equals the relay pool's, then returns the
-snapshot's relay charges. The additional pool is counted in the executor memory total. A full
+snapshot's `state_read` charges. Both read pools have independent relay-sized capacity and are
+counted in the executor memory total. Decoded snapshots use `state_read` through installation or
+evaluation and dispatch, leaving relay admission available for the work that completes the read. A full
 cache pool returns the current complete read without caching or waiting for retention space;
-its transient relay admission ends with that read. Each occurrence describes the currently selected owner again. Reuse
+its transient state-read admission ends with that read. Each occurrence describes the currently selected owner again. Reuse
 requires the same owner, placement and complete sealed envelope: length, digest, revision, fence
 and branch generation. A revision alone cannot identify contents after restart or restore. A
 changed envelope drops the retained generation before replacement admission. Local routing,

@@ -202,7 +202,7 @@ const RELAY_ROW_VIEW_BYTES: u64 = 8 * 1024 * 1024;
 pub(in crate::runtime) enum RestoredRows {
     /// A relay's materialized records, within one relay's 8 MiB row-view metadata ceiling.
     Relay,
-    /// A window's retained rows, which the window's own model bounds: as many as the relay memory
+    /// A window's retained rows, which the window's own model bounds: as many as the state-read memory
     /// class holds while the window reopens.
     Window,
 }
@@ -1075,7 +1075,7 @@ impl RestoredMaterializedSnapshot {
             .iter()
             .fold(metadata_bytes, |total, charge| {
                 total.checked_add(charge.bytes()).assured(
-                    "a snapshot's reservations together fit the relay pool that admitted them",
+                    "a snapshot's reservations together fit the state-read pool that admitted them",
                 )
             });
         let charge = match executor.try_reserve(MemoryClass::StateReadCache, bytes) {
@@ -1112,7 +1112,7 @@ impl RestoredMaterializedSnapshot {
             .assured("a bounded test generation fits");
         let charge = executor
             .try_reserve(
-                MemoryClass::Relay,
+                MemoryClass::StateRead,
                 u64::try_from(bytes)
                     .verified("a bounded test generation fits")
                     .max(1),
@@ -1193,7 +1193,7 @@ impl RestoredMaterializedSnapshot {
         // Admit the row views and uniqueness table before either grows. The columns become
         // materialized runtime state; these arrays are transient until installation consumes them.
         let mut metadata_charge = executor
-            .reserve(MemoryClass::Relay, layout.metadata_bytes.max(1))
+            .reserve(MemoryClass::StateRead, layout.metadata_bytes.max(1))
             .await
             .change_context(MaterializedSnapshotError::Admission)?;
         let mut records = Vec::with_capacity(layout.records);
@@ -1233,7 +1233,7 @@ impl RestoredMaterializedSnapshot {
                 .max(1);
             column_charges.push(
                 executor
-                    .try_reserve(MemoryClass::Relay, retained_bytes)
+                    .try_reserve(MemoryClass::StateRead, retained_bytes)
                     .map_err(|error| error.change_context(MaterializedSnapshotError::Admission))?,
             );
             let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(

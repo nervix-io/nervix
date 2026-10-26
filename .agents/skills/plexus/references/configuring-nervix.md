@@ -523,10 +523,11 @@ Choose checks relevant to the configured graph:
   deduplicator conversion also charges its resident keyspace to `restore_metadata` while it runs.
   Observe `nervix_execution_memory_reserved_bytes` by class; database and runtime `START` memory
   have separate owners. The backup chapter documents record limits and preparation sizing.
-  Materialized generators retain unchanged remote source generations in the independent
+  Decoded materialized snapshots use the independent `state_read` class through installation or
+  source evaluation and dispatch. Materialized generators retain unchanged remote generations in
   `state_read_cache` class, whose capacity equals the relay budget, 192 MiB by default. A full
   cache reads the complete generation without retaining it or waiting for cache space. Include
-  this pool in node sizing: the default execution pools total 2,531 MiB, checked at startup.
+  both read pools in node sizing: the default execution pools total 2,723 MiB, checked at startup.
 - `SHOW UDFS`, `DESCRIBE UDF <name>`, and `SHOW CREATE UDF <name>` inspect trusted Roto functions.
   Creation itself is the test gate: a rejecting Roto `test` block prevents persistence.
 - `SHOW PLACEMENTS`, `DESCRIBE PLACEMENT <name>`, `SHOW CREATE PLACEMENT <name>`, and

@@ -434,6 +434,47 @@ async fn unchanged_remote_generations_transfer_once_and_replaced_contents_are_re
         .executor
         .try_reserve(MemoryClass::StateReadCache, cache_capacity)
         .assured("other read tasks can occupy the entire optional cache pool");
+    let uncached = fixture
+        .reader
+        .materialized_records_from_owner(&mut routing, &mut cache, &fixture.domain, &fixture.relay)
+        .await
+        .assured("cache pressure still admits a complete active source read");
+    assert!(
+        fixture
+            .reader
+            .inner
+            .executor
+            .memory(MemoryClass::StateRead)
+            .reserved_bytes
+            > 0,
+        "an active uncached view retains its independent source-read admission"
+    );
+    let relay_capacity = fixture
+        .reader
+        .inner
+        .executor
+        .memory(MemoryClass::Relay)
+        .capacity_bytes;
+    let live_work = fixture
+        .reader
+        .inner
+        .executor
+        .try_reserve(MemoryClass::Relay, relay_capacity)
+        .expect(
+            "an active uncached source read leaves relay admission for evaluation and dispatch",
+        );
+    drop(live_work);
+    drop(uncached);
+    assert_eq!(
+        fixture
+            .reader
+            .inner
+            .executor
+            .memory(MemoryClass::StateRead)
+            .reserved_bytes,
+        0,
+        "ending the active view returns its source-read admission"
+    );
     let bytes_before = fixture.received_bytes();
     for _ in 0..2 {
         let uncached = fixture.read(&mut routing, &mut cache).await;

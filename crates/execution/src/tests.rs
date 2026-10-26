@@ -77,7 +77,7 @@ async fn default_limits_validate_together() {
     assert_eq!(snapshot.connector_storage.workers, 2);
 }
 
-/// Each configured pool and the equally sized derived read-cache pool count in the total.
+/// Each configured pool and both equally sized derived read pools count in the total.
 #[test]
 fn the_memory_total_counts_every_class_once() {
     let budgets = MemoryBudgets {
@@ -90,7 +90,7 @@ fn the_memory_total_counts_every_class_once() {
         credentials: ByteUnit::Byte(64),
     };
 
-    assert_eq!(budgets.total(), Some(ByteUnit::Byte(131)));
+    assert_eq!(budgets.total(), Some(ByteUnit::Byte(135)));
 }
 
 /// Budgets whose sum does not fit a byte count have no total, rather than one that wrapped.
@@ -105,7 +105,7 @@ fn memory_budgets_beyond_a_byte_count_have_no_total() {
 }
 
 /// The startup preflight refuses a memory limit below the total, so the total is what the executor
-/// can reserve: the capacity of every memory class together, 2,531 MiB by default.
+/// can reserve: the capacity of every memory class together, 2,723 MiB by default.
 #[nervix_primitives::test]
 async fn the_default_memory_total_is_what_the_executor_can_reserve() {
     use meticulous::ResultExt as _;
@@ -117,6 +117,7 @@ async fn the_default_memory_total_is_what_the_executor_can_reserve() {
         MemoryClass::Management,
         MemoryClass::Commands,
         MemoryClass::Relay,
+        MemoryClass::StateRead,
         MemoryClass::StateReadCache,
         MemoryClass::Bulk,
         MemoryClass::BulkWindow,
@@ -125,17 +126,24 @@ async fn the_default_memory_total_is_what_the_executor_can_reserve() {
     ] {
         reservable = reservable
             .checked_add(executor.memory(class).capacity_bytes)
-            .assured("eight budgets that each fit a u32 permit count add up within a u64");
+            .assured("nine budgets that each fit a u32 permit count add up within a u64");
     }
 
     assert_eq!(config.budgets.total(), Some(ByteUnit::Byte(reservable)));
-    assert_eq!(reservable, ByteUnit::Mebibyte(2531).as_u64());
+    assert_eq!(reservable, ByteUnit::Mebibyte(2723).as_u64());
 }
 
 #[nervix_primitives::test]
-async fn retained_reads_and_live_relays_have_independent_capacity() {
+async fn active_reads_retained_reads_and_live_relays_have_independent_capacity() {
     let executor = small_executor();
     let capacity = executor.memory(MemoryClass::Relay).capacity_bytes;
+    assert_eq!(
+        executor.memory(MemoryClass::StateRead).capacity_bytes,
+        capacity
+    );
+    let active = executor
+        .try_reserve(MemoryClass::StateRead, capacity)
+        .expect("active source views can fill their own pool");
     assert_eq!(
         executor.memory(MemoryClass::StateReadCache).capacity_bytes,
         capacity
@@ -159,6 +167,8 @@ async fn retained_reads_and_live_relays_have_independent_capacity() {
         0
     );
     assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, capacity);
+    drop(active);
+    assert_eq!(executor.memory(MemoryClass::StateRead).reserved_bytes, 0);
     drop(live);
     assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, 0);
 }
@@ -676,6 +686,7 @@ mod shuttle_checks {
             ("management", snapshot.management_memory),
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
+            ("state_read", snapshot.state_read_memory),
             ("state_read_cache", snapshot.state_read_cache_memory),
             ("bulk", snapshot.bulk_memory),
             ("bulk_window", snapshot.bulk_window_memory),
@@ -713,6 +724,7 @@ mod shuttle_checks {
             ("management", snapshot.management_memory),
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
+            ("state_read", snapshot.state_read_memory),
             ("state_read_cache", snapshot.state_read_cache_memory),
             ("bulk", snapshot.bulk_memory),
             ("bulk_window", snapshot.bulk_window_memory),
@@ -760,6 +772,7 @@ mod shuttle_checks {
             for class in [
                 MemoryClass::Management,
                 MemoryClass::Commands,
+                MemoryClass::StateRead,
                 MemoryClass::StateReadCache,
                 MemoryClass::Bulk,
             ] {
@@ -798,6 +811,7 @@ mod shuttle_checks {
             assert_eq!(snapshot.relay_memory.reserved_bytes, relay_capacity);
             assert_eq!(snapshot.management_memory.reserved_bytes, 1024);
             assert_eq!(snapshot.commands_memory.reserved_bytes, 1024);
+            assert_eq!(snapshot.state_read_memory.reserved_bytes, 1024);
             assert_eq!(snapshot.state_read_cache_memory.reserved_bytes, 1024);
             assert_eq!(snapshot.bulk_memory.reserved_bytes, 1024);
 
