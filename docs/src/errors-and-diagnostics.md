@@ -14,6 +14,13 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+The ClickHouse declaration checks a required positive `timeout_ms` and the address/TLS pairing
+before inspecting mounted files or opening a client. Missing timeout or HTTPS trust is a
+`ClientConfigSchemaError::MissingRequired` or `RequiresKey`; a TLS key with an HTTP address is
+`InvalidValue` for that key. These reports name only the key, never its path or URL. A ClickHouse
+table locator with an empty or third dot-separated part is an `ExternalNameError` at Plexus Model
+construction; no malformed target reaches the insert SQL.
+
 Transaction model preflight adds its operation identity with `change_context` above the registry
 report. It does not nest that report in a context field: the ordinary typed report chain remains
 inspectable, so command projection can retain the schema's invalid-key diagnosis.

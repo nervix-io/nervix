@@ -9,6 +9,10 @@ key presence, duplicates, type checks and TLS pairing; rendered mount values cro
 boundary again before storage. Driver-specific validation stays in connector engines called by
 the composition root. Confidential inspection is an explicit projection of complete entries;
 stored configuration and archive serialization do not consume that projection.
+ClickHouse's rendered CONFIG validation requires a positive request deadline and HTTPS trust or
+refuses TLS file keys on HTTP. The case-preserving `ClickHouseTableName` is constructed only from
+one or two nonempty locator parts; the connector receives that validated name and quotes its parts
+for SQL without reparsing a Plexus statement.
 
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not

@@ -406,16 +406,15 @@ the request URL, its authority, the TLS server name and the signing inputs remai
 configured. `nervix-dns` implements both hooks on the node resolver: Hyper's resolver service for
 `hyper-util`'s `HttpConnector`, and Smithy's `ResolveDns`.
 
-A ClickHouse client builds `HttpConnector` over the node resolver in both of its forms. Without TLS
-entries it is the plain HTTP client the driver would build for itself in this build, which has no
-driver TLS feature: an `https` address fails its request, and the connector keeps the driver's
-60-second TCP keepalive and 2-second pool idle timeout. With `tls_ca_file` or client identity
-entries the same connector is wrapped in the AWS-LC rustls configuration those entries build,
-trusting the bundled WebPKI roots, the platform's native roots and the configured CA, and serving
-`http` or `https` addresses. Hyper dials a literal IPv4 or IPv6 host without asking the resolver,
+A ClickHouse client builds `HttpConnector` over the node resolver in both of its forms. An HTTP
+address refuses TLS file keys and uses a plain HTTP client. An HTTPS address requires
+`tls_ca_file` and wraps the connector in the AWS-LC rustls configuration, trusting the bundled
+WebPKI roots, the platform's native roots and the configured CA. Client identity entries may
+accompany that trust material. Both forms keep the driver's 60-second TCP keepalive and 2-second
+pool idle timeout. Hyper dials a literal IPv4 or IPv6 host without asking the resolver,
 dials a name's answers under its dual-stack policy, described in [Dialling The
 Answers](./name-resolution.md#dialling-the-answers), and applies the URL's port or its scheme's
-default. The connector's `timeout_ms` bounds the send and the response of an insert, and the
+default. The required positive `timeout_ms` bounds the send and the response of an insert, and the
 connection and its lookup run inside that response wait.
 
 An SQS client installs a Smithy HTTP client whose connector resolves through the node resolver with
@@ -1425,8 +1424,12 @@ inference or compilation retains its typed VM report beneath a `MappedValuesErro
 connector and the emitter, then the emitter-initialization context. The emitter follows its existing
 initialization retry policy; the connector never receives a partially compiled mapping.
 
-The ClickHouse row emitter uses the shared columnar JSON writer for `JSONEachRow`. It prepares typed
-column readers and string escape masks once for each carrier of a write, then writes each selected
+The ClickHouse row emitter uses the shared columnar JSON writer for `JSONEachRow`. Its validated
+table locator holds one or two case-preserving parts; the connector quotes each part with backticks
+in the insert SQL. The client requires a positive `timeout_ms`; an HTTPS address requires mounted
+CA trust, while an HTTP address refuses TLS file keys. The required request deadline covers DNS,
+connection, TLS, upload, and the response. The emitter prepares typed column readers and string
+escape masks once for each carrier of a write, then writes each selected
 row in mapping order without building per-row JSON values. It selects the writer's octet encoding
 for binary columns, so a `String` column stores a `BYTES` value's own octets rather than base64
 text. It keeps the host's request cadence and per-record outcomes.

@@ -18,7 +18,7 @@ use nervix_execution::{MemoryClass, StorageClass};
 use nervix_models::{
     ClientConfigEntry, ClientConfigOwner, ClientConfigSchemaError, ClientConfigValue,
     ConfiguredClientRef, ConnectorKind, DomainName, PrometheusApiRoot, PrometheusClientConfigError,
-    WebsocketsClientConfig, WebsocketsClientConfigError,
+    WebsocketsClientConfig, WebsocketsClientConfigError, validate_clickhouse_client_config,
 };
 
 use super::{ModelBindingValidationError, SessionServiceImpl};
@@ -112,10 +112,12 @@ impl SessionServiceImpl {
                     let declaration = connector
                         .client()
                         .assured("a configured client has a client declaration");
-                    declaration
-                        .config
-                        .validate_rendered(&resolved.entries)
-                        .change_context(ClientValidationError::Schema)?;
+                    let validation = if connector == ConnectorKind::ClickHouse {
+                        validate_clickhouse_client_config(&resolved.entries)
+                    } else {
+                        declaration.config.validate_rendered(&resolved.entries)
+                    };
+                    validation.change_context(ClientValidationError::Schema)?;
                     Self::validate_rendered_client_values(connector, &resolved.entries)?;
                     for entry in &resolved.entries {
                         cancellation
