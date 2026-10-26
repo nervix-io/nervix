@@ -2463,6 +2463,20 @@ the failure directory in a tar archive as the `shuttle-failures` artifact when a
 fully qualified test names contain colons, which the artifact uploader rejects as paths. See the
 command recipes in [Developing Nervix](./developing-nervix.md).
 
+The host checks share the dev-only `nervix-connector-fake` harness. Its ingestor channel detects
+a read abandoned before completion, and its scripted record emitter retains the complete
+values of each attempt. The ingestor loop remains the owner under exploration; the emitter
+checks drive the production retained-payload and acknowledgement owners. Moving a fixture
+does not move a protocol into the harness or qualify a real transport. The fake uses the
+selected primitive backend and preserves the existing check identities and replay path.
+
+Its assertion logs are harness coordination: one shared log orders the observations of its
+scripted connector callbacks with the test's reads. Recurring trait overrides carry narrow
+`bounded` source contracts naming that log and one synchronous, caller-bounded observation
+update. Every log guard ends before a callback awaits input, cancellation or a scripted gate.
+These contracts retain the fixture's synchronization under compiler review; production
+connector and host synchronization keeps its own protocol contracts.
+
 ### Protocols and their checks
 
 The consensus log chunk owner releases its iterator allocation and Commands reservation in the

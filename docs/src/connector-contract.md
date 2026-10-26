@@ -53,6 +53,38 @@ it resolves through the node's resolver, as the sections below describe, and a d
 inside itself is one of the residual paths [Residual
 Resolution](./name-resolution.md#residual-resolution) lists.
 
+### Host test fixtures
+
+`nervix-connector-fake` is a test harness outside the product layer order and a server
+dev-dependency. Product code never names it. It implements the broker and paced ingestor
+boundaries and the record, mapped-row, row-request and HTTP-request emitter boundaries. Its
+family kinds use the vocabulary's existing entity declarations; it introduces no connector
+kind or Plexus statement.
+
+Finite publish scripts fail on an unexpected extra call. Repeating answers are explicit.
+Scripts distinguish accepted, rejected and unanswered members, infrastructure failures and
+typed retry hints. Queued and channel input retain message positions, ordered headers and
+typed metadata. Channel reads use the host's cancellation handle and detect a future dropped
+before its read completed. Resume, settlement and lifecycle scripts preserve the same host
+ordering assertions as the local fixtures they consolidate.
+
+Observations retain the complete current contract values: record identities, admission times,
+keys, groups, headers, payloads and HTTP request fields. Mapped-row observations share Arrow
+columns and retain column names and selected row order. Payload preparation and row-request
+preparation run through the real host adapters, as do staged writes and commits. A failed
+commit retains its staged work and acknowledgements until a successful commit.
+
+The fake's channels, synchronization and ownership come from `nervix-primitives`; the server's
+Shuttle and Loom features propagate through its dev-dependency. Host unit tests check policy
+and value retention. Its shared assertion logs serialize one synchronous observation update
+per callback, with guards released before waiting. Recurring contract implementations declare
+that bounded harness coordination beside their methods. The registered host Shuttle checks
+explore the production owners
+against scripted boundaries. These checks establish host behavior only. Driver confirmation,
+external delivery and transport-specific cancellation still need the real integration's
+owner tests and public scenarios. The fake adds no product synchronization protocol and does
+not change the applicability of the lifecycle Deloxide lanes.
+
 ### Declaration validation
 
 Each ingestor and emitter entity declares its accepted modes, quiesce forms, client kinds, payload
