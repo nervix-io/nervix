@@ -406,15 +406,19 @@ mod tests {
         let run = |number: u32| {
             ScenarioRun::new(NonZeroU32::new(number).verified("the runs below count from one"))
         };
-        // In CI's 48 slots a first run holds one, the first retry a sixteenth and the second retry
+        // In CI's 64 slots a first run holds one, the first retry a sixteenth and the second retry
         // an eighth of the pool.
         assert_eq!(SCENARIO_RETRIES, 2);
+        assert_eq!(run(1).run_slots(64), 1);
+        assert_eq!(run(2).run_slots(64), 4);
+        assert_eq!(run(3).run_slots(64), 8);
+        // A run past the configured retries, as a `--retry` override allows, keeps the last share.
+        assert_eq!(run(4).run_slots(64), 8);
+        assert_eq!(run(9).run_slots(64), 8);
+        // A 48-slot pool, three slots per CPU of the same runner, gives its retries three and six.
         assert_eq!(run(1).run_slots(48), 1);
         assert_eq!(run(2).run_slots(48), 3);
         assert_eq!(run(3).run_slots(48), 6);
-        // A run past the configured retries, as a `--retry` override allows, keeps the last share.
-        assert_eq!(run(4).run_slots(48), 6);
-        assert_eq!(run(9).run_slots(48), 6);
         // A pool too small for a sixteenth still gives every run one slot.
         assert_eq!(run(2).run_slots(4), 1);
         assert_eq!(run(3).run_slots(4), 1);
@@ -4183,6 +4187,55 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn the_running_scenarios_are_those_that_hold_their_run_slots() {
+        use crate::scenario_schedule::ScenarioLength;
+
+        let start = |scenario: &str| {
+            ActiveScenarioRegistration::start(
+                "Harness liveness",
+                scenario,
+                STAND_IN_SCENARIO_LINE,
+                ScenarioLength::Ordinary,
+            )
+        };
+        let queued = start("running set: queued for its permits");
+        let running = start("running set: running its steps");
+        running.start_running(1);
+        let stopping = start("running set: stopping its cluster");
+        stopping.start_running(1);
+        stopping.enter(ScenarioPhase::Stopping);
+        // Cucumber keeps the world of a failed attempt for its report, and with it the attempt's
+        // registration, after the attempt has finished.
+        let finished = start("running set: finished and retained");
+        finished.start_running(1);
+        finished.enter(ScenarioPhase::Finished);
+
+        let mut holding = BTreeSet::new();
+        for active in ActiveScenario::running() {
+            holding.insert(active.identity);
+        }
+        assert!(holding.contains(running.identity()));
+        assert!(holding.contains(stopping.identity()));
+        assert!(
+            !holding.contains(queued.identity()),
+            "a scenario queued for its permits runs nothing that can hold the runner task"
+        );
+        assert!(!holding.contains(finished.identity()));
+
+        let mut unfinished = BTreeSet::new();
+        for active in ActiveScenario::unfinished() {
+            unfinished.insert(active.identity);
+        }
+        assert!(unfinished.contains(queued.identity()));
+        assert!(unfinished.contains(running.identity()));
+        assert!(unfinished.contains(stopping.identity()));
+        assert!(
+            !unfinished.contains(finished.identity()),
+            "a finished attempt is not one the suite is still waiting for"
+        );
+    }
+
+    #[nervix_primitives::test]
     async fn a_wait_past_its_deadline_leaves_the_task_running_with_its_owner() {
         let mut not_started = OwnedNodeTask::not_started();
         assert!(matches!(
@@ -5254,6 +5307,49 @@ mod tests {
     }
 
     #[nervix_primitives::test(start_paused = true)]
+    async fn a_suite_timeout_does_not_count_a_finished_attempt_as_active() {
+        use crate::scenario_schedule::ScenarioLength;
+
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        // Cucumber keeps the world of a failed attempt for its report, so the attempt's
+        // registration outlives the attempt, and the retry that ran after it, until the run ends.
+        let retained = ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "a failed attempt whose world Cucumber keeps",
+            20,
+            ScenarioLength::Ordinary,
+        );
+        retained.start_running(1);
+        retained.enter(ScenarioPhase::Finished);
+        let regression = WatchdogRegression::start(
+            "a body that never returns beside a retained attempt",
+            21,
+            ScenarioPhase::Body,
+            &[("node-1", StandInStopBehavior::StopsWhenAsked)],
+        );
+
+        let timeout = time_out(SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW)).await;
+
+        assert!(
+            timeout
+                .stall
+                .scenarios
+                .iter()
+                .all(|stalled| &stalled.active.identity != retained.identity()),
+            "a finished attempt holds no permit and no cluster, so it is not active: {timeout}"
+        );
+        let stalled = stalled(&timeout, regression.identity());
+        assert_eq!(stalled.active.phase, ScenarioPhase::Body);
+        let diagnostic = timeout.to_string();
+        assert!(
+            !diagnostic.contains("a failed attempt whose world Cucumber keeps"),
+            "{diagnostic}"
+        );
+        drop(regression);
+        drop(retained);
+    }
+
+    #[nervix_primitives::test(start_paused = true)]
     async fn a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes() {
         let _serialized = WATCHDOG_REGRESSIONS.lock().await;
         let regression = WatchdogRegression::start(
@@ -5581,6 +5677,63 @@ mod tests {
             (after - before - 20.0).abs() < 0.05,
             "{before} then {after}"
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn the_suite_summary_adds_up_every_runner_tick_beside_its_stalls() {
+        use crate::{
+            runner_lag::RunnerTick,
+            scenario_phase::{record_runner_tick, suite_summary},
+        };
+
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let counted = || {
+            let summary = suite_summary();
+            let Some((_, runner)) = summary.split_once("Runner task: ") else {
+                panic!("the summary must describe the runner task:\n{summary}");
+            };
+            let Some((ticks, rest)) = runner.split_once(" ticks polled ") else {
+                panic!("the runner task line must count its ticks:\n{summary}");
+            };
+            let Some((_, rest)) = rest.split_once("; ") else {
+                panic!("the runner task line must count its stalls:\n{summary}");
+            };
+            let Some((stalls, _)) = rest.split_once(" stalls took ") else {
+                panic!("the runner task line must count its stalls:\n{summary}");
+            };
+            let ticks = ticks
+                .parse::<u64>()
+                .unwrap_or_else(|error| panic!("{error}: the tick count in\n{summary}"));
+            let stalls = stalls
+                .parse::<u64>()
+                .unwrap_or_else(|error| panic!("{error}: the stall count in\n{summary}"));
+            (ticks, stalls)
+        };
+        let (ticks_before, stalls_before) = counted();
+
+        let bound = Duration::from_secs(1);
+        record_runner_tick(RunnerTick {
+            late: Duration::from_millis(300),
+            reported: bound,
+        });
+        record_runner_tick(RunnerTick {
+            late: Duration::from_millis(1_500),
+            reported: bound,
+        });
+        let (ticks_after, stalls_after) = counted();
+
+        assert_eq!(
+            ticks_after.checked_sub(ticks_before),
+            Some(2),
+            "a tick below the stall bound still counts as a tick"
+        );
+        assert_eq!(
+            stalls_after.checked_sub(stalls_before),
+            Some(1),
+            "only the tick at or above the bound is a stall"
+        );
+        let summary = suite_summary();
+        assert!(summary.contains("\nRuntime workers: "), "{summary}");
     }
 
     /// A command line that carries only the suite watchdog's own options, so the injection point

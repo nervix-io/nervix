@@ -450,19 +450,32 @@ including their instrumented builds. Coverage flags do not replace Wild linker s
 
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
-`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `3`, so its
-16-CPU runner has 48 slots. The instrumented inventory consumed 78,433 slot-seconds with 115
-attempts still active, almost the entire 78,720 slot-seconds that 32 slots could supply in
-that run's 41-minute suite budget. The additional slots use the observed CPU and memory
-headroom; their complete-suite qualification retains runner load and the actual margin rather than
-assuming that work stays constant as concurrency changes. Cucumber may take up all parsed scenarios
-without charging a slot.
+`--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `4`, so its
+16-CPU runner has 64 slots. Cucumber may take up all parsed scenarios without charging a slot.
+
+The slots are the suite's capacity, and the measurement of 26 October 2026 set their number. Over
+the retained artifacts of 20 Check runs, an ordinary run of one inventory of about 3,620 attempts
+used between 128,000 and 215,000 slot-seconds on 48 slots. The inventory did not decide that
+spread; the runner did. Every scenario of a run slows by the same factor: the median, over
+scenarios that passed their first attempt, of an attempt's time against that scenario's median
+across runs ranged from 0.74 to 1.25 from run to run, while inside one run half of the scenarios
+stayed within about a tenth of the run's own factor. The three slowest runs in that sample were
+the only ones on Intel Xeon runners, and they are the two passing runs that ended within 25
+seconds of the 75-minute budget and the one that exhausted it.
+
+The suite waits rather than computes. Once the long-running attempts that start together have
+ended, the runner's CPUs averaged 51 to 55 percent busy while every one of the 48 slots held a
+scenario, and an ordinary scenario started during the 82 to 86 percent peak of the first fifteen
+minutes ran no slower, against its own median, than one started later. More slots therefore add
+throughput rather than contention, and memory is no limit: the runner used at most about 27 GiB
+of its 64. Factor `4` uses that idle CPU.
+
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. A first run holds one slot.
 A retry holds a larger share, so it runs beside fewer scenarios than the run that failed. The first
 retry holds a sixteenth of the pool, and each later retry holds twice the share of the run before
-it. With Cucumber's two retries, the second retry holds an eighth, so the shares are 1, 3 and 6 of
-CI's 48 slots. Every run holds at least one slot, so a pool of fewer than sixteen slots gives its
+it. With Cucumber's two retries, the second retry holds an eighth, so the shares are 1, 4 and 8 of
+CI's 64 slots. Every run holds at least one slot, so a pool of fewer than sixteen slots gives its
 first retry one. A run past the configured retries, as a `--retry` override allows, keeps the last
 retry's share. No run holds more than a quarter of the pool, so no scenario runs alone. A retry
 whose share is not yet free keeps the slots that free up until its share fits. Otherwise the first
@@ -2260,6 +2273,14 @@ suite timeout: the <budget> suite budget expired with <n> scenario(s) active
 suite timeout cleanup: asked <n> node(s) to stop and waited <elapsed> of a 60s window; every node ended itself
 ```
 
+The active lines name every scenario still queued for its permits or running. An attempt that has
+finished is not active, even while its registration remains: Cucumber keeps the world of a failed
+attempt, and the registration with it, for the report it prints at the end of the run, long after the
+retry that followed has run. The timeout of Check run 40241968478 listed 13 such attempts of 12
+scenarios beside its 142 queued and running scenarios, and they read as retries that had never
+started. Every one of them had been followed by a retry that started between 1.8 and 10.3 seconds
+after it ended, and each scenario's last retry had passed.
+
 When a node is still running at the end of the window, the cleanup line names its cluster instead of
 reporting that every node ended itself, and the scenario log adds
 `suite timeout cleanup forced: the run was dropped with nodes still running`. A live cluster whose
@@ -2379,12 +2400,18 @@ The watchdog is polled on the runner task, so it cannot see, let alone end, a st
 task. The run is therefore polled beside a tick on the same task, due every 250 milliseconds. A step
 that blocks inside its poll delays the tick until it returns, so how late the tick is polled is how
 long the task was held. A stall of one second or more goes to the scenario log with every scenario
-live during it:
+that held its run slots during it:
 
 ```text
 runner task stalled for <duration>
 scenario live during runner stall: <identity> attempt=<n> phase=<phase> phase_age=<age> age=<age>
 ```
+
+A scenario still queued for its permits runs no step and no cleanup, so it cannot hold the task and
+the stall does not list it. Cucumber takes up every parsed scenario at once, so early in a run more
+than three thousand scenarios wait in that queue; listing them made each stall write thousands of
+lines from the runner task itself, which was more than half of the scenario log's 265 MB in Check
+run 40241030302.
 
 The log line is a diagnostic, not a failure: a stall delays every wait and bound the other scenarios
 measure, and the line says when and for how long. Backup steps hand their archive reads, rewrites,
@@ -2392,6 +2419,22 @@ digests and fixture generation, and the inspection of stopped nodes' databases, 
 the native metadata restore scenario, whose archive holds lifecycle and offset records above 32 MiB
 each, held the runner task for about 30 seconds while it inspected three restored nodes before they
 did.
+
+One poll of the run polls every scenario woken since the last one, so the task is also late when many
+scenarios each do a little synchronous work in the same poll, without any single step reaching a
+second. The suite summary therefore adds up the lateness of every tick, not only the stalls, and
+reads the scheduling counters of the thread that polls the run from its procfs `schedstat`: how long
+that thread ran on a CPU, and how long it was ready to run without one. Beside them it reports how
+long the runtime's workers, which run every in-process node, were busy together:
+
+```text
+Runner task: <n> ticks polled <late> late in total; <n> stalls took <stalled>, the longest <longest>; its thread ran <on-cpu> on a CPU, <share> of the run, and waited <wait> for one.
+Runtime workers: <n> busy for <busy> together, <share> of their time over the run.
+```
+
+A runner thread that is on a CPU for most of the run is what every scenario waits for. One that waits
+long for a CPU is starved by the rest of the runner rather than by its own steps. Workers busy for
+most of their time say that the nodes, not the steps, set the pace.
 
 ## Diagnostic Lane
 
@@ -2726,7 +2769,7 @@ artifact carries `tests/logs`.
 | Cucumber report | Standard output | Every scenario and step result in order, the world of a failed step, the summary, and every failed scenario repeated at the end |
 | Harness transitions | Standard error | Node startup transitions and outcomes, the stops scenarios waited for, and a suite timeout's diagnostic and cleanup |
 | Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, cluster start requests and failures, the Plexus statements scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
-| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, wait time by reason, retries, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
+| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, retries, the runner task's tick lateness and stalls with its thread's CPU and run-queue time, how busy the runtime workers were, wait time by reason, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
 | Runner load | `runner-load-tests` and `runner-load-scenarios` artifacts | Five-second CPU utilization and steal-time samples and their mean and peak |
 | Node traces | `tests/logs/scenarios.log` | The trace output of every in-process node of the run |
 
@@ -2940,6 +2983,8 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | A server process report names the listener another socket held only when its outermost context is a lost bind, read without its emphasis | `a_report_names_its_outermost_context_without_its_emphasis`, `the_last_report_a_launch_wrote_is_the_one_read`, `a_log_without_a_report_names_no_context`, `control_sequences_are_removed_and_the_text_between_them_is_kept`, `a_report_of_a_lost_bind_names_the_listener_the_next_launch_moves`, `a_report_of_any_other_failure_names_no_listener` |
 | A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
+| Every tick's lateness adds up beside the stalls, and the summary reports the runner thread's CPU and run-queue time and the runtime workers' busy time | `the_lateness_of_every_tick_adds_up_beside_the_stalls`, `a_tick_below_the_bound_counts_as_lateness_and_not_as_a_stall`, `a_thread_schedstat_reads_its_cpu_time_and_run_queue_wait`, `the_runner_thread_reads_the_cpu_time_it_spent_since_it_was_named`, `the_suite_summary_adds_up_every_runner_tick_beside_its_stalls` |
+| A stall lists only the scenarios that hold run slots, and a suite timeout counts only the scenarios still queued or running | `the_running_scenarios_are_those_that_hold_their_run_slots`, `a_suite_timeout_does_not_count_a_finished_attempt_as_active` |
 | A step takes the messages a NATS observer's client already holds without a poll of the runner task for each one, in the order the server delivered them | `a_step_takes_buffered_deliveries_without_a_poll_per_message` |
 | NATS driver diagnostics distinguish a deliberately overflowing subscription from a disconnected TCP peer, and a disconnect preserves all 32,768 deliveries already buffered | `an_observer_records_the_drivers_slow_consumer_notifications`, `a_disconnected_observer_keeps_its_buffered_burst_and_reports_the_connection_end` |
 | The actual sequence/header assertion drains all 32,768 messages while its caller is unpolled past its deadline, preserves each oracle and still fails a stalled delivery at the original deadline | `a_buffered_sequence_meets_its_deadline_while_the_runner_is_stalled`, `a_sequence_keeps_every_message_and_header_oracle`, `a_stalled_delivery_still_fails_at_the_captured_sequence_deadline` |

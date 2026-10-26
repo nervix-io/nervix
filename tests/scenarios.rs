@@ -145,7 +145,7 @@ use crate::common::{
     runner_observation::ArrivalObservation,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
-        begin_suite_measurement, suite_summary,
+        begin_suite_measurement, record_runner_tick, suite_summary,
     },
     scenario_schedule::{
         FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
@@ -32891,7 +32891,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                         if teardown.left_nodes_stopping() {
                             // A node that outlasts its cleanup is usually one that stopped beside
                             // work heavy enough to starve it, so name what else was live.
-                            for active in ActiveScenario::active() {
+                            for active in ActiveScenario::running() {
                                 append_cucumber_log_line(&format!(
                                     "scenario live during unfinished cleanup: {active}"
                                 ));
@@ -32950,9 +32950,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // A step that blocks the runner task holds every scenario and the watchdog alike, and nothing
     // polled on that task can end it, so each such stall is logged with the scenarios live during
     // it.
-    let run = SCENARIO_RUNNER_LAG.observe(run, |stall| {
+    let run = SCENARIO_RUNNER_LAG.observe(run, |tick| {
+        record_runner_tick(tick);
+        let Some(stall) = tick.stall() else {
+            return;
+        };
         append_cucumber_log_line(&stall.to_string());
-        for active in ActiveScenario::active() {
+        // Only a scenario that holds its run slots runs steps or cleanup that can hold the task; the
+        // scenarios still queued for their permits run nothing.
+        for active in ActiveScenario::running() {
             append_cucumber_log_line(&format!("scenario live during runner stall: {active}"));
         }
     });

@@ -726,9 +726,10 @@ jobs:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      # Keep the qualified 48-slot load. Recent slow runs need more time at this concurrency:
-      # 39656928785 used 117,587 slot-seconds with 833 attempts still active after 41 minutes.
-      NERVIX_TEST_CONCURRENCY_FACTOR: "3"
+      # 64 slots on the 16-CPU runner. At 48 slots the suite kept every slot busy while the runner's
+      # CPUs were about half idle once the long-running attempts had ended, so it waited rather than
+      # computed, and an ordinary run on the slowest runners used 99.5% of the budget.
+      NERVIX_TEST_CONCURRENCY_FACTOR: "4"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

@@ -409,10 +409,14 @@ pub(crate) struct StalledScenario {
 }
 
 impl StalledScenario {
-    /// Reads every active scenario together with the clusters it holds.
+    /// Reads every scenario still queued or running together with the clusters it holds.
+    ///
+    /// An attempt that has finished is not part of what the run was doing: Cucumber keeps the
+    /// world of a failed attempt for its report, so its registration stays in the registry long
+    /// after the attempt and its retry have ended, but it holds no permit and no cluster.
     fn snapshot(live: &[LiveCluster]) -> Vec<Self> {
         let mut stalled = Vec::new();
-        for active in ActiveScenario::active() {
+        for active in ActiveScenario::unfinished() {
             let mut nodes = Vec::new();
             for cluster in live {
                 if cluster.scenario == active.identity {
