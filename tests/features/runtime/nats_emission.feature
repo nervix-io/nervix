@@ -1,7 +1,137 @@
 Feature: NATS emission
+  @nats_core_connection_loss @deloxide_stress
+  Scenario Outline: A core NATS write retries every record through connection loss
+    Given NATS is running
+    And a NATS endpoint the scenario controls is configured
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And NATS subject "core_loss_out_{{test_id}}" is observed
+    Given the leader node is configured with these Plexus statements
+      """
+      CREATE SCHEMA core_loss_input ( sequence I64 );
+      CREATE SCHEMA core_loss_event ( sequence I64, padding STRING );
+      CREATE WIRE JSON SCHEMA core_loss_wire MODE STRICT ( sequence integer, padding string );
+      CREATE CODEC core_loss_input_codec FROM JSON TO SCHEMA core_loss_input
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE CODEC core_loss_codec FROM WIRE JSON SCHEMA core_loss_wire TO SCHEMA core_loss_event;
+      CREATE RELAY core_loss_events SCHEMA core_loss_event UNBRANCHED;
+      CREATE NATS CLIENT core_loss_in CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS SUBJECT INGESTOR core_loss_source
+        FROM core_loss_in SUBJECT 'core_loss_in_{{test_id}}'
+        QUEUE GROUP 'core_loss_group_{{test_id}}' INSTANCES 1 MODE NO ACK
+        ON QUIESCE DROP DECODE USING core_loss_input_codec
+        TO core_loss_events
+          INHERIT ALL
+          SET padding = repeat('x', 1000)
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE NATS CLIENT core_loss_out CONFIG {
+        'addr' = '{{nats_controlled_addr}}',
+        'timeout_ms' = '60000'
+      };
+      CREATE NATS SUBJECT EMITTER core_loss_output FROM core_loss_events
+        TO core_loss_out SUBJECT 'core_loss_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
+          ENCODE USING core_loss_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "core_loss_source" on the leader node contains
+      """
+      ready: true
+      """
+    When the controlled NATS endpoint holds what each client sends after 0 publishes
+    And a NATS message carrying records 1 to 12000 by field "sequence" is published to subject "core_loss_in_{{test_id}}"
+    Then within "60s" the controlled NATS endpoint has stopped reading a publish
+    When the controlled NATS connection is lost during publication
+    Then within "180s" the observed broker receives every record from 1 to 12000 by field "sequence"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @nats_core_connection_loss @nats_core_stop_connection_loss @deloxide_stress
+  Scenario Outline: Nervix reports a core NATS connection change during STOP
+    Given NATS is running
+    And a NATS endpoint the scenario controls is configured
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And NATS subject "core_loss_out_{{test_id}}" is observed
+    Given the leader node is configured with these Plexus statements
+      """
+      CREATE SCHEMA core_loss_input ( sequence I64 );
+      CREATE SCHEMA core_loss_event ( sequence I64, padding STRING );
+      CREATE WIRE JSON SCHEMA core_loss_wire MODE STRICT ( sequence integer, padding string );
+      CREATE CODEC core_loss_input_codec FROM JSON TO SCHEMA core_loss_input
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE CODEC core_loss_codec FROM WIRE JSON SCHEMA core_loss_wire TO SCHEMA core_loss_event;
+      CREATE RELAY core_loss_events SCHEMA core_loss_event UNBRANCHED;
+      CREATE NATS CLIENT core_loss_in CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS SUBJECT INGESTOR core_loss_source
+        FROM core_loss_in SUBJECT 'core_loss_in_{{test_id}}'
+        QUEUE GROUP 'core_loss_group_{{test_id}}' INSTANCES 1 MODE NO ACK
+        ON QUIESCE DROP DECODE USING core_loss_input_codec
+        TO core_loss_events
+          INHERIT ALL
+          SET padding = repeat('x', 1000)
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE NATS CLIENT core_loss_out CONFIG {
+        'addr' = '{{nats_controlled_addr}}',
+        'timeout_ms' = '60000'
+      };
+      CREATE NATS SUBJECT EMITTER core_loss_output FROM core_loss_events
+        TO core_loss_out SUBJECT 'core_loss_out_{{test_id}}'
+          MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
+          ENCODE USING core_loss_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "core_loss_source" on the leader node contains
+      """
+      ready: true
+      """
+    When the controlled NATS endpoint holds what each client sends after 0 publishes
+    And a NATS message carrying records 1 to 12000 by field "sequence" is published to subject "core_loss_in_{{test_id}}"
+    Then within "60s" the controlled NATS endpoint has stopped reading a publish
+    When the controlled NATS connection is lost during STOP
+    Then within "30s" the active session observes a server error containing
+      """
+      connection changed before
+      """
+    And the last server error contains
+      """
+      pending records were flushed
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: NATS SUBJECT emitter drains a wide columnar batch in order without duplicates
     Given NATS is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -79,9 +209,25 @@ Feature: NATS emission
         ON GENERAL ERROR LOG;
       START;
       """
+    # Exercise both remote hops in the three-node example, before any record is published.
     And these Plexus commands are executed
       """
+      RELOCATE INGESTOR columnar_events_in ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY columnar_events ONTO NODE <relay_node> IGNORE PREFERENCES;
+      RELOCATE EMITTER columnar_events_out ONTO NODE node-1 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=columnar_events_in owner=node-1
+      """
+    And the last command output contains
+      """
+      - domain={{domain}} kind=relay name=columnar_events owner=<relay_node>
+      """
+    And the last command output contains
+      """
+      - domain={{domain}} kind=emitter name=columnar_events_out owner=node-1
       """
     Then the last cluster status owner for scheduled "ingestor" "columnar_events_in" is saved as placeholder "columnar_ingestor_owner"
     When emitter "columnar_events_out" enters stall mode
@@ -106,9 +252,9 @@ Feature: NATS emission
       """
 
     Examples:
-      | cluster_size | message_count |
-      | 1            | 32768         |
-      | 3            | 32768         |
+      | cluster_size | relay_node | message_count |
+      | 1            | node-1     | 32768         |
+      | 3            | node-2     | 32768         |
 
   Scenario Outline: NATS SUBJECT emitter publishes JSON payloads from a relay
     Given MQTT is running

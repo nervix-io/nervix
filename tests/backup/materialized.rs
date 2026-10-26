@@ -63,15 +63,30 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
     .await
     .assured("the workload client connects");
     for command in plexus_statements(&commands) {
-        let outcome = client
-            .execute(command.clone())
-            .await
-            .assured("the workload command recovers through a leader change");
+        let started = Instant::now();
+        append_cucumber_log_line(&format!(
+            "materialized workload command started: domain={}, command={command}",
+            world.domain
+        ));
+        let outcome = match client.execute(command.clone()).await {
+            Ok(outcome) => outcome,
+            Err(error) => panic!(
+                "materialized workload command failed after {:?}: domain={}, command={command}: \
+                 {error:#}",
+                started.elapsed(),
+                world.domain
+            ),
+        };
         assert!(
             outcome.succeeded(),
             "the public materialized workload is valid: {command}: {}",
             outcome.message
         );
+        append_cucumber_log_line(&format!(
+            "materialized workload command completed: domain={}, elapsed={:?}, command={command}",
+            world.domain,
+            started.elapsed()
+        ));
         world.last_command_output = Some(outcome.message);
     }
     let leader = current_leader_node(world).await;
@@ -270,6 +285,39 @@ async fn then_materialized_generators_report_every_row(
         capture_missing_materialized_state(world, &pending).await;
         panic!("missing materialized generator rows: {pending:?}");
     }
+}
+
+#[then(
+    expr = "node {string} reuses its remote materialized generation across five complete \
+            observations of round {int}"
+)]
+async fn then_materialized_generation_is_reused(
+    world: &mut ScenarioWorld,
+    node: String,
+    round: u32,
+) {
+    let labels = [
+        "class=\"bulk\"".to_string(),
+        "direction=\"received\"".to_string(),
+    ];
+    let before = world
+        .cluster()
+        .read_observability_metric(&node, "nervix_interconnect_bulk_bytes_total", &labels)
+        .await
+        .assured("the remote reader exposes its transferred bulk bytes");
+    for _ in 0..5 {
+        then_materialized_generators_report_every_row(world, "30s".to_string(), round, 64, 1, 2)
+            .await;
+    }
+    let after = world
+        .cluster()
+        .read_observability_metric(&node, "nervix_interconnect_bulk_bytes_total", &labels)
+        .await
+        .assured("the remote reader still exposes its transferred bulk bytes");
+    assert_eq!(
+        after, before,
+        "five complete observations of unchanged rows must reuse the verified generation"
+    );
 }
 
 /// Observe the addressed owner's and replica's public state before failed-scenario teardown.

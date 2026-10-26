@@ -313,6 +313,7 @@ mod remote_ack_watch_charge;
 mod remote_dispatch;
 mod reorderer;
 mod resources;
+pub(crate) use resources::RuntimeResourceError;
 mod runtime_lifecycle;
 mod runtime_settings;
 mod schedule_apply;

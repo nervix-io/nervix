@@ -2,6 +2,29 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
+client/domain context. The server's changed-model binding validation runs connector-owned offline
+checks before standalone mutation or transaction commit. `OfflineClientConfigError` retains typed
+native causes; the AMQP URI parser's string-only refusal is retained as a diagnostic attachment.
+Public command projections render the invalid key and client identity without driver values,
+including through transaction planning and commit wrappers. Resource resolution, file inspection,
+worker admission and cancellation have distinct contexts. Admission failure never claims that a
+key failed validation. Rendered WebSockets and Prometheus values retain their owning configuration
+errors; the public projection uses their value-free key contexts. Redis's capacity refusal keeps
+the ingestor plan's typed range error beneath `OfflineClientConfigError` for
+`subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
+
+ZeroMQ endpoint validation keeps the socket driver's endpoint error beneath
+`OfflineClientConfigError` for `addr`. Its socket owners keep the shared Boolean parser's
+`ClientConfigError` beneath their configuration context for `bind`; a malformed value does not
+select a socket operation. Public CREATE refusals retain the key and client identity while the
+driver's diagnostic remains internal.
+
+Transaction model preflight adds its operation identity with `change_context` above the registry
+report. It does not nest that report in a context field: the ordinary typed report chain remains
+inspectable, so command projection can retain the schema's invalid-key diagnosis.
+
+
 Connector-storage worker capacity crosses the typed node-capability setting boundary before
 executor construction. A claim exceeding the primitive's permit representation returns
 `ExecutionConfigError::WorkerCountTooLarge` with its class, requested count and maximum; the
@@ -106,6 +129,13 @@ emitter shows the first printable attachment of a failure as its transient error
 one the outermost context. A typed attachment carries a value for one consumer, as an emitter attaches
 the retry delay its receiver stated for the emitter host to read. Neither replaces a context: a
 caller decides from contexts and typed fields.
+
+A Core NATS flush keeps its driver's typed failure beneath `CoreFlushError::ClientFlush`.
+A connection change is the separate `CoreFlushError::ConnectionChanged` failure, carrying the
+nonzero count whose delivery can no longer be certified. Publication and finish add their own
+`EmitterWriteError` or `EmitterFinishError::Flush` context and render the complete report for the
+emitter's transient description. An elapsed write still names its configured `timeout_ms`; an
+elapsed finish reports the pending count through `EmitterFinishError::Unsent`.
 
 Two failures of one operation stay one report. When a model alteration fails after its domain
 paused and resuming the domain fails too, the resume's report is added beside the alteration's and
@@ -767,9 +797,11 @@ A Kafka source classifies an unknown topic from a subscription or topic metadata
 `KafkaTopicIngestorError::MissingTopic`, retaining the driver's typed `KafkaError` as an attachment.
 The named topic is the semantic failure shown in `DESCRIBE INGESTOR` until the operator provisions
 it. Partition watches recognize this variant as an empty topology; other inspection failures keep
-their existing reporting path. A Kafka client's attempt to set `allow.auto.create.topics` is
-`RegistryError::NervixOwnedClientConfigKey`, naming the domain, client and owned key without its
-configured value. The source and both inspectors enforce `false` after pass-through configuration.
+their existing reporting path. A Kafka client's attempt to set a host-owned key, such as
+`allow.auto.create.topics` or `delivery.report.only.error`, is
+`ClientConfigSchemaError::Reserved` beneath the registry's client context, naming the domain,
+client and owned key without its configured value. The source and both inspectors enforce `false`
+after pass-through configuration.
 
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
@@ -2177,6 +2209,14 @@ Native `MaterializedSnapshotError` checks framing, metadata bounds, unique keys,
 counts, exact schemas and complete container consumption. Diagnostics carry typed causes and
 entity identities, without payload columns or branch field values. Replica installation refuses
 a revision older than its currently installed materialized revision.
+
+Generator source-read failures retain `MaterializedReadError::RemoteSnapshot` above the typed
+snapshot-exchange cause and the interconnect's `RequestError` when describing or opening the
+transfer fails. Each layer changes the report's context without flattening the transport cause
+into a printable attachment. The generator event renders the complete report chain with its domain,
+generator and source relay, without logging row columns or branch values. A failed read discards
+its retained remote generation and skips that occurrence; it cannot emit a cached success while
+the selected owner's description or transfer failed.
 
 Once admitted, a step that fails ends the restore as `restore failed at step '<step>':` and its
 reason, with the restore's report: the consensus command that records a step refuses it with a

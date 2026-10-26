@@ -5,8 +5,9 @@
 //! - **Owns.** The Pulsar client Model, the topic source and emitter Models with their delivery
 //!   mode, the topic and subscription names a source reads with the rules Pulsar holds them to,
 //!   who owns a source's subscription, and what each entity declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
-//! - **Must not know.** The Pulsar driver, its configuration keys, or how a topic is consumed or
+//! - **Must not know.** The Pulsar driver, or how a topic is consumed or
 //!   produced to.
 
 #![cfg_attr(
@@ -38,7 +39,23 @@ use crate::{
     OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
 };
 
-configured_client!(Pulsar: unpooled, config Nervix, CreateClientPulsar => PulsarConfigEntry);
+configured_client!(Pulsar: unpooled, config CLIENT_CONFIG, CreateClientPulsar => PulsarConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("addr", V::Url(&["pulsar", "pulsar+ssl"])),
+            K::optional("namespace", V::String),
+            K::optional("tls_allow_insecure_connection", V::Boolean),
+            K::TLS_CA,
+            K::optional("tls_hostname_verification_enabled", V::Boolean),
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// The longest topic Nervix consumes, in bytes.
 const PULSAR_TOPIC_MAX: usize = 1024;

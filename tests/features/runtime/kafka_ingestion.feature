@@ -1531,7 +1531,7 @@ Feature: Kafka ingestion
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus statements fail with "client 'kafka_main' in domain '{{domain}}' cannot set CONFIG key 'allow.auto.create.topics'"
+    When these Plexus statements fail with "client config key 'allow.auto.create.topics' is reserved for Nervix"
       """
       CREATE KAFKA CLIENT kafka_main
       CONFIG {

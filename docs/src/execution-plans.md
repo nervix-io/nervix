@@ -363,6 +363,11 @@ archived domain start generation. Native loading retains one database snapshot w
 bounded sections. A `RESUME` completion changes the domain to running at that same generation
 and mapping only after publication and passive-handle clearing on every target node. The new
 running revision therefore binds generators and branch tasks to installed materialized rows.
+Each generator task may retain one admitted remote source generation. Every occurrence resolves
+its current source owner and describes the complete sealed identity before reusing that view;
+owner, placement or envelope changes replace it. Quiescence, paused time, ending intake and read
+failures discard the remote view. The cache belongs to the running task and is never an execution
+plan, installed state, persisted checkpoint or restore authority.
 [Backup And Restore Architecture](./backup-and-restore-architecture.md) owns archive cut modes,
 state selection, skipped sections and the restore guarantees, and [Backup And
 Restore](./backup-and-restore.md) the operator-visible statements, reports and limits.

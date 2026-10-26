@@ -55,12 +55,9 @@ async fn a_step_takes_buffered_deliveries_without_a_poll_per_message() {
     let server = StandInNatsServer::start(BURST)
         .await
         .assured("a loopback listener binds an ephemeral port");
-    let client = async_nats::connect(server.address.to_string())
+    let mut observer = NatsObserver::connect(&server.address.to_string(), SUBJECT)
         .await
-        .assured("the stand-in server answers the client's handshake");
-    let mut observer = NatsObserver::subscribe(&client, SUBJECT)
-        .await
-        .assured("the client is connected to the stand-in server");
+        .assured("the real observing client opens its subscription");
     timeout(DELIVERY_BOUND, async {
         while observer.received() < BURST {
             consume_budget().await;
@@ -99,6 +96,97 @@ async fn a_step_takes_buffered_deliveries_without_a_poll_per_message() {
         "draining {BURST} messages the client had already received took {polls} polls of the \
          runner task, more than {MOST_POLLS_FOR_THE_BURST}"
     );
+}
+
+/// Overflow is made deliberate on the actual driver's subscription, rather than inferred from a
+/// missing sequence. The fixture still sends the full scenario burst before the observer drains.
+#[nervix_primitives::test(flavor = "current_thread")]
+async fn an_observer_records_the_drivers_slow_consumer_notifications() {
+    let server = StandInNatsServer::start(BURST)
+        .await
+        .assured("the slow-consumer fixture binds a loopback port");
+    let mut observer = NatsObserver::connect_with_options(
+        &server.address.to_string(),
+        SUBJECT,
+        async_nats::ConnectOptions::new().subscription_capacity(1),
+    )
+    .await
+    .assured("the observing client opens a deliberately small subscription");
+    timeout(DELIVERY_BOUND, async {
+        while observer.received() < BURST
+            || event_count(&observer.describe_receipts(), "slow_consumer") == 0
+        {
+            consume_budget().await;
+            yield_now().await;
+        }
+    })
+    .await
+    .assured("the driver receives the full burst and reports the controlled overflow");
+
+    let receipts = observer.describe_receipts();
+    assert_eq!(event_count(&receipts, "connected"), 1);
+    assert!(event_count(&receipts, "slow_consumer") > 0);
+    assert_eq!(event_count(&receipts, "disconnected"), 0);
+    let first = observer
+        .next()
+        .await
+        .assured("the bounded subscription retains the first delivery");
+    assert_eq!(first.payload.as_ref(), b"1");
+}
+
+/// Ending the peer after every message reached the client must be observable without discarding
+/// the buffered messages. This separates a real disconnection from an incomplete observer drain.
+#[nervix_primitives::test(flavor = "current_thread")]
+async fn a_disconnected_observer_keeps_its_buffered_burst_and_reports_the_connection_end() {
+    let server = StandInNatsServer::start(BURST)
+        .await
+        .assured("the disconnect fixture binds a loopback port");
+    let mut observer = NatsObserver::connect(&server.address.to_string(), SUBJECT)
+        .await
+        .assured("the observing client opens its subscription");
+    timeout(DELIVERY_BOUND, async {
+        while observer.received() < BURST {
+            consume_budget().await;
+            yield_now().await;
+        }
+    })
+    .await
+    .assured("the client buffers the full burst before its peer ends");
+    drop(server);
+    timeout(DELIVERY_BOUND, async {
+        while event_count(&observer.describe_receipts(), "disconnected") == 0 {
+            consume_budget().await;
+            yield_now().await;
+        }
+    })
+    .await
+    .assured("ending the real TCP peer produces a driver disconnect notification");
+
+    for sequence in 1..=BURST {
+        consume_budget().await;
+        let message = observer
+            .next()
+            .await
+            .assured("the connection ending leaves every received message buffered");
+        assert_eq!(message.payload.as_ref(), sequence.to_string().as_bytes());
+    }
+    let receipts = observer.describe_receipts();
+    assert!(receipts.contains("32768 messages"));
+    assert!(event_count(&receipts, "disconnected") > 0);
+    assert_eq!(event_count(&receipts, "slow_consumer"), 0);
+}
+
+fn event_count(receipts: &str, event: &str) -> u64 {
+    let prefix = format!("{event}=");
+    let (_, remaining) = receipts
+        .split_once(&prefix)
+        .assured("the receipt diagnostic names this driver event");
+    remaining
+        .split(',')
+        .next()
+        .assured("the named event has a counter")
+        .parse()
+        .assured("the named event counter is an unsigned integer")
 }
 
 /// A NATS server that answers its one client's handshake and pings, and delivers a burst of

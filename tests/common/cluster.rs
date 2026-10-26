@@ -4919,6 +4919,14 @@ impl ClusterStatus {
     }
 }
 
+/// Reads a retained status observation through the same parser as the cluster's status waits.
+pub(crate) fn interconnect_status_from_text(raw: &str, peer: &str) -> Option<String> {
+    ClusterStatus::parse(raw.to_string())
+        .interconnect
+        .get(peer)
+        .cloned()
+}
+
 fn parse_membership_line(line: &str) -> Option<(String, String)> {
     let item = line.strip_prefix("- ")?;
     let (node_id, rest) = item.split_once(" [")?;
@@ -6594,8 +6602,7 @@ async fn observe_nats(
     dependencies: &DependencyEndpoints,
     subject: &str,
 ) -> io::Result<BrokerObserver> {
-    let client = nats_client(dependencies).await?;
-    let observer = NatsObserver::subscribe(&client, subject).await?;
+    let observer = NatsObserver::connect(dependencies.get(NATS_ADDR)?, subject).await?;
     Ok(BrokerObserver::nats(observer))
 }
 

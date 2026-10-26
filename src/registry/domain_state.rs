@@ -13,7 +13,7 @@
 )]
 
 use ahash::{HashMap, HashMapExt};
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
     CreateEndpoint, DomainName, EndpointType, IngestorInput, IngestorReference, Model, ModelIndex,
@@ -47,8 +47,7 @@ use crate::registry::{
             validate_emitter_publishing_contract, validate_endpoint_paths,
             validate_http_emitter_client, validate_http_literal_request_fields,
             validate_http_request_expressions, validate_ingestor_filter_where_for_internal_schemas,
-            validate_ingestor_source, validate_kafka_client, validate_sqs_fifo_group_expression,
-            validate_vhost_hostnames,
+            validate_ingestor_source, validate_sqs_fifo_group_expression, validate_vhost_hostnames,
         },
         expression::add_udf_dependency_edges,
         materialized_state::{
@@ -151,6 +150,18 @@ impl DomainState {
 
         for (key, model) in models {
             let identifier = &key.identifier;
+            if let Some(client) = model.configured_client() {
+                let declaration = client
+                    .connector
+                    .client()
+                    .assured("a configured client has a connector declaration");
+                declaration.config.validate(client.config).change_context(
+                    RegistryError::ClientConfig {
+                        domain: domain.clone(),
+                        client: client.name.clone(),
+                    },
+                )?;
+            }
             let validation = ModelValidationContext {
                 domain,
                 identifier,
@@ -235,8 +246,8 @@ impl DomainState {
                 Model::WireAvroSchema(schema) => {
                     ensure_wire_schema_has_fields(domain, identifier, schema)?;
                 }
-                Model::ClientKafka(client) => validate_kafka_client(domain, identifier, client)?,
-                Model::ClientPulsar(_)
+                Model::ClientKafka(_)
+                | Model::ClientPulsar(_)
                 | Model::ClientHttp(_)
                 | Model::ClientSentry(_)
                 | Model::ClientOtel(_)
@@ -273,22 +284,19 @@ impl DomainState {
                     }
                 }
                 Model::ClientPrometheus(client) => {
-                    if let Err(report) = PrometheusApiRoot::of_client_config(&client.config) {
-                        // The refusal quotes the issue, which names the key, so the one message a
-                        // failed command shows states the whole reason; the vocabulary's report
-                        // stays beneath it.
-                        let issue = report.current_context().clone();
-                        return Err(report.change_context(
+                    if !client.config.iter().any(|entry| entry.value.contains("{{")) {
+                        PrometheusApiRoot::of_client_config(&client.config).change_context(
                             RegistryError::InvalidPrometheusClientConfig {
                                 domain: domain.clone(),
                                 client: client.name.clone(),
-                                issue,
                             },
-                        ));
+                        )?;
                     }
                 }
                 Model::ClientWebsockets(client) => {
-                    if let Err(report) = WebsocketsClientConfig::parse(&client.config) {
+                    if !client.config.iter().any(|entry| entry.value.contains("{{"))
+                        && let Err(report) = WebsocketsClientConfig::parse(&client.config)
+                    {
                         let issue = report.current_context().clone();
                         return Err(report.change_context(
                             RegistryError::InvalidWebsocketsClientConfig {

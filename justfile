@@ -318,8 +318,12 @@ test-native-metadata-restore-repeat: tests-deps
     printf 'Native metadata restore qualification complete; evidence: %s\n' "$attempt"
 
 # Replay a compiled scenario binary, including a saved pre-fix reproducer, without rebuilding it.
+[positional-arguments]
 test-scenarios-binary binary *args: download-onnxruntime
-    ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)" {{ quote(binary) }} {{ quote(args) }}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    exec "$@"
 
 # Replay a compiled ONNX inspection owner with an explicit runtime library.
 test-onnx-owner-binary binary library *args:
@@ -574,6 +578,10 @@ check-package-lib package *args:
 # Run the unit tests of one workspace package whose tests need no server test dependencies.
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
+
+# Qualify the pinned NATS driver's flush implementation through its own bounded stream tests.
+test-nats-driver checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nats-driver") }} cargo test --manifest-path {{ quote(checkout + "/async-nats/Cargo.toml") }} --package async-nats --no-default-features --features aws-lc-rs,jetstream,server_2_10,server_2_11 --lib -- {{ args }}
 
 # Run the vocabulary settings' compiling and class-rejection API examples.
 test-settings:

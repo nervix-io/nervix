@@ -317,9 +317,9 @@ impl SessionServiceImpl {
         let prepared = match preflight {
             Ok(prepared) => prepared,
             Err(error) => {
-                return Err(StandaloneSetback::refused(command_error(format!(
-                    "{error:#}"
-                ))));
+                return Err(StandaloneSetback::refused(command_error(
+                    super::TransactionPreflightError::public_message(&error),
+                )));
             }
         };
         if let Err(error) = self
@@ -394,9 +394,9 @@ impl SessionServiceImpl {
                 match preflight {
                     Ok(prepared) => prepared,
                     Err(error) => {
-                        return Err(StandaloneSetback::refused(command_error(format!(
-                            "{error:#}"
-                        ))));
+                        return Err(StandaloneSetback::refused(command_error(
+                            super::TransactionPreflightError::public_message(&error),
+                        )));
                     }
                 }
             }

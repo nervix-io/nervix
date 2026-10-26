@@ -1,6 +1,34 @@
 Feature: Large native restore metadata
   Restoring a complete state set publishes one durable generation before START.
 
+  @restore_installation @deloxide_stress_restore
+  Scenario: A completed restore replay follows the current leader
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "replay.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the CLI restores "domain {{domain}} --as {{domain}}_copy" from "replay.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 0 resource versions and 1 models
+    And the CLI restore execution reference is saved as placeholder "restore_reference"
+    And a node other than placeholder "leader" is saved as placeholder "survivor"
+    When leadership is transferred from node "{{leader}}" to node "{{survivor}}"
+    Then node "{{survivor}}" eventually reports a leader other than "{{leader}}"
+    And node "{{leader}}" eventually reports a leader other than "{{leader}}"
+    When restore "DOMAIN {{domain}} AS {{domain}}_copy" of backup archive "replay.nvxb" is streamed to node "{{leader}}" under execution reference "{{restore_reference}}" in the background with outcome recovery
+    Then the background restore stream's outcome is "completed" as "recovered"
+    And the restore stream's report shows every step applied
+    And the restore stream's complete report is saved as placeholder "restore_report"
+    When the cluster is restarted
+    When restore "DOMAIN {{domain}} AS {{domain}}_copy" of backup archive "replay.nvxb" is streamed to node "{{leader}}" under execution reference "{{restore_reference}}" in the background with outcome recovery
+    Then the background restore stream's outcome is "completed" as "recovered"
+    And the restore stream's complete report matches placeholder "restore_report"
+
   @restore_installation @native_metadata_restore @deloxide_stress_restore @long_running
   Scenario Outline: Native lifecycle and Kafka metadata above the bulk budget on <cluster_size> nodes restore exactly
     Given Kafka is running
@@ -94,14 +122,14 @@ Feature: Large native restore metadata
       """
     Then the last cluster status schedules nodes on at least <restore_owners> distinct owners
     And the last cluster status placements of restored work are saved as placeholder "native_restore_placements"
-    When restore "DOMAIN {{source_domain}} AS {{domain}}" of backup archive "native.nvxb" is streamed to node "{{leader}}" under execution reference "{{native_restore_reference}}"
-    Then the restore stream's outcome is "completed" as "recovered"
+    When restore "DOMAIN {{source_domain}} AS {{domain}}" of backup archive "native.nvxb" is streamed to node "{{leader}}" under execution reference "{{native_restore_reference}}" in the background with outcome recovery
+    Then the background restore stream's outcome is "completed" as "recovered"
     And the restore stream's report shows every step applied
     And the restore stream's complete report is saved as placeholder "native_restore_report"
     When the cluster is restarted
     Then the current leader node is saved as placeholder "leader"
-    When restore "DOMAIN {{source_domain}} AS {{domain}}" of backup archive "native.nvxb" is streamed to node "{{leader}}" under execution reference "{{native_restore_reference}}"
-    Then the restore stream's outcome is "completed" as "recovered"
+    When restore "DOMAIN {{source_domain}} AS {{domain}}" of backup archive "native.nvxb" is streamed to node "{{leader}}" under execution reference "{{native_restore_reference}}" in the background with outcome recovery
+    Then the background restore stream's outcome is "completed" as "recovered"
     And the restore stream's complete report matches placeholder "native_restore_report"
     And stopped restored nodes preserve every native metadata value from backup archive "native.nvxb"
     When the cluster is restarted

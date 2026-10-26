@@ -1157,7 +1157,10 @@ impl SessionServiceImpl {
             ))
             .await
             {
-                return command_error(format!("{error:#}"));
+                return command_error(
+                    super::model_validation::client_validation_message(&error)
+                        .unwrap_or_else(|| format!("{error:#}")),
+                );
             }
             let prepared_udfs = match Box::pin(self.prepare_planned_domain_udfs(&planned)).await {
                 Ok(prepared) => prepared,
@@ -2457,7 +2460,7 @@ impl SessionServiceImpl {
                     }
                 };
 
-                let canonical = match model.to_canonical_plexus() {
+                let canonical = match model.to_public_plexus() {
                     Ok(v) => v,
                     Err(_) => {
                         let diagnostic = CommandDiagnostic::unlocated(

@@ -332,8 +332,8 @@ impl io::Write for SharedFileWriter {
 /// open, refusal, attachment and attempt, so a scenario with endpoints costs a few dozen lines.
 const TEST_TRACE_FILTER: &str =
     "nervix_interconnect=debug,nervix_client_core::restoration=debug,\
-     nervix_client_core::consumer=debug,nervix_client_core::producer=debug,\
-     nervix_server::application::session::consumers=debug,\
+     nervix_server::application=debug,nervix_client_core::consumer=debug,\
+     nervix_client_core::producer=debug,nervix_server::application::session::consumers=debug,\
      nervix_server::application::session::producers=debug,\
      nervix_server::application::client_consumers=debug,\
      nervix_server::application::client_producers=debug,\

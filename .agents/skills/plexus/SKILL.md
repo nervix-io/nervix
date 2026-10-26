@@ -113,6 +113,14 @@ Build configuration in dependency order:
 3. Define internal schemas, branch-key schemas, branches, wire schemas, and codecs.
 4. Define clients with a `<CONNECTOR> CLIENT` head, such as `CREATE KAFKA CLIENT`. Define signaling
    protocols, virtual hosts/endpoints, lookup models, and trusted Roto UDFs as needed.
+   Read the generated client CONFIG key tables in Connector Capabilities. Keys are lowercase and
+   case-sensitive; declare required keys exactly once, follow their value types and pair TLS
+   certificate/key files. Pass other property names only in an explicitly delegated driver
+   namespace. CREATE also runs network-free Kafka/connection-URL checks before storing a client;
+   credentials and connectivity still validate at initialization. Public SHOW CREATE and previews
+   redact declared secrets and address credentials/query options; backups retain secret-bearing
+   complete configuration under the archive contract.
+
 5. Define relays before nodes that read or write them.
 6. Define ingestors, processors, generators, and emitters in graph order.
 7. Define placement rules after every referenced runtime node, including each relay, exists.
@@ -146,6 +154,9 @@ configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`
 `ATTACH DOMAIN CLOCK`/`DETACH DOMAIN CLOCK`, resource uploads, backups, restores, and node
 administration outside the transaction. Plan restore capacity for independently admitted archive
 metadata and streamed checkpoint I/O, following the backup guidance in `references/configuring-nervix.md`.
+Size node memory for every execution pool, including active snapshots and optional retained materialized-source reads;
+the default startup requirement is 2,723 MiB. Read [Node Settings](https://docs.nervix.io/node-settings.html)
+for the complete prerequisite checks.
 Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after
@@ -342,9 +353,9 @@ including the returning bootstrap node, omit them.
   send that depends on an earlier reply goes after the wait for it. A `WAIT` step may list several
   matchers when their frames may arrive in any order. Use `CAPTURE` on a single-matcher step to
   record values, and read them in later programs through `$state`.
-- Say where payload starts flowing with `ACCEPT DATA`, either on `ON CONNECT` or on the `WAIT` step
-  whose completion proves the peer is streaming. Frames arriving before that are dropped, not
-  buffered.
+- Use `ACCEPT DATA` on `ON CONNECT` or on the `WAIT` step that must finish before accepting payload.
+  Frames arriving before acceptance are dropped. For an outbound client's bounded handshake
+  handoff and delivery after readiness, read `Ingestors` → `WEBSOCKETS CONNECTION`.
 - Scope rejection to where it applies: `FAIL JAQ` on a `WAIT` step aborts during that step, and a
   `FAIL JAQ` written before `ON CONNECT` applies throughout the handshake.
 - Preserve written operation order in schema, relay, junction, deduplicator, reorderer, emitter,

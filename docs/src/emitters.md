@@ -180,7 +180,7 @@ to discard a record.
 | Pulsar | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | Producer acceptance for `NO ACK`; one broker receipt per record for `ACK` |
 | RabbitMQ | `NO ACK`; `ACK SEQUENTIAL`; `ACK PARALLEL MAX <n>` | The channel's answer to one round trip after each write for `NO ACK`; publisher confirm for `ACK` |
 | MQTT | `QOS 0`; `QOS 1 ACK ...`; `QOS 2 ACK ...` | Client acceptance, `PUBACK`, or completion of the QoS 2 handshake respectively |
-| NATS | `NO ACK`; `JETSTREAM ACK SEQUENTIAL`; `JETSTREAM ACK PARALLEL MAX <n>` | The core NATS client's flush of the write to its socket for `NO ACK`, which is not a server round trip; JetStream `PubAck` otherwise |
+| NATS | `NO ACK`; `JETSTREAM ACK SEQUENTIAL`; `JETSTREAM ACK PARALLEL MAX <n>` | The Core NATS write's queued bytes drained and flushed on the same connection for `NO ACK`, without a server round trip; JetStream `PubAck` otherwise |
 | Redis Pub/Sub | `NO ACK` | Server acceptance of `PUBLISH`; the subscriber count is not a delivery guarantee |
 | ZeroMQ | `NO ACK` | Socket acceptance |
 | SQS | `SINGLE`; `BATCH` | Successful per-record or per-entry service response |
@@ -1131,9 +1131,14 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-emit).
 <!-- connector-matrix:emit-kafka-topic:end -->
 
-`ACK` waits for every record's delivery report. Kafka's `acks`, idempotence, batching, linger, and
-compression remain pass-through client configuration. `ACK TIMEOUT` bounds the report wait and is
-also the producer's own delivery bound: the emitter sets librdkafka's `message.timeout.ms` to its
+`ACK` waits for every record's delivery report through the shared confirmation window. If a publish
+attempt fails, the window first settles the answers already received and returns only unresolved
+members for retry; confirmed records are not sent again by that attempt's retry. An unanswered
+report is still ambiguous: the broker may have accepted the record, so a retry can duplicate it.
+
+Kafka's `acks`, idempotence, batching, linger, and compression remain pass-through client
+configuration. `ACK TIMEOUT` bounds the report wait and is also the producer's own delivery bound:
+the emitter sets librdkafka's `message.timeout.ms` to its
 `ACK TIMEOUT`, rounded up to the millisecond, and removes `delivery.timeout.ms`, overriding either
 name in the client's `CONFIG`. The producer therefore gives up a record within about a second of
 the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
@@ -1152,14 +1157,21 @@ queue is an infrastructure condition paced by the declared retry policy. In eith
 whose payload exceeds the entire `queue.buffering.max.kbytes` capacity is rejected through
 `ON MESSAGE ERROR`, with its payload size and the capacity in bytes. This queue capacity counts
 the payload alone; `message.max.bytes` separately bounds the encoded Kafka record.
+
+The producer keeps librdkafka's topic auto-creation default. A broker that permits it can therefore
+create a missing topic on the first publish, even though Nervix's consumers disable auto-creation
+and `CREATE KAFKA CLIENT` refuses `allow.auto.create.topics`. Provision output topics explicitly;
+the consumer's no-creation guarantee does not extend to the producer.
+
 When the emitter stops, it flushes what the producer still queues, in both modes and
 regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
 the node's graceful shutdown each give that flush their deadline. Records still awaiting their
 delivery report when the deadline passes are lost; `DESCRIBE EMITTER` reports how many as its
 transient error, counting records alone and never the errors or statistics waiting in librdkafka's
 queue beside them, and a replacement that cannot flush fails and keeps the running emitter. Because
-a record counts until its delivery report arrives, the producer always reports every record and
-overrides `delivery.report.only.error` in the client's `CONFIG`. A definitive record-specific
+a record counts until its delivery report arrives, the producer always reports every record.
+`delivery.report.only.error` is reserved for Nervix and refused in the client's `CONFIG` at CREATE.
+A definitive record-specific
 rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
 Once the emitter and its flush are done with the producer, the node destroys it on its connector
 control workers, never on the task that served the emitter. The destruction purges what the producer
@@ -1472,24 +1484,23 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [NATS SUBJECT capability and mirror reference](connector-capabilities.md#nats-subject-emit).
 <!-- connector-matrix:emit-nats-subject:end -->
 
-`NO ACK` publishes through Core NATS. A write hands its records to the client's command queue and
-delivers them once the client reports them flushed to its socket. The flush is local: the server
-answers nothing, so a delivered record is still lost when its connection fails before the server
-reads it. A connection that fails also discards the records the client had already taken from its
-command queue for that connection but not yet written, while the records still queued are sent once
-the client has connected again. A flush that was waiting when its connection failed completes once
-the client has connected again and flushed the new connection, so a write whose flush spans a
-reconnect delivers records the server may never have received.
+`NO ACK` publishes through Core NATS. A write delivers its records only after the client's queued
+bytes have drained and their connection has flushed. The flush is local: the server answers
+nothing, so a delivered record can still be lost if its connection fails before the server reads
+it. If the connection is replaced before the write completes, its records stay unresolved and
+Nervix retries them on the emitter's policy. A replacement connection's flush cannot certify bytes
+discarded with the failed connection. Records queued while the client is already disconnected
+can complete on its next connection; another replacement makes that write uncertain too.
 
 The client's optional `timeout_ms` bounds each write, the hand-over and the flush included. A write
 that runs out of it, because the client cannot write to a server that went down or stopped reading,
 fails as the emitter's transient status, which names `timeout_ms` and its bound, and the emitter
-retries it on its policy. Its records stay with the client, which sends them once its connection
-drains or it has connected again, so the retry can deliver them a second time; a connection that
-fails first discards those it had already taken. A write first waits, within its own `timeout_ms`,
-for the client to flush what an earlier write left with it, and hands the client nothing more until
-it has, so a retry never queues another copy behind the one the client holds. Without `timeout_ms` a
-write waits for its flush however long that takes.
+retries it on its policy. The client may still send records from that attempt, while a failed
+connection may have discarded others, so a retry can duplicate records the server received. A
+write first drains what an earlier attempt left with the client, within its own `timeout_ms`,
+before handing over more records. If that pending flush used a replacement connection, the write
+reports the uncertainty before the next retry resends the unresolved records. Without
+`timeout_ms` a write waits for its flush however long that takes.
 
 The client connects again on its own after it loses its server, on the emitter's `RETRY POLICY`: it
 waits `BACKOFF` before its first attempt and doubles the wait for each further attempt up to `MAX`.
@@ -1537,7 +1548,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | BATCH | optional |
 | Protocol batch maximum | No additional protocol maximum is declared; general BATCH limits still apply. |
 | Batch transformation required | no |
-| Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
+| Envelope | Not offered: The PUSH socket sends one payload frame. Multipart envelopes and additional per-record envelope clauses are not offered. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | bytes queued for a peer: unbounded |
 | Network waits | connecting and the ZMTP handshake: `connect_timeout_ms`; 30s when omitted<br>a send: `timeout_ms`; unbounded when omitted |
@@ -1552,9 +1563,14 @@ paced by the declared retry policy.
 
 The emitter is a PUSH socket on the client's `addr`, a `tcp://<host>:<port>` or `ipc://<path>`
 endpoint. With `'bind' = 'true'` the socket binds that address and peers connect to it; otherwise
-it connects to a peer bound there. Every value of the client's `CONFIG` is rendered the way an
+it connects to a peer bound there (`'bind' = 'false'` is also the default when omitted).
+Only `true` and `false`, ignoring letter case, are accepted for `bind`; `CREATE CLIENT` refuses
+other values. Every value of the client's `CONFIG` is rendered the way an
 ingestor renders it, so it can name the client's `MOUNT`; see
 [Client Config Mounts](resources.md#client-config-mounts).
+
+`CREATE CLIENT` checks `addr` with the socket driver's TCP/IPC endpoint parser, including after
+rendering an address template. This check opens no socket and performs no name lookup.
 
 A client that connects rather than binds connects when the emitter starts. The driver retries a
 refused connection on its own and waits for the peer's ZMTP handshake, so the client's
@@ -2786,7 +2802,7 @@ out the additional mode- and transport-specific duplicate and loss conditions.
 | --- | --- | --- | --- |
 | Kafka | `ACK` retry after an ambiguous delivery report or timeout; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after local producer-queue admission; broker durability follows Kafka client and topic configuration | None; Kafka producer idempotence is pass-through client configuration |
 | Pulsar | `ACK` retry after an ambiguous broker receipt; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` does not expose broker failures after producer acceptance; retention and durability remain broker policy | None |
-| NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a write ran out of `timeout_ms`, whose records the client still sends unless its connection fails first; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` delivers once the client reports a record flushed to its socket, which is not durable stream acknowledgement; a failed connection loses what the server had not read from it and what the client had taken for it but not yet written, even when a write's flush completes after the client connected again | None |
+| NATS | JetStream retry after an ambiguous `PubAck`; Core `NO ACK` retry after a timed-out write or a connection change, including records the server may already have received; either mode after a lost upstream ACK or attached sibling failure | Core NATS `NO ACK` confirms a local drain and flush on the write's connection, without durable stream acknowledgement; a connection failure after that completion can lose what the server has not read | None |
 | RabbitMQ | Confirming `ACK` retry after a nack, timeout, or lost confirm; `NO ACK` retry after its channel or connection is lost before a write's round trip completes; either mode after a lost upstream ACK or attached sibling failure | `NO ACK` can lose a record after the broker's channel has taken it; queue durability and message persistence remain broker policy | None |
 | SQS | Retry after an ambiguous `SendMessage` result, lost ACK, or attached sibling failure | Any failure after detached relay acceptance; SQS retains its own at-least-once behavior | None |
 | MQTT | QoS 1 or 2 retry after an ambiguous handshake; any mode after a lost upstream ACK or attached sibling failure | QoS 0 can lose a record after client acceptance; later delivery follows the configured broker and session guarantees | None |

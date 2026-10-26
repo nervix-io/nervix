@@ -1662,6 +1662,13 @@ no available record for that read. The dependency policy then waits, skips, or s
 default; `REQUIRED WAIT` retains the batch and retries after routing, state, or bounded poll progress.
 Execution failures and transport failures remain errors.
 
+Generator scans describe their selected source owner on every occurrence. They retain one
+verified decoded generation and fetch bytes only when the owner, placement or complete sealed
+envelope changes. The envelope's digest, length, revision, ownership fence and branch generation
+all participate in reuse, so a restarted owner with changed contents at an equal or lower revision
+requires another transfer. A failed description never authorizes serving the retained view.
+This uses the existing describe and bounded fetch operations without another wire form or lane.
+
 The [Control Plane](./control-plane.md) defines when replicated changes and resources become
 authoritative. The [Data Plane](./data-plane.md) defines how a local execution consumes transferred
 state. The interconnect supplies bounded delivery between those owners and does not reinterpret
@@ -1837,6 +1844,10 @@ generation, advertised address, and observation time that were targeted. A healt
 return the same application identity. If discovery replaces the incarnation or endpoint while a
 probe is running, its late result is ignored.
 
+A failed probe records its exact target and complete typed request-error chain at debug level.
+A response with a different application identity records the target and returned identity at the
+same level. These diagnostics do not change availability classification or the probe deadline.
+
 Health observations distinguish:
 
 - **Healthy:** the current target returned the expected application identity within the deadline.
@@ -1887,6 +1898,14 @@ polling queries while the barrier reads the leader's participant view, so a prob
 executor permit keeps progressing while that view request waits. Ending the barrier aborts its
 probe task. Queries retain their transport deadlines, and the barrier retains its command deadline
 and leader-tenure and incarnation checks.
+
+The public gossip-completion qualification holds the two followers' revision replies after
+sampling and a peer's health reply. One client connects before those faults, then creates a user,
+creates a relay and reads cluster status in order within one twenty-second harness budget. That
+budget includes margin over the measured multi-stage gossip propagation under parallel bulk load;
+it is not a product deadline. The retained status must still report the connected follower as
+connected and name the new relay's owner before releasing any reply. The adjacent health-only
+qualification keeps its nine-second sequential probe.
 
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application

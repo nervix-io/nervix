@@ -424,7 +424,7 @@ them:
   a 64 KiB buffer, which the streamed publisher installs like a guest save, including a container
   larger than the 32 MiB bulk budget; the pieces and the container briefly occupy twice its disk
   space. Typed branch uniqueness has an independent 8 MiB commands reservation and native row views an
-  independent 8 MiB relay reservation. Decoded columns are charged cumulatively to relay memory
+  independent 8 MiB state-read reservation. Decoded columns are charged cumulatively to `state_read`
   through installation, and loading refuses further groups when that class is full. Row projection
   and Arrow encoding share one admission and one bounded bulk CPU job, so projected columns never
   wait for a second grant while retaining the first, and typed native identities convert only after
@@ -541,6 +541,20 @@ its retry validity ends; a dry run releases it when it answers.
 State installation runs inside the apply-models step, after the models published the domain's
 stopped schedule, so state is staged under the placements the restored schedule computes for this
 cluster.
+Decoded materialized containers keep their metadata and column charges in the independent
+`state_read` pool until installation consumes them or their last source reader ends. Its capacity
+equals the relay budget and counts separately in startup sizing, leaving relay work the capacity
+it needs to evaluate, encode and dispatch while those source columns remain admitted.
+
+Running generators keep remote source views only in their task-local read cache. They describe
+the selected owner's complete sealed identity before each reuse and replace a changed view even
+when its revision equals or precedes the one they observed before restart or restore. Cached
+rows carry their admission charges in the separate bounded `state_read_cache` pool, whose
+capacity equals the relay budget and is included in the startup total. Optional retention never
+waits for space: a full pool returns the complete current read uncached. Cached references are
+released before replacement admission and on
+quiescence or failure. They neither persist nor select a restore generation; complete publication,
+handle clearing and the installation gate remain the authority for resumption.
 
 ### The Installation Authority
 
@@ -995,8 +1009,10 @@ operation under the capability its binding grants is checked by the assignment a
 checks and Loom models. Quiesced capture, restore, offset, generation and ownership behavior is
 established by the ordinary, public and model evidence above, not by those examples.
 
-Ordinary Bolero properties run on every pull request; the sanitizer campaigns run only for one
-labeled `fuzz`, and a skipped campaign is neither execution nor coverage evidence. Coverage uses the
+Ordinary Bolero properties run when the reusable Bolero workflow is selected. Check excludes that
+workflow only for a verified prose-only pull request without `fuzz`; a labeled pull request runs
+both the ordinary properties and sanitizer campaigns. A skipped campaign is neither execution nor
+coverage evidence. Coverage uses the
 LLVM tools the toolchain declares, and patch coverage is advisory. The measured freeze durations,
 archive throughput and restore times, with their commands and image identities, are recorded on
 [Backup 07](https://app.clickup.com/t/86bc8dbxv); the freeze grows with a domain's branches and

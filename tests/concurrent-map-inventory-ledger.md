@@ -318,6 +318,13 @@ work retains its existing acknowledgement ownership and registry bounds.
 | `RelayPeerProtocol::outbound_attempts`, `outbound_admissions` | send, status/cancel reconciliation, exact terminal reply, refusal cleanup and peer ending | per remote frame or ACK | retained peer owner; receiver epoch and full registrar identity | at most 2Q of each; idle retention 10 min; exact correlation retires once | retain: bounded peer protocol, Typed Ratchet 05 |
 | `RequestState::handlers` (`ArcSwap` of an immutable map) | copy-on-write registration; one load per request | per remote frame, lock-free | fixed at startup | none | retain: bounded protocol (copy-on-write table) |
 
+Generator source reads still issue one description per occurrence, but issue a snapshot fetch only
+when the selected owner, placement or complete sealed envelope changes. An unchanged generation
+therefore avoids the fetch handler's immutable-table load and bulk connection lease. Connection
+registries retain their lifecycle-only access. The generator's retained decoded view is one
+task-owned optional generation with its admission, released on replacement or task/read ending;
+it adds no map or lock and does not change relay-frame or ACK protocol maps.
+
 ### Metrics
 
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |

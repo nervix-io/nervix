@@ -3,8 +3,9 @@
 The [Nervix Kubernetes Operator](https://github.com/nervix-io/nervix-k8s-operator) watches
 namespaced `NervixCluster` resources across a Kubernetes cluster. For each resource, it creates the
 services, StatefulSet, one persistent volume claim per Nervix node, and the certificates its nodes
-authenticate each other with. It also coordinates one-time initialization of the `default` user
-before scaling the StatefulSet to the requested replica count.
+authenticate each other with. It also coordinates one-time initialization of the `default` user and
+of the cluster parameters a new cluster requests before scaling the StatefulSet to the requested
+replica count.
 
 ## Prerequisites
 
@@ -53,8 +54,9 @@ kubectl --namespace nervix create secret generic nervix-initial-password \
 ```
 
 The operator exposes this credential only to the first bootstrap pod. After authentication proves
-that Nervix committed the user, the operator restarts that pod without the credential and then
-scales the cluster to the requested replica count.
+that Nervix committed the user, the operator commits the requested
+[cluster parameters](#cluster-parameters), restarts that pod without the credential and then scales
+the cluster to the requested replica count.
 
 ## Create A Nervix Cluster
 
@@ -80,7 +82,7 @@ spec:
 
 Each node checks its volume and its memory before it starts, and refuses to start when they cannot
 hold its configuration: its volume must be at least as large as each resource quota, 16 GiB for
-extracted resources by default, and its memory limit must hold its execution budgets, 2.28 GiB. The
+extracted resources by default, and its memory limit must hold its execution budgets, 2.66 GiB. The
 example spells out the operator's defaults, a 20 GiB volume and a 3 GiB memory limit, which meet
 both checks. With a smaller volume or memory limit, every pod exits with the refusal.
 [Capacity Planning](capacity-planning.md#what-a-node-needs-to-start) gives the rules.
@@ -100,6 +102,42 @@ kubectl --namespace nervix get pods,services,persistentvolumeclaims
 
 One operator can manage multiple Nervix clusters. Create each cluster as a separate
 `NervixCluster`, usually in a separate namespace or with a distinct name in the same namespace.
+
+## Cluster Parameters
+
+Cluster parameters, such as the replica count, are policy the whole cluster shares. The operator
+passes no cluster parameter option to any node. Restarting a pod, recreating it on its persistent
+volume, rolling the StatefulSet and scaling it therefore change no parameter, and a new cluster
+starts with the server's defaults.
+
+To start a new cluster with other values, request them in `spec.initialClusterParameters`:
+
+```yaml
+spec:
+  initialDefaultUserPasswordSecretRef:
+    name: nervix-initial-password
+    key: password
+  initialClusterParameters:
+    replicaCount: 2
+```
+
+`replicaCount` is `REPLICA_COUNT`: how many nodes besides its owner hold a replica of each piece of
+runtime state. The operator commits the request while it initializes the cluster, after the
+bootstrap pod accepts the initial password and before the operator removes it. Running the bootstrap
+pod's own `nervix-cli`, it reads the committed values with `DESCRIBE CLUSTER` and commits every
+requested value that differs with one `ALTER CLUSTER SET`. It decides the outcome from the committed
+values it reads back, so an initialization that resumes after the bootstrap pod or the operator
+restarted commits each value once. The cluster stays initializing until the request is committed. A
+server without `ALTER CLUSTER SET` refuses the statement, and the refusal is reported. The operator's
+ClusterRole lets it exec into pods for this.
+
+`status.initialClusterParameters` records the values the operator committed. The
+`InitialClusterParametersCommitted` condition reports on the request: `Pending`, or `Uncommitted`
+with the refusal, while the cluster initializes; `Committed` once the request is committed;
+`ChangedAfterInitialization` when the request changes afterwards; and `InitializationNotRequested`
+for a cluster without `initialDefaultUserPasswordSecretRef`, which the operator does not initialize.
+The operator never changes an initialized cluster's parameters. Change them with `ALTER CLUSTER SET`,
+which `DESCRIBE CLUSTER` then reports with each node's running values.
 
 ## Interconnect Certificates
 
@@ -194,4 +232,7 @@ The [startup preflight](node-settings.md#the-startup-preflight) retains its sepa
 Changes to the server's command line, startup settings or initialization contract must keep the
 operator's generated startup command, chart and example current in the same delivery. The server
 PR's deployment check is required evidence for that work. The operator's own workflow also checks
-changes to its repository; it does not replace the server-image checks.
+changes to its repository: it interrupts the example's initialization by stopping the operator and
+recreating the bootstrap pod, then restarts and recreates pods on their volumes, rolls and scales
+the StatefulSet, and changes the parameter request. After each step every pod must start and the
+cluster must keep its committed parameters. It does not replace the server-image checks.

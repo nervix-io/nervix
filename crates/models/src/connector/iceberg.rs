@@ -5,8 +5,9 @@
 //! - **Owns.** The table emitter Model with its storage backend, catalog and commit policy, the
 //!   object-store and catalog client Models it writes and commits through, and what the emitter
 //!   declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared emitter declarations and the names a body references.
-//! - **Must not know.** The Iceberg, object-store or catalog drivers, their configuration keys, or
+//! - **Must not know.** The Iceberg, object-store or catalog drivers, or
 //!   how data files are staged and committed.
 
 #![cfg_attr(
@@ -35,10 +36,102 @@ use crate::{
     LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
 };
 
-configured_client!(S3: unpooled, config NervixWithPropertyNamespaces, CreateClientS3 => S3ConfigEntry);
-configured_client!(Gcs: unpooled, config NervixWithPropertyNamespaces, CreateClientGcs => GcsConfigEntry);
-configured_client!(AzureBlob: unpooled, config NervixWithPropertyNamespaces, CreateClientAzureBlob => AzureBlobConfigEntry);
-configured_client!(IcebergRest: unpooled, config NervixWithPropertyNamespaces, CreateClientIcebergRest => IcebergRestConfigEntry);
+configured_client!(S3: unpooled, config CLIENT_CONFIG_S3, CreateClientS3 => S3ConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG_S3: crate::ClientConfigSchema = {
+    use crate::{
+        ClientConfigKey as K, ClientConfigNamespace, ClientConfigSchema, ClientConfigValue as V,
+    };
+    ClientConfigSchema::new(
+        &[
+            K::optional("access_key_id", V::String).secret().driver(),
+            K::optional("allow_anonymous", V::Boolean).driver(),
+            K::optional("client_region", V::String).driver(),
+            K::optional("disable_ec2_metadata", V::Boolean).driver(),
+            K::optional("endpoint", V::Url(&["http", "https"])).driver(),
+            K::optional("path_style_access", V::Boolean).driver(),
+            K::optional("region", V::String).driver(),
+            K::optional("secret_access_key", V::String)
+                .secret()
+                .driver(),
+            K::optional("session_token", V::String).secret().driver(),
+            K::TIMEOUT,
+        ],
+        &[ClientConfigNamespace::All],
+        &[],
+    )
+};
+configured_client!(Gcs: unpooled, config CLIENT_CONFIG_GCS, CreateClientGcs => GcsConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG_GCS: crate::ClientConfigSchema = {
+    use crate::{
+        ClientConfigKey as K, ClientConfigNamespace, ClientConfigSchema, ClientConfigValue as V,
+    };
+    ClientConfigSchema::new(
+        &[
+            K::optional(
+                "credential_path",
+                V::File(crate::ClientConfigFile::MountedFile),
+            )
+            .secret()
+            .driver(),
+            K::optional("no_auth", V::Boolean).driver(),
+            K::optional("service_path", V::Url(&["http", "https"])).driver(),
+            K::TIMEOUT,
+            K::optional("token", V::String).secret().driver(),
+        ],
+        &[ClientConfigNamespace::All],
+        &[],
+    )
+};
+configured_client!(AzureBlob: unpooled, config CLIENT_CONFIG_AZUREBLOB, CreateClientAzureBlob => AzureBlobConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG_AZUREBLOB: crate::ClientConfigSchema = {
+    use crate::{
+        ClientConfigKey as K, ClientConfigNamespace, ClientConfigSchema, ClientConfigValue as V,
+    };
+    ClientConfigSchema::new(
+        &[
+            K::optional("account_key", V::String).secret().driver(),
+            K::optional("account_name", V::String).driver(),
+            K::optional("authority_host", V::String).driver(),
+            K::optional("client_id", V::String).driver(),
+            K::optional("client_secret", V::String).secret().driver(),
+            K::optional("connection_string", V::String)
+                .secret()
+                .driver(),
+            K::optional("endpoint", V::Url(&["http", "https"])).driver(),
+            K::optional("sas_token", V::String).secret().driver(),
+            K::optional("tenant_id", V::String).driver(),
+            K::TIMEOUT,
+        ],
+        &[ClientConfigNamespace::All],
+        &[],
+    )
+};
+configured_client!(IcebergRest: unpooled, config CLIENT_CONFIG_ICEBERGREST, CreateClientIcebergRest => IcebergRestConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG_ICEBERGREST: crate::ClientConfigSchema = {
+    use crate::{
+        ClientConfigKey as K, ClientConfigNamespace, ClientConfigSchema, ClientConfigValue as V,
+    };
+    ClientConfigSchema::new(
+        &[
+            K::optional("credential", V::String).secret().driver(),
+            K::optional("oauth2-server-uri", V::Url(&["http", "https"])).driver(),
+            K::optional("scope", V::String).driver(),
+            K::optional("token", V::String).secret().driver(),
+            K::required("uri", V::Url(&["http", "https"])).driver(),
+            K::optional("warehouse", V::String).driver(),
+        ],
+        &[ClientConfigNamespace::All],
+        &[],
+    )
+};
 
 pub type IcebergValueMapping = EmitterValueMapping;
 

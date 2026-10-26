@@ -500,6 +500,16 @@ execution reference like any other lost reply.
 
 ## Command Dispositions
 
+Client CONFIG validation uses the ordinary failed-command outcome before configuration commits.
+The registry checks declared keys and the composition root runs network-free driver checks for
+standalone mutations and transaction preflight. Refusals name the client and key without rendering
+driver values that may contain credentials. A refused transaction statement leaves the transaction
+available for correction. `SHOW CREATE CLIENT` and structured-choice previews are confidential
+inspection projections: declared secrets, address credentials/query options and undeclared driver
+properties appear as `********`. Complete canonical configuration remains in backup serialization;
+inspection text is not a complete configuration export. See the
+[Connector Contract](connector-contract.md) for the validation boundary and initialization limits.
+
 A command's reply is a `CommandOutcome`: the execution reference it answers, whether the outcome was
 produced now or recovered from the durable record of an earlier attempt, one typed disposition, a
 message for display, diagnostics with optional source spans, and, for a request of several

@@ -4,7 +4,7 @@
 //! Layer: test harness.
 //! - **Owns.** Starting a console page with the connection recorder in `recorder.js`, reading the
 //!   page's record, closing the session connection the page holds, and the steps that check the
-//!   record against the consoles of the scenario's nodes.
+//!   record against the consoles of the scenario's nodes and the leaders the nodes reported on it.
 //! - **Depends on.** The scenario's browser page and cluster, and the console connection record
 //!   and its checks.
 //! - **Must not know.** How the console drives its session, or how a node serves it.
@@ -14,7 +14,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::websocket::CONSOLE_SESSION_PATH;
 
 use super::{ScenarioWorld, expand_placeholders};
-use crate::common::console_connections::{ConsoleAddress, ConsoleConnectionRecord};
+use crate::common::console_connections::{
+    ConsoleAddress, ConsoleConnectionRecord, ReportedLeaders,
+};
 
 /// What a console page runs before any script of its own.
 const RECORDER: &str = include_str!("recorder.js");
@@ -46,6 +48,14 @@ async fn read_record(page: &playwright_rs::Page) -> ConsoleConnectionRecord {
         .assured("every console page starts with the connection recorder")
 }
 
+/// The leaders the nodes reported on the page's connections.
+fn reported_leaders(record: &ConsoleConnectionRecord) -> ReportedLeaders {
+    match record.reported_leaders() {
+        Ok(leaders) => leaders,
+        Err(error) => panic!("{error:#}; the web console's connections:{record}"),
+    }
+}
+
 /// The console `node_id` serves, as the connections the page opens to it name it.
 fn console_of(world: &ScenarioWorld, node_id: &str) -> ConsoleAddress {
     let node_id = expand_placeholders(world, node_id);
@@ -71,19 +81,12 @@ async fn when_web_console_loses_its_session_connection(world: &mut ScenarioWorld
     }
 }
 
-#[then(expr = "the web console's session reconnected to node {string} after it was lost")]
-async fn then_web_console_session_reconnected(world: &mut ScenarioWorld, node_id: String) {
-    let console = console_of(world, &node_id);
+#[then("the web console's session reconnected where it lost its connection")]
+async fn then_web_console_session_reconnected_where_it_was_lost(world: &mut ScenarioWorld) {
     let record = read_record(browser_page(world)).await;
-    let reconnected = match record.session_reconnected_after_loss(&console) {
-        Ok(reconnected) => reconnected,
-        Err(violation) => panic!("{violation}; the web console's connections:{record}"),
-    };
-    assert!(
-        reconnected,
-        "no session connection opened on {console} after the web console lost its session \
-         connection; its connections:{record}"
-    );
+    if let Err(violation) = record.session_reconnected_where_it_was_lost() {
+        panic!("{violation}; the web console's connections:{record}");
+    }
 }
 
 #[then("the web console never held two session connections at once")]
@@ -96,9 +99,9 @@ async fn then_web_console_held_one_session_connection_at_a_time(world: &mut Scen
 
 #[then(
     expr = "the web console's session reached node {string} until it was redirected to node \
-            {string}"
+            {string}, and then only nodes reported to it as the leader"
 )]
-async fn then_web_console_session_followed_its_redirect(
+async fn then_web_console_session_followed_reported_leaders(
     world: &mut ScenarioWorld,
     origin: String,
     leader: String,
@@ -106,16 +109,26 @@ async fn then_web_console_session_followed_its_redirect(
     let origin = console_of(world, &origin);
     let leader = console_of(world, &leader);
     let record = read_record(browser_page(world)).await;
-    if let Err(violation) = record.session_followed_redirect(&origin, &leader) {
-        panic!("{violation}; the web console's connections:{record}");
+    let leaders = reported_leaders(&record);
+    if let Err(violation) = record.session_followed_reported_leaders(&leaders, &origin, &leader) {
+        panic!(
+            "{violation}; the web console's connections:{record}\nthe leaders reported to \
+             it:{leaders}"
+        );
     }
 }
 
-#[then(expr = "the web console's backup downloads and restores reached node {string}")]
-async fn then_web_console_backup_streams_reached(world: &mut ScenarioWorld, leader: String) {
-    let leader = console_of(world, &leader);
+#[then(
+    "the web console's backup downloads and restores reached only nodes reported to it as the \
+     leader"
+)]
+async fn then_web_console_backup_streams_reached_reported_leaders(world: &mut ScenarioWorld) {
     let record = read_record(browser_page(world)).await;
-    if let Err(violation) = record.backup_streams_reached(&leader) {
-        panic!("{violation}; the web console's connections:{record}");
+    let leaders = reported_leaders(&record);
+    if let Err(violation) = record.backup_streams_reached_reported_leaders(&leaders) {
+        panic!(
+            "{violation}; the web console's connections:{record}\nthe leaders reported to \
+             it:{leaders}"
+        );
     }
 }

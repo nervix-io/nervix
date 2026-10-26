@@ -304,6 +304,69 @@ fn given_restore_publication_pauses(
     );
 }
 
+/// Arms the existing node-specific hooks before a request learns its current leader. Only the
+/// coordinator that actually reaches publication remains held across the later authority change.
+#[given(expr = "restoring domain {string} pauses on its first coordinator")]
+fn given_first_restore_coordinator_pauses(world: &mut ScenarioWorld, domain: String) {
+    let domain = scenario_domain(world, &domain);
+    for coordinator in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .pause_restore_state_publication(domain.clone(), node_name(&coordinator));
+    }
+}
+
+#[then(
+    expr = "the first publication coordinator for restoring domain {string} is saved as \
+            placeholder {string}"
+)]
+async fn then_first_restore_coordinator_is_saved(
+    world: &mut ScenarioWorld,
+    domain: String,
+    placeholder: String,
+) {
+    let domain = scenario_domain(world, &domain);
+    let candidates = world.cluster().node_ids();
+    let mut pauses = Vec::new();
+    for coordinator in &candidates {
+        let coordinator = coordinator.clone();
+        let fault_injection = world.fault_injection.clone();
+        let domain = domain.clone();
+        pauses.push(Box::pin(async move {
+            fault_injection
+                .wait_for_restore_state_publication(&domain, &node_name(&coordinator))
+                .await;
+            coordinator
+        }));
+    }
+    let mut background = world
+        .background_restore
+        .take()
+        .assured("the restore request is running before its publication barrier");
+    let coordinator = nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
+        nervix_primitives::select! {
+            biased;
+            (coordinator, _, _) = futures_util::future::select_all(pauses) => coordinator,
+            ended = &mut background => {
+                let ended = ended.assured("the background restore task does not panic");
+                panic!("restore ended before its publication barrier: {ended:?}");
+            }
+        }
+    })
+    .await
+    .assured("restore reaches its publication barrier");
+    world.background_restore = Some(background);
+    for candidate in candidates {
+        if candidate != coordinator {
+            world
+                .fault_injection
+                .release_restore_state_publication(&domain, &node_name(&candidate));
+        }
+    }
+    println!("restore publication is held on coordinator '{coordinator}'");
+    world.placeholders.insert(placeholder, coordinator);
+}
+
 #[then(expr = "restoring domain {string} by coordinator {string} has reached state publication")]
 async fn then_restore_publication_pauses(
     world: &mut ScenarioWorld,
@@ -393,21 +456,19 @@ async fn then_restore_eventually_completes(
     reference: String,
 ) {
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
-    let end = nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
-        let mut poll = nervix_primitives::time::interval(Duration::from_millis(100));
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            poll.tick().await;
-            let end = stream_restore(&request, None, None).await;
-            match &restore_outcome(&end).disposition {
-                CommandDisposition::Completed { .. } => break end,
-                CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying) => {}
-                other => panic!("restore recovery did not complete: {other:?}"),
-            }
-        }
-    })
+    let end = nervix_primitives::time::timeout(
+        RESTORE_PAUSE_TIMEOUT,
+        request.complete(restore_outcome_routes(world)),
+    )
     .await
     .assured("restore completes under the new coordinator");
+    assert!(
+        matches!(
+            restore_outcome(&end).disposition,
+            CommandDisposition::Completed { .. }
+        ),
+        "restore recovery completes: {end:?}"
+    );
     world.last_restore_end = Some(end);
 }
 
@@ -1265,6 +1326,21 @@ struct RestoreStreamRequest {
     archive: Vec<u8>,
 }
 
+/// Every current route is eligible to teach a probe the outcome of its immutable execution.
+fn restore_outcome_routes(world: &ScenarioWorld) -> Vec<String> {
+    world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .map(|node| {
+            world
+                .cluster()
+                .grpc_uri(&node)
+                .assured("each scenario node has a restore endpoint")
+        })
+        .collect()
+}
+
 impl RestoreStreamRequest {
     /// Repeats one immutable restore request until a node knows its outcome. Only the destination
     /// changes; a refusal or definitive failure returns with its actual origin and report.
@@ -1472,15 +1548,7 @@ async fn when_restore_is_streamed_with_outcome_recovery(
         "a background restore stream is already running"
     );
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
-    let mut servers = Vec::new();
-    for node in world.cluster().node_ids() {
-        servers.push(
-            world
-                .cluster()
-                .grpc_uri(&node)
-                .assured("each scenario node has a restore endpoint"),
-        );
-    }
+    let servers = restore_outcome_routes(world);
     world.background_restore = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
         request.complete(servers),
     )));

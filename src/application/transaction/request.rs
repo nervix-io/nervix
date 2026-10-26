@@ -122,7 +122,9 @@ impl SessionServiceImpl {
             .await
         {
             Ok(admission) => admission,
-            Err(error) => return command_error(format!("{error:#}")),
+            Err(error) => {
+                return command_error(super::TransactionPreflightError::public_message(&error));
+            }
         };
         let request_reference = queued.request_reference.clone();
         let queued = TransactionStatement::admitted(queued, prepared.result);

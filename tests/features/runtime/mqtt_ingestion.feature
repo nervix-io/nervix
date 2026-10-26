@@ -312,7 +312,7 @@ Feature: MQTT ingestion
 
       CREATE MQTT CLIENT mqtt_main
         CONFIG {
-          'addr' = '127.0.0.1:1883'
+          'addr' = 'mqtt://127.0.0.1:1883'
         };
       """
     When these Plexus statements fail with "invalid ACK TIMEOUT duration 'oops'"

@@ -79,8 +79,9 @@ Holding one of those source loops pushes back into its transport, so a node whos
 extension workers stay full delays polls and lets those transports buffer or drop at their own
 bounds; see [When The Extension Workers Are Full](./ingestors.md#when-the-extension-workers-are-full).
 
-Transient memory is 291 MiB per node, divided into ceilings that cannot borrow from each other:
-8 MiB for management, 24 MiB for commands and replication, 192 MiB for relay work, 32 MiB for
+Transient memory is 675 MiB per node, divided into ceilings that cannot borrow from each other:
+8 MiB for management, 24 MiB for commands and replication, 192 MiB each for relay work, active
+materialized snapshots and retained materialized-source reads, 32 MiB for
 bulk buffers, 16 MiB for the receive windows of bulk streams and 19 MiB for credentials. Each bulk
 stream a node opens, such as a resource, checkpoint or snapshot fetch, holds one 1 MiB receive
 window for as long as it is open, so sixteen bulk streams run at once and a seventeenth waits for
@@ -105,6 +106,12 @@ is refused for that room, and a sender whose own budget has no room to store the
 of the rows it sends, hold their delivery back and wait as well; see
 [Held Deliveries](./interconnect.md#held-deliveries). The budgets are fixed defaults and do not
 follow the node's own memory.
+Decoded materialized snapshots use the independent `state_read` pool; optional source retention
+uses `state_read_cache`. Each has the relay pool's capacity. Retaining a complete generation
+transfers its admission to the cache before returning its active-read charges. A full cache
+leaves the current read uncached, without waiting for retention space. Both active and retained
+views leave live relay capacity available for evaluation, encoding and dispatch, and both pools
+count in the startup memory total.
 The commands budget also holds the 16 MiB working reservation for one normalized consensus state
 write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
 The credentials budget holds the 19 MiB Argon2id works in for one password, so a node computes one
@@ -134,7 +141,7 @@ cannot hold it:
 - **Memory.** The node's memory limit is `--memory-limit` (`NERVIX_MEMORY_LIMIT`) when given, and
   otherwise the smallest memory limit of its control group and the groups above it, or its
   physical memory when no group limit is smaller. It must hold every execution budget at once: the
-  291 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,339 MiB in all,
+  675 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,723 MiB in all,
   and a `--memory-high-watermark` when one is set. A container limited to 2 GiB therefore cannot
   start a node. Size the limit above the budgets by the process memory a running graph holds, which
   the memory-pressure watermarks govern.
