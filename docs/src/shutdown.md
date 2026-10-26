@@ -773,6 +773,14 @@ group in `MODE NO ACK` acknowledges nothing: when intake stops, its source commi
 driver delivered since the driver's last commit, and waits for the answer before the consumer
 leaves the group, and a Pulsar subscription in `MODE NO ACK` only queues its acknowledgements.
 
+For Kafka consumer groups, each acknowledged batch's commit has a thirty-second caller deadline.
+An unanswered commit fails the acknowledgement and remains the instance's one native commit until
+its coordinator answers; a later commit waits for that same answer first. Cancelling the caller
+does not cancel or replace that native job. A drain still ends at its own deadline, so a stop that
+times out can leave the commit's outcome uncertain. `OFFSET BY DOMAIN` instead waits for Nervix's
+assigned state replicas; it commits no consumer-group offset on Kafka. Neither mode's commit
+confirmation waits for native client destruction, which runs separately on the connector workers.
+
 RabbitMQ `ACK PARALLEL` retains a separate admitted acknowledgement root for each delivery through
 its own transport operation. A failed transport keeps the remaining admitted graph waits owned
 until they finish; shutdown reports the retained and pending positions as unconfirmed. RabbitMQ
