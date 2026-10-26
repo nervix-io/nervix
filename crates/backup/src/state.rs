@@ -49,6 +49,8 @@ pub struct KafkaOffsetsRecord {
     pub entity: ModelName,
     pub schema: SchemaFingerprint,
     pub revision: u64,
+    /// The explicit domain start already applied by the source, if any.
+    pub applied_start_generation: Option<u64>,
     pub offsets: Vec<KafkaPartitionOffset>,
 }
 
@@ -116,7 +118,7 @@ impl ArchiveRecord for WasmStateDescriptor {
 
 impl ArchiveRecord for KafkaOffsetsRecord {
     const KIND: RecordKind = RecordKind::KafkaOffsets;
-    const VERSION: u16 = STATE_RECORD_VERSION;
+    const VERSION: u16 = 2;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         StreamedKafkaOffsets {
@@ -124,6 +126,7 @@ impl ArchiveRecord for KafkaOffsetsRecord {
             entity: self.entity.clone(),
             schema: self.schema,
             revision: self.revision,
+            applied_start_generation: self.applied_start_generation,
             offsets: self.offsets.iter().cloned(),
         }
         .encode()
@@ -147,6 +150,7 @@ impl ArchiveRecord for KafkaOffsetsRecord {
             entity: parse_entity(path, &wire.entity)?,
             schema: SchemaFingerprint::from_digest(wire.schema),
             revision: wire.revision,
+            applied_start_generation: wire.applied_start_generation,
             offsets: wire
                 .offsets
                 .into_iter()
@@ -415,6 +419,7 @@ mod tests {
             entity: entity(),
             schema: SchemaFingerprint::from_digest([3; 32]),
             revision: 19,
+            applied_start_generation: Some(0),
             offsets: vec![
                 KafkaPartitionOffset {
                     topic: "orders".to_string(),
@@ -461,6 +466,7 @@ mod tests {
             entity: entity(),
             schema: SchemaFingerprint::from_digest([3; 32]),
             revision: 1,
+            applied_start_generation: None,
             offsets: vec![
                 KafkaPartitionOffset {
                     topic: "orders".to_string(),

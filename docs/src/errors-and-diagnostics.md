@@ -503,6 +503,12 @@ source composition with the protocol encoder's typed cause retained beneath the 
 
 ### Stored Shapes And Archives
 
+The native Kafka checkpoint decoder checks its required format signature before exposing offsets
+or the optional applied-start generation. A mismatched signature retains the typed
+`KafkaOffsetCheckpointError::FormatSignature` cause beneath `RuntimePersistenceError::DecodeState`.
+Loading, replica conversion and backup capture all use that owning decoder; no missing marker is
+filled from domain metadata.
+
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
 transport failure. Registry Model records validate their current frame signature and report
@@ -832,6 +838,11 @@ acknowledgement, rather than failures to decode a record. A control call that ex
 `socket.timeout.ms` budget reports `KafkaTopicIngestorError::ControlTimeout` with that bound. Metadata,
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
+
+After an explicit domain start is accepted, another explicit start in the canonical-position read
+ends that resume attempt with `KafkaTopicIngestorError::UnresolvedDomainStart` beneath
+`IngestorError::Resume`. Its typed fields retain the accepted and observed generations. The host
+retries on its existing cadence; the connector polls only after it has canonical resume positions.
 
 A domain-offset Kafka ingestor that must start a partition without a domain offset while its
 client's `auto.offset.reset` is `error` fails its resume with

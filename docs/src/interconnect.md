@@ -1579,6 +1579,8 @@ the owner's revision advanced. Its typed answer distinguishes an unchanged revis
 revision, and the shared remote-operation refusal classes. An unchanged checkpoint is neither
 encoded nor transferred. A newer checkpoint uses `sync_kafka_offsets` on Bulk with the Snapshot
 subquota and a thirty-second progress deadline, independently of the replica polling cadence.
+Its native checkpoint retains the optional applied-start generation beside every offset and topic
+schedule, so promotion does not reapply an explicit start.
 The owner retains the admitted offset topology and reads its conservative revision before the
 offset slots, encodes the current native checkpoint directly into a quota-owned staging file, and
 sends a forty-byte revision/digest header followed by chunks of at most 64 KiB. The declared

@@ -341,6 +341,13 @@ enum ScriptedStart {
     Recorded { next_offset: i64 },
     /// A new start point at a timestamp.
     At(Timestamp),
+    /// Another initializer accepts this start while this instance resolves its own lookup.
+    ConcurrentAt {
+        timestamp: Timestamp,
+        canonical_next_offset: i64,
+    },
+    /// A second explicit generation appears after the first start was accepted.
+    ChangedGenerationAt(Timestamp),
 }
 
 impl ScriptedStart {
@@ -354,7 +361,9 @@ impl ScriptedStart {
                 positions: vec![position(0, next_offset)],
                 missing_partition_timestamp: None,
             },
-            Self::At(timestamp) => KafkaDomainOffsetStart::At(timestamp),
+            Self::At(timestamp)
+            | Self::ConcurrentAt { timestamp, .. }
+            | Self::ChangedGenerationAt(timestamp) => KafkaDomainOffsetStart::At(timestamp),
         }
     }
 }
@@ -370,6 +379,11 @@ struct ScriptedDomainOffsets {
 #[async_trait]
 impl KafkaDomainOffsetServices for ScriptedDomainOffsets {
     fn generation(&self) -> Option<u64> {
+        if matches!(self.start, ScriptedStart::ChangedGenerationAt(_))
+            && !self.resets.lock().is_empty()
+        {
+            return Some(2);
+        }
         Some(1)
     }
 
@@ -377,9 +391,29 @@ impl KafkaDomainOffsetServices for ScriptedDomainOffsets {
         &self,
         _partitions: &[i32],
     ) -> KafkaDomainOffsetResult<KafkaDomainOffsetInitialization> {
+        let accepted = self.resets.lock();
+        let mut generation = 1;
+        let start = if accepted.is_empty() {
+            self.start.start()
+        } else if let ScriptedStart::ChangedGenerationAt(timestamp) = self.start {
+            generation = 2;
+            KafkaDomainOffsetStart::At(timestamp)
+        } else {
+            let positions = match self.start {
+                ScriptedStart::ConcurrentAt {
+                    canonical_next_offset,
+                    ..
+                } => vec![position(0, canonical_next_offset)],
+                _ => accepted.clone(),
+            };
+            KafkaDomainOffsetStart::Resume {
+                positions,
+                missing_partition_timestamp: None,
+            }
+        };
         Ok(KafkaDomainOffsetInitialization {
-            generation: 1,
-            start: self.start.start(),
+            generation,
+            start,
             schedule: Some(KafkaPartitionSchedule {
                 observed_partitions: vec![0],
                 rebalance_epoch: 0,
@@ -388,7 +422,12 @@ impl KafkaDomainOffsetServices for ScriptedDomainOffsets {
         })
     }
 
-    async fn reset(&self, positions: Vec<KafkaOffsetPosition>) -> KafkaDomainOffsetResult<()> {
+    async fn reset(
+        &self,
+        generation: u64,
+        positions: Vec<KafkaOffsetPosition>,
+    ) -> KafkaDomainOffsetResult<()> {
+        assert_eq!(generation, 1);
         self.resets.lock().extend(positions);
         Ok(())
     }
@@ -615,6 +654,64 @@ async fn a_new_start_point_replaces_the_domain_offset_of_every_partition() {
         read_positions(&mut domain.source).await,
         vec![position(0, 2)]
     );
+}
+
+#[nervix_primitives::test]
+async fn a_concurrent_explicit_start_uses_the_canonical_partition_position() {
+    let cluster = cluster();
+    publish(&cluster).await;
+    // Another initializer chose offset 0 before this record arrived. The mock broker's later
+    // timestamp lookup finds no timestamp, so this instance resolves the partition's end, 1.
+    let mut domain = domain_source(
+        &cluster,
+        "earliest",
+        ScriptedStart::ConcurrentAt {
+            timestamp: Timestamp::from_unix_nanos(0),
+            canonical_next_offset: 0,
+        },
+    )
+    .await;
+    let resumed = domain
+        .source
+        .resume()
+        .await
+        .assured("the source takes its partition up after the generation start is accepted");
+    assert!(matches!(resumed, IngestorResume::Ready));
+    assert_eq!(*domain.resets.lock(), vec![position(0, 1)]);
+    publish(&cluster).await;
+    assert_eq!(
+        read_positions(&mut domain.source).await,
+        vec![position(0, 1)]
+    );
+    assert_eq!(
+        read_positions(&mut domain.source).await,
+        vec![position(0, 2)]
+    );
+}
+
+#[nervix_primitives::test]
+async fn a_new_generation_during_start_acceptance_requires_another_resume() {
+    let cluster = cluster();
+    let mut domain = domain_source(
+        &cluster,
+        "earliest",
+        ScriptedStart::ChangedGenerationAt(Timestamp::from_unix_nanos(0)),
+    )
+    .await;
+    let failure = domain
+        .source
+        .resume()
+        .await
+        .err()
+        .assured("a changed start ends this resume attempt before polling");
+    assert!(matches!(
+        failure.downcast_ref::<KafkaTopicIngestorError>(),
+        Some(KafkaTopicIngestorError::UnresolvedDomainStart {
+            accepted_generation: 1,
+            observed_generation: 2,
+        })
+    ));
+    assert_eq!(*domain.resets.lock(), vec![position(0, 0)]);
 }
 
 #[nervix_primitives::test]
