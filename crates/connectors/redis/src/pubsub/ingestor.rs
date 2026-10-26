@@ -157,7 +157,9 @@ impl RedisPubSubIngestorPlan {
         })
     }
 
-    fn buffer_messages(config: &[ClientConfigEntry]) -> RedisPubSubIngestorResult<NonZeroUsize> {
+    pub(crate) fn buffer_messages(
+        config: &[ClientConfigEntry],
+    ) -> RedisPubSubIngestorResult<NonZeroUsize> {
         let Some(value) = optional_client_config_value(config, "subscription_buffer_messages")
         else {
             return Err(Report::new(

@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, AffectedTopology,
@@ -36,8 +36,8 @@ use thiserror::Error;
 
 use super::graph::{UnattributedImpactEdge, UnattributedImpactTopology};
 use crate::registry::{
-    ActiveGraph, EntityGatePlan, PlannedMutations, Registry, RegistryError, RegistryMutation,
-    ScheduleDelta, entity_pause_relays_for_schedule, gate_boundary, scheduled_impact_coverage,
+    ActiveGraph, EntityGatePlan, PlannedMutations, Registry, RegistryMutation, ScheduleDelta,
+    entity_pause_relays_for_schedule, gate_boundary, scheduled_impact_coverage,
 };
 
 mod commit_plan;
@@ -253,10 +253,9 @@ pub(crate) enum TransactionPlanningError {
         operation: TransactionOperationNumber,
         error: ResourceVersionResolutionError,
     },
-    #[error("transaction operation {operation} failed model preflight: {error}")]
+    #[error("transaction operation {operation} failed model preflight")]
     ModelPreflight {
         operation: TransactionOperationNumber,
-        error: Report<RegistryError>,
     },
     #[error("transaction operation {operation} failed external model validation")]
     ExternalModelValidation {
@@ -436,9 +435,7 @@ impl Registry {
                     &transitions,
                     operation_count,
                 )
-                .map_err(|error| {
-                    Report::new(TransactionPlanningError::ModelPreflight { operation, error })
-                })?;
+                .change_context(TransactionPlanningError::ModelPreflight { operation })?;
                 PlannedTransactionStepKind::Models {
                     plan: Box::new(PlannedModelTransactionStep {
                         planned: Some(planned),
@@ -594,11 +591,8 @@ impl Registry {
                     let active_graph = if changed {
                         Some(
                             crate::registry::domain_state::DomainState::build(&domain, &models)
-                                .map_err(|error| {
-                                    Report::new(TransactionPlanningError::ModelPreflight {
-                                        operation: number,
-                                        error,
-                                    })
+                                .change_context(TransactionPlanningError::ModelPreflight {
+                                    operation: number,
                                 })?
                                 .graph,
                         )
@@ -962,11 +956,8 @@ impl Registry {
             &mutations,
             allow_incomplete,
         )
-        .map_err(|error| {
-            Report::new(TransactionPlanningError::ModelPreflight {
-                operation: range.first(),
-                error,
-            })
+        .change_context(TransactionPlanningError::ModelPreflight {
+            operation: range.first(),
         })?;
         let candidate_models = preflight.candidate_models().clone();
         let incomplete_reason = preflight.incomplete_reason().map(ToOwned::to_owned);

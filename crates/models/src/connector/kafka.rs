@@ -5,8 +5,9 @@
 //! - **Owns.** The Kafka client Model, the topic source and emitter Models with their offset and
 //!   delivery modes, the topic and consumer group names a source reads with the rules Kafka holds
 //!   them to, and what each entity declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
-//! - **Must not know.** The Kafka driver, its configuration keys, or how a topic is consumed or
+//! - **Must not know.** The Kafka driver, or how a topic is consumed or
 //!   produced to.
 
 #![cfg_attr(
@@ -38,7 +39,62 @@ use crate::{
     OptionForm, OptionPresence, OptionValue, PositionClass, RetryPolicy,
 };
 
-configured_client!(Kafka: unpooled, config Driver, CreateClientKafka => KafkaConfigEntry);
+configured_client!(Kafka: unpooled, config CLIENT_CONFIG, CreateClientKafka => KafkaConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{
+        ClientConfigKey as K, ClientConfigNamespace, ClientConfigSchema, ClientConfigValue as V,
+    };
+    ClientConfigSchema::new(
+        &[
+            K::optional("auto.offset.reset", V::String).driver(),
+            K::optional("bootstrap.servers", V::String).driver(),
+            K::optional("client.id", V::String).driver(),
+            K::optional("fetch.wait.max.ms", V::UnsignedInteger).driver(),
+            K::optional("heartbeat.interval.ms", V::PositiveInteger).driver(),
+            K::optional("linger.ms", V::UnsignedInteger).driver(),
+            K::optional("message.max.bytes", V::PositiveInteger).driver(),
+            K::optional("message.timeout.ms", V::UnsignedInteger).driver(),
+            K::optional("queue.buffering.max.messages", V::UnsignedInteger).driver(),
+            K::optional("sasl.mechanism", V::String).driver(),
+            K::optional("sasl.mechanisms", V::String).driver(),
+            K::optional("sasl.oauthbearer.config", V::String)
+                .secret()
+                .driver(),
+            K::optional("sasl.password", V::String).secret().driver(),
+            K::optional("sasl.username", V::String).secret().driver(),
+            K::optional("security.protocol", V::String).driver(),
+            K::optional("session.timeout.ms", V::PositiveInteger).driver(),
+            K::optional("socket.timeout.ms", V::Milliseconds).driver(),
+            K::optional(
+                "ssl.ca.location",
+                V::File(crate::ClientConfigFile::MountedFile),
+            )
+            .driver(),
+            K::optional(
+                "ssl.certificate.location",
+                V::File(crate::ClientConfigFile::MountedFile),
+            )
+            .driver(),
+            K::optional(
+                "ssl.key.location",
+                V::File(crate::ClientConfigFile::MountedFile),
+            )
+            .driver(),
+            K::optional("ssl.key.password", V::String).secret().driver(),
+            K::optional("ssl.key.pem", V::String).secret().driver(),
+        ],
+        &[ClientConfigNamespace::All],
+        &[
+            "allow.auto.create.topics",
+            "delivery.report.only.error",
+            "enable.auto.commit",
+            "enable.partition.eof",
+            "group.id",
+        ],
+    )
+};
 
 /// The longest topic Kafka admits, in bytes.
 const KAFKA_TOPIC_MAX: usize = 249;

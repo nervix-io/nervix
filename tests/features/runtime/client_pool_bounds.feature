@@ -44,7 +44,7 @@ Feature: Database client connection pool bounds
       CREATE POSTGRES CLIENT postgres_main
         POOL SIZE MIN 2 MAX 8
         CONFIG {
-          'addr' = 'postgresql://nervix:nervix@127.0.0.1:5432/nervix?sslmode=disable'
+          'addr' = '********'
         };
       """
     When these Plexus commands are executed on the leader node
@@ -56,7 +56,7 @@ Feature: Database client connection pool bounds
       CREATE MYSQL CLIENT mysql_main
         POOL SIZE MIN 0 MAX 4
         CONFIG {
-          'addr' = 'mysql://nervix:nervix@127.0.0.1:3306/nervix'
+          'addr' = '********'
         };
       """
     When these Plexus commands are executed on the leader node
@@ -68,7 +68,7 @@ Feature: Database client connection pool bounds
       CREATE MONGODB CLIENT mongodb_main
         POOL SIZE MIN 3 MAX 3
         CONFIG {
-          'addr' = 'mongodb://root:nervix@127.0.0.1:27017/nervix?authSource=admin',
+          'addr' = '********',
           'database' = 'nervix'
         };
       """
@@ -170,6 +170,6 @@ Feature: Database client connection pool bounds
       CREATE POSTGRES CLIENT widest_bounds
         POOL SIZE MIN 4294967295 MAX 4294967295
         CONFIG {
-          'addr' = 'postgresql://nervix:nervix@127.0.0.1:5432/nervix?sslmode=disable'
+          'addr' = '********'
         };
       """

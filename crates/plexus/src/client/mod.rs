@@ -13,13 +13,13 @@
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, CreateClientAzureBlob,
-    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
-    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
-    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
-    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
-    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateStatement, Model,
-    RequestedResourceVersion,
+    ClientConfigEntry, ClientConfigSchema, ClientName, ClientPoolBounds, ClientResourceMount,
+    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
+    CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
+    CreateClientWebsockets, CreateClientZeroMq, CreateStatement, Model, RequestedResourceVersion,
 };
 
 use crate::{
@@ -41,9 +41,18 @@ fn scalar_value<'src>()
     ))
 }
 
-fn config_key<'src>()
--> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
-    string_lit().labelled("config_key")
+fn config_key<'src>(
+    schema: ClientConfigSchema,
+) -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    let mut alternatives = Vec::new();
+    for key in schema.keys() {
+        let name = key.name.to_string();
+        alternatives.push(just(Token::StringLiteral(name.clone())).to(name).boxed());
+    }
+    // The registry owns key acceptance, including delegated driver namespaces. Keeping the
+    // general literal in this composed grammar lets it diagnose an unknown key at CREATE.
+    alternatives.push(string_lit().labelled("config_key").boxed());
+    choice(alternatives)
 }
 
 fn config_value<'src>()
@@ -51,9 +60,10 @@ fn config_value<'src>()
     scalar_value().labelled("config_value")
 }
 
-fn config_entry<'src>()
--> impl Parser<'src, &'src [Token], ClientConfigEntry, extra::Err<ParseError<'src>>> + Clone {
-    config_key()
+fn config_entry<'src>(
+    schema: ClientConfigSchema,
+) -> impl Parser<'src, &'src [Token], ClientConfigEntry, extra::Err<ParseError<'src>>> + Clone {
+    config_key(schema)
         .then_ignore(tok(Token::Eq))
         .then(config_value())
         .map(|(key, value)| ClientConfigEntry { key, value })
@@ -102,6 +112,7 @@ fn client_pool_bounds<'src>()
 /// and the optional terminator identical for every client type.
 fn create_client_parser<'src, B: 'src, T>(
     connector: Identifier,
+    schema: ClientConfigSchema,
     before_mount: impl Parser<'src, &'src [Token], B, extra::Err<ParseError<'src>>> + Clone + 'src,
     build: impl Fn(
         ClientName,
@@ -119,7 +130,7 @@ fn create_client_parser<'src, B: 'src, T>(
         .then(before_mount)
         .then(client_mount())
         .then_ignore(kw(Identifier::Config))
-        .then(transport_config())
+        .then(transport_config(schema))
         .then_ignore(tok(Token::Semicolon).or_not())
         .map(move |((((if_not_exists, name), between), mount), config)| {
             CreateStatement::new(build(name, between, mount, config), if_not_exists)
@@ -147,6 +158,7 @@ macro_rules! declare_client_parsers {
             > + Clone {
                 create_client_parser(
                     Identifier::$BeforeKeyword,
+                    <$BeforeClient<RequestedResourceVersion>>::DECLARATION.config,
                     empty(),
                     |name, (), mount, config| $BeforeClient {
                         name,
@@ -165,6 +177,7 @@ macro_rules! declare_client_parsers {
             > + Clone {
                 create_client_parser(
                     Identifier::$AfterKeyword,
+                    <$AfterClient<RequestedResourceVersion>>::DECLARATION.config,
                     empty(),
                     |name, (), mount, config| $AfterClient {
                         name,
@@ -183,6 +196,7 @@ macro_rules! declare_client_parsers {
             > + Clone {
                 create_client_parser(
                     Identifier::$PooledKeyword,
+                    <$PooledClient<RequestedResourceVersion>>::DECLARATION.config,
                     client_pool_bounds(),
                     |name, pool, mount, config| $PooledClient {
                         name,
@@ -264,6 +278,7 @@ pub fn create_client_websockets_parser<'src>() -> impl Parser<
 > + Clone {
     create_client_parser(
         Identifier::Websockets,
+        <CreateClientWebsockets<RequestedResourceVersion>>::DECLARATION.config,
         signaling_protocol_clause().or_not(),
         |name, signaling_protocol, mount, config| CreateClientWebsockets {
             name,
@@ -274,9 +289,11 @@ pub fn create_client_websockets_parser<'src>() -> impl Parser<
     )
 }
 
-fn transport_config<'src>()
--> impl Parser<'src, &'src [Token], Vec<ClientConfigEntry>, extra::Err<ParseError<'src>>> + Clone {
-    config_entry()
+fn transport_config<'src>(
+    schema: ClientConfigSchema,
+) -> impl Parser<'src, &'src [Token], Vec<ClientConfigEntry>, extra::Err<ParseError<'src>>> + Clone
+{
+    config_entry(schema)
         .separated_by(tok(Token::Comma))
         .allow_trailing()
         .collect::<Vec<_>>()
