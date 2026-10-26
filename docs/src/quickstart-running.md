@@ -107,8 +107,10 @@ docker run -d --name redis -p 6379:6379 redis:7
 If you work from a repository clone, `just deps` starts a complete local dependency stack instead
 ([Developing Nervix](developing-nervix.md#start-local-broker-dependencies)).
 
-Nervix never creates topics, queues, or any other external entities as a side effect of running a
-graph. Missing entities surface as initialization or publish errors, so the tutorial provisions
-its Kafka topic explicitly before ingesting from it.
+Provision external entities before starting a graph. This tutorial creates its Kafka topic
+explicitly before ingesting from it: Nervix's consumers disable topic auto-creation and report a
+missing topic as a transient source failure. Kafka emitters keep librdkafka's producer default, so a
+broker that allows auto-creation can create a missing output topic on the first publish. Do not
+rely on that broker behavior to provision topics with the intended partitions and settings.
 
 Continue to [Your First Pipeline: Kafka To Redis](./quickstart-first-pipeline.md).

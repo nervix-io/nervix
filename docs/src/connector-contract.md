@@ -538,8 +538,9 @@ including when the waiting caller is cancelled or its thirty-second deadline exp
 refusals remain transient source failures; they never reject a record as invalid.
 
 librdkafka's producer flush still runs on the runtime's blocking pool as a declared owner outside
-the executor, bounded by the host's physical flush deadline. The producer's destruction does not:
-it is a connector storage job like a consumer's.
+the executor. The host's physical flush deadline bounds the caller's wait; a native flush step
+already running keeps its producer handle until the driver returns, even if the caller stops
+waiting. The producer's destruction is a connector storage job like a consumer's.
 [Blocking work outside the executor](./execution-primitives.md#blocking-work-outside-the-executor)
 lists every declared owner, and the boundary check rejects any other connector code that names the
 pool.
@@ -567,12 +568,12 @@ to 100 milliseconds and any delivery report it is serving. rust-rdkafka then pur
 producer still queues or has in flight, flushes for up to 500 milliseconds so that their reports
 are served, and librdkafka joins its threads, a broker thread still resolving a name included.
 
-A ingestor or partition inspector shares its consumer with the driver jobs it admits, a emitter shares
-its producer with the flush its finish runs, and any of them can hold the last handle. A ingestor goes
+An ingestor or partition inspector shares its consumer with the driver jobs it admits, an emitter shares
+its producer with the flush its finish runs, and any of them can hold the last handle. An ingestor goes
 when its host's task ends after the ingestor's loop, or when composing its ingestor's instances fails;
 an inspector goes when its watch ends; a control job keeps running after its caller is cancelled,
 and a job the connector queue refuses lets its handle go unrun; and a consumer-group commit can be
-answered after its ingestor is gone. A emitter goes when its emitter's task ends after the emitter's finish,
+answered after its ingestor is gone. An emitter goes when its emitter's task ends after the emitter's finish,
 when a swap or `ALTER` replaces it, or when composing its emitter fails after the emitter started; and
 a flush keeps running on the runtime's blocking pool after its finish's caller stops waiting for it,
 until librdkafka's flush returns. Whichever of them lets the last handle go hands the client to its
@@ -711,10 +712,14 @@ an optional Redis subscription capacity passes the same range parser its ingesto
 Ingestor-only presence requirements stay with that plan.
 MQTT's representative first instance uses the same instance-template renderer as execution.
 Connector-owned offline parsers check librdkafka property names and values, sqlx and mysql_async
-options, Redis connection information, lapin AMQP URIs and NATS server addresses. They create no
-connection, consumer, producer, DNS lookup or remote side effect. Checks requiring the remote
-service still belong to client initialization. The registry names no connector crate and runtime
-receives entries and pinned mounts rather than a Model.
+options, Redis connection information, lapin AMQP URIs, NATS server addresses and ZeroMQ endpoints.
+They create no connection, consumer, producer, DNS lookup or remote side effect. Checks requiring
+the remote service still belong to client initialization. The registry names no connector crate
+and runtime receives entries and pinned mounts rather than a Model.
+
+ZeroMQ uses its socket driver's endpoint parser for both TCP and IPC addresses. Its `bind` key
+uses the shared Boolean parser at the connector boundary, so a malformed value is a configuration
+refusal before either a PULL or PUSH socket opens; an omitted value selects connect.
 
 Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
 exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed
@@ -1471,10 +1476,12 @@ transient failure its pending work is still waiting out.
 Every emitter implements `finish`, and no emitter inherits a default. A publish reports a record
 delivered at the completion point its mode declares, and for `NO ACK` on Kafka, Pulsar and MQTT
 QoS 0 that point is the client taking the record, so the client can still hold delivered records
-when the emitter stops. A Core NATS write delivers its records once the client reports them flushed
-to its socket, so its client holds records only after a write ran out of the client's `timeout_ms`:
-they stay unresolved for the host's retry, and the client still sends them unless its connection
-fails first, which discards those the client had taken for that connection but not yet written.
+when the emitter stops. A Core NATS write delivers only after its queued bytes drain and flush on
+the same connection. A failed or timed-out write retains its pending count and connection
+expectation; its records stay unresolved for the host's retry. That count includes records the
+client may still send and records a failed connection may have discarded, until a later flush
+settles the client's buffer. A replacement connection cannot certify the preceding connection's
+unwritten bytes.
 `finish` sends what the client still holds by the deadline the host gives it and answers with one
 of two outcomes:
 
@@ -1513,7 +1520,7 @@ the emitter's transient error that `DESCRIBE EMITTER` shows and as an error even
 | Kafka | `NO ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
 | Pulsar | `NO ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
 | MQTT | `QOS 0`: publishes the client took and its event loop has not yet written and flushed to the broker connection, which a client cut off from its broker holds until it connects again. `QOS 1` and `QOS 2`: nothing | Waits until the event loop has flushed every publish the client took or the deadline passes; reports a failed flush or the count still unflushed at that deadline |
-| NATS | Core `NO ACK`: nothing after a write whose flush completed; after a write that ran out of `timeout_ms`, the records it handed the client, which the next write flushes before it hands the client more. JetStream: nothing, because JetStream answers each record | Flushes the Core NATS client by the deadline, which sends what it holds; reports the count still held when the deadline passes, or the client's failure with the driver's cause beneath. A flush that completes after the client lost its connection and connected again answers Flushed, though the failed connection discarded the records it had taken but not yet written |
+| NATS | Core `NO ACK`: nothing after a write whose connection flushed; after a failed or timed-out write, its pending count and connection expectation until the client's buffer is settled. JetStream: nothing, because JetStream answers each record | Drains and flushes the Core NATS client by the deadline, then verifies the pending write's connection. A connection change fails finish with the uncertain record count; a driver failure retains its typed cause; an expired deadline reports the pending count. Only a flush on the expected connection answers Flushed |
 | ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#emitters) describes |
@@ -1961,6 +1968,13 @@ sequenceDiagram
   transient error until the topic is provisioned.
   Partition inspectors preserve that typed outcome across their admitted control call so their
   watches observe an empty topology until provisioning, then publish the available partitions.
+  The consumer settings Nervix owns are reserved in client `CONFIG`. They select the statement's
+  `group.id`, disable partition EOF events and enable auto-commit only for consumer-group
+  `MODE NO ACK`. `auto.offset.reset` remains
+  the client's choice. Domain-offset consumers assign partitions directly and inspectors only
+  fetch metadata, so their Nervix-generated group identifiers create no broker-managed group or
+  stored group offsets. A user-named consumer group and its committed offsets remain on the broker
+  after its ingestor is dropped; Nervix does not delete the operator's group.
   Under `OFFSET BY CONSUMER GROUP` in an `ACK` mode, the source commits the latest offset of each
   partition of an acknowledged batch and waits for the coordinator's answer, one round trip per
   batch, which `ACK PARALLEL` amortizes over the batch. A commit the coordinator refuses fails the
@@ -1996,7 +2010,10 @@ sequenceDiagram
   it stood before that lookup when it has no such record yet, and in an unpaced domain where the
   client's `auto.offset.reset` places it, `earliest` at its earliest retained record and `latest`
   at its end. The instance records that start before it reads, so a reconnect resumes there
-  instead of placing the partition again past records it has not acknowledged. Offset snapshots
+  instead of placing the partition again past records it has not acknowledged. A generation begun
+  with `START AT` currently reapplies its timestamp on every domain-offset resume and resets the
+  whole topic's offsets, so that generation can replay acknowledged records; it does not have the
+  saved-position resume guarantee of a plain `START`. Offset snapshots
   can lag a crash, so this mode remains at least once. Commits and start-point resets wait for the
   assigned state replicas within the native checkpoint bulk operation's thirty-second budget. A
   missing acknowledgement still fails the commit and follows the host's existing rejection and

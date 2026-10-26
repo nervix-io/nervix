@@ -12289,6 +12289,54 @@ async fn when_command_response_delivery_pause_is_released(
         .release_command_response_delivery_pause(&crate::common::cluster::node_name(&node_id));
 }
 
+#[given("command response delivery on every node pauses after execution")]
+async fn given_command_response_delivery_pause_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .pause_command_response_delivery_on(crate::common::cluster::node_name(&node_id));
+    }
+}
+
+/// Waits for the response delivery pause of the node that executes the command: the leader the
+/// command reached. Leadership that moves before the command runs, as an election under load may
+/// move it after the pauses were armed, makes another node execute it, so no earlier step can name
+/// that node. The wait spans such a move as well as the command, so it is bounded like the wait for
+/// a leadership move.
+#[then("the command response delivery pause on the node that executes the command is reached")]
+async fn then_executing_node_command_response_delivery_pause_is_reached(world: &mut ScenarioWorld) {
+    let mut pauses = Vec::new();
+    for node_id in world.cluster().node_ids() {
+        let fault_injection = world.fault_injection.clone();
+        pauses.push(Box::pin(async move {
+            fault_injection
+                .wait_for_command_response_delivery_pause(&crate::common::cluster::node_name(
+                    &node_id,
+                ))
+                .await;
+            node_id
+        }));
+    }
+    let reached = nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        futures_util::future::select_all(pauses),
+    )
+    .await;
+    let Ok((node_id, _, _)) = reached else {
+        panic!("no node reached its command response delivery pause");
+    };
+    println!("the command response delivery pause was reached on node '{node_id}'");
+}
+
+#[when("the command response delivery pause is released on every node")]
+async fn when_command_response_delivery_pause_is_released_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_command_response_delivery_pause(&crate::common::cluster::node_name(&node_id));
+    }
+}
+
 #[given(expr = "resource installation on node {string} pauses before promotion")]
 async fn given_resource_installation_pause(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);

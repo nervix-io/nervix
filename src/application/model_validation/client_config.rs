@@ -176,6 +176,7 @@ fn validate_driver(
         ConnectorKind::Redis => nervix_connector_redis::validate_client_configuration(config),
         ConnectorKind::RabbitMq => nervix_connector_rabbitmq::validate_client_configuration(config),
         ConnectorKind::Nats => nervix_connector_nats::validate_client_configuration(config),
+        ConnectorKind::ZeroMq => nervix_connector_zeromq::validate_client_configuration(config),
         _ => Ok(()),
     }
 }
@@ -221,6 +222,20 @@ pub(in crate::application) fn client_validation_message<C: error_stack::Context>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zeromq_driver_validation_refuses_an_endpoint_without_its_transport() {
+        let config = [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: "127.0.0.1:5555".to_string(),
+        }];
+        let refusal = validate_driver(ConnectorKind::ZeroMq, &config)
+            .expect_err("a ZeroMQ endpoint requires its transport scheme");
+        assert!(matches!(
+            refusal.current_context(),
+            OfflineClientConfigError::InvalidKey { key } if key == "addr"
+        ));
+    }
 
     #[test]
     fn rendered_api_root_refusal_retains_its_cause_and_hides_its_query() {

@@ -22,6 +22,12 @@ Client initialization also preserves the driver cause of option installation and
 ping. Public command refusal projection renders the reviewed key/pool context rather than driver
 input.
 
+ZeroMQ endpoint validation keeps the socket driver's endpoint error beneath
+`OfflineClientConfigError` for `addr`. Its socket owners keep the shared Boolean parser's
+`ClientConfigError` beneath their configuration context for `bind`; a malformed value does not
+select a socket operation. Public CREATE refusals retain the key and client identity while the
+driver's diagnostic remains internal.
+
 Transaction model preflight adds its operation identity with `change_context` above the registry
 report. It does not nest that report in a context field: the ordinary typed report chain remains
 inspectable, so command projection can retain the schema's invalid-key diagnosis.
@@ -131,6 +137,13 @@ emitter shows the first printable attachment of a failure as its transient error
 one the outermost context. A typed attachment carries a value for one consumer, as an emitter attaches
 the retry delay its receiver stated for the emitter host to read. Neither replaces a context: a
 caller decides from contexts and typed fields.
+
+A Core NATS flush keeps its driver's typed failure beneath `CoreFlushError::ClientFlush`.
+A connection change is the separate `CoreFlushError::ConnectionChanged` failure, carrying the
+nonzero count whose delivery can no longer be certified. Publication and finish add their own
+`EmitterWriteError` or `EmitterFinishError::Flush` context and render the complete report for the
+emitter's transient description. An elapsed write still names its configured `timeout_ms`; an
+elapsed finish reports the pending count through `EmitterFinishError::Unsent`.
 
 Two failures of one operation stay one report. When a model alteration fails after its domain
 paused and resuming the domain fails too, the resume's report is added beside the alteration's and

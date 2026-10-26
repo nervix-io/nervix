@@ -459,6 +459,10 @@ is assumed to be covered:
 | ZeroMQ sources and emitters, `zeromq` 0.4.1 | The driver's TCP transport connects with Tokio's `TcpStream::connect((host, port))`. A connect-mode emitter's connection, its lookups included, ends at its client's `connect_timeout_ms`, which ends the connection but not a lookup the blocking pool already runs | No socket hook |
 | The web console | The browser resolves the page's origin and its WebSocket and fetch requests | The browser owns resolution |
 
+The pinned async-nats flush correction drains queued bytes before completing a local flush and
+exposes its successful-connection generation. It retains this driver's resolver, address-attempt
+policy and dependency features; the pin does not move NATS resolution onto the node's resolver.
+
 Postgres observation clients in the test harness use that same SQLx resolution path. Their suite
 environment retains the plaintext and TLS pools and their certificate-authority files through
 client closure. MQTT fixture publishers retain their native driver through publication completion;
