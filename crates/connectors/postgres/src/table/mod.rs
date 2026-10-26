@@ -267,7 +267,7 @@ impl PostgresPool {
 /// The URL carries the endpoint, the user and the database explicitly, and selects one of two TLS
 /// policies. Mounted files are the client's TLS-file interface: an opportunistic fallback and an
 /// encrypted connection without peer verification are both refused rather than silently allowed.
-fn connect_options(
+pub(crate) fn connect_options(
     addr: &str,
     config: &[ClientConfigEntry],
 ) -> EmitterStartResult<PgConnectOptions> {

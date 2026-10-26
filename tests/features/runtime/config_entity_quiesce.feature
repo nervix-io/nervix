@@ -103,7 +103,7 @@ Feature: Config entity quiesce classification
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false',
-          'send_timeout' = '5s'
+          'timeout_ms' = 5000
         };
       CREATE ZEROMQ PUSH EMITTER config_out
         FROM config_events

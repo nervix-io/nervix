@@ -53,7 +53,7 @@ Feature: Web console visual client, vhost and endpoint creation
       | 3            |
 
   @visual_client_pool_create
-  Scenario Outline: A pooled client preserves its explicit bounds and sends masked configuration values
+  Scenario Outline: A pooled client preserves its explicit bounds and redacts credential addresses
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     When these Plexus commands are executed on the leader node
@@ -66,9 +66,12 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".create-menu [data-create-kind='client']" is clicked
     And selector ".create-name" is filled with "visual_redis"
     And selector ".create-client-type [data-client-type='http-client']" is clicked
-    And selector ".create-client-config-add" is clicked
+    Then selector "#client-config-keys option[value='endpoint']" exists
+    When selector ".create-client-config-add" is clicked
     And selector ".create-client-type [data-client-type='redis-client']" is clicked
     Then selector ".create-client-config-entry" does not exist
+    And selector "#client-config-keys option[value='addr']" exists
+    And selector "#client-config-keys option[value='endpoint']" does not exist
     When selector ".create-submit" is clicked
     Then selector ".create-validation" contains "Pool minimum"
     When selector ".create-client-pool-min" is filled with "5"
@@ -78,10 +81,7 @@ Feature: Web console visual client, vhost and endpoint creation
     When selector ".create-client-pool-min" is filled with "1"
     And selector ".create-client-config-add" is clicked
     And selector ".create-client-config-entry:nth-of-type(1) .create-client-config-key" is filled with "addr"
-    And selector ".create-client-config-entry:nth-of-type(1) .create-client-config-value" is filled with "redis://127.0.0.1:6379/"
-    And selector ".create-client-config-add" is clicked
-    And selector ".create-client-config-entry:nth-of-type(2) .create-client-config-key" is filled with "password"
-    And selector ".create-client-config-entry:nth-of-type(2) .create-client-config-value" is filled with "visual-secret"
+    And selector ".create-client-config-entry:nth-of-type(1) .create-client-config-value" is filled with "redis://user:visual-secret@127.0.0.1:6379/"
     Then selector ".create-preview" contains "POOL SIZE MIN 1 MAX 4"
     And selector ".create-preview" contains "CREATE REDIS CLIENT visual_redis"
     And selector ".create-preview" does not contain "visual-secret"
@@ -92,7 +92,7 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "POOL SIZE MIN 1 MAX 4"
     And selector ".terminal" contains "CREATE REDIS CLIENT visual_redis"
-    And selector ".terminal" contains "visual-secret"
+    And selector ".terminal" contains "'addr' = '********'"
 
     Examples:
       | cluster_size |
@@ -126,7 +126,7 @@ Feature: Web console visual client, vhost and endpoint creation
     Then selector ".create-client-version [data-value='1']" exists
     When selector ".create-client-version [data-value='1']" is clicked
     And selector ".create-client-config-add" is clicked
-    And selector ".create-client-config-key" is filled with "url"
+    And selector ".create-client-config-key" is filled with "endpoint"
     And selector ".create-client-config-value" is filled with "http://127.0.0.1:1"
     Then selector ".create-preview" contains "MOUNT visual_client_bundle VERSION 1"
     And selector ".create-preview" contains "CREATE HTTP CLIENT visual_http"
@@ -137,6 +137,38 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "MOUNT visual_client_bundle VERSION 1"
     And selector ".terminal" contains "CREATE HTTP CLIENT visual_http"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @visual_client_endpoint_create
+  Scenario Outline: A visual cloud client redacts its delegated endpoint query
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".create-menu-button" is clicked
+    And selector ".create-menu [data-create-kind='client']" is clicked
+    And selector ".create-name" is filled with "visual_cloud"
+    And selector ".create-client-type [data-client-type='azure_blob-client']" is clicked
+    Then selector "#client-config-keys option[value='endpoint']" exists
+    When selector ".create-client-config-add" is clicked
+    And selector ".create-client-config-key" is filled with "endpoint"
+    And selector ".create-client-config-value" is filled with "https://account.blob.example.com/?sig=visual-private-signature"
+    Then selector ".create-preview" contains "'endpoint' = '********'"
+    When selector ".create-submit" is clicked
+    Then selector ".create-status" contains "Completed"
+    When selector ".create-close" is clicked
+    And selector ".prompt-row input" is filled with "SHOW CREATE CLIENT visual_cloud;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "CREATE AZURE_BLOB CLIENT visual_cloud"
+    And selector ".terminal" contains "'endpoint' = '********'"
 
     Examples:
       | cluster_size |

@@ -176,7 +176,7 @@ def render_matrix(surface, notes):
     lines = ["# Connector Capabilities\n", "This reference is generated from the current declarations in Plexus, the Nervix graph definition language. Regenerate it with `just connector-matrix`; `just validate-connector-matrix` rejects drift in this chapter and the generated manual regions.\n",
              "The tables describe the implemented surface. A connector Epic can extend a declaration and regenerate these tables in the same change. Modes below are complete bodies after `MODE`; options retain their declared order, exact value types, presence and defaults. Locator rule names identify the vocabulary's validator; see [External Names](ingestors.md#external-names).\n",
              "Ingest and emit are separate contracts: consuming a broker position and publishing a record need different acknowledgements. Each mirror column compares every declared entity of the same connector on the other side and explains transport differences. An absent capability requires reviewed explanatory prose; stale or missing explanations fail validation.\n",
-             "Client declarations currently expose pooling, statement options and CONFIG ownership. They do not yet enumerate CONFIG keys, so these tables do not imply that an arbitrary Nervix-owned key is accepted. Read the linked entity manual and [client pool reference](database-client-pools.md) for those keys. Driver-owned CONFIG remains intentional pass-through.\n"]
+             "Client CONFIG keys below come from the same declaration used by validation, completion and public inspection. Keys are lowercase and case-sensitive; every key occurs at most once. Required keys, Nervix-owned value types and TLS identity pairs validate before storage. Driver property namespaces and address query options remain intentional pass-through; undeclared driver properties are confidential in public inspection. Kafka properties and Postgres, MySQL, Redis, RabbitMQ and NATS addresses also pass network-free driver checks before commit. Authentication, connectivity and checks requiring a remote service wait for initialization. Nervix-owned file values accept resource mount templates and must resolve to readable files; driver-owned file properties retain their native interpretation. HTTPS retains the driver's built-in trust roots; MQTT requires tls_ca_file for mqtts, as its key's conditional presence declares. tls_ca_file follows the connector's documented augmentation or replacement policy, and a client certificate requires its private key.\n"]
     for side, title in (("ingest", "Ingest"), ("emit", "Emit")):
         lines.append(f"## {title}\n")
         for row in surface[side]:
@@ -190,6 +190,15 @@ def render_matrix(surface, notes):
         lines.append(table([("Kind", client["kind"]), ("Connection pooling", client["pool"]),
                             ("CONFIG owner class", client["config_owner"]),
                             ("Statement options", option_text(client["options"]))]))
+        lines.append(table([
+            (f"`{key['name']}`", key["presence"], key["type"], key["owner"],
+             "yes" if key["confidential"] else "no",
+             key["file"])
+            for key in client["keys"]
+        ], ("CONFIG key", "Presence", "Value", "Owner", "Confidential", "File role")))
+        namespaces = ", ".join(client["namespaces"]) or "none; only declared keys are accepted"
+        reserved = ", ".join(f"`{key}`" for key in client["reserved"]) or "none"
+        lines.append(f"Delegated property namespaces: {namespaces}. Reserved keys: {reserved}.\n")
     return "\n".join(lines)
 
 

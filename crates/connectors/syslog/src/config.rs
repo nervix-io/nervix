@@ -303,21 +303,10 @@ impl SyslogClientConfig {
     fn validate_keys(
         entries: &[nervix_models::ClientConfigEntry],
     ) -> error_stack::Result<(), SyslogConfigError> {
-        let known = [
-            "protocol",
-            "addr",
-            "max_message_size",
-            "framing",
-            DeadlineKey::Timeout.key(),
-            DeadlineKey::ConnectTimeout.key(),
-            DeadlineKey::IdleTimeout.key(),
-            "tls_cert_file",
-            "tls_key_file",
-            "tls_ca_file",
-        ];
+        let schema = nervix_models::CreateClientSyslog::<u64>::DECLARATION.config;
         let mut seen = HashSet::default();
         for entry in entries {
-            if !known.contains(&entry.key.as_str()) {
+            if schema.key(&entry.key).is_none() {
                 return Err(Report::new(SyslogConfigError::UnknownKey {
                     key: entry.key.clone(),
                 }));
