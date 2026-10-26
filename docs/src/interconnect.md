@@ -787,9 +787,12 @@ A delivery proceeds as follows:
    in.
 8. When the concrete runtime branch accepts the batch, the receiver sends a terminal admission
    outcome over the reserved management capacity. The sender can then release the channel for the
-   next batch. A batch that carries record acknowledgements is admitted only once the receiver has
-   charged its acknowledgement watches; while the relay budget has no room for them, the receiver
-   holds the batch back unadmitted, as
+   next batch, whose grant can reach the receiver before the delivery of that outcome returns there
+   and takes the channel's next position all the same, as
+   [Ordering, Retry, And Reconciliation](#ordering-retry-and-reconciliation) describes. A batch that
+   carries record acknowledgements is admitted only once the receiver has charged its
+   acknowledgement watches; while the relay budget has no room for them, the receiver holds the
+   batch back unadmitted, as
    [Bounded Correlation And Peer Owners](#bounded-correlation-and-peer-owners) describes.
 9. If the send includes record acknowledgements, later acknowledgement events report downstream
    processing completion. Detached sends and subscription fan-out end at admission.
@@ -818,7 +821,11 @@ source or persist an acknowledgement. Admission progress carries no parked state
 Progress and terminal acknowledgements share the bounded application receive queue. The application
 keeps consuming progress while terminal delivery waits for queue capacity. The one-slot transport
 capacity test explicitly queues progress, consumes it while sending the terminal acknowledgement,
-and verifies that the next relay grant fits only after that terminal send completes.
+and verifies that the channel's next relay grant is refused as busy while the first batch is
+unadmitted and fits once that terminal send completes. A second one-slot test lets the first
+batch's terminal outcome reach the sender's application without its delivery returning to the
+receiver, and verifies that the channel's next relay grant takes its position with the queue item
+and terminal capacity the first batch held.
 
 ### Acknowledgement Registrations
 
@@ -1064,6 +1071,17 @@ Each attempt carries the channel and admission identities it was granted under. 
 has delivered an attempt's terminal outcome, it retires that same attempt: it advances the channel
 watermark and releases the attempt, its channel occupancy, and its admission without rebuilding
 either identity or looking the admission up again.
+
+A sender continues a channel as soon as the outcome of its batch reaches it, so the grant for the
+channel's next position can reach the receiver before the delivery of that outcome has returned
+there, as when the receiver's task awaiting that delivery's reply runs late on a loaded node. A
+sender asks for a channel's next position, by its grant or by its cancellation, only once it holds
+the outcome of the position before. Such a request therefore proves what the returned delivery
+would: when the receiver still retains the attempt before it and that attempt's outcome is decided,
+the request retires the attempt, recording its outcome in the channel's watermark and releasing its
+capacity before the request reserves its own, and then takes the next position. The delivery's own
+return then finds nothing left to retire. A request for the next position while the batch before
+it is still unadmitted finds the channel busy, and one that skips a position remains out of order.
 
 Relay attempts, grants, watermarks, admission state, and record-acknowledgement owners are in-memory
 hot-path state. A receiver process-epoch change therefore makes an unresolved delivery

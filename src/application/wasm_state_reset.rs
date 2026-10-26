@@ -21,7 +21,9 @@ use std::collections::BTreeSet;
 use error_stack::{Report, ResultExt as _};
 use futures_util::future::try_join_all;
 use meticulous::OptionExt as _;
-use nervix_consensus::{DomainMutationLease, DomainPlanningInputs, ReplicatedTransaction};
+use nervix_consensus::{
+    ConsensusError, DomainMutationLease, DomainPlanningInputs, ReplicatedTransaction,
+};
 use nervix_interconnect::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse, EntityGatePurpose,
     RemoteOperationSubject, WasmStateResetRuntimeAction as RemoteWasmStateResetRuntimeAction,
@@ -672,6 +674,26 @@ impl SessionServiceImpl {
                 .wasm_state_generations()
                 .verified("the reset began on a scheduled WASM processor")
                 .of_reset_scope(&plan.scope);
+            if self
+                .inner
+                .runtime
+                .wasm_reset_publication_failure_is_enabled(domain)
+            {
+                self.abort_unpublished_wasm_state_reset(
+                    &plan.owner,
+                    gate,
+                    processor,
+                    request,
+                    plan.scope,
+                )
+                .await?;
+                self.inner
+                    .runtime
+                    .deliver_wasm_reset_publication_failure(domain);
+                return Err(Report::new(WasmStateResetError::Publish {
+                    processor: processor.clone(),
+                }));
+            }
             #[cfg(feature = "testing")]
             if self
                 .inner
@@ -690,11 +712,20 @@ impl SessionServiceImpl {
                     processor: processor.clone(),
                 }));
             }
-            let publication = self
+            let publication = if self
                 .inner
-                .consensus
-                .replace_domain_schedule(plan.inputs.clone(), Some(plan.schedule), mutation)
-                .await;
+                .runtime
+                .take_wasm_reset_publication_authority_loss(domain)
+            {
+                Err(Report::new(ConsensusError::LeadershipLost {
+                    leader_id: None,
+                }))
+            } else {
+                self.inner
+                    .consensus
+                    .replace_domain_schedule(plan.inputs.clone(), Some(plan.schedule), mutation)
+                    .await
+            };
             if let Err(error) = publication {
                 let observed = self.inner.consensus.domain_planning_inputs(domain).await;
                 if Self::schedule_has_wasm_reset(

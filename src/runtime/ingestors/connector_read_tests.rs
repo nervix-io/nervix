@@ -464,11 +464,7 @@ pub(super) fn gathering_policy(max_in_flight: usize) -> BrokerIngestorPolicy {
         timeout: Duration::from_secs(60),
         retry: INGESTOR_RECONNECT_POLICY,
     };
-    BrokerIngestorPolicy {
-        acknowledgement,
-        retry: acknowledgement.retry(),
-        position_class: PositionClass::Replayable,
-    }
+    BrokerIngestorPolicy::new(acknowledgement, PositionClass::Replayable)
 }
 
 /// A ingestor the tests feed and the host it reads for, before the loop takes them.

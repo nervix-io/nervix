@@ -137,16 +137,6 @@ impl IngestorAckPolicy {
             Self::Parallel { .. } => IngestorAcknowledgementSupport::Parallel,
         }
     }
-
-    pub fn retry(self) -> ParsedRetryPolicy {
-        match self {
-            Self::None => ParsedRetryPolicy {
-                backoff: Duration::ZERO,
-                max_backoff: Duration::ZERO,
-            },
-            Self::Sequential { retry, .. } | Self::Parallel { retry, .. } => retry,
-        }
-    }
 }
 
 /// The complete host and connector plan for one ingestor node.

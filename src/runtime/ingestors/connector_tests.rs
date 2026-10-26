@@ -415,11 +415,7 @@ impl PacedIngestorHostServices for FakeHost {
 }
 
 fn replayable(acknowledgement: IngestorAckPolicy) -> BrokerIngestorPolicy {
-    BrokerIngestorPolicy {
-        acknowledgement,
-        retry: acknowledgement.retry(),
-        position_class: PositionClass::Replayable,
-    }
+    BrokerIngestorPolicy::new(acknowledgement, PositionClass::Replayable)
 }
 
 fn three_messages() -> VecDeque<FakeMessage> {

@@ -3,8 +3,8 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** One single-broker mock cluster, the librdkafka client whose instance hosts it for as
-//!   long as the scenario keeps it, the topics it serves, and whether it refuses the writes produced
-//!   to it or the offsets its consumer groups commit.
+//!   long as the scenario keeps it, the topics it serves, whether it refuses the writes produced
+//!   to it or the offsets its consumer groups commit, and an outage of its broker.
 //! - **Depends on.** rust-rdkafka through the Kafka connector's testing re-export.
 //! - **Must not know.** Nervix, its emitters, or the shared Kafka test broker.
 //!
@@ -15,7 +15,9 @@
 //! retries that answer, and the broker stores nothing it refused, so nothing it refused appears once
 //! it accepts writes again. While a scenario asks it to, it also refuses offset commits with
 //! `GROUP_AUTHORIZATION_FAILED`, an answer a consumer does not retry, and a group's committed offset
-//! stays where it was.
+//! stays where it was. While its broker is down, it closes every connection and accepts none, as a
+//! restarting broker does, and it keeps its topics, their records and its groups' committed offsets
+//! for when the broker comes back.
 
 use std::{fmt, io, time::Duration};
 
@@ -25,6 +27,7 @@ use nervix_connector_kafka::testing_rdkafka::{
     producer::{DefaultProducerContext, Producer, ThreadedProducer},
     types::{RDKafkaApiKey, RDKafkaRespErr},
 };
+use nervix_primitives::time::{Instant, sleep_until};
 
 /// How many produce requests a refusing broker answers with `NOT_ENOUGH_REPLICAS` at most: far more
 /// than a producer, which retries a refused request about once a second, sends during a scenario.
@@ -38,11 +41,16 @@ const REFUSED_OFFSET_COMMITS: usize = 10_000;
 /// The librdkafka setting that makes a client host a mock cluster of that many brokers.
 const MOCK_BROKER_COUNT: &str = "test.mock.num.brokers";
 
+/// The id of the mock cluster's one broker: librdkafka numbers a mock cluster's brokers from one.
+const BROKER_ID: i32 = 1;
+
 pub(crate) struct KafkaMockBroker {
     /// The client whose librdkafka instance hosts the mock cluster, which lives as long as it.
     host: ThreadedProducer<DefaultProducerContext>,
     /// Where a client reaches the broker.
     bootstrap_servers: String,
+    /// When the broker went down, while it is down.
+    down_since: Option<Instant>,
 }
 
 impl KafkaMockBroker {
@@ -56,6 +64,7 @@ impl KafkaMockBroker {
         Ok(Self {
             host,
             bootstrap_servers,
+            down_since: None,
         })
     }
 
@@ -133,15 +142,41 @@ impl KafkaMockBroker {
     /// Holds every answer while the scenario checks progress independent of this broker.
     pub(crate) fn hold_answers(&self) -> io::Result<()> {
         self.cluster()?
-            .broker_round_trip_time(1, Duration::from_secs(3600))
+            .broker_round_trip_time(BROKER_ID, Duration::from_secs(3600))
             .map_err(io::Error::other)
     }
 
     /// Releases the broker's answers before the scenario drains its sources.
     pub(crate) fn release_answers(&self) -> io::Result<()> {
         self.cluster()?
-            .broker_round_trip_time(1, Duration::ZERO)
+            .broker_round_trip_time(BROKER_ID, Duration::ZERO)
             .map_err(io::Error::other)
+    }
+
+    /// Takes the broker down: it closes every connection and accepts none until it comes back up.
+    pub(crate) fn go_down(&mut self) -> io::Result<()> {
+        self.cluster()?
+            .broker_down(BROKER_ID)
+            .map_err(io::Error::other)?;
+        self.down_since = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Brings the broker back up once it has been down for `outage`, measured from when it went
+    /// down, so the outage lasts that long however late the scenario asks.
+    pub(crate) async fn come_up_after(&mut self, outage: Duration) -> io::Result<()> {
+        let down_since = self.down_since.ok_or_else(|| {
+            io::Error::other("the mock Kafka broker comes up only once it is down")
+        })?;
+        let back_at = down_since
+            .checked_add(outage)
+            .ok_or_else(|| io::Error::other("the outage outlasts the monotonic clock"))?;
+        sleep_until(back_at).await;
+        self.cluster()?
+            .broker_up(BROKER_ID)
+            .map_err(io::Error::other)?;
+        self.down_since = None;
+        Ok(())
     }
 }
 

@@ -370,9 +370,8 @@ impl KafkaTopicIngestorStartPlan {
             acknowledgement,
         };
 
-        // An unacknowledged Kafka consumer reopens after the host's fixed ingestor error delay
-        // rather than backing off, which the unacknowledged policy's zero retry expresses.
-        let retry = acknowledgement.retry();
+        let policy =
+            BrokerIngestorPolicy::new(acknowledgement, source_plan.capabilities.position_class());
         let mut opened: Vec<Box<dyn IngestorInstance>> =
             Vec::with_capacity(source_plan.capabilities.instances().get().arch_into());
         for instance_index in 0..source_plan.capabilities.instances().get() {
@@ -380,14 +379,7 @@ impl KafkaTopicIngestorStartPlan {
             let source = KafkaTopicIngestor::open(&source_plan.connector, instance_index)
                 .await
                 .change_context_lazy(|| ingestor.initialize_failure())?;
-            opened.push(Box::new(BrokerIngestorInstance {
-                source,
-                policy: BrokerIngestorPolicy {
-                    acknowledgement,
-                    retry,
-                    position_class: source_plan.capabilities.position_class(),
-                },
-            }));
+            opened.push(Box::new(BrokerIngestorInstance { source, policy }));
         }
         Ok(IngestorStart {
             instances: opened,

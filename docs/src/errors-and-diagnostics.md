@@ -388,6 +388,12 @@ runtime caller can still distinguish a resource limit, invalid emission, and a s
 without classifying a rendered string. Callback and checkpoint acknowledgement decisions stay the
 same; [WASM State And Recovery](./wasm-state.md) owns those boundaries.
 
+The reset coordinator preserves the typed `ConsensusError::LeadershipLost` beneath its publication
+error. Transaction application inspects that cause before rendering a diagnostic: authority loss
+leaves the durable reset step applying in both its first attempt and recovery. Other preparation,
+storage and publication failures keep their terminal failure behavior. A rendered message is not
+used to decide whether a reset can resume.
+
 A guest export answers the host with an integer, and the SDK renders a guest report only there. A
 guest's own failure puts the rendered chain on the global-error channel, latches the instance's
 error state and returns the error-state code; a panic latches the same state with the panic's
@@ -782,6 +788,16 @@ acknowledgement, rather than failures to decode a record. A control call that ex
 `socket.timeout.ms` budget reports `KafkaTopicIngestorError::ControlTimeout` with that bound. Metadata,
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
+
+A domain-offset Kafka ingestor that must start a partition without a domain offset while its
+client's `auto.offset.reset` is `error` fails its resume with
+`KafkaTopicIngestorError::ResetRefused`, which names the topic and partition, beneath
+`IngestorError::Resume`; the host shows it as the ingestor's transient status and resumes again on
+its cadence. A timestamp lookup whose answer carries a partition error keeps that `KafkaError`
+beneath `KafkaTopicIngestorError::ResolveTimestampOffsets`. A consumer-group rebalance runs in the consumer's context, which has no caller to return a failure
+to: a rejected partition's floor that cannot be set on the assignment, and an assignment or
+revocation librdkafka refuses, are logged at `warn` with the driver's error, and the partition then
+starts where the group's committed offset or the client's reset policy places it.
 
 A Kafka consumer takes the commands charge of the job that will destroy it before it is created,
 and a refused charge keeps `AdmissionError` beneath `KafkaTopicIngestorError::RetirementAdmission`. It

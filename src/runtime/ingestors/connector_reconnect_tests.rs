@@ -4,7 +4,8 @@
 //! Layer: test harness.
 //! - **Owns.** The connection-bound broker, ingestor and host doubles that the reconnect unit tests
 //!   and the Shuttle check share, and the unit tests of each position class across a lost
-//!   connection, and retry backoff across successful reconnects until a batch is delivered.
+//!   connection, of retry backoff across successful reconnects until a batch is delivered, and of
+//!   the cadence an ingestor whose delivery mode declares no retry policy reconnects on.
 //! - **Depends on.** The production broker host loop, the ingestor contract and its position
 //!   classes.
 //! - **Must not know.** Broker drivers, the runtime ingestor host or the quiesce control.
@@ -347,14 +348,13 @@ pub(super) fn sequential_policy(position_class: PositionClass) -> BrokerIngestor
         backoff: Duration::from_millis(1),
         max_backoff: Duration::from_millis(1),
     };
-    BrokerIngestorPolicy {
-        acknowledgement: IngestorAckPolicy::Sequential {
+    BrokerIngestorPolicy::new(
+        IngestorAckPolicy::Sequential {
             timeout: Duration::from_secs(1),
             retry,
         },
-        retry,
         position_class,
-    }
+    )
 }
 
 /// Runs the broker loop over two messages until its ingestor closes, losing the connection while the
@@ -518,4 +518,24 @@ async fn successful_upgrades_keep_read_failure_backoff_until_a_batch_is_delivere
         );
         assert_eq!(broker.lock().acknowledged, [1]);
     }
+}
+
+#[test]
+fn a_broker_source_without_a_retry_policy_reopens_on_the_reconnect_cadence() {
+    let unacknowledged =
+        BrokerIngestorPolicy::new(IngestorAckPolicy::None, PositionClass::Replayable);
+    assert_eq!(unacknowledged.retry, INGESTOR_RECONNECT_POLICY);
+
+    let declared = ParsedRetryPolicy {
+        backoff: Duration::from_millis(1),
+        max_backoff: Duration::from_millis(2),
+    };
+    let acknowledged = BrokerIngestorPolicy::new(
+        IngestorAckPolicy::Sequential {
+            timeout: Duration::from_secs(1),
+            retry: declared,
+        },
+        PositionClass::Replayable,
+    );
+    assert_eq!(acknowledged.retry, declared);
 }
