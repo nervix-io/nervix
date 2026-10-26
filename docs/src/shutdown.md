@@ -1442,3 +1442,10 @@ released claim becomes available again. Task teardown removes its confirmation/s
 and pooled emitter teardown removes its wait registration; cancellation clears a pending borrow's
 wait through its guard. Handoff watches register before reading their retained entity publication,
 and release publishes thaw before waking them.
+
+## Live Domain Policy
+
+Domain-drain and entity-gate deadlines come from the installed committed parameter record. Each
+operation captures its deadline when it begins. Node drain and shutdown deadlines remain local
+capabilities. Startup installs a live construction policy and admits the matching consensus
+revision before activating graph tasks; it does not replay an unplaced local graph first.

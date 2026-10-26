@@ -284,6 +284,8 @@ async fn attach_producer(
                 batches: NonZeroU32::new(4).assured("a literal non-zero count"),
                 bytes: NonZeroU64::new(1_024).assured("a literal non-zero size"),
             },
+            max_batch_rows: NonZeroU32::new(nervix_models::DEFAULT_CLIENT_BATCH_ROWS)
+                .assured("the fixture row allowance is nonzero"),
             max_batch_bytes: NonZeroU64::new(1_024).assured("a literal non-zero size"),
             serving,
             reply,

@@ -83,6 +83,7 @@ const KEY_WEB_CONSOLE_ADVERTISE_ADDR: &str = "web_console_advertise_addr";
 const KEY_INTERCONNECT_LISTEN_ADDR: &str = "interconnect_listen_addr";
 const KEY_INTERCONNECT_ADVERTISE_ADDR: &str = "interconnect_advertise_addr";
 const KEY_BOOTSTRAP_HOST: &str = "bootstrap_host";
+const KEY_CLUSTER_PARAMETERS: &str = "cluster_parameters";
 const KEY_TERMINATING: &str = "terminating";
 const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
 const KEY_AUTHORITATIVE_REVISION_APPLIED: &str = "authoritative_revision_applied";
@@ -115,7 +116,7 @@ pub struct ClusterHandle {
     chitchat_server: Mutex<Option<ChitchatHandle>>,
     events: ClusterEvents,
     peer_health_state: watch::Sender<PeerHealthStateSnapshot>,
-    node_unavailability_timeout: Duration,
+    node_unavailability_timeout: nervix_primitives::publication::ArcSwap<Duration>,
     membership_task: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -1430,7 +1431,9 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         chitchat_server: Mutex::new(Some(chitchat)),
         events,
         peer_health_state: watch::channel(PeerHealthStateSnapshot::default()).0,
-        node_unavailability_timeout: settings.membership.node_unavailability_timeout(),
+        node_unavailability_timeout: nervix_primitives::publication::ArcSwap::from_pointee(
+            settings.membership.node_unavailability_timeout(),
+        ),
         membership_task: Mutex::new(Some(membership_task)),
     })
 }
@@ -1825,7 +1828,7 @@ impl ClusterHandle {
             targets = snapshot.replace_endpoints(
                 endpoints.clone(),
                 now,
-                self.node_unavailability_timeout,
+                self.node_unavailability_timeout(),
             );
             snapshot.revision() != previous_revision
         });
@@ -1846,7 +1849,8 @@ impl ClusterHandle {
         }
         let mut disposition = PeerHealthResultDisposition::Superseded;
         self.peer_health_state.send_if_modified(|snapshot| {
-            disposition = snapshot.record_result(result.clone(), self.node_unavailability_timeout);
+            disposition =
+                snapshot.record_result(result.clone(), self.node_unavailability_timeout());
             matches!(disposition, PeerHealthResultDisposition::Published { .. })
         });
         disposition
@@ -1857,7 +1861,7 @@ impl ClusterHandle {
         let mut effective = None;
         self.peer_health_state.send_if_modified(|snapshot| {
             let previous_revision = snapshot.revision();
-            effective = Some(snapshot.effective_snapshot(now, self.node_unavailability_timeout));
+            effective = Some(snapshot.effective_snapshot(now, self.node_unavailability_timeout()));
             snapshot.revision() != previous_revision
         });
         effective.assured("the peer-health watch update closure always publishes its snapshot")
@@ -1915,12 +1919,60 @@ impl ClusterHandle {
     fn subscribe_peer_health_state(&self) -> PeerHealthStateWatcher {
         PeerHealthStateWatcher::new(
             self.peer_health_state.subscribe(),
-            self.node_unavailability_timeout,
+            self.node_unavailability_timeout(),
         )
     }
 
+    /// Publish a coherent committed/running pair; a joining node reads this live revision before
+    /// activating its stored graph. Gossip authentication supplies the existing cluster boundary.
+    pub(crate) async fn publish_cluster_parameters(
+        &self,
+        record: nervix_models::ClusterParameterRecord,
+        running: bool,
+    ) {
+        let mut chitchat = self.chitchat.lock().await;
+        let state = chitchat.self_node_state();
+        let previous: Option<nervix_models::ClusterParameterPublication> = state
+            .get(KEY_CLUSTER_PARAMETERS)
+            .and_then(|text| serde_json::from_str(text).ok());
+        let publication =
+            previous.unwrap_or_else(|| nervix_models::ClusterParameterPublication::new(record));
+        let next = if running {
+            publication.install(record)
+        } else {
+            publication.observe(record)
+        };
+        match next {
+            Ok(next) => {
+                if let Some(applied) = next.running() {
+                    self.node_unavailability_timeout
+                        .store(StdArc::new(applied.values.node_unavailability_timeout()));
+                }
+                state.set(
+                    KEY_CLUSTER_PARAMETERS,
+                    serde_json::to_string(&next)
+                        .assured("parameter publications contain only bounded scalar values"),
+                );
+            }
+            Err(error) => warn!(error = %error, "refused a contradictory parameter publication"),
+        }
+    }
+
+    pub(crate) async fn live_cluster_parameters(
+        &self,
+    ) -> Option<nervix_models::ClusterParameterRecord> {
+        let local = self.local_node_identity().await;
+        self.gossip_state()
+            .await
+            .live_nodes
+            .iter()
+            .filter(|node| &node.node_id != local.node_id())
+            .filter_map(|node| node.parameters.map(|publication| publication.committed()))
+            .max_by_key(|record| record.revision)
+    }
+
     pub(crate) fn node_unavailability_timeout(&self) -> Duration {
-        self.node_unavailability_timeout
+        **self.node_unavailability_timeout.load()
     }
 }
 
@@ -2036,7 +2088,11 @@ fn membership_report(nodes: &BTreeMap<ChitchatId, NodeState>) -> Vec<String> {
 /// reads it again.
 fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode> {
     let identity = cluster_node_identity(node_id)?;
+    let parameters: Option<nervix_models::ClusterParameterPublication> = state
+        .get(KEY_CLUSTER_PARAMETERS)
+        .and_then(|text| serde_json::from_str(text).ok());
     Some(GossipNode {
+        parameters,
         node_id: identity.node_id().clone(),
         incarnation: identity.incarnation(),
         terminating: state.get(KEY_TERMINATING).is_some(),

@@ -421,3 +421,11 @@ assignment slot. Schedule replacement, branch eviction and entity or domain tear
 routes before removing registry entries. Frame handlers read the immutable route publication;
 announcers and entity catch-up tasks retain their route or lifecycle and never revisit execution
 or identity registries. See [Data-Plane Concurrency](./data-plane-concurrency.md#checkpoint-replication).
+
+## Parameter Revisions
+
+A coherent consensus runtime snapshot carries its committed parameter record alongside schedules
+and domains. A node installs that policy before constructing its execution revision and reporting
+prepared/ready. A returning node fences this step with the live revision used at construction and
+verifies equal values as it catches up. It does not activate a locally stored graph before that
+boundary. Policy installation changes no placement identity, stored state generation or ACK owner.

@@ -53,7 +53,6 @@ use super::{
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
     subscription::{SessionSubscriptions, SubscriptionInterests, SubscriptionSampler},
     tls::HttpsListenerCertificates,
-    transaction::TransactionLimits,
 };
 use crate::{
     ConfiguredFaultInjection, cluster, registry::Registry, resource::ResourceStore,
@@ -267,7 +266,6 @@ fn test_session_service(
         &cluster,
     );
     let subscription_interests = SubscriptionInterests::new(cluster.clone(), runtime.metrics());
-    let transaction_limits = TransactionLimits::default();
     let client_producers = super::client_producers::ClientProducerRouter::new(
         runtime.clone(),
         interconnect.clone(),
@@ -288,7 +286,6 @@ fn test_session_service(
             https_certificates,
             runtime,
             runtime_admission: Arc::new(super::runtime_admission::RuntimeAdmission::new()),
-            replica_count: 0,
             admission_shutdown: CancellationToken::new(),
             drain_support_shutdown: CancellationToken::new(),
             events: SessionEvents::new(16),
@@ -300,13 +297,7 @@ fn test_session_service(
             service_tasks: super::service_tasks::ServiceTasks::default(),
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
-            transaction_idle_timeout: transaction_limits.idle_timeout(),
-            transaction_tombstone_retention: transaction_limits.tombstone_retention(),
-            transaction_max_statements: transaction_limits.max_statements(),
-            transaction_max_source_bytes: transaction_limits.max_source_bytes(),
-            transaction_max_open: transaction_limits.max_open(),
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
-            command_execution_policy: super::command_execution::CommandExecutionPolicy::default(),
             command_executions: super::command_execution::CommandExecutionOwners::default(),
             transaction_executions: DashMap::with_hasher(RandomState::new()),
             transaction_recovery: Default::default(),
@@ -667,6 +658,11 @@ pub(in crate::application) async fn build_test_service_inner(
         leading,
         "the single-node test consensus did not elect node '{expected_leader}'"
     );
+    consensus
+        .proposer()
+        .seed_cluster_parameters(nervix_models::ClusterParameterValues::default())
+        .await
+        .assured("the elected fixture leader commits its initial policy");
     if create_default_domain_flag {
         create_test_domain(&consensus.proposer(), "default").await;
     }

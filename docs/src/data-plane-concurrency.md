@@ -2632,3 +2632,12 @@ lock, concurrent map or memory-ordering protocol. OTEL entities delegate to one 
 The HTTP and WebSockets endpoint wrappers share an intake owner whose drop still ends the exact
 binding lifetime. Their existing host Shuttle checks and lifecycle Deloxide lanes remain the
 concurrency evidence; moving these owners requires current inventory paths, not a new protocol model.
+
+## Live Cluster Policy
+
+Runtime timing and resource bounds are immutable publications through the governed `ArcSwap`.
+Control-plane installation remains serialized by runtime admission. A new client attachment
+captures its grant and each worker batch keeps that attachment's row bound; no record consults a
+shared policy map. HTTP preparation captures its typed header-byte and field-count bounds once per publication.
+Snapshot owners observe changed intervals at the existing bounded replica-poll boundary, without
+a new wait/notify protocol or changes to checkpoint/acknowledgement ownership.

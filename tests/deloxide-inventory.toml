@@ -2769,6 +2769,9 @@ workloads = [
 [[owner]]
 path = "src/registry/storage.rs"
 workloads = [
+  "parameters.live",
+  "parameters.restart",
+  "parameters.return",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
   "stress.diagnostic-nodes",
@@ -3320,3 +3323,157 @@ invariant = "The declared auto-ack or parallel-prefetch contract survives graph 
 invocation = "stress-scenarios"
 scenario = "RabbitMQ ACK PARALLEL settles successful deliveries while another delivery is rejected"
 selections = ["deloxide-stress"]
+
+# Parameter publication shares the existing runtime admission and storage owners in every mode.
+[[invocation]]
+bound_seconds = 900
+concurrency = 1
+evidence = true
+features = ["testing"]
+id = "cluster-parameters"
+inputs = ["tests/features/cluster/cluster_parameters.feature"]
+kind = "cucumber"
+package = "nervix-server"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+tags = ["@cluster_parameters"]
+target = "test:scenarios"
+
+[[workload]]
+coverage = "Each live node installs the committed policy before command completion."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.live"
+invariant = "Each live node installs the committed policy before command completion."
+invocation = "cluster-parameters"
+scenario = "A committed parameter change applies on every node without restarting on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "First-bootstrap values become one cluster authority."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.seed"
+invariant = "First-bootstrap values become one cluster authority."
+invocation = "cluster-parameters"
+scenario = "First bootstrap seeds the parameter record for every node on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Explicit seed flags are refused after the first bootstrap."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.refuse-seed"
+invariant = "Explicit seed flags are refused after the first bootstrap."
+invocation = "cluster-parameters"
+scenario = "An existing cluster refuses parameter seed options at a later node start on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Committed policy survives a process restart."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.restart"
+invariant = "Committed policy survives a process restart."
+invocation = "cluster-parameters"
+scenario = "A committed parameter survives a node restart on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A returning node adopts live policy before its stale log catches up."
+examples = 1
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.return"
+invariant = "A returning node adopts live policy before its stale log catches up."
+invocation = "cluster-parameters"
+scenario = "A node down during a parameter change adopts the committed record when it returns"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "An atomic cap refusal identifies the existing model."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.model-cap"
+invariant = "An atomic cap refusal identifies the existing model."
+invocation = "cluster-parameters"
+scenario = "Lowering a cap refuses the existing model that exceeds it on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Repeated-work durations have a typed positive bound."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.positive-duration"
+invariant = "Repeated-work durations have a typed positive bound."
+invocation = "cluster-parameters"
+scenario = "A parameter change refuses a nonpositive snapshot interval on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "Public native producer opens observe a raised and lowered policy while admitted credit remains attached."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.client-credit"
+invariant = "New grants use committed byte limits; an admitted grant survives a later lower cap."
+invocation = "cluster-parameters"
+scenario = "A live producer byte cap changes new grants and retains admitted credit on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]
+
+[[workload]]
+coverage = "A lowered header cardinality is validated against the committed HTTP emitter before publication."
+examples = 2
+feature = "tests/features/cluster/cluster_parameters.feature"
+id = "parameters.header-cap"
+invariant = "A parameter transition cannot invalidate a model's literal HTTP header fields."
+invocation = "cluster-parameters"
+scenario = "A lower HTTP header count refuses the model that exceeds it on a cluster of <cluster_size>"
+selections = [
+  "deloxide",
+  "deloxide-order",
+  "deloxide-stress",
+  "deloxide-stress-restore",
+]

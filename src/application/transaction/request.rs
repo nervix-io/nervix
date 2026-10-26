@@ -16,7 +16,7 @@
     )
 )]
 
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     ReplicatedTransaction, TransactionActivity, TransactionOutcome, TransactionQueueAdmission,
     TransactionQueueLimits, TransactionQueueRequest, TransactionState, TransactionStatement,
@@ -58,7 +58,11 @@ impl SessionServiceImpl {
         match self
             .inner
             .consensus
-            .open_transaction(transaction, self.inner.transaction_max_open)
+            .open_transaction(
+                transaction,
+                usize::try_from(self.cluster_parameters().transaction_max_open())
+                    .assured("the committed count fits a supported target"),
+            )
             .await
         {
             Ok(transaction) => {
@@ -100,9 +104,11 @@ impl SessionServiceImpl {
         let Some(transaction) = self.inner.consensus.current_transaction(&id).await else {
             return command_error(format!("transaction '{id}' is unknown"));
         };
+        let parameters = self.cluster_parameters();
         let limits = TransactionQueueLimits {
-            max_statements: self.inner.transaction_max_statements,
-            max_source_bytes: self.inner.transaction_max_source_bytes,
+            max_statements: usize::try_from(parameters.transaction_max_statements())
+                .assured("the committed count fits a supported target"),
+            max_source_bytes: parameters.transaction_max_source_bytes(),
         };
         match transaction.queue_admission(&owner, &domain, &queued, limits) {
             Ok(TransactionQueueAdmission::Existing(admission)) => {

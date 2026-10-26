@@ -17,6 +17,7 @@
 use std::collections::BTreeSet;
 
 use error_stack::Report;
+use meticulous::ResultExt as _;
 use nervix_consensus::{DomainPlanningInputs, TransactionScheduleEligibility};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, DomainSchedule, PlacementPolicy,
@@ -351,7 +352,8 @@ impl SessionServiceImpl {
             placement_candidate_identities,
             live_voters,
             cluster_nodes,
-            replica_count: self.inner.replica_count,
+            replica_count: usize::try_from(self.cluster_parameters().replica_count())
+                .assured("the committed count fits a supported target"),
             mode,
         }
     }
@@ -374,6 +376,7 @@ mod tests {
 
     fn gossip_node(name: &str, incarnation: u64, terminating: bool) -> GossipNode {
         GossipNode {
+            parameters: None,
             node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
             incarnation: ClusterNodeIncarnation::new(incarnation),
             terminating,

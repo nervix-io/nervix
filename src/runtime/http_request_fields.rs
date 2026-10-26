@@ -173,6 +173,14 @@ pub(in crate::runtime) enum HttpRequestInput {
     },
 }
 
+/// The source, expression snapshot and policy one request publication is evaluated against.
+pub(in crate::runtime) struct HttpRequestEvaluation<'a> {
+    pub(in crate::runtime) input: HttpRequestInput,
+    pub(in crate::runtime) side_inputs: &'a HashMap<String, RuntimeValue>,
+    pub(in crate::runtime) execution_now: Timestamp,
+    pub(in crate::runtime) header_limits: nervix_models::HttpHeaderLimits,
+}
+
 impl HttpRequestInput {
     /// The original source record of row `row` of `published`, which a message error names.
     fn source_record(
@@ -521,10 +529,14 @@ impl CompiledHttpRequestFields {
         executor: &Executor,
         emitter: &EmitterName,
         mut published: RelayRecordBatch,
-        input: HttpRequestInput,
-        side_inputs: &HashMap<String, RuntimeValue>,
-        execution_now: Timestamp,
+        evaluation: HttpRequestEvaluation<'_>,
     ) -> Result<PreparedHttpRequests, PlannedGeneralFailure> {
+        let HttpRequestEvaluation {
+            input,
+            side_inputs,
+            execution_now,
+            header_limits,
+        } = evaluation;
         let acks = std::mem::take(&mut published.acks);
         let source_input = match &input {
             HttpRequestInput::Published => None,
@@ -585,7 +597,7 @@ impl CompiledHttpRequestFields {
         let mut requests = Vec::with_capacity(row_count);
         let mut message_errors: Vec<PlannedMessageError> = Vec::new();
         for row in 0..row_count {
-            let failed = match self.row_request(&fields, row) {
+            let failed = match self.row_request(&fields, row, header_limits) {
                 Ok(request) => {
                     accepted_rows.push(row);
                     requests.push(request);
@@ -708,6 +720,7 @@ impl CompiledHttpRequestFields {
         &self,
         fields: &EvaluatedRequestFields<'a>,
         row: usize,
+        header_limits: nervix_models::HttpHeaderLimits,
     ) -> Result<HttpRequestFields, FailedRequestField<'a>> {
         if let Some(error) = fields.evaluation_failure(row, METHOD_POSITION) {
             return Err(FailedRequestField::evaluation(METHOD_POSITION, error));
@@ -727,7 +740,7 @@ impl CompiledHttpRequestFields {
             .target(path)
             .map_err(|error| FailedRequestField::invalid(PATH_POSITION, error))?;
 
-        let mut headers = HttpApplicationHeaders::default();
+        let mut headers = HttpApplicationHeaders::with_limits(header_limits);
         let mut last_position = None;
         for (index, header_write) in fields.header_writes.iter().enumerate() {
             let position = FIRST_HEADER_POSITION
@@ -1173,9 +1186,13 @@ mod tests {
                 &Executor::default(),
                 &named("deliver"),
                 batch,
-                HttpRequestInput::Published,
-                &HashMap::default(),
-                Timestamp::from_unix_nanos(7),
+                HttpRequestEvaluation {
+                    input: HttpRequestInput::Published,
+                    side_inputs: &HashMap::default(),
+                    execution_now: Timestamp::from_unix_nanos(7),
+                    header_limits: nervix_models::ClusterParameterValues::default()
+                        .http_header_limits(),
+                },
             )
             .await
             .expect("every row is evaluated");
@@ -1365,12 +1382,16 @@ mod tests {
                 &Executor::default(),
                 &named("deliver"),
                 published,
-                HttpRequestInput::Source {
-                    records,
-                    rows: vec![0, 2],
+                HttpRequestEvaluation {
+                    input: HttpRequestInput::Source {
+                        records,
+                        rows: vec![0, 2],
+                    },
+                    side_inputs: &HashMap::default(),
+                    execution_now: Timestamp::from_unix_nanos(7),
+                    header_limits: nervix_models::ClusterParameterValues::default()
+                        .http_header_limits(),
                 },
-                &HashMap::default(),
-                Timestamp::from_unix_nanos(7),
             )
             .await
             .expect("every row is evaluated");

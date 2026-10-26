@@ -26,6 +26,7 @@
 
 mod client;
 mod client_io;
+mod cluster_parameters;
 mod codec;
 mod control;
 mod emitter;
@@ -494,7 +495,11 @@ mod tests {
                 "{bound} producer batches"
             );
         }
-        for bound in [1, nervix_models::CLIENT_PRODUCER_SESSION_BYTES, u64::MAX] {
+        for bound in [
+            1,
+            nervix_models::DEFAULT_CLIENT_PRODUCER_SESSION_BYTES,
+            u64::MAX,
+        ] {
             assert!(producer_bytes.contains(&bound), "{bound} producer bytes");
         }
         for bound in [1, nervix_models::MAX_CLIENT_CONSUMER_BATCHES, u32::MAX] {
@@ -503,7 +508,11 @@ mod tests {
                 "{bound} consumer batches"
             );
         }
-        for bound in [1, nervix_models::CLIENT_CONSUMER_SESSION_BYTES, u64::MAX] {
+        for bound in [
+            1,
+            nervix_models::DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
+            u64::MAX,
+        ] {
             assert!(consumer_bytes.contains(&bound), "{bound} consumer bytes");
         }
     }

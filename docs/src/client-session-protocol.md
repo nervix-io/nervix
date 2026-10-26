@@ -1359,7 +1359,8 @@ owns the public contract of a producer; this section places producers in the pro
 the credit it asks for: how many batches and how many bytes it may have outstanding. The open runs
 on the ordered lane. The serving node checks the session's transaction binding, the requested
 limits, the committed domain state and schedule, and the ingestor's kind, reserves room in the
-session's budget of 32 producers and 32 MiB and in its own node budget of 128 MiB, and attaches the
+session's budget of 32 producers and its committed byte cap (32 MiB by default), and in
+its own node budget of 128 MiB, and attaches the
 producer through the node that executes the ingestor, which checks the expected fields against the
 execution it runs. The reply is `ProducerOpened` or a typed `ClientProducerRefusal` with a message;
 a refused open leaves nothing attached and reserves nothing. `ProducerOpened` carries the domain,
@@ -1487,7 +1488,8 @@ stopped endpoint is still classified, by the serving node, on the next attempt.
 
 `OpenEmitterRequest` names the domain and `TO CLIENT` emitter, an exact field list, and requested
 outstanding batch and byte limits. The serving node validates the committed schedule and schema,
-reserves the requested bytes against the session's 32 MiB and node's separate 128 MiB consumer
+reserves the requested bytes against the session's committed cap (32 MiB by default) and the
+node's separate 128 MiB consumer
 budgets, and attaches to the executing node before sending `OpenEmitterOutcome.Opened`. It
 refuses an open that cannot hold the emitter's maximum IPC batch. At most 32 consumer handles
 belong to one session. The request identity of the open is its `ConsumerId`. The protocol and its
@@ -2092,3 +2094,14 @@ It also retains the node's executor and passes it to predicate evaluation for bo
 Its dropped-row counter is resolved with the generation. A native ingestor endpoint resolves every
 public batch-outcome metric child at startup and retains its execution's acknowledgement trackers.
 These internal ownership rules change neither session framing nor client recovery behavior.
+
+## Committed Cluster Policy
+
+`ALTER CLUSTER SET` is an administrative command on the ordinary command and execution-reference
+path. Existing informational notices announce a committed parameter revision after local
+installation; notices retain their ordinary best-effort delivery contract. No frame or correlation
+shape changes. Cluster inspection reports committed and per-node installed values.
+
+Producer and consumer session-byte admission uses the committed cluster limits. A producer's
+existing grant carries its exact row bound, which the admission worker enforces for that
+attachment. The compiled defaults are request preferences, not server admission ceilings.

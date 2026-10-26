@@ -122,6 +122,13 @@ Each node keeps the verified archive beside the extracted tree, which is what it
 node fetches the version. The quotas and their defaults are listed in
 [Resources](./resources.md#upload-format); each node enforces them itself.
 
+The archive-byte, extracted-byte and file-count quotas are committed cluster parameters. Live
+installation updates the same resource store; newly constructed staging owners capture its typed
+limits. A parameter transition validates completed catalog versions against its candidate quotas,
+and a concurrent catalog change invalidates that validation before the record can commit.
+[Node Settings](node-settings.md#committed-parameter-changes) owns bootstrap seeds, the administrative
+statement and the parameter publication contract.
+
 ### Publication And Transfer
 
 After the leader installs its own copy, one consensus command publishes the version: it stores the

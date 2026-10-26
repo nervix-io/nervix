@@ -16,13 +16,13 @@
     )
 )]
 
-use std::{convert::Infallible, time::Duration};
+// Cluster policy definitions have one vocabulary owner. These facades hold bootstrap inputs.
+use std::time::Duration;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{
-    ClusterParameters, Prerequisites, Setting, SettingDefinition, TimingPrerequisite,
-};
+pub use nervix_models::NodeUnavailabilityTimeout;
+use nervix_models::{Prerequisites, Setting, SettingDefinition, TimingPrerequisite};
 use thiserror::Error;
 
 /// How many gossip intervals the failure detector assumes between a peer's heartbeats before it
@@ -58,6 +58,8 @@ const _: () = assert!(
 /// the value given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum MembershipSettingsError {
+    #[error("invalid cluster parameter")]
+    InvalidClusterParameter,
     #[error("{prerequisite} ({value:?}) must be at least 1ms")]
     BelowOneMillisecond {
         prerequisite: TimingPrerequisite,
@@ -83,27 +85,6 @@ fn at_least_one_millisecond(
         }));
     }
     Ok(())
-}
-
-/// How long a member may go unobserved before the cluster treats it as unavailable.
-pub struct NodeUnavailabilityTimeout;
-
-impl SettingDefinition for NodeUnavailabilityTimeout {
-    type Class = ClusterParameters;
-    type Value = Duration;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "node-unavailability-timeout";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> Duration {
-        Duration::from_secs(10)
-    }
-
-    fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
 }
 
 /// How often a node exchanges its gossip record with its peers.
@@ -178,7 +159,7 @@ impl MembershipSettings {
     /// Resolves each value that is not given through its definition's default, then validates it.
     pub fn resolve(values: MembershipValues) -> Result<Self, Report<MembershipSettingsError>> {
         let node_unavailability_timeout = Setting::resolve(values.node_unavailability_timeout, &())
-            .assured("the node unavailability timeout declares no validation");
+            .change_context(MembershipSettingsError::InvalidClusterParameter)?;
         Ok(Self {
             node_unavailability_timeout,
             gossip_interval: Setting::resolve(values.gossip_interval, &())?,

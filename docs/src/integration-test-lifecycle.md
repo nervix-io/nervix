@@ -2920,3 +2920,14 @@ After every run, no `nervix-server` process, scenario binary, or dependency cont
 ledger](https://github.com/nervix-io/nervix/blob/main/tests/harness-liveness-qualification-ledger.md)
 records each run in full, with its artifacts, the executable evidence for every item of the
 qualification matrix, and the comparison with the run the job limit cancelled.
+
+
+### Cluster Parameter Seeds In Process Fixtures
+
+The process fixture's typed snapshot interval and transaction-retention options seed the initial
+bootstrapping node. Joining nodes use its committed record. Once a process has accepted commands,
+the fixture records that proof and omits those seed options from subsequent launches, retaining the
+same database. Explicit written command-line and environment options remain literal inputs on each
+launch, including scenarios that assert a seed-option refusal. Lost-bind retries before the first
+successful startup retain the first-start configuration. Live policy changes use Plexus
+`ALTER CLUSTER SET`; [Node Settings](node-settings.md#committed-parameter-changes) owns that contract.

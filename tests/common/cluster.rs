@@ -79,9 +79,7 @@ use nervix_server::{
     },
     cluster::{MembershipSettings, MembershipValues},
     memory_pressure::{MemoryPressureConfig, MemoryPressureSettings},
-    runtime::{
-        DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout,
-    },
+    runtime::{DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout},
 };
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
@@ -164,7 +162,7 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
 /// conflict while an ingestor's check holds a non-durable cursor of the same name.
 const PULSAR_PROVISION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
-    branch_task_stop_timeout(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+    branch_task_stop_timeout(nervix_models::DomainDrainTimeout::DEFAULT);
 const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
     match DEFAULT_TEST_DRAIN_TIMEOUT.checked_add(DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT) {
         Some(timeout) => timeout,
@@ -175,7 +173,8 @@ const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
 /// policy, not an upper bound on valid shutdown. Configured bounded phases may raise its floor.
 const NODE_SHUTDOWN_LIVENESS_WATCHDOG: Duration = Duration::from_secs(5 * 60);
 const _: () = assert!(
-    DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT.as_nanos() > DEFAULT_DOMAIN_DRAIN_TIMEOUT.as_nanos(),
+    DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT.as_nanos()
+        > nervix_models::DomainDrainTimeout::DEFAULT.as_nanos(),
     "the runtime branch stop budget must include its post-drain grace"
 );
 const _: () = assert!(
@@ -3768,7 +3767,7 @@ impl NodeHandle {
         let domain_drain_timeout = self
             .fault_injection
             .domain_drain_timeout()
-            .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
+            .unwrap_or(nervix_models::DomainDrainTimeout::DEFAULT);
         let configured_phase_floor = application_drain_timeout
             .checked_add(branch_task_stop_timeout(domain_drain_timeout))
             .ok_or_else(|| {

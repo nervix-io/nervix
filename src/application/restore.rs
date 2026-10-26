@@ -419,7 +419,7 @@ impl SessionServiceImpl {
     fn restore_retained_until(&self, reference: &CommandExecutionReference) -> Option<Timestamp> {
         let issued_at = reference.retry_issued_at().ok()?;
         issued_at
-            .checked_add(self.inner.command_execution_policy.retry_validity())
+            .checked_add(self.command_execution_policy().retry_validity())
             .ok()
     }
 

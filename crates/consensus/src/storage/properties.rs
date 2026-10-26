@@ -226,10 +226,19 @@ fn is_invalid_storage(error: &io::Error) -> bool {
     let Some(inner) = error.get_ref() else {
         return false;
     };
-    matches!(
-        inner.downcast_ref::<StorageFailure>(),
-        Some(StorageFailure::InvalidState)
-    )
+    match inner.downcast_ref::<StorageFailure>() {
+        Some(StorageFailure::InvalidState) => true,
+        Some(StorageFailure::StateMetadata(cause)) => {
+            let Some(cause) = cause.get_ref() else {
+                return false;
+            };
+            matches!(
+                cause.downcast_ref::<StorageFailure>(),
+                Some(StorageFailure::InvalidState)
+            )
+        }
+        _ => false,
+    }
 }
 
 /// The facts the readers of a recovered state rely on without checking them again: every record

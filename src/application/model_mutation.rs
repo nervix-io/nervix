@@ -102,7 +102,8 @@ struct CollectedModelMutations {
 fn requires_request_domain(statement: &Statement) -> bool {
     !matches!(
         statement,
-        Statement::CreateDomain(_)
+        Statement::AlterCluster(_)
+            | Statement::CreateDomain(_)
             | Statement::CreateUser(_)
             | Statement::Backup(_)
             | Statement::Restore(_)
@@ -121,7 +122,8 @@ fn requires_request_domain(statement: &Statement) -> bool {
 pub(in crate::application) fn requires_existing_domain(statement: &Statement) -> bool {
     !matches!(
         statement,
-        Statement::CreateDomain(_)
+        Statement::AlterCluster(_)
+            | Statement::CreateDomain(_)
             | Statement::CreateUser(_)
             | Statement::Backup(_)
             | Statement::Restore(_)
@@ -173,7 +175,8 @@ pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> 
     statement.is_model_mutation()
         || matches!(
             statement,
-            Statement::CreateDomain(_)
+            Statement::AlterCluster(_)
+                | Statement::CreateDomain(_)
                 | Statement::AlterDomain(_)
                 | Statement::CreateUser(_)
                 | Statement::CreateResource(_)
@@ -2499,6 +2502,9 @@ impl SessionServiceImpl {
             }
             Statement::ShowClusterStatus(_) => {
                 command_ok(render_cluster_status(&self.inner.cluster, &self.inner.consensus).await)
+            }
+            Statement::AlterCluster(_) => {
+                command_error("ALTER CLUSTER SET requires durable command admission".to_string())
             }
             Statement::DescribeCluster(_) => {
                 command_ok(describe_cluster(&self.inner.cluster, &self.inner.consensus).await)

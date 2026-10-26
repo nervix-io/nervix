@@ -64,7 +64,9 @@ pub struct ResourceStore {
     /// The node's bounded execution and memory admission. Walking, reading and hashing a version's
     /// contents is bulk work, so it is admitted and charged rather than run on an async worker.
     executor: Executor,
-    limits: ResourceStoreLimits,
+    limits: nervix_primitives::sync::StdArc<
+        nervix_primitives::publication::ArcSwap<ResourceStoreLimits>,
+    >,
 }
 
 /// Per-version disk bounds applied independently to the staged archive and extracted tree.
@@ -757,22 +759,30 @@ impl ResourceStore {
         Ok(Self {
             root,
             executor,
-            limits,
+            limits: nervix_primitives::sync::StdArc::new(
+                nervix_primitives::publication::ArcSwap::from_pointee(limits),
+            ),
         })
     }
 
-    pub fn limits(&self) -> ResourceStoreLimits {
+    pub(crate) fn install_limits(&self, limits: ResourceStoreLimits) {
         self.limits
+            .store(nervix_primitives::sync::StdArc::new(limits));
+    }
+
+    pub fn limits(&self) -> ResourceStoreLimits {
+        **self.limits.load()
     }
 
     pub fn validate_archive_bytes(
         &self,
         archive_bytes: u64,
     ) -> Result<(), Report<ResourceStoreError>> {
-        if archive_bytes > self.limits.max_archive_bytes {
+        let limit = self.limits().max_archive_bytes;
+        if archive_bytes > limit {
             return Err(Report::new(ResourceStoreError::ArchiveQuotaExceeded {
                 actual: archive_bytes,
-                limit: self.limits.max_archive_bytes,
+                limit,
             }));
         }
         Ok(())
@@ -782,20 +792,22 @@ impl ResourceStore {
         &self,
         extracted_bytes: u64,
     ) -> Result<(), Report<ResourceStoreError>> {
-        if extracted_bytes > self.limits.max_extracted_bytes {
+        let limit = self.limits().max_extracted_bytes;
+        if extracted_bytes > limit {
             return Err(Report::new(ResourceStoreError::ExtractedQuotaExceeded {
                 actual: extracted_bytes,
-                limit: self.limits.max_extracted_bytes,
+                limit,
             }));
         }
         Ok(())
     }
 
     pub fn validate_file_count(&self, file_count: u64) -> Result<(), Report<ResourceStoreError>> {
-        if file_count > self.limits.max_file_count {
+        let limit = self.limits().max_file_count;
+        if file_count > limit {
             return Err(Report::new(ResourceStoreError::FileCountQuotaExceeded {
                 actual: file_count,
-                limit: self.limits.max_file_count,
+                limit,
             }));
         }
         Ok(())
@@ -850,7 +862,7 @@ impl ResourceStore {
             current_file: None,
             file_count: 0,
             extracted_bytes: 0,
-            limits: self.limits,
+            limits: self.limits(),
             executor: self.executor.clone(),
         })
     }
@@ -890,7 +902,7 @@ impl ResourceStore {
             file: Some(opened.file),
             hasher: Some(Hasher::new()),
             archive_bytes: 0,
-            max_archive_bytes: self.limits.max_archive_bytes,
+            max_archive_bytes: self.limits().max_archive_bytes,
             executor: self.executor.clone(),
         })
     }
@@ -1161,7 +1173,7 @@ impl ResourceStore {
             )
             .await
             .change_context(ResourceStoreError::BulkAdmission)?;
-        let limits = self.limits;
+        let limits = self.limits();
         let chunk_bytes = self.executor.limits().bulk_chunk_bytes.as_u64();
         self.executor
             .run_storage(

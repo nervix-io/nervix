@@ -16,6 +16,8 @@
 )]
 
 mod branch_state_schemas;
+mod cluster_parameters;
+pub(crate) use cluster_parameters::{validate_model_parameters, validate_resource_parameters};
 mod creation_order;
 mod domain_activation_plan;
 mod domain_state;
@@ -65,9 +67,11 @@ pub(crate) use entrypoint_plan::{
 /// `pub(in crate::registry)` or narrower, so the control plane reaches the registry only through
 /// the names below.
 pub(crate) use error::RegistryError;
+#[cfg(test)]
+pub(crate) use execution_revision::ExecutionRevisionError;
 pub(crate) use execution_revision::{
     DynamicExecutionUpdate, EntitySwapExecution, ExecutionDelta, ExecutionNode, ExecutionRevision,
-    ExecutionRevisionError, PlannedClusterRevision,
+    PlannedClusterRevision,
 };
 pub(crate) use graph::{ActiveGraph, EdgeKind};
 pub(crate) use ingestor_plan::{

@@ -2683,3 +2683,15 @@ Connector terminology follows entity ownership: `IngestorError` and `EmitterOpen
 record. Renaming and grouping entity owners changes neither retry classification nor what is
 rendered at the boundary. The ingestor planner's input identity/kind errors cover client, endpoint
 and native schema references before composition.
+
+## Cluster Parameter Refusals
+
+Parameter definitions own positive duration and numeric range errors, and structured assignments
+own empty or duplicate-key refusals. The registry names the exact parameter, domain/model or
+resource, actual requirement and candidate maximum when a lowered cap cannot hold committed
+state. Consensus compares captured inputs and reports a typed stale-input conflict before any
+publication. Bootstrap seed refusal names the parameter and `ALTER CLUSTER SET`.
+
+A live publication that disagrees with an equal applied revision is a typed installation failure,
+not a default or retry interpretation. Invalid current consensus metadata preserves its decoder
+cause beneath a typed node-state recreation error.

@@ -2304,3 +2304,10 @@ That evidence supports the current ingestor and emitter behavior; it does not cl
 Its Kafka A/B measurements found lower bounded-pressure rates and a separate 16-partition commit
 failure that require owner investigation. An integration must preserve its own transport and
 delivery semantics rather than assuming a generic envelope or exactly-once external outcome.
+
+## Committed Host Bounds
+
+The Nervix host validates batch counts and client-emitter batch bytes against the committed
+cluster policy. HTTP request preparation captures typed header-byte and field-count bounds for that publication;
+the fixed field-count and syntax contract remains enforced by `HttpApplicationHeaders`. Connector
+transport ownership and per-record acknowledgement boundaries are unchanged.

@@ -105,11 +105,6 @@ impl<'bytes> GeneratedSettings<'bytes> {
         self.entropy.any_u64()
     }
 
-    fn size(&mut self) -> usize {
-        let count = self.count();
-        usize::try_from(count).assured("the server builds only for 64-bit targets")
-    }
-
     fn raft(&mut self) -> RaftTimings {
         let heartbeat = self.timing_from(1);
         RaftTimings::resolve(Some(heartbeat)).assured(
@@ -119,7 +114,7 @@ impl<'bytes> GeneratedSettings<'bytes> {
 
     fn membership(&mut self) -> MembershipSettings {
         MembershipSettings::resolve(MembershipValues {
-            node_unavailability_timeout: Some(self.duration()),
+            node_unavailability_timeout: Some(self.cluster_duration()),
             gossip_interval: Some(self.timing_from(1)),
             clock_skew_tolerance: Some(self.timing_from(1)),
         })
@@ -179,36 +174,67 @@ impl<'bytes> GeneratedSettings<'bytes> {
             .assured("the drain never exceeds the shutdown")
     }
 
+    fn cluster_duration(&mut self) -> Duration {
+        let seconds = self.entropy.boundary_biased(0..=u64::from(u32::MAX));
+        let nanos = if seconds == u64::from(u32::MAX) {
+            0
+        } else {
+            self.entropy.boundary_biased(0..=999_999_999)
+        };
+        let nanos = if seconds == 0 { nanos.max(1) } else { nanos };
+        Duration::new(
+            seconds,
+            u32::try_from(nanos).assured("generated nanoseconds are below one second"),
+        )
+    }
+
+    fn cluster_count(&mut self) -> usize {
+        usize::try_from(self.entropy.boundary_biased(0..=u64::from(u32::MAX)))
+            .assured("a native target represents the cluster count domain")
+    }
+
+    fn positive_bytes(&mut self) -> ubyte::ByteUnit {
+        ubyte::ByteUnit::Byte(self.bytes().as_u64().max(1))
+    }
+
     fn node_settings(&mut self) -> NodeSettings {
         let raft = self.raft();
         let raft_retention = self.raft_retention();
         let membership = self.membership();
-        let scheduling = SchedulingSettings::resolve(Some(self.size()))
+        let scheduling = SchedulingSettings::resolve(Some(self.cluster_count()))
             .assured("the scheduling settings declare no validation");
         let restore_staging_max_bytes = if self.entropy.flag() {
             Some(self.bytes())
         } else {
             None
         };
-        let runtime = RuntimeSettings::resolve(Some(self.duration()), restore_staging_max_bytes)
-            .assured("the runtime settings declare no validation");
+        let runtime =
+            RuntimeSettings::resolve(Some(self.cluster_duration()), restore_staging_max_bytes)
+                .assured("the runtime settings declare no validation");
         let transactions = TransactionLimits::resolve(TransactionBounds {
-            idle_timeout: Some(self.duration()),
-            tombstone_retention: Some(self.duration()),
-            max_statements: Some(self.size()),
+            idle_timeout: Some(self.cluster_duration()),
+            tombstone_retention: Some(self.cluster_duration()),
+            max_statements: Some(self.cluster_count()),
             max_source_bytes: Some(self.count()),
-            max_open: Some(self.size()),
+            max_open: Some(self.cluster_count()),
         })
         .assured("the transaction limits declare no validation");
-        let commands = CommandExecutionPolicy::resolve(Some(self.duration()), Some(self.size()))
-            .assured("the command execution settings declare no validation");
+        let commands = CommandExecutionPolicy::resolve(
+            Some(self.cluster_duration()),
+            Some(self.cluster_count().max(1)),
+        )
+        .assured("the command execution settings declare no validation");
         let memory_pressure = self.memory_pressure();
         let shutdown = self.shutdown();
-        let resources =
-            ResourceSettings::resolve(Some(self.bytes()), Some(self.bytes()), Some(self.count()))
-                .assured("the resource settings declare no validation");
+        let resources = ResourceSettings::resolve(
+            Some(self.positive_bytes()),
+            Some(self.positive_bytes()),
+            Some(self.count().max(1)),
+        )
+        .assured("the resource settings declare no validation");
         let capacity = self.capacity();
-        NodeSettings {
+        let mut settings = NodeSettings {
+            parameter_seeds: Default::default(),
             raft,
             raft_retention,
             membership,
@@ -220,7 +246,10 @@ impl<'bytes> GeneratedSettings<'bytes> {
             shutdown,
             resources,
             capacity,
-        }
+        };
+        let args = super::SettingsArgs::from(&settings);
+        settings.parameter_seeds = args.parameter_seeds();
+        settings
     }
 }
 

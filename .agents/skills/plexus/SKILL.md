@@ -207,6 +207,13 @@ per-route branch selection, while generator route bodies remain set-only.
 `ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
 activation; a newly effective hard colocation requirement can relocate runtime nodes.
 
+Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
+for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
+selected domain. Read `Node Settings` for the complete parameter set, positive duration bounds,
+existing-model cap refusals, live installation and committed-versus-running inspection. Seed flags
+belong only to the first bootstrap, including when their value equals the default. Later starts,
+including the returning bootstrap node, omit them.
+
 ## Preserve Plexus semantics
 
 - For paced domains, use a positive `PERIOD` no larger than `18446744073709551615ns`; `SKEW` may

@@ -122,6 +122,11 @@ fresh_start_cluster() {
     done
     wait_for 'a formed fresh cluster of three voters' "${fresh_startup_bound}" fresh_cluster_formed "${case_dir}" \
         || fresh_fail product 'the fresh cluster never formed with its three node names'
+    local original_cli_host="${cli_host}" policy_status=0
+    cli_host="${fresh_hosts[0]}"
+    configure_cluster_parameters >"${case_dir}/fresh-cluster-parameters.txt" 2>&1 || policy_status=$?
+    cli_host="${original_cli_host}"
+    ((policy_status == 0)) || fresh_fail product 'the fresh cluster refused its requested policy'
 }
 
 # True when the restored domain's ingestor runs on a fresh node.

@@ -74,3 +74,20 @@ status=0
 PATH="${tmp_dir}/bin:${PATH}" publish_startup_status 2>/dev/null || status=$?
 [[ "${status}" != 0 && "${status}" != 73 && ! -e "${artifact_dir}/public/cluster-status.txt" ]]
 printf 'startup status self-test passed\n'
+
+
+# Startup applies the requested policy once through the cluster command, before installing a graph.
+# shellcheck source=../cluster-parameters.sh
+source "${chaos_dir}/cluster-parameters.sh"
+(
+    export CHAOS_REPLICA_COUNT=2 CHAOS_STATE_SNAPSHOT_INTERVAL=250ms
+    export CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s CHAOS_COMMAND_RETRY_VALIDITY=20m
+    cli_command() { printf '%s\n' "$1"; }
+    configured="$(configure_cluster_parameters)"
+    [[ "${configured}" == $'ALTER CLUSTER SET REPLICA_COUNT = 2, STATE_SNAPSHOT_INTERVAL = 250ms, NODE_UNAVAILABILITY_TIMEOUT = 15s, COMMAND_RETRY_VALIDITY = 20m;\nDESCRIBE CLUSTER;' ]]
+    export CHAOS_STATE_SNAPSHOT_INTERVAL='1s; SHOW CLUSTER STATUS;'
+    status=0
+    configure_cluster_parameters >"${tmp_dir}/policy-refusal.txt" 2>&1 || status=$?
+    [[ "${status}" == 2 ]]
+)
+printf 'cluster parameter startup control self-test passed\n'

@@ -2244,6 +2244,11 @@ if [[ "${node_count}" == "3" ]]; then
     node_hosts+=(nervix-2 nervix-3)
 fi
 wait_for "public cluster status for ${node_count} node(s)" 120 cluster_status_ready
+phase "committed cluster parameter installation"
+# shellcheck source=cluster-parameters.sh
+source "${script_dir}/cluster-parameters.sh"
+configure_cluster_parameters >"${artifact_dir}/public/cluster-parameters.txt" 2>&1
+wait_for "public status after cluster policy installation" 120 cluster_status_ready
 phase "startup status publication"
 # shellcheck source=startup-status.sh
 source "${script_dir}/startup-status.sh"

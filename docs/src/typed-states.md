@@ -900,3 +900,12 @@ emitter plans, configurations and concrete types. `IngestorConnector::KIND` and
 `EmitterLifecycle::kind()` expose the vocabulary identity; composition asserts the declared kind
 at compile time. Shared private encoding or endpoint intake state does not add an entity selector
 to those public configurations. A new entity adds a typed variant and implementation.
+
+## Parameter Authority and Installation
+
+`ClusterParameterValues` holds validated class-typed settings with a single definition for each
+default and bound. `ClusterParameterRecord` pairs them with a positive revision. The state machine
+has no record until first bootstrap; it never fills missing persisted fields from defaults.
+A node's gossip publication keeps committed and optional running records together and validates
+their revision/value relationship. A live construction record distinguishes pending catch-up from
+ready installation and rejects equal revisions with unequal values.

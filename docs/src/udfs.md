@@ -43,7 +43,7 @@ CREATE [IF NOT EXISTS] UDF <name>
 ```
 
 A declaration has between one and eight arguments. Argument and return types use the schema type
-grammar: all scalar types, `VEC<T>`, and `ARRAY<T, n>` are accepted. Code is limited to 64 KiB.
+grammar: all scalar types, `VEC<T>`, and `ARRAY<T, n>` are accepted. Code is bounded by the committed `UDF_CODE_BYTES` cluster parameter, 64 KiB by default.
 The declared signature must exactly match the named Roto entry function; implicit casts are never
 inserted.
 

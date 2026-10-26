@@ -2837,3 +2837,15 @@ staging volume's samples.
   `e69c0801`. Twelve combined runs lost 20.2% of 4,800 packets, at least 64 of 400 against the
   floor of 20, and four random-loss runs lost 30.3% of 1,600, at least 99 against 30. All 16 runs
   passed, and each sample took 5.0 seconds, against 4.9 for 40 lossy packets.
+
+
+### Committed Parameter Policy In The Harness
+
+The baseline and fresh-restore Compose projects launch every node with local prerequisites and
+capabilities. After the cluster is ready, the controller applies its requested replica count,
+snapshot interval, node-unavailability timeout and command retry validity through one Plexus
+`ALTER CLUSTER SET` command, then retains `DESCRIBE CLUSTER` beside the mutation result. Graph
+installation follows that command's runtime barrier. Restarts and later joins retain the committed
+record and pass no parameter seeds. Stateful checkpoint observations use the snapshot interval
+this startup command installed, rather than a per-node environment variable. [Node Settings](node-settings.md#committed-parameter-changes)
+owns the seed and parameter-change contract.

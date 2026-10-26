@@ -11,9 +11,6 @@ use nervix_primitives::sync::blocking::Mutex;
 
 use super::*;
 
-/// Default deadline for draining one runtime branch during a domain or node transition.
-pub const DEFAULT_DOMAIN_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
-
 /// Includes the grace a branch task receives after its configured drain deadline.
 pub const fn branch_task_stop_timeout(domain_drain_timeout: Duration) -> Duration {
     // Saturation is the meaning: a drain timeout configured near `Duration::MAX` already asks to

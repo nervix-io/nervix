@@ -8,10 +8,11 @@ use std::{
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    CLIENT_CONSUMER_SESSION_BYTES, CLIENT_PRODUCER_SESSION_BYTES, ClientAttachmentId,
-    ClientConsumerLimits, ClientEndpointContract, ClientProducerDescription, ClientProducerGrant,
-    ClientProducerLimits, ClientProducerPolicy, ClientSubmissionOutcome, ClientSubmissionRefusal,
-    MAX_CLIENT_BATCH_ROWS, MAX_CLIENT_CONSUMER_BATCHES, MAX_CLIENT_PRODUCER_BATCHES,
+    ClientAttachmentId, ClientConsumerLimits, ClientEndpointContract, ClientProducerDescription,
+    ClientProducerGrant, ClientProducerLimits, ClientProducerPolicy, ClientSubmissionOutcome,
+    ClientSubmissionRefusal, DEFAULT_CLIENT_BATCH_ROWS, DEFAULT_CLIENT_CONSUMER_SESSION_BYTES,
+    DEFAULT_CLIENT_PRODUCER_SESSION_BYTES, MAX_CLIENT_CONSUMER_BATCHES,
+    MAX_CLIENT_PRODUCER_BATCHES,
 };
 use strum::IntoEnumIterator;
 
@@ -75,7 +76,7 @@ impl Arbitrary<'_> {
     pub fn client_producer_limits(&mut self) -> ClientProducerLimits {
         ClientProducerLimits {
             batches: self.positive_u32_around(MAX_CLIENT_PRODUCER_BATCHES),
-            bytes: self.positive_u64_around(CLIENT_PRODUCER_SESSION_BYTES),
+            bytes: self.positive_u64_around(DEFAULT_CLIENT_PRODUCER_SESSION_BYTES),
         }
     }
 
@@ -84,7 +85,7 @@ impl Arbitrary<'_> {
     pub fn client_consumer_limits(&mut self) -> ClientConsumerLimits {
         ClientConsumerLimits {
             batches: self.positive_u32_around(MAX_CLIENT_CONSUMER_BATCHES),
-            bytes: self.positive_u64_around(CLIENT_CONSUMER_SESSION_BYTES),
+            bytes: self.positive_u64_around(DEFAULT_CLIENT_CONSUMER_SESSION_BYTES),
         }
     }
 
@@ -92,9 +93,9 @@ impl Arbitrary<'_> {
     pub fn client_producer_grant(&mut self) -> ClientProducerGrant {
         ClientProducerGrant {
             batches: self.positive_u32_around(MAX_CLIENT_PRODUCER_BATCHES),
-            bytes: self.positive_u64_around(CLIENT_PRODUCER_SESSION_BYTES),
-            max_batch_bytes: self.positive_u64_around(CLIENT_PRODUCER_SESSION_BYTES),
-            max_batch_rows: self.positive_u32_around(MAX_CLIENT_BATCH_ROWS),
+            bytes: self.positive_u64_around(DEFAULT_CLIENT_PRODUCER_SESSION_BYTES),
+            max_batch_bytes: self.positive_u64_around(DEFAULT_CLIENT_PRODUCER_SESSION_BYTES),
+            max_batch_rows: self.positive_u32_around(DEFAULT_CLIENT_BATCH_ROWS),
         }
     }
 

@@ -156,6 +156,7 @@ mod cli_values;
 mod client_consumers;
 mod client_producers;
 mod cluster_description;
+mod cluster_parameters;
 mod cluster_status;
 mod command_execution;
 mod command_result;
@@ -344,14 +345,21 @@ impl Application {
         let default_user = self.identity.default_user.clone();
         let init_default_user_password = self.identity.init_default_user_password.clone();
         let settings = self.settings;
+        let parameter_seeds = settings
+            .bootstrap_parameters()
+            .change_context(AppError::InvalidClusterParameters)?;
+        if !allow_bootstrap
+            && let Some(parameter) = settings.parameter_seeds.explicit_parameters().first()
+        {
+            return Err(Report::new(
+                AppError::ClusterParameterSeedOnExistingCluster {
+                    parameter: *parameter,
+                },
+            ));
+        }
         let node_unavailability_timeout = settings.membership.node_unavailability_timeout();
         let raft_timings = settings.raft;
         let raft_retention = settings.raft_retention;
-        let transaction_idle_timeout = settings.transactions.idle_timeout();
-        let transaction_tombstone_retention = settings.transactions.tombstone_retention();
-        let transaction_max_statements = settings.transactions.max_statements();
-        let transaction_max_source_bytes = settings.transactions.max_source_bytes();
-        let transaction_max_open = settings.transactions.max_open();
         let replica_count = settings.scheduling.replica_count();
         let runtime_settings = settings.runtime;
         let state_snapshot_interval = runtime_settings.state_snapshot_interval();
@@ -435,6 +443,7 @@ impl Application {
             dns,
             memory,
             restore_staging_max_bytes,
+            database_volume,
         } = match preflight {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -594,14 +603,7 @@ impl Application {
             runtime_state_snapshot_interval = ?startup.runtime.state_snapshot_interval(),
             "initialized runtime persistence"
         );
-        if let Err(error) = startup.apply_stored_runtime_changes().await {
-            error!(
-                error = format!("{error:#}"),
-                "failed to apply startup runtime changes"
-            );
-            startup.terminate().await;
-            return Err(error);
-        }
+
         let interconnect_result = Transport::bind(
             interconnect_listen_addr,
             TransportIdentity {
@@ -645,6 +647,26 @@ impl Application {
                 return Err(error);
             }
         };
+        if allow_bootstrap
+            && consensus.observer().cluster_parameters().is_none()
+            && let Err(error) =
+                preflight::validate_resource_volume(&parameter_seeds, database_volume, &db_path)
+        {
+            startup.consensus = Some(consensus);
+            startup.terminate().await;
+            return Err(error.change_context(AppError::Preflight));
+        }
+        if consensus.observer().cluster_parameters().is_some()
+            && let Some(parameter) = settings.parameter_seeds.explicit_parameters().first()
+        {
+            startup.consensus = Some(consensus);
+            startup.terminate().await;
+            return Err(Report::new(
+                AppError::ClusterParameterSeedOnExistingCluster {
+                    parameter: *parameter,
+                },
+            ));
+        }
         let recovered_members = consensus.observer().stored_membership_nodes();
         startup.consensus = Some(consensus);
         let join_standing = if recovered_members.contains_key(&node_id) {
@@ -796,6 +818,7 @@ impl Application {
         let reconcile_shutdown = shutdown.clone();
         let cluster_for_membership_reconcile = cluster.clone();
         let administrator_for_membership_reconcile = consensus.administrator();
+        let proposer_for_parameter_seeding = consensus.proposer();
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
@@ -866,6 +889,26 @@ impl Application {
                         }
                     }
                 }
+                if allow_bootstrap
+                    && proposer_for_parameter_seeding
+                        .cluster_parameters()
+                        .is_none()
+                    && proposer_for_parameter_seeding
+                        .current_leader()
+                        .await
+                        .as_ref()
+                        == Some(proposer_for_parameter_seeding.local_node_id())
+                    && let Err(error) = proposer_for_parameter_seeding
+                        .seed_cluster_parameters(parameter_seeds)
+                        .await
+                {
+                    warn!(error = %error, "failed to seed cluster parameters");
+                }
+                if let Some(record) = proposer_for_parameter_seeding.cluster_parameters() {
+                    cluster_for_membership_reconcile
+                        .publish_cluster_parameters(record, false)
+                        .await;
+                }
                 if let Err(error) = administrator_for_membership_reconcile
                     .reconcile_nodes(cluster_for_membership_reconcile.gossip_state())
                     .await
@@ -878,6 +921,58 @@ impl Application {
                 }
             }
         }));
+        let initial_parameters =
+            nervix_primitives::time::timeout(cluster_parameters::DISCOVERY_TIMEOUT, async {
+                loop {
+                    nervix_primitives::task::consume_budget().await;
+                    let record = if has_bootstrap_candidates {
+                        cluster.live_cluster_parameters().await
+                    } else {
+                        consensus.observer().cluster_parameters()
+                    };
+                    if let Some(record) = record {
+                        break Some(record);
+                    }
+                    nervix_primitives::select! {
+                        _ = shutdown.cancelled() => break None,
+                        _ = sleep(settings.membership.gossip_interval()) => {}
+                    }
+                }
+            })
+            .await;
+        let initial_parameters = match initial_parameters {
+            Ok(Some(record)) => {
+                match preflight::validate_resource_volume(&record.values, database_volume, &db_path)
+                {
+                    Ok(()) => Ok(record),
+                    Err(error) => Err(error.change_context(AppError::Preflight)),
+                }
+            }
+            _ => Err(Report::new(AppError::ClusterParametersUnavailable)),
+        };
+        let record = match initial_parameters {
+            Ok(record) => record,
+            Err(error) => {
+                shutdown.cancel();
+                consensus.shutdown().await;
+                interconnect.shutdown().await;
+                if let Err(shutdown_error) = cluster.shutdown().await {
+                    warn!(error = %shutdown_error, "failed to stop gossip while refusing cluster policy");
+                }
+                runtime.shutdown(runtime.domain_drain_timeout()).await;
+                for task in background_tasks {
+                    if let Err(error) = task.await {
+                        warn!(error = %error, "startup task ended while refusing cluster policy");
+                    }
+                }
+                return Err(error);
+            }
+        };
+        runtime.install_cluster_parameters(record.values);
+        registry.install_cluster_parameters(record.values);
+        // Runtime admission waits for the same or a later committed publication before installing
+        // the graph; a returning node never runs its stale local policy or schedule.
+        runtime.set_construction_parameters(record);
         #[cfg(feature = "testing")]
         {
             let mut leadership_transfer_rx = runtime.subscribe_leadership_transfers();
@@ -1239,7 +1334,7 @@ impl Application {
                                 let mut schedule = graph.schedule_for_domain_with_mode(
                                     &domain,
                                     &schedulable_node_ids,
-                                    replica_count,
+                                    usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
                                     domain_state.config.placement,
                                     scheduler_mode,
                                 );
@@ -1247,7 +1342,7 @@ impl Application {
                                 let mut schedule = graph.schedule_for_domain(
                                     &domain,
                                     &schedulable_node_ids,
-                                    replica_count,
+                                    usize::try_from(automatic_schedule_input.runtime_state().parameters.verified("scheduling starts after parameter seeding").values.replica_count()).assured("the committed replica count fits a supported target"),
                                     domain_state.config.placement,
                                 );
                                 let current_domain = current_schedule.domain(&domain);
@@ -1494,6 +1589,8 @@ impl Application {
         certificates
             .register_installation_handler(&interconnect)
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
+        let parameter_events = events.clone();
         let certificates_for_schedule = certificates.clone();
         let runtime_for_schedule = runtime.clone();
         let registry_for_schedule = registry.clone();
@@ -1514,25 +1611,30 @@ impl Application {
                 admission: &schedule_runtime_admission,
                 shutdown: &schedule_shutdown,
             };
-            if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                warn!(error = format!("{error:#}"), "failed to apply initial cluster schedule");
-            }
+            let mut announced_parameters = None;
             loop {
                 nervix_primitives::task::consume_budget().await;
+                match apply_current_cluster_runtime_state(application).await {
+                    Ok(()) => {
+                        cluster_parameters::announce_parameter_installation(
+                            &parameter_events,
+                            &cluster_for_schedule,
+                            &consensus_for_schedule,
+                            &mut announced_parameters,
+                        )
+                        .await
+                    }
+                    Err(error) => warn!(
+                        error = format!("{error:#}"),
+                        "failed to apply cluster runtime state"
+                    ),
+                }
                 nervix_primitives::select! {
                     _ = schedule_shutdown.cancelled() => break,
-                    changed = schedule_rx.changed() => {
-                        if changed.is_err() {
-                            break;
-                        }
-                        if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                            warn!(error = format!("{error:#}"), "failed to apply updated cluster schedule");
-                        }
-                    }
+                    changed = schedule_rx.changed() => if changed.is_err() { break; }
                 }
             }
         }));
-        let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
         let service = SessionServiceImpl {
             inner: Arc::new(SessionServiceInner {
                 cluster: cluster.clone(),
@@ -1543,7 +1645,6 @@ impl Application {
                 https_certificates: certificates,
                 runtime: runtime.clone(),
                 runtime_admission: runtime_admission.clone(),
-                replica_count,
                 admission_shutdown: shutdown_coordinator.admission_token(),
                 drain_support_shutdown: shutdown.clone(),
                 events: events.clone(),
@@ -1566,13 +1667,7 @@ impl Application {
                 service_tasks: ServiceTasks::default(),
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
                 failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
-                transaction_idle_timeout,
-                transaction_tombstone_retention,
-                transaction_max_statements,
-                transaction_max_source_bytes,
-                transaction_max_open,
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
-                command_execution_policy: settings.commands,
                 command_executions: Default::default(),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_recovery: Default::default(),

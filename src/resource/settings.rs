@@ -15,77 +15,12 @@
     )
 )]
 
-use std::convert::Infallible;
-
 use error_stack::Report;
 use meticulous::ResultExt as _;
-use nervix_models::{ClusterParameters, Setting, SettingDefinition};
+use nervix_models::Setting;
 use ubyte::ByteUnit;
 
 use super::ResourceStoreLimits;
-
-/// The most staged archive bytes one resource version may have.
-pub struct ResourceMaxArchiveBytes;
-
-impl SettingDefinition for ResourceMaxArchiveBytes {
-    type Class = ClusterParameters;
-    type Value = ByteUnit;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "resource-max-archive-bytes";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> ByteUnit {
-        ByteUnit::Gibibyte(4)
-    }
-
-    fn validate(_: &ByteUnit, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
-/// The most extracted bytes one resource version may have.
-pub struct ResourceMaxExtractedBytes;
-
-impl SettingDefinition for ResourceMaxExtractedBytes {
-    type Class = ClusterParameters;
-    type Value = ByteUnit;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "resource-max-extracted-bytes";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> ByteUnit {
-        ByteUnit::Gibibyte(16)
-    }
-
-    fn validate(_: &ByteUnit, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
-
-/// The most extracted files one resource version may have.
-pub struct ResourceMaxFileCount;
-
-impl SettingDefinition for ResourceMaxFileCount {
-    type Class = ClusterParameters;
-    type Value = u64;
-    type Context = ();
-    type Error = Infallible;
-
-    const NAME: &'static str = "resource-max-file-count";
-    const DERIVATION: Option<&'static str> = None;
-
-    fn default_value(_: &()) -> u64 {
-        1_000_000
-    }
-
-    fn validate(_: &u64, _: &()) -> Result<(), Report<Infallible>> {
-        Ok(())
-    }
-}
 
 /// The size bounds the cluster puts on one resource version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,10 +36,16 @@ impl ResourceSettings {
         max_archive_bytes: Option<ByteUnit>,
         max_extracted_bytes: Option<ByteUnit>,
         max_file_count: Option<u64>,
-    ) -> Result<Self, Report<Infallible>> {
+    ) -> Result<Self, Report<nervix_models::ClusterParameterError>> {
         Ok(Self {
-            max_archive_bytes: Setting::resolve(max_archive_bytes, &())?,
-            max_extracted_bytes: Setting::resolve(max_extracted_bytes, &())?,
+            max_archive_bytes: Setting::resolve(
+                max_archive_bytes.map(|bytes| bytes.as_u64()),
+                &(),
+            )?,
+            max_extracted_bytes: Setting::resolve(
+                max_extracted_bytes.map(|bytes| bytes.as_u64()),
+                &(),
+            )?,
             max_file_count: Setting::resolve(max_file_count, &())?,
         })
     }
@@ -112,8 +53,8 @@ impl ResourceSettings {
     /// The bounds the resource store applies to each version.
     pub fn limits(&self) -> ResourceStoreLimits {
         ResourceStoreLimits {
-            max_archive_bytes: self.max_archive_bytes.value().as_u64(),
-            max_extracted_bytes: self.max_extracted_bytes.value().as_u64(),
+            max_archive_bytes: *self.max_archive_bytes.value(),
+            max_extracted_bytes: *self.max_extracted_bytes.value(),
             max_file_count: *self.max_file_count.value(),
         }
     }
@@ -121,6 +62,9 @@ impl ResourceSettings {
 
 impl Default for ResourceSettings {
     fn default() -> Self {
-        Self::resolve(None, None, None).assured("the resource defaults declare no validation")
+        Self::resolve(None, None, None).assured("the resource defaults have valid bounds")
     }
 }
+
+// Cluster policy definitions have one vocabulary owner. These facades hold bootstrap inputs.
+pub use nervix_models::{ResourceMaxArchiveBytes, ResourceMaxExtractedBytes, ResourceMaxFileCount};

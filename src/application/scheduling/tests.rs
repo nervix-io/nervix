@@ -36,6 +36,7 @@ fn voter_gossip(live: &[&str], dead: &[&str]) -> GossipState {
         live_nodes: live
             .iter()
             .map(|name| GossipNode {
+                parameters: None,
                 node_id: named(name),
                 incarnation: ClusterNodeIncarnation::new(1),
                 terminating: false,

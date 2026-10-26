@@ -21,6 +21,7 @@ mod canonical_round_trip_tests;
 pub mod client;
 #[cfg(feature = "client")]
 pub mod client_statement;
+pub mod cluster_parameters;
 pub mod codec;
 #[cfg(test)]
 mod conformance_support;

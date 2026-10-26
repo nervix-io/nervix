@@ -21,12 +21,12 @@ use nervix_models::{
     Assignment, AssignmentTarget, ClientDeadline, ClientIngestMode, CodecBatchContainer,
     CreateClientHttp, CreateClientKafka, CreateCodec, CreateEmitter, CreateIngestor, CreateSchema,
     CreateSignalingProtocol, DomainName, EmitterEntity, EndpointName, Expression, FieldName,
-    HttpApplicationHeaders, HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod,
-    HttpOrigin, HttpRequestEmitter, IngestTimestampSource, IngestorInput, LiteralHeaderWrite,
-    Model, ModelIndex, ModelName, OtelAggregationTemporality, OtelEmitter, OtelMappings,
-    OtelMetricKind, OtelMetricsEmitter, ParseAsType, ProcessorOutput, RelayName, RouteConstruction,
-    SchemaField, SchemaName, SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsQueueEmitter,
-    VhostName, parse_duration_text,
+    HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
+    HttpRequestEmitter, IngestTimestampSource, IngestorInput, LiteralHeaderWrite, Model,
+    ModelIndex, ModelName, OtelAggregationTemporality, OtelEmitter, OtelMappings, OtelMetricKind,
+    OtelMetricsEmitter, ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField,
+    SchemaName, SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsQueueEmitter, VhostName,
+    parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -966,12 +966,6 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
     origin: &HttpOrigin,
     emitter: &CreateEmitter,
 ) -> Result<(), Report<RegistryError>> {
-    struct KnownHeader {
-        invocation: usize,
-        name: HttpHeaderName,
-        value: HttpHeaderValue,
-    }
-
     let EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter { method, path, .. })) =
         emitter.connector.as_ref()
     else {
@@ -1010,8 +1004,6 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
             .map_err(|_| invalid("HTTP publish path is invalid".to_string()))?;
     }
 
-    let mut known_headers = Vec::new();
-    let mut all_headers_known = true;
     for (index, invocation) in emitter.construction.invocations.iter().enumerate() {
         let invocation_index = index
             .checked_add(1)
@@ -1019,65 +1011,19 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
         let [name, value] = invocation.arguments.as_slice() else {
             continue;
         };
-        let name = if let Expression::Literal(nervix_models::Literal::String(name)) = name {
-            Some(HttpHeaderName::parse(name).map_err(|_| {
+        if let Expression::Literal(nervix_models::Literal::String(name)) = name {
+            HttpHeaderName::parse(name).map_err(|_| {
                 invalid(format!(
                     "HTTP invoke #{invocation_index} header name is invalid or reserved"
                 ))
-            })?)
-        } else {
-            all_headers_known = false;
-            None
-        };
-        let value = if let Expression::Literal(nervix_models::Literal::String(value)) = value {
-            Some(HttpHeaderValue::parse(value).map_err(|_| {
+            })?;
+        }
+        if let Expression::Literal(nervix_models::Literal::String(value)) = value {
+            HttpHeaderValue::parse(value).map_err(|_| {
                 invalid(format!(
                     "HTTP invoke #{invocation_index} header value is invalid"
                 ))
-            })?)
-        } else {
-            all_headers_known = false;
-            None
-        };
-        if let (Some(name), Some(value)) = (name, value) {
-            let size = name
-                .as_str()
-                .len()
-                .checked_add(value.as_str().len())
-                .ok_or_else(|| {
-                    invalid(format!(
-                        "HTTP invoke #{invocation_index} header exceeds 32 KiB"
-                    ))
-                })?;
-            if size > 32 * 1024 {
-                return Err(invalid(format!(
-                    "HTTP invoke #{invocation_index} header exceeds 32 KiB"
-                )));
-            }
-            known_headers.push(KnownHeader {
-                invocation: invocation_index,
-                name,
-                value,
-            });
-        }
-    }
-    if all_headers_known {
-        let mut headers = HttpApplicationHeaders::default();
-        let final_invocation = known_headers.last().map(|header| header.invocation);
-        for known in known_headers {
-            headers.insert(known.name, known.value).map_err(|_| {
-                invalid(format!(
-                    "HTTP invoke #{} application headers exceed the count or 32 KiB limit",
-                    known.invocation
-                ))
             })?;
-        }
-        if headers.validate_total().is_err() {
-            let invocation = final_invocation
-                .assured("a nonzero total requires at least one literal header invocation");
-            return Err(invalid(format!(
-                "HTTP invoke #{invocation} application headers exceed the 32 KiB limit"
-            )));
         }
     }
     Ok(())

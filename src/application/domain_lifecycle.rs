@@ -19,6 +19,7 @@
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
+use meticulous::ResultExt as _;
 use nervix_consensus::{ConsensusError, DomainMutationLease};
 use nervix_interconnect::{
     DomainDrainStatusEnvelope, RemoteOperationFailure,
@@ -858,7 +859,8 @@ impl SessionServiceImpl {
                 let mut schedule = graph.schedule_for_domain_with_mode(
                     domain,
                     cluster_nodes,
-                    self.inner.replica_count,
+                    usize::try_from(self.cluster_parameters().replica_count())
+                        .assured("the committed count fits a supported target"),
                     alter.policy,
                     self.inner.runtime.scheduler_mode(),
                 );
@@ -866,7 +868,8 @@ impl SessionServiceImpl {
                 let mut schedule = graph.schedule_for_domain(
                     domain,
                     cluster_nodes,
-                    self.inner.replica_count,
+                    usize::try_from(self.cluster_parameters().replica_count())
+                        .assured("the committed count fits a supported target"),
                     alter.policy,
                 );
                 Self::merge_existing_schedule_data(
@@ -1132,7 +1135,7 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::OptionExt as _;
     #[cfg(feature = "testing")]
     use nervix_consensus::{ConsensusError, ConsensusTestProbe, StorageBoundary};
     use nervix_models::{DomainConfig, DomainPace, PlacementPolicy};
