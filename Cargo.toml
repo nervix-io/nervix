@@ -839,6 +839,13 @@ overflow-checks = true
 debug = 0
 opt-level = 1
 
+# The scenario suite parses each Plexus command it runs several times on the one thread that polls
+# every scenario, and the client library parses it again. That thread was on a CPU for most of the
+# suite, and an unoptimized parse takes about five times as long. Debug assertions and overflow
+# checks stay on.
+[profile.dev.package.nervix-plexus]
+opt-level = 2
+
 [profile.dev.package."wasmtime"]
 opt-level = 3
 [profile.dev.package."wasmtime-environ"]

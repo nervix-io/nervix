@@ -2504,6 +2504,16 @@ same decay schedule, and no thread that allocates waits for a purge. On that wor
 thread's system time fell from 18 to 8 percent of the run, and its user time, the scenarios' own
 work, rose from 2 to 7 percent.
 
+Purging in the background did not free the thread on CI: at 48 slots it still ran on a CPU for 89
+percent of Check run 40404803351, about 0.95 seconds per attempt. Much of that is parsing. The
+runner thread parses a command a scenario runs about eight times: the harness parses the command's
+document to decide how to send it and what to record from it, parses each statement again to size
+the client's wait, and the client library parses the statement it sends. The 36,276 statements of
+that run averaged 54 characters. Formatting a 140-character statement, which parses it, took about
+38 milliseconds unoptimized and about 7 with only `nervix-plexus` optimized. The dev profile
+therefore builds `nervix-plexus` at `opt-level = 2`, keeping its debug assertions and overflow
+checks.
+
 ## Diagnostic Lane
 
 `just test-deloxide`, `just test-deloxide-order`, `just test-deloxide-stress` and
