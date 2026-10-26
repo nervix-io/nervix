@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from scripts.tests.test_release_evidence import workflow_job
+
 
 class BenchmarkWorkflowTests(unittest.TestCase):
     def test_no_docker_label_skips_pr_pipeline(self) -> None:
@@ -10,8 +12,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         trigger, jobs = workflow.split("\njobs:", maxsplit=1)
         meta = jobs.split("\n  meta:", maxsplit=1)[1]
         meta = meta.split("\n  build-arch:", maxsplit=1)[0]
-        reporter = jobs.split("\n  benchmark-comment:", maxsplit=1)[1]
-        reporter = reporter.split("\n  publish-manifest:", maxsplit=1)[0]
+        reporter = workflow_job(workflow, "benchmark-comment")
 
         self.assertIn(
             "types: [opened, synchronize, reopened, labeled]",
@@ -29,8 +30,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
 
     def test_reporter_job_is_separate_least_privilege_and_always_updates_pr(self) -> None:
         workflow = Path(".github/workflows/docker-build.yaml").read_text()
-        reporter = workflow.split("\n  benchmark-comment:", maxsplit=1)[1]
-        reporter = reporter.split("\n  publish-manifest:", maxsplit=1)[0]
+        reporter = workflow_job(workflow, "benchmark-comment")
 
         self.assertIn("needs: [build-arch, benchmark]", reporter)
         self.assertIn("always()", reporter)

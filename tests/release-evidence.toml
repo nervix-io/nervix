@@ -28,6 +28,11 @@ description = "The release image of the revision for each architecture"
 name = "release-images"
 
 [[method]]
+checks = ["operator-deployment-amd64", "operator-deployment-arm64"]
+description = "The shipped Kubernetes operator initializes three ready Nervix pods and public three-voter membership on each release image"
+name = "operator-deployment"
+
+[[method]]
 checks = [
   "bolero / bolero-random",
   "bolero / bolero-fuzz-combined",
