@@ -5,8 +5,9 @@
 //! - **Owns.** The RabbitMQ client Model, the queue source and emitter Models with their delivery
 //!   mode, the queue name a source consumes with the rule AMQP holds it to, and what each entity
 //!   declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
-//! - **Must not know.** The AMQP driver, its configuration keys, or how a queue is consumed or
+//! - **Must not know.** The AMQP driver, or how a queue is consumed or
 //!   published to.
 
 #![cfg_attr(
@@ -38,7 +39,24 @@ use crate::{
     RetryPolicy,
 };
 
-configured_client!(RabbitMq: unpooled, config NervixWithAddressQuery, CreateClientRabbitMq => RabbitMqConfigEntry);
+configured_client!(RabbitMq: unpooled, config CLIENT_CONFIG, CreateClientRabbitMq => RabbitMqConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("addr", V::DriverAddress),
+            K::CONNECT_TIMEOUT,
+            K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// The longest queue name AMQP 0-9-1 carries, in bytes.
 #[cfg_attr(

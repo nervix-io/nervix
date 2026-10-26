@@ -415,7 +415,7 @@ impl ConfiguredChoices {
                         model.node_ref(),
                         format!("{} client", kind.form_label()),
                         "Client source",
-                        model.to_canonical_plexus(),
+                        model.to_public_plexus(),
                     )?
                 }
                 (ConfiguredQuestion::IngestRelays(branch), Model::Relay(relay))

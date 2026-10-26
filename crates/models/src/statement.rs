@@ -1246,6 +1246,19 @@ macro_rules! declare_models {
                 }
             }
 
+            /// The fields every configured connector client declares, borrowed from its owner.
+            pub fn configured_client(&self) -> Option<crate::ConfiguredClientRef<'_, Version>> {
+                match self {
+                    $(Self::$Variant(model) => declare_models!(@client $Kind model, $Model $(<$Version>)?),)+
+                }
+            }
+
+            pub(crate) fn client_config_mut(&mut self) -> Option<&mut Vec<ClientConfigEntry>> {
+                match self {
+                    $(Self::$Variant(model) => declare_models!(@client_config $Kind model),)+
+                }
+            }
+
             /// Rebuilds this model with the version of every resource it binds passed through
             /// `map`, in the order the model declares its bindings. A model that binds no resource
             /// is rebuilt unchanged.
@@ -1267,6 +1280,17 @@ macro_rules! declare_models {
     (@map_versions $model:ident, $map:ident) => {
         $model
     };
+    (@client Client $model:ident, $Client:ident<$Version:ident>) => {
+        Some(crate::ConfiguredClientRef {
+            connector: $Client::<$Version>::CONNECTOR,
+            name: &$model.name,
+            mount: $model.mount.as_ref(),
+            config: &$model.config,
+        })
+    };
+    (@client $kind:ident $model:ident, $Client:ident $(<$Version:ident>)?) => { { let _ = $model; None } };
+    (@client_config Client $model:ident) => { Some(&mut $model.config) };
+    (@client_config $kind:ident $model:ident) => { { let _ = $model; None } };
     (@map_versions $model:ident, $map:ident, $Version:ident) => {
         $model.try_map_resource_versions(&mut $map)?
     };

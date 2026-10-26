@@ -59,7 +59,7 @@ use super::{
 use crate::{
     registry::{
         PlannedTransaction, PlannedTransactionStep, PlannedTransactionStepKind, Registry,
-        RegistryMutation, TransactionPlanningError, TransactionPlanningSnapshot,
+        RegistryError, RegistryMutation, TransactionPlanningError, TransactionPlanningSnapshot,
         TransactionScheduleDecision,
     },
     runtime::RuntimeError,
@@ -208,9 +208,13 @@ fn transaction_planning_basis(
 pub(in crate::application) fn transaction_planning_error_message(
     error: &Report<TransactionPlanningError>,
 ) -> String {
+    if let Some(message) = super::model_validation::client_validation_message(error) {
+        return message;
+    }
     if error
         .downcast_ref::<super::model_validation::ModelBindingValidationError>()
         .is_some()
+        || error.downcast_ref::<RegistryError>().is_some()
     {
         return format!("{error:#}");
     }
@@ -222,6 +226,12 @@ pub(in crate::application) fn transaction_planning_error_message(
 }
 
 fn transaction_commit_error_message(error: &Report<TransactionCommitError>) -> String {
+    if let Some(message) = super::model_validation::client_validation_message(error) {
+        return message;
+    }
+    if error.downcast_ref::<RegistryError>().is_some() {
+        return format!("{error:#}");
+    }
     let context = match error.downcast_ref::<TransactionPlanningError>() {
         Some(planning_error) => planning_error.to_string(),
         None => match error.downcast_ref::<ConsensusTransactionError>() {
@@ -375,6 +385,13 @@ pub(in crate::application) enum TransactionPreflightError {
     Report,
     #[error("transaction statement failed report archival")]
     Archive,
+}
+
+impl TransactionPreflightError {
+    pub(in crate::application) fn public_message(error: &Report<Self>) -> String {
+        super::model_validation::client_validation_message(error)
+            .unwrap_or_else(|| format!("{error:#}"))
+    }
 }
 
 impl SessionTransactionBindingError {

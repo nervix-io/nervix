@@ -57,10 +57,10 @@ mod service_url;
 mod tls;
 
 pub use client_config::{
-    ClientConfigError, ClientConfigResult, ClientResourceMounts, ClientTlsPaths, ParsedRetryPolicy,
-    ResolvedClientConfig, client_config_value, client_tls_paths, next_retry_delay,
-    optional_bool_client_config_value, optional_client_config_value, read_tls_file,
-    render_client_config_template,
+    ClientConfigError, ClientConfigResult, ClientResourceMounts, ClientTlsPaths,
+    OfflineClientConfigError, ParsedRetryPolicy, ResolvedClientConfig, client_config_value,
+    client_tls_paths, next_retry_delay, optional_bool_client_config_value,
+    optional_client_config_value, read_tls_file, render_client_config_template,
 };
 pub use client_deadline::{ConfiguredDeadline, DeadlineElapsed};
 pub use confirmation_window::{
