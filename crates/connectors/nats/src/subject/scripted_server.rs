@@ -8,9 +8,10 @@
 //! - **Must not know.** The connector's ingestor or emitter, the runtime host, or how a real server
 //!   decides.
 
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_primitives::{
     net::{
-        TcpListener,
+        TcpListener, TcpSocket,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
     },
     sync::oneshot,
@@ -65,6 +66,19 @@ impl ScriptedServer {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("a loopback port is available");
+        Self { listener }
+    }
+
+    /// A server whose receive window keeps a large publish partly in its client's write buffer.
+    pub(crate) async fn with_receive_buffer(bytes: u32) -> Self {
+        let socket = TcpSocket::new_v4().assured("a loopback socket can be created");
+        socket
+            .set_recv_buffer_size(bytes)
+            .assured("the scripted server can bound its receive buffer");
+        socket
+            .bind("127.0.0.1:0".parse().assured("a literal loopback address"))
+            .assured("a loopback port is available");
+        let listener = socket.listen(1).assured("the bound socket can listen");
         Self { listener }
     }
 
@@ -149,6 +163,26 @@ impl DownServer {
 }
 
 impl ScriptedConnection {
+    /// Reads only a publish's operation line and prefix, leaving its remaining bytes unread.
+    pub(crate) async fn expect_publish_prefix(&mut self, prefix: &[u8]) -> usize {
+        let line = self.read_line().await;
+        let mut tokens = line.split_whitespace();
+        assert_eq!(tokens.next(), Some("PUB"), "{line:?}");
+        let size = tokens
+            .last()
+            .assured("a publish names its payload length")
+            .parse::<usize>()
+            .assured("the payload length is a number");
+        assert!(prefix.len() < size, "the check leaves payload bytes unread");
+        let mut received = vec![0; prefix.len()];
+        self.read
+            .read_exact(&mut received)
+            .await
+            .assured("the client sends the beginning of its publish");
+        assert_eq!(received, prefix);
+        size
+    }
+
     /// Reads what the client sends until its next subscription that is not its inbox, answering
     /// each PING on the way.
     pub(crate) async fn expect_subscription(&mut self) -> Subscription {
