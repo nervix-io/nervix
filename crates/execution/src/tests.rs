@@ -7,8 +7,9 @@ use meticulous::OptionExt as _;
 use ubyte::ByteUnit;
 
 use crate::{
-    AdmissionError, BudgetedBuffer, ExecutionConfig, ExecutionConfigError, Executor, MemoryBudgets,
-    MemoryClass, OperationLimits, WorkerCounts,
+    AdmissionError, BudgetedBuffer, ExecutionConfig, ExecutionConfigError, ExecutionError,
+    Executor, MemoryBudgets, MemoryClass, OperationLimits, QueueAdmission, StorageClass,
+    WorkerCounts,
 };
 
 fn one() -> NonZeroUsize {
@@ -25,6 +26,8 @@ fn small_executor() -> Executor {
             bulk_cpu: one(),
             consensus_storage: one(),
             filesystem_storage: one(),
+            connector_storage: crate::ConnectorStorageWorkers::resolve(Some(one()))
+                .expect("one worker fits the primitive permit bound"),
             pending_jobs: one(),
         },
         budgets: MemoryBudgets::default(),
@@ -49,6 +52,8 @@ fn queued_executor(pending_jobs: usize) -> Executor {
                 bulk_cpu: one(),
                 consensus_storage: one(),
                 filesystem_storage: one(),
+                connector_storage: crate::ConnectorStorageWorkers::resolve(Some(one()))
+                    .expect("one worker fits the primitive permit bound"),
                 pending_jobs: one(),
             }
         },
@@ -69,6 +74,168 @@ async fn default_limits_validate_together() {
     assert_eq!(snapshot.control_cpu.workers, 1);
     assert_eq!(snapshot.consensus_storage.workers, 1);
     assert_eq!(snapshot.filesystem_storage.workers, 2);
+    assert_eq!(snapshot.connector_storage.workers, 2);
+}
+
+/// Each configured pool and both equally sized derived read pools count in the total.
+#[test]
+fn the_memory_total_counts_every_class_once() {
+    let budgets = MemoryBudgets {
+        management: ByteUnit::Byte(1),
+        commands: ByteUnit::Byte(2),
+        relay: ByteUnit::Byte(4),
+        bulk: ByteUnit::Byte(8),
+        bulk_window: ByteUnit::Byte(16),
+        restore_metadata: ByteUnit::Byte(32),
+        credentials: ByteUnit::Byte(64),
+    };
+
+    assert_eq!(budgets.total(), Some(ByteUnit::Byte(135)));
+}
+
+/// Budgets whose sum does not fit a byte count have no total, rather than one that wrapped.
+#[test]
+fn memory_budgets_beyond_a_byte_count_have_no_total() {
+    let budgets = MemoryBudgets {
+        relay: ByteUnit::Byte(u64::MAX),
+        ..MemoryBudgets::default()
+    };
+
+    assert_eq!(budgets.total(), None);
+}
+
+/// The startup preflight refuses a memory limit below the total, so the total is what the executor
+/// can reserve: the capacity of every memory class together, 2,723 MiB by default.
+#[nervix_primitives::test]
+async fn the_default_memory_total_is_what_the_executor_can_reserve() {
+    use meticulous::ResultExt as _;
+
+    let config = ExecutionConfig::default();
+    let executor = Executor::new(config).assured("the default budgets hold the default limits");
+    let mut reservable = 0_u64;
+    for class in [
+        MemoryClass::Management,
+        MemoryClass::Commands,
+        MemoryClass::Relay,
+        MemoryClass::StateRead,
+        MemoryClass::StateReadCache,
+        MemoryClass::Bulk,
+        MemoryClass::BulkWindow,
+        MemoryClass::RestoreMetadata,
+        MemoryClass::Credentials,
+    ] {
+        reservable = reservable
+            .checked_add(executor.memory(class).capacity_bytes)
+            .assured("nine budgets that each fit a u32 permit count add up within a u64");
+    }
+
+    assert_eq!(config.budgets.total(), Some(ByteUnit::Byte(reservable)));
+    assert_eq!(reservable, ByteUnit::Mebibyte(2723).as_u64());
+}
+
+#[nervix_primitives::test]
+async fn active_reads_retained_reads_and_live_relays_have_independent_capacity() {
+    let executor = small_executor();
+    let capacity = executor.memory(MemoryClass::Relay).capacity_bytes;
+    assert_eq!(
+        executor.memory(MemoryClass::StateRead).capacity_bytes,
+        capacity
+    );
+    let active = executor
+        .try_reserve(MemoryClass::StateRead, capacity)
+        .expect("active source views can fill their own pool");
+    assert_eq!(
+        executor.memory(MemoryClass::StateReadCache).capacity_bytes,
+        capacity
+    );
+    let cached = executor
+        .try_reserve(MemoryClass::StateReadCache, capacity)
+        .expect("the cache can fill its own pool");
+    let exhausted = executor
+        .try_reserve(MemoryClass::StateReadCache, 1)
+        .expect_err("optional retention refuses a full pool without waiting");
+    assert!(matches!(
+        exhausted.current_context(),
+        AdmissionError::BudgetExhausted { .. }
+    ));
+    let live = executor
+        .try_reserve(MemoryClass::Relay, capacity)
+        .expect("a full cache leaves all live relay capacity available");
+    drop(cached);
+    assert_eq!(
+        executor.memory(MemoryClass::StateReadCache).reserved_bytes,
+        0
+    );
+    assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, capacity);
+    drop(active);
+    assert_eq!(executor.memory(MemoryClass::StateRead).reserved_bytes, 0);
+    drop(live);
+    assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, 0);
+}
+
+#[test]
+fn charged_bytes_keep_their_own_size_and_the_room_their_only_holder_keeps() {
+    let executor = Executor::default();
+    let operation = executor
+        .try_reserve(MemoryClass::Relay, 10_000)
+        .expect("an empty relay budget takes a small operation");
+    let mut body = crate::ChargedBytes::from_owned(vec![7; 100], operation);
+    let shared = body.clone();
+
+    body.keep_charge_for(250);
+    assert_eq!(
+        executor.memory(MemoryClass::Relay).reserved_bytes,
+        10_000,
+        "an allocation another handle shares keeps its whole charge"
+    );
+
+    drop(shared);
+    body.keep_charge_for(250);
+    assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, 350);
+    assert_eq!(&*body, &[7; 100][..]);
+
+    body.keep_charge_for(u64::MAX);
+    body.keep_charge_for(1000);
+    assert_eq!(
+        executor.memory(MemoryClass::Relay).reserved_bytes,
+        350,
+        "keeping more room than the charge holds returns nothing and takes nothing"
+    );
+    drop(body);
+    assert_eq!(executor.memory(MemoryClass::Relay).reserved_bytes, 0);
+}
+
+#[test]
+fn connector_worker_capacity_is_a_validated_node_capability() {
+    use nervix_models::{NodeCapabilities, SettingClass as _, SettingDefinition as _};
+
+    use crate::ConnectorStorageWorkers;
+
+    let default = ConnectorStorageWorkers::resolve(None).expect("the default capacity is valid");
+    let explicit = ConnectorStorageWorkers::resolve(Some(NonZeroUsize::MIN))
+        .expect("one worker fits the primitive permit bound");
+    let copied = explicit;
+    assert_eq!(copied, explicit);
+    assert_eq!(default.value().get(), 2);
+    assert_eq!(explicit.value().get(), 1);
+    assert_eq!(
+        ConnectorStorageWorkers::NAME,
+        "execution-connector-storage-workers"
+    );
+    assert_eq!(
+        <ConnectorStorageWorkers as nervix_models::SettingDefinition>::Class::NAME,
+        NodeCapabilities::NAME
+    );
+    let error = ConnectorStorageWorkers::resolve(Some(NonZeroUsize::MAX))
+        .expect_err("a capability claim must fit the primitive's permit representation");
+    assert_eq!(
+        error.current_context(),
+        &ExecutionConfigError::WorkerCountTooLarge {
+            class: "connector_storage",
+            workers: usize::MAX,
+            maximum: nervix_primitives::sync::Semaphore::MAX_PERMITS,
+        }
+    );
 }
 
 #[nervix_primitives::test]
@@ -134,6 +301,54 @@ async fn retained_restore_metadata_is_admitted_independently_of_bulk_buffers() {
     drop(bulk);
 }
 
+/// An open bulk stream holds its receive window while its reader's chunks are charged to bulk
+/// buffers. With every window of the node held, a chunk still finds room, and with every bulk
+/// buffer held, a waiting stream still gets the window another stream returns.
+#[nervix_primitives::test]
+async fn bulk_receive_windows_are_admitted_independently_of_bulk_buffers() {
+    use meticulous::ResultExt as _;
+
+    let executor = small_executor();
+    let snapshot = executor.snapshot();
+    assert_eq!(
+        snapshot.bulk_window_memory.capacity_bytes,
+        ByteUnit::Mebibyte(16).as_u64()
+    );
+    assert_eq!(MemoryClass::BulkWindow.as_str(), "bulk_window");
+    let windows = executor
+        .try_reserve(
+            MemoryClass::BulkWindow,
+            snapshot.bulk_window_memory.capacity_bytes,
+        )
+        .assured("every window of the class is available");
+    let chunk = executor
+        .try_reserve(MemoryClass::Bulk, snapshot.bulk_memory.capacity_bytes)
+        .assured("bulk buffers have independent admission");
+    let error = executor
+        .try_reserve(MemoryClass::BulkWindow, 1)
+        .err()
+        .assured("the occupied window class refuses another window");
+    assert_eq!(
+        *error.current_context(),
+        AdmissionError::BudgetExhausted {
+            class: "bulk_window",
+            requested: 1
+        }
+    );
+    drop(windows);
+    assert_eq!(executor.snapshot().bulk_window_memory.reserved_bytes, 0);
+    assert_eq!(
+        executor.snapshot().bulk_memory.reserved_bytes,
+        snapshot.bulk_memory.capacity_bytes
+    );
+    let window = executor
+        .reserve(MemoryClass::BulkWindow, ByteUnit::Mebibyte(1).as_u64())
+        .await
+        .assured("a returned window admits the next stream although bulk buffers are full");
+    drop(window);
+    drop(chunk);
+}
+
 #[nervix_primitives::test]
 async fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
@@ -151,6 +366,24 @@ async fn a_relay_budget_below_two_maximum_operations_fails_to_start() {
             operation: "pair of relay operations",
             budget: ByteUnit::Mebibyte(96).as_u64(),
             required: ByteUnit::Mebibyte(160).as_u64(),
+        }
+    );
+}
+
+#[nervix_primitives::test]
+async fn an_empty_bulk_window_budget_fails_to_start() {
+    let error = Executor::new(ExecutionConfig {
+        budgets: MemoryBudgets {
+            bulk_window: ByteUnit::Byte(0),
+            ..MemoryBudgets::default()
+        },
+        ..ExecutionConfig::default()
+    })
+    .expect_err("a budget that backs no bulk stream's window is rejected");
+    assert_eq!(
+        *error.current_context(),
+        ExecutionConfigError::EmptyBudget {
+            class: "bulk_window"
         }
     );
 }
@@ -287,6 +520,148 @@ async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
     );
 }
 
+/// A storage job that waits for a place is not refused by a full wait queue, unlike one refused
+/// when full, and runs once the occupying job frees a place.
+#[nervix_primitives::test]
+async fn a_storage_job_waiting_for_a_place_runs_once_the_full_queue_frees_one() {
+    let executor = small_executor();
+    let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+    let (release, released) = nervix_primitives::sync::oneshot::channel::<()>();
+    let occupying = executor
+        .try_reserve(MemoryClass::Bulk, 1)
+        .expect("the untouched bulk class has room");
+    let occupied = executor.clone();
+    let running = nervix_primitives::task::spawn(async move {
+        occupied
+            .run_storage(StorageClass::Filesystem, occupying, move |_charge, _| {
+                started
+                    .send(())
+                    .expect("the test waits for the occupying job");
+                released
+                    .blocking_recv()
+                    .expect("the test releases the occupying job before it exits");
+            })
+            .await
+            .expect("the occupying job runs");
+    });
+    has_started
+        .await
+        .expect("the occupying job reports once it holds the one worker");
+    let queued_charge = executor
+        .try_reserve(MemoryClass::Bulk, 1)
+        .expect("the bulk class has room for the queued job");
+    let queue_holder = executor.clone();
+    let queued = nervix_primitives::task::spawn(async move {
+        queue_holder
+            .run_storage(StorageClass::Filesystem, queued_charge, |_charge, _| ())
+            .await
+    });
+    while executor.snapshot().filesystem_storage.pending < 1 {
+        nervix_primitives::task::consume_budget().await;
+        nervix_primitives::task::yield_now().await;
+    }
+
+    let refused = executor
+        .run_storage(
+            StorageClass::Filesystem,
+            executor
+                .try_reserve(MemoryClass::Bulk, 1)
+                .expect("the bulk class has room for the refused job"),
+            |_charge, _| (),
+        )
+        .await
+        .expect_err("a full wait queue refuses a job that answers a request");
+    assert!(
+        matches!(refused.current_context(), ExecutionError::QueueFull { .. }),
+        "a job refused when full is refused for the full queue, got {refused}"
+    );
+    let waiting_charge = executor
+        .try_reserve(MemoryClass::Bulk, 1)
+        .expect("the bulk class has room for the waiting job");
+    let waiter = executor.clone();
+    let waiting = nervix_primitives::task::spawn(async move {
+        waiter
+            .run_storage_with(
+                StorageClass::Filesystem,
+                QueueAdmission::WaitForPlace,
+                waiting_charge,
+                |_charge, _| "waited",
+            )
+            .await
+    });
+    release
+        .send(())
+        .expect("the occupying job holds its worker until the test releases it");
+
+    running.await.expect("the occupying job is joined");
+    queued
+        .await
+        .expect("the queued job is joined")
+        .expect("the queued job runs once the worker frees");
+    let waited = waiting
+        .await
+        .expect("the waiting job is joined")
+        .expect("a job waiting for a place is never refused");
+    assert_eq!(waited, "waited");
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.filesystem_storage.refused, 1);
+    assert_eq!(snapshot.filesystem_storage.completed, 3);
+    assert_eq!(snapshot.bulk_memory.reserved_bytes, 0);
+}
+
+async fn connector_storage_isolation() {
+    let executor = small_executor();
+    let (started, has_started) = nervix_primitives::sync::oneshot::channel();
+    let (release, released) = nervix_primitives::sync::oneshot::channel();
+    let charge = executor
+        .try_reserve(MemoryClass::Commands, 1)
+        .expect("the connector job can reserve its envelope");
+    let occupied = executor.clone();
+    let running = nervix_primitives::task::spawn(async move {
+        occupied
+            .run_storage(StorageClass::Connector, charge, move |_, _| {
+                started.send(()).expect("the test awaits worker admission");
+                released
+                    .blocking_recv()
+                    .expect("the test releases the worker");
+            })
+            .await
+            .expect("the admitted connector job completes");
+    });
+    has_started
+        .await
+        .expect("the connector reports its admission");
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.connector_storage.running, 1);
+    assert_eq!(snapshot.filesystem_storage.running, 0);
+    assert_eq!(snapshot.consensus_storage.running, 0);
+    for class in [StorageClass::Filesystem, StorageClass::Consensus] {
+        let charge = executor
+            .try_reserve(MemoryClass::Commands, 1)
+            .expect("each independent job can reserve its envelope");
+        executor
+            .run_storage(class, charge, |_, _| ())
+            .await
+            .expect("an occupied connector worker cannot hold other storage classes");
+        assert_eq!(executor.snapshot().connector_storage.running, 1);
+    }
+    release
+        .send(())
+        .expect("the connector remains held until both jobs finish");
+    running.await.expect("the connector supervisor is joined");
+    let snapshot = executor.snapshot();
+    assert_eq!(snapshot.connector_storage.running, 0);
+    assert_eq!(snapshot.connector_storage.completed, 1);
+    assert_eq!(snapshot.filesystem_storage.completed, 1);
+    assert_eq!(snapshot.consensus_storage.completed, 1);
+    assert_eq!(snapshot.commands_memory.reserved_bytes, 0);
+}
+
+#[nervix_primitives::test]
+async fn a_blocked_connector_leaves_filesystem_and_consensus_workers_available() {
+    connector_storage_isolation().await;
+}
+
 #[cfg(feature = "shuttle")]
 mod shuttle_checks {
     use std::{future::Future, task::Poll};
@@ -311,7 +686,10 @@ mod shuttle_checks {
             ("management", snapshot.management_memory),
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
+            ("state_read", snapshot.state_read_memory),
+            ("state_read_cache", snapshot.state_read_cache_memory),
             ("bulk", snapshot.bulk_memory),
+            ("bulk_window", snapshot.bulk_window_memory),
             ("restore_metadata", snapshot.restore_metadata_memory),
             ("credentials", snapshot.credentials_memory),
         ] {
@@ -334,6 +712,7 @@ mod shuttle_checks {
             ("bulk_cpu", snapshot.bulk_cpu),
             ("consensus_storage", snapshot.consensus_storage),
             ("filesystem_storage", snapshot.filesystem_storage),
+            ("connector_storage", snapshot.connector_storage),
         ] {
             assert_eq!(
                 workers.running, 0,
@@ -345,7 +724,10 @@ mod shuttle_checks {
             ("management", snapshot.management_memory),
             ("commands", snapshot.commands_memory),
             ("relay", snapshot.relay_memory),
+            ("state_read", snapshot.state_read_memory),
+            ("state_read_cache", snapshot.state_read_cache_memory),
             ("bulk", snapshot.bulk_memory),
+            ("bulk_window", snapshot.bulk_window_memory),
             ("restore_metadata", snapshot.restore_metadata_memory),
             ("credentials", snapshot.credentials_memory),
         ] {
@@ -390,6 +772,8 @@ mod shuttle_checks {
             for class in [
                 MemoryClass::Management,
                 MemoryClass::Commands,
+                MemoryClass::StateRead,
+                MemoryClass::StateReadCache,
                 MemoryClass::Bulk,
             ] {
                 let (started, has_started) = nervix_primitives::sync::oneshot::channel();
@@ -427,6 +811,8 @@ mod shuttle_checks {
             assert_eq!(snapshot.relay_memory.reserved_bytes, relay_capacity);
             assert_eq!(snapshot.management_memory.reserved_bytes, 1024);
             assert_eq!(snapshot.commands_memory.reserved_bytes, 1024);
+            assert_eq!(snapshot.state_read_memory.reserved_bytes, 1024);
+            assert_eq!(snapshot.state_read_cache_memory.reserved_bytes, 1024);
             assert_eq!(snapshot.bulk_memory.reserved_bytes, 1024);
 
             let Err(error) = executor.try_reserve(MemoryClass::Relay, 1) else {
@@ -521,6 +907,13 @@ mod shuttle_checks {
     #[test]
     fn shuttle_occupied_bulk_execution_leaves_control_execution_untouched() {
         check_random_and_pct(occupied_bulk_execution_invariant);
+    }
+
+    #[test]
+    fn shuttle_occupied_connector_leaves_filesystem_and_consensus_execution_untouched() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(super::connector_storage_isolation());
+        });
     }
 
     fn queued_job_drop_invariant() {

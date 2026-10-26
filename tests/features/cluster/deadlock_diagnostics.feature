@@ -12,11 +12,11 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
   Scenario Outline: In-process diagnostic nodes run a workload with every blocking lock tracked on a <nodes> node cluster
     Given the scenario process tracks its blocking locks for deadlocks
     And a <nodes> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE SCHEMA event_error ( seq I64, operation STRING );
@@ -53,7 +53,7 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
       """
       "seq":1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER JUNCTION route_events SET FILTER WHERE input.seq >= 10;
       """
@@ -65,7 +65,7 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
       """
       "seq":10
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER JUNCTION route_events SET FILTER WHERE input.seq >= 1;
       CREATE SUBSCRIPTION event_errors_subscription TO event_errors;
@@ -92,7 +92,7 @@ Feature: Diagnostic nodes track their blocking locks for active deadlocks
   @deloxide_stress
   Scenario Outline: Diagnostic server processes record a running detector and stop gracefully on a <nodes> node cluster
     Given a <nodes> node diagnostic nervix-server process cluster is started with deadlock evidence
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( seq I64 );

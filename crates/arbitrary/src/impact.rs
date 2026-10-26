@@ -122,7 +122,7 @@ const MODEL_CHANGE_ASPECTS: [ModelChangeAspect; 76] = [
     ModelChangeAspect::ReordererMaxTime,
     ModelChangeAspect::EmitterInput,
     ModelChangeAspect::EmitterInputWhere,
-    ModelChangeAspect::EmitterSink,
+    ModelChangeAspect::EmitterConnector,
     ModelChangeAspect::EmitterClient,
     ModelChangeAspect::EmitterCodec,
     ModelChangeAspect::EmitterCollectPolicy,
@@ -2429,7 +2429,7 @@ mod tests {
 
     #[test]
     fn reports_steps_and_plans_follow_the_vocabulary_rules_in_both_domains() {
-        for values in [Domain::Nspl, Domain::Vocabulary] {
+        for values in [Domain::Plexus, Domain::Vocabulary] {
             for seed in 0..SEEDS {
                 let bytes = seeded_bytes(seed, 3);
                 let mut arbitrary = Arbitrary::new(&bytes, values);

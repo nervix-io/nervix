@@ -1,7 +1,7 @@
 //! Layer: data plane.
 //! Owns: persistence and replica polling tasks for runtime state.
 //! May depend on: runtime state carriers, the state store, interconnect, and vocabulary models.
-//! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
+//! Must not know: control-plane transactions, Plexus parsing, or edge protocols.
 
 #![cfg_attr(
     nervix_lint,
@@ -27,10 +27,26 @@ use super::*;
 /// published last. No branch task can therefore own it to its end, so the runtime does, and none
 /// outlives the runtime with the node's storage open. Closing the owner tells every task to write
 /// that state now and end; waiting for it returns once each of them has finished.
+///
+/// Each task is also counted for the domain of its branch. A domain's stop ends every branch task
+/// of the domain, which leaves each of their snapshot tasks making its last write, and waits for
+/// the domain's tasks before it returns, so a stopped domain's checkpoints are on disk when its
+/// stop completes.
 #[derive(Default)]
 pub(in crate::runtime) struct BranchSnapshotTasks {
     tracker: TaskTracker,
     stopping: CancellationToken,
+    /// The snapshot tasks of every domain that has one. Each tracker is closed as it is created,
+    /// so waiting for it returns as soon as it counts no task.
+    domains: DashMap<DomainName, TaskTracker, RandomState>,
+}
+
+/// A tracker that counts its domain's snapshot tasks, closed so that waiting for it ends when no
+/// task is left rather than when an owner closes it.
+fn closed_domain_tracker() -> TaskTracker {
+    let tracker = TaskTracker::new();
+    tracker.close();
+    tracker
 }
 
 impl BranchSnapshotTasks {
@@ -39,10 +55,20 @@ impl BranchSnapshotTasks {
         self.stopping.clone()
     }
 
+    /// Start `task`, the snapshot task of a branch of `domain`.
     pub(in crate::runtime) fn spawn(
         &self,
+        domain: &DomainName,
         task: impl Future<Output = ()> + Send + 'static,
     ) -> JoinHandle<()> {
+        // The task counts for its domain while the domain's entry is held, so a stop that finds the
+        // domain's tracker empty and removes it never removes a tracker this task joins.
+        let domain_tasks = self
+            .domains
+            .entry(domain.clone())
+            .or_insert_with(closed_domain_tracker);
+        let task = domain_tasks.track_future(task);
+        drop(domain_tasks);
         self.tracker.spawn(task)
     }
 
@@ -53,6 +79,19 @@ impl BranchSnapshotTasks {
 
     pub(in crate::runtime) async fn wait(&self) {
         self.tracker.wait().await;
+    }
+
+    /// Wait until no snapshot task of `domain` is left. The caller has ended every branch task of
+    /// the domain, so each task this waits for is making its last write.
+    pub(in crate::runtime) async fn wait_for_domain(&self, domain: &DomainName) {
+        let Some(domain_tasks) = self.domains.get(domain) else {
+            return;
+        };
+        let tasks = domain_tasks.value().clone();
+        // The shard is released before the wait, which lasts as long as the slowest write.
+        drop(domain_tasks);
+        tasks.wait().await;
+        self.domains.remove_if(domain, |_, tasks| tasks.is_empty());
     }
 }
 
@@ -144,7 +183,8 @@ impl Runtime {
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
         let runtime_stopping = self.inner.branch_snapshot_tasks.stopping();
-        Some(self.inner.branch_snapshot_tasks.spawn(async move {
+        let domain = state.placement().domain.clone();
+        Some(self.inner.branch_snapshot_tasks.spawn(&domain, async move {
             let mut next_persist = Instant::now() + snapshot_interval;
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -211,6 +251,14 @@ impl Runtime {
         state: &PublishedBranchState,
         store: &RuntimeStateStore,
     ) {
+        let placement = state.placement();
+        if let Some(delay) = self.inner.fault_injection.stopped_branch_state_write_delay(
+            &placement.domain,
+            placement.kind,
+            &placement.identifier,
+        ) {
+            sleep(delay).await;
+        }
         let persisted = state
             .persist_published(store, &self.inner.executor, &self.inner.snapshot_staging)
             .await;

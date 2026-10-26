@@ -1,11 +1,11 @@
 Feature: Generator node
   Scenario Outline: Generators cannot cross named branch boundaries
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "generator 'synth_notifications' branch name 'output_branch' does not match relay 'notifications' branch name 'input_branch'"
+    When these Plexus commands fail with "generator 'synth_notifications' branch name 'output_branch' does not match relay 'notifications' branch name 'input_branch'"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -53,11 +53,11 @@ Feature: Generator node
   Scenario Outline: Generator materialized state and output remain isolated per branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -152,11 +152,11 @@ Feature: Generator node
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (tenant STRING, amount I64);
       CREATE SCHEMA generated_notification (tenant STRING, total I64);
@@ -205,7 +205,7 @@ Feature: Generator node
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports status containing "{{domain}} status=Running"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION generated_after_restart TO generated_notifications;
       """
@@ -226,11 +226,11 @@ Feature: Generator node
   Scenario Outline: Generator projects columnar materialized state and branch keys
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA generator_metric (
         tenant STRING,
@@ -320,11 +320,11 @@ Feature: Generator node
   Scenario Outline: Generator emits records from materialized relay state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -396,11 +396,11 @@ Feature: Generator node
   Scenario Outline: Generator flushes buffered records on flush cadence
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -472,11 +472,11 @@ Feature: Generator node
   Scenario Outline: Paced generators follow domain logical time
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -507,7 +507,7 @@ Feature: Generator node
 
       CREATE BRANCH tenant_branch
         SCHEMA tenant_branch_schema
-        TTL 1d;
+        TTL 2d;
 
       CREATE RELAY notifications
         SCHEMA notification BRANCHED BY tenant_branch
@@ -579,11 +579,11 @@ Feature: Generator node
   Scenario Outline: Generator routes share one immutable state snapshot per tick
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA generator_source_value (
         id STRING,
@@ -656,11 +656,11 @@ Feature: Generator node
   Scenario Outline: Generator message errors expose state and partial output to standard SET functions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA generator_error_source (
         id STRING,

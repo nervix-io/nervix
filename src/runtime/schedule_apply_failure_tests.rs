@@ -18,12 +18,11 @@ use std::collections::BTreeMap;
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CodecWireFormat, CommandExecutionReference,
     CreateClientZeroMq, CreateCodec, CreateDeduplicator, CreateEmitter, CreateGenerator,
-    CreateReingestor, CreateRelay, CreateSchema, DomainSchedule, EmitSink, EmitterBody,
-    EmitterPublishingMode, ErrorPolicies, FlushPolicy, MaterializedRelayState, MessageErrorPolicy,
-    ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
-    ProcessorOutputs, RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode, SchemaField,
-    SchemaName, WasmStateReset, WasmStateResetReason, WasmStateResetScope, ZeroMqPushSink,
-    ZeroMqSink,
+    CreateReingestor, CreateRelay, CreateSchema, DomainSchedule, EmitterBody, EmitterEntity,
+    ErrorPolicies, FlushPolicy, MaterializedRelayState, MessageErrorPolicy, ModelKind, ModelName,
+    NodeRef, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode, SchemaField, SchemaName,
+    WasmStateReset, WasmStateResetReason, WasmStateResetScope, ZeroMqEmitter, ZeroMqPushEmitter,
 };
 use nervix_primitives::{
     sync::{mpsc, watch},
@@ -92,6 +91,7 @@ fn swap_of(entity: NodeRef) -> EntitySwapExecution {
         dynamic_updates: Vec::new(),
         state_purges: BTreeMap::new(),
         gate_relays: Vec::new(),
+        forced_recovery_relays: Vec::new(),
     }
 }
 
@@ -535,7 +535,7 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             encoding_rules: Vec::new(),
         })),
         scheduled_model(nervix_models::Model::ClientZeroMq(CreateClientZeroMq {
-            name: named("sink"),
+            name: named("emitter"),
             mount: None,
             config: Vec::new(),
         })),
@@ -552,18 +552,20 @@ fn emitting_nodes() -> Vec<ScheduledNode> {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
-                client: named("sink"),
-            }))),
+            connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+                ZeroMqPushEmitter {
+                    mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("emitter"),
+                },
+            ))),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -646,6 +648,27 @@ async fn an_emitter_swap_keeps_the_task_that_did_not_stop() {
         )
         .await
         .expect_err("an emitter whose task does not stop cannot be swapped");
+    assert_eq!(
+        format!("{error:#}"),
+        failed_build(
+            &domain,
+            "failed to stop emitter 'audit' for its swap: scheduled emitter task is unavailable \
+             for stopping"
+        )
+    );
+    let node = ClusterNodeName::parse("node-1").assured("the test node is a valid name");
+    let revision = test_execution_revision(&domain, emitting_nodes());
+    let result = runtime
+        .apply_schedule_delta(
+            &node,
+            &revision,
+            &ExecutionDelta::EntitySwap(swap_of(emitter.clone())),
+            true,
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("schedule application must keep a failed emitter stop visible");
+    };
     assert_eq!(
         format!("{error:#}"),
         failed_build(
@@ -834,10 +857,10 @@ async fn a_generator_swap_needs_the_installed_execution() {
             each: "100ms".parse().assured("the fixture cadence is positive"),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                 relay: named("generated"),
-                construction: nervix_nspl::parse_route_construction(
+                construction: nervix_plexus::parse_route_construction(
                     "SET tenant = relay_state.notifications.tenant",
                 )
-                .assured("the fixture route is valid NSPL"),
+                .assured("the fixture route is valid Plexus"),
                 flush_policy: Some(FlushPolicy::Immediate),
                 message_error_policy: MessageErrorPolicy::Log,
                 branch: None,

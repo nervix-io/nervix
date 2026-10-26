@@ -6,11 +6,11 @@ Feature: WebSocket client name resolution
     And a <cluster_size> node nervix cluster is started
     And the WebSocket endpoint "{{mock_ws_addr}}" is forwarded as "websocket.nervix.test" from fixture addresses "127.0.5.1,127.0.5.2,127.0.5.4"
     And the DNS fixture answers "websocket.nervix.test" with addresses "127.0.5.3,127.0.5.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -22,7 +22,7 @@ Feature: WebSocket client name resolution
         SEND JAQ '{op: "subscribe"}'
         WAIT JAQ '.user_id == 42' ACCEPT DATA
         TIMEOUT 5s;
-      CREATE CLIENT ws_main TYPE WEBSOCKETS WITH SIGNALING PROTOCOL initial_frame CONFIG {
+      CREATE WEBSOCKETS CLIENT ws_main WITH SIGNALING PROTOCOL initial_frame CONFIG {
         'endpoint' = '{{websocket_forwarded_addr}}/ws/{{test_id}}'
       };
       CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications

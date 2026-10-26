@@ -1,5 +1,7 @@
 # Manual
 
+*Plexus, the Nervix graph definition language.*
+
 This section is the user-facing guide to Nervix. If you are new to Nervix, the
 [Quickstart](./quickstart.md) builds a first graph step by step; this section is the full
 reference behind it.
@@ -9,7 +11,7 @@ Nervix is experimental software in active development. It is intended for evalua
 Use it for:
 
 - understanding product boundaries and non-goals
-- learning the NSPL surface
+- learning the Plexus surface
 - understanding the currently supported transport integrations, including Kafka and Pulsar
 - defining schemas, resources, relays, ingestors, processors, and emitters
 - planning branch capacity from the documented cost structure and current signals

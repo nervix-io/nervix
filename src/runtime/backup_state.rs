@@ -1,8 +1,9 @@
 //! Capturing the runtime checkpoint kinds and fresh materialized generations at a domain cut.
 //!
 //! Layer: data plane.
-//! - **Owns.** Forcing Kafka and branch-lifecycle publications, then listing one database
-//!   snapshot and reading only the checkpoints the cut archives, reattaching typed branch keys
+//! - **Owns.** For the entities the node is the scheduled primary of, forcing Kafka and
+//!   branch-lifecycle publications, then listing one database snapshot and reading only the
+//!   checkpoints the cut archives, reattaching typed branch keys
 //!   from lifecycle checkpoints for the branches that need them, handing Kafka offset and
 //!   lifecycle checkpoints on in that snapshot and reading each one whole under its own admitted
 //!   charge, retaining WASM guest checkpoints until their scheduled generation is checked and
@@ -46,8 +47,8 @@ use stored_branch::StoredBranchCheckpoint;
 use super::{
     BranchInstanceSnapshotEntry, BranchKey, CapturedDeduplicatorKeyspace, CapturedWindow,
     MaterializedGeneration, OwnershipHandoffError, OwnershipHandoffResult,
-    ReplicatedKafkaOffsetState, ReplicatedMaterializedRelayState, Runtime, RuntimeStateKind,
-    RuntimeStatePlacement, ScheduledNodeTask,
+    ProcessorCheckpointPurpose, ReplicatedKafkaOffsetState, ReplicatedMaterializedRelayState,
+    Runtime, RuntimeStateKind, RuntimeStatePlacement, ScheduledNodeTask,
     backup_capture_fence::{BackupCaptureFence, BackupPublication},
     branch_lru_state::{LifecycleBranches, NativeBranchLifecycle, write_branch_lru_snapshot},
     kafka_offset_state::{KafkaOffsetPositions, NativeKafkaOffsets, write_offset_payload},
@@ -444,7 +445,8 @@ impl Runtime {
                     })?;
                     task.commands.clone()
                 };
-                ScheduledNodeTask::checkpoint_via(&commands).await?
+                ScheduledNodeTask::checkpoint_via(&commands, ProcessorCheckpointPurpose::BackupCut)
+                    .await?
             } else {
                 self.checkpoint_entrypoint_branch_lifecycle(domain, &entity)
                     .await?
@@ -625,12 +627,15 @@ impl Runtime {
     }
 
     /// Publishes volatile state and reads it with durable WASM saves from one database snapshot.
-    /// The caller holds the domain cut or accepts a live checkpoint.
+    /// The caller holds the domain cut or accepts a live checkpoint. Only the placements of
+    /// `primaries`, the entities the cut's schedule names this node the primary of, are sealed,
+    /// listed, read and charged: a replica's copy is never archived, so it is never touched.
     pub(crate) fn capture_backup_state(
         &self,
         domain: &DomainName,
         quiesced: bool,
         status: DomainStatus,
+        primaries: &ahash::HashSet<NodeRef>,
         cancellation: &Cancellation,
     ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
         let Some(store) = self.inner.state_store.as_ref() else {
@@ -643,6 +648,7 @@ impl Runtime {
         for state in self.inner.replicated_kafka_offset_states.iter() {
             let placement = state.key();
             if &placement.domain != domain
+                || !primaries.contains(&NodeRef::new(placement.kind, placement.identifier.clone()))
                 || !self.runtime_state_placement_is_assigned_locally(placement)
             {
                 continue;
@@ -658,6 +664,7 @@ impl Runtime {
         for state in self.inner.replicated_branch_lifecycles.iter() {
             let placement = state.key();
             if &placement.domain != domain
+                || !primaries.contains(&NodeRef::new(placement.kind, placement.identifier.clone()))
                 || !self.runtime_state_placement_is_assigned_locally(placement)
             {
                 continue;
@@ -692,7 +699,9 @@ impl Runtime {
             .change_context(BackupStateCaptureError::Storage)?;
         let mut current = Vec::new();
         for checkpoint in listed.checkpoints {
-            if self.names_stored_state(domain, &checkpoint.placement) {
+            let stored = &checkpoint.placement;
+            let entity = NodeRef::new(stored.kind, stored.identifier.clone());
+            if primaries.contains(&entity) && self.names_stored_state(domain, stored) {
                 current.push(checkpoint);
             }
         }
@@ -704,14 +713,14 @@ impl Runtime {
                 needed.insert(BranchStateIdentity::of_stored(&checkpoint.placement));
             }
         }
-        for identity in self.published_branch_state_identities(domain) {
+        for identity in self.published_branch_state_identities(domain, primaries) {
             needed.insert(identity);
         }
         let keys = self.lifecycle_keys(&current, &needed, cancellation)?;
         let mut branch_states = match status {
             DomainStatus::Stopped => Vec::new(),
             DomainStatus::Running | DomainStatus::Paused => {
-                self.capture_published_branch_states(domain, &keys)
+                self.capture_published_branch_states(domain, primaries, &keys)
             }
         };
         let mut published = ahash::HashSet::default();
@@ -812,7 +821,9 @@ impl Runtime {
                 let mut materialized = Vec::new();
                 for state in self.inner.replicated_materialized_stream_states.iter() {
                     let placement = state.key();
+                    let entity = NodeRef::new(placement.kind, placement.identifier.clone());
                     if &placement.domain != domain
+                        || !primaries.contains(&entity)
                         || !self.runtime_state_placement_is_assigned_locally(placement)
                     {
                         continue;
@@ -913,16 +924,24 @@ impl Runtime {
     }
 
     /// The identities of the deduplicator and window generations this node's branch tasks of
-    /// `domain` published, whichever branches the cut's lifecycles hold.
-    fn published_branch_state_identities(&self, domain: &DomainName) -> Vec<BranchStateIdentity> {
+    /// `domain` published for `primaries`, whichever branches the cut's lifecycles hold.
+    fn published_branch_state_identities(
+        &self,
+        domain: &DomainName,
+        primaries: &ahash::HashSet<NodeRef>,
+    ) -> Vec<BranchStateIdentity> {
         let mut identities = Vec::new();
         for state in self.inner.replicated_deduplicator_states.iter() {
-            if let Some(identity) = self.names_published_branch_state(domain, state.key()) {
+            if let Some(identity) =
+                self.names_published_branch_state(domain, primaries, state.key())
+            {
                 identities.push(identity);
             }
         }
         for state in self.inner.replicated_window_processor_states.iter() {
-            if let Some(identity) = self.names_published_branch_state(domain, state.key()) {
+            if let Some(identity) =
+                self.names_published_branch_state(domain, primaries, state.key())
+            {
                 identities.push(identity);
             }
         }
@@ -935,17 +954,18 @@ impl Runtime {
     fn capture_published_branch_states(
         &self,
         domain: &DomainName,
+        primaries: &ahash::HashSet<NodeRef>,
         keys: &ahash::HashMap<BranchStateIdentity, Option<BranchKey>>,
     ) -> Vec<CapturedBranchState> {
         let mut deduplicators = Vec::new();
         for state in self.inner.replicated_deduplicator_states.iter() {
-            if self.captures_published_branch_state(domain, state.key(), keys) {
+            if self.captures_published_branch_state(domain, primaries, state.key(), keys) {
                 deduplicators.push(state.value().clone());
             }
         }
         let mut windows = Vec::new();
         for state in self.inner.replicated_window_processor_states.iter() {
-            if self.captures_published_branch_state(domain, state.key(), keys) {
+            if self.captures_published_branch_state(domain, primaries, state.key(), keys) {
                 windows.push(state.value().clone());
             }
         }
@@ -981,34 +1001,38 @@ impl Runtime {
         captured
     }
 
-    /// Whether a published branch state belongs to this cut: it is this node's state of `domain`,
-    /// named by its entity's current identity, for a branch a captured lifecycle holds.
+    /// Whether a published branch state belongs to this cut: it is this node's state of `domain`
+    /// for one of `primaries`, named by its entity's current identity, for a branch a captured
+    /// lifecycle holds.
     fn captures_published_branch_state(
         &self,
         domain: &DomainName,
+        primaries: &ahash::HashSet<NodeRef>,
         placement: &RuntimeStatePlacement,
         keys: &ahash::HashMap<BranchStateIdentity, Option<BranchKey>>,
     ) -> bool {
-        let Some(identity) = self.names_published_branch_state(domain, placement) else {
+        let Some(identity) = self.names_published_branch_state(domain, primaries, placement) else {
             return false;
         };
         keys.contains_key(&identity)
     }
 
-    /// The identity of a published branch state that is this node's state of `domain`, named by
-    /// its entity's current identity.
+    /// The identity of a published branch state that is this node's state of `domain` for one of
+    /// `primaries`, named by its entity's current identity.
     fn names_published_branch_state(
         &self,
         domain: &DomainName,
+        primaries: &ahash::HashSet<NodeRef>,
         placement: &RuntimeStatePlacement,
     ) -> Option<BranchStateIdentity> {
+        let node = NodeRef::new(placement.kind, placement.identifier.clone());
         if &placement.domain != domain
+            || !primaries.contains(&node)
             || !self.runtime_state_placement_is_assigned_locally(placement)
         {
             return None;
         }
         let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
-        let node = NodeRef::new(placement.kind, placement.identifier.clone());
         let slot = self
             .inner
             .state_identities
@@ -1156,14 +1180,28 @@ mod tests {
             .assured("the storage job runs to completion")
     }
 
+    /// The entities a cut names this node the primary of.
+    fn primaries(entities: impl IntoIterator<Item = NodeRef>) -> ahash::HashSet<NodeRef> {
+        let mut primaries = ahash::HashSet::default();
+        primaries.extend(entities);
+        primaries
+    }
+
     async fn capture(
         runtime: &Runtime,
         domain: &DomainName,
+        primaries: ahash::HashSet<NodeRef>,
     ) -> error_stack::Result<CapturedDomainState, BackupStateCaptureError> {
         let capturing = runtime.clone();
         let domain = domain.clone();
         in_storage_job(runtime, move |cancellation| {
-            capturing.capture_backup_state(&domain, true, DomainStatus::Stopped, cancellation)
+            capturing.capture_backup_state(
+                &domain,
+                true,
+                DomainStatus::Stopped,
+                &primaries,
+                cancellation,
+            )
         })
         .await
     }
@@ -1275,7 +1313,17 @@ mod tests {
                 .publish_sealed_snapshot(&placement, 8, b"invalid checkpoint payload")
                 .assured("the checkpoint envelope persists");
         }
-        let captured = capture(&runtime, &domain)
+        let processors = primaries([
+            NodeRef::new(
+                ModelKind::Deduplicator,
+                ModelName::parse("keys").assured("processor is valid"),
+            ),
+            NodeRef::new(
+                ModelKind::WindowProcessor,
+                ModelName::parse("window").assured("processor is valid"),
+            ),
+        ]);
+        let captured = capture(&runtime, &domain, processors)
             .await
             .assured("the cut retains unopened branch checkpoints");
         assert_eq!(captured.branch_states.len(), 2);
@@ -1327,6 +1375,83 @@ mod tests {
                 .reserved_bytes,
             0
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_cut_reads_only_the_placements_this_node_is_the_primary_of() {
+        let dir = tempfile::tempdir().assured("state directory opens");
+        let runtime = persisted_runtime(dir.path());
+        let store = runtime
+            .inner
+            .state_store
+            .as_ref()
+            .assured("state store is configured");
+        let domain = DomainName::parse("orders").assured("domain is valid");
+        let schema = SchemaFingerprint::from_digest([4; 32]);
+        let owned = ModelName::parse("owned_keys").assured("processor is valid");
+        let replicated = ModelName::parse("replicated_keys").assured("processor is valid");
+        for entity in [&owned, &replicated] {
+            schedule(&runtime, &domain, ModelKind::Deduplicator, entity);
+            let lifecycle = lifecycle_of(&domain, ModelKind::Deduplicator, entity);
+            store
+                .publish_sealed_snapshot(
+                    &lifecycle,
+                    9,
+                    &encode_branch_lru_snapshot(&[branch("alpha", 3)]).assured("lifecycle encodes"),
+                )
+                .assured("lifecycle persists");
+            let placement = RuntimeStatePlacement {
+                state: RuntimeState::Deduplicator { schema },
+                branch_key: super::super::string_branch_key("tenant", "alpha"),
+                ..lifecycle
+            };
+            store
+                .publish_sealed_snapshot(&placement, 8, b"invalid checkpoint payload")
+                .assured("the checkpoint envelope persists");
+        }
+        let owned_only = primaries([NodeRef::new(ModelKind::Deduplicator, owned.clone())]);
+
+        // While conversion admission is full, reading a lifecycle for its typed branch keys is
+        // refused. The replica's copy is never read, so it cannot refuse a cut.
+        let budget = runtime
+            .executor()
+            .snapshot()
+            .restore_metadata_memory
+            .capacity_bytes;
+        let occupied = runtime
+            .executor()
+            .try_reserve(MemoryClass::RestoreMetadata, budget)
+            .assured("the test occupies conversion admission");
+        let replica_only = capture(&runtime, &domain, primaries([]))
+            .await
+            .assured("a node that is no placement's primary reads no lifecycle");
+        assert!(replica_only.native_metadata.is_empty());
+        assert!(replica_only.branch_states.is_empty());
+        assert!(replica_only.guest_saves.is_empty());
+        let refusal = match capture(&runtime, &domain, owned_only.clone()).await {
+            Ok(_) => panic!("the primary's lifecycle read waits for no conversion admission"),
+            Err(refusal) => refusal,
+        };
+        assert!(matches!(refusal.current_context(),
+            BackupStateCaptureError::Admission { entity } if entity == &owned
+        ));
+        drop(occupied);
+
+        let captured = capture(&runtime, &domain, owned_only)
+            .await
+            .assured("the primary's placements are captured");
+        let metadata = captured
+            .native_metadata
+            .iter()
+            .map(|captured| &captured.placement.identifier)
+            .collect::<Vec<_>>();
+        assert_eq!(metadata, vec![&owned]);
+        let branch_states = captured
+            .branch_states
+            .iter()
+            .map(|captured| &captured.placement.identifier)
+            .collect::<Vec<_>>();
+        assert_eq!(branch_states, vec![&owned]);
     }
 
     #[nervix_primitives::test]
@@ -1384,11 +1509,19 @@ mod tests {
                 .assured("the inactive branch retains its sealed publication")
         })
         .await;
+        let scheduled = primaries([NodeRef::new(kind, entity.clone())]);
         let capture_running = || {
             let capturing = runtime.clone();
             let domain = domain.clone();
+            let scheduled = scheduled.clone();
             in_storage_job(&runtime, move |cancellation| {
-                capturing.capture_backup_state(&domain, true, DomainStatus::Running, cancellation)
+                capturing.capture_backup_state(
+                    &domain,
+                    true,
+                    DomainStatus::Running,
+                    &scheduled,
+                    cancellation,
+                )
             })
         };
         let inactive = capture_running()
@@ -1428,7 +1561,7 @@ mod tests {
         assert_eq!(opened.revision(), revision);
         assert_eq!(opened.incarnation(), 3);
         assert!(opened.groups(1024).is_empty());
-        let stopped = capture(&runtime, &domain)
+        let stopped = capture(&runtime, &domain, scheduled)
             .await
             .assured("a stopped cut lists stored bytes even while a live handle is retained");
         assert_eq!(stopped.branch_states.len(), 1);
@@ -1436,7 +1569,7 @@ mod tests {
             stopped.branch_states[0].state,
             CapturedBranchStateKind::StoredWindow(_)
         ));
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -1451,6 +1584,7 @@ mod tests {
         let domain = DomainName::parse("orders").assured("domain is valid");
         let entity = ModelName::parse("accumulator").assured("processor is valid");
         schedule(&runtime, &domain, ModelKind::WasmProcessor, &entity);
+        let scheduled = primaries([NodeRef::new(ModelKind::WasmProcessor, entity.clone())]);
         let lifecycle = lifecycle_of(&domain, ModelKind::WasmProcessor, &entity);
         store
             .publish_sealed_snapshot(&guest_of(&lifecycle, "alpha"), 8, b"saved-alpha")
@@ -1462,7 +1596,7 @@ mod tests {
                 &encode_branch_lru_snapshot(&[]).assured("empty current lifecycle encodes"),
             )
             .assured("eviction persists");
-        let captured = capture(&runtime, &domain)
+        let captured = capture(&runtime, &domain, scheduled.clone())
             .await
             .assured("a retained inactive guest does not fail the cut");
         assert!(
@@ -1479,7 +1613,7 @@ mod tests {
             RuntimeStateKind::BranchLru
         );
         runtime.clear_state_identities(&domain);
-        let captured = capture(&runtime, &domain)
+        let captured = capture(&runtime, &domain, scheduled)
             .await
             .assured("removed entities do not contribute retained checkpoints");
         assert!(captured.guest_saves.is_empty());
@@ -1500,6 +1634,10 @@ mod tests {
         let ingestor = ModelName::parse("source").assured("ingestor is valid");
         schedule(&runtime, &domain, ModelKind::WasmProcessor, &processor);
         schedule(&runtime, &domain, ModelKind::Ingestor, &ingestor);
+        let scheduled = primaries([
+            NodeRef::new(ModelKind::WasmProcessor, processor.clone()),
+            NodeRef::new(ModelKind::Ingestor, ingestor.clone()),
+        ]);
         let lifecycle = lifecycle_of(&domain, ModelKind::WasmProcessor, &processor);
         let branches = [branch("alpha", 3), branch("beta", 5), branch("gamma", 7)];
         store
@@ -1520,7 +1658,7 @@ mod tests {
                 b"not a lifecycle snapshot",
             )
             .assured("the ingestor lifecycle persists");
-        let captured = capture(&runtime, &domain)
+        let captured = capture(&runtime, &domain, scheduled)
             .await
             .assured("an unread lifecycle does not fail the cut");
         let Ok([guest]) = <[CapturedGuestSave; 1]>::try_from(captured.guest_saves) else {
@@ -1610,6 +1748,7 @@ mod tests {
         let domain = DomainName::parse("orders").assured("domain is valid");
         let processor = ModelName::parse("accumulator").assured("processor is valid");
         schedule(&runtime, &domain, ModelKind::WasmProcessor, &processor);
+        let scheduled = primaries([NodeRef::new(ModelKind::WasmProcessor, processor.clone())]);
         let lifecycle = lifecycle_of(&domain, ModelKind::WasmProcessor, &processor);
         store
             .publish_sealed_snapshot(
@@ -1622,7 +1761,7 @@ mod tests {
         store
             .publish_sealed_snapshot(&guest_of(&lifecycle, "alpha"), 8, &payload)
             .assured("guest persists");
-        let captured = capture(&runtime, &domain)
+        let captured = capture(&runtime, &domain, scheduled.clone())
             .await
             .assured("the cut lists its guest");
         let Ok([guest]) = <[CapturedGuestSave; 1]>::try_from(captured.guest_saves) else {
@@ -1642,7 +1781,7 @@ mod tests {
             failure.current_context(),
             BackupStateCaptureError::GuestSaveInterrupted { entity } if *entity == processor
         ));
-        let captured = capture(&runtime, &domain)
+        let captured = capture(&runtime, &domain, scheduled)
             .await
             .assured("the same checkpoint remains retryable");
         let Ok([guest]) = <[CapturedGuestSave; 1]>::try_from(captured.guest_saves) else {
@@ -1672,6 +1811,7 @@ mod tests {
         let domain = DomainName::parse("orders").assured("domain is valid");
         let processor = ModelName::parse("accumulator").assured("processor is valid");
         schedule(&runtime, &domain, ModelKind::WasmProcessor, &processor);
+        let scheduled = primaries([NodeRef::new(ModelKind::WasmProcessor, processor.clone())]);
         let lifecycle = lifecycle_of(&domain, ModelKind::WasmProcessor, &processor);
         store
             .publish_sealed_snapshot(
@@ -1692,7 +1832,7 @@ mod tests {
             .executor()
             .try_reserve(MemoryClass::RestoreMetadata, capacity)
             .assured("the test holds the whole class");
-        let failure = capture(&runtime, &domain)
+        let failure = capture(&runtime, &domain, scheduled.clone())
             .await
             .err()
             .assured("a lifecycle read is refused rather than read uncharged");
@@ -1701,7 +1841,7 @@ mod tests {
             BackupStateCaptureError::Admission { entity } if *entity == processor
         ));
         drop(held);
-        let captured = capture(&runtime, &domain)
+        let captured = capture(&runtime, &domain, scheduled)
             .await
             .assured("the same cut is admitted once the class has room");
         assert_eq!(captured.guest_saves.len(), 1);
@@ -1713,6 +1853,89 @@ mod tests {
                 .reserved_bytes,
             0,
             "the lifecycle charge ends with its read"
+        );
+    }
+
+    /// A deduplicator placement of `domain`, as one of its branch tasks registers it.
+    fn deduplicator_of(domain: &DomainName) -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            domain: domain.clone(),
+            kind: ModelKind::Deduplicator,
+            identifier: ModelName::parse("unique_orders").assured("deduplicator is valid"),
+            state: RuntimeState::Deduplicator {
+                schema: SchemaFingerprint::from_digest([4; 32]),
+            },
+            branch_key: super::super::string_branch_key("tenant", "alpha"),
+        }
+    }
+
+    /// A window placement of `domain`, as one of its branch tasks registers it.
+    fn window_of(domain: &DomainName) -> RuntimeStatePlacement {
+        RuntimeStatePlacement {
+            domain: domain.clone(),
+            kind: ModelKind::WindowProcessor,
+            identifier: ModelName::parse("order_totals").assured("window is valid"),
+            state: RuntimeState::WindowProcessor {
+                schema: SchemaFingerprint::from_digest([4; 32]),
+            },
+            branch_key: super::super::string_branch_key("tenant", "alpha"),
+        }
+    }
+
+    /// Publishing a restored generation clears the runtime handles of the domain it restored: the
+    /// first deduplicator and window branch tasks after activation build new handles from the
+    /// published checkpoints instead of reusing one created before the restore, and another
+    /// domain keeps its handles.
+    #[test]
+    fn a_restored_domain_drops_its_deduplicator_and_window_handles() {
+        const BUILT: &str = "a runtime without a state store returns a held handle or builds one \
+                             from no checkpoint";
+        let runtime = Runtime::default();
+        let restored = DomainName::parse("orders").assured("domain is valid");
+        let other = DomainName::parse("payments").assured("domain is valid");
+        let restored_deduplicator = runtime
+            .replicated_deduplicator_state(deduplicator_of(&restored))
+            .assured(BUILT);
+        let restored_window = runtime
+            .replicated_window_processor_state(window_of(&restored))
+            .assured(BUILT);
+        let other_deduplicator = runtime
+            .replicated_deduplicator_state(deduplicator_of(&other))
+            .assured(BUILT);
+        let other_window = runtime
+            .replicated_window_processor_state(window_of(&other))
+            .assured(BUILT);
+
+        runtime.clear_runtime_state_for_domain(&restored);
+
+        let started_deduplicator = runtime
+            .replicated_deduplicator_state(deduplicator_of(&restored))
+            .assured(BUILT);
+        let started_window = runtime
+            .replicated_window_processor_state(window_of(&restored))
+            .assured(BUILT);
+        assert!(
+            !nervix_primitives::sync::Arc::ptr_eq(&started_deduplicator, &restored_deduplicator),
+            "a deduplicator branch task started after the restore reused a handle created before \
+             it"
+        );
+        assert!(
+            !nervix_primitives::sync::Arc::ptr_eq(&started_window, &restored_window),
+            "a window branch task started after the restore reused a handle created before it"
+        );
+        let kept_deduplicator = runtime
+            .replicated_deduplicator_state(deduplicator_of(&other))
+            .assured(BUILT);
+        let kept_window = runtime
+            .replicated_window_processor_state(window_of(&other))
+            .assured(BUILT);
+        assert!(
+            nervix_primitives::sync::Arc::ptr_eq(&kept_deduplicator, &other_deduplicator),
+            "the restore cleared another domain's deduplicator handle"
+        );
+        assert!(
+            nervix_primitives::sync::Arc::ptr_eq(&kept_window, &other_window),
+            "the restore cleared another domain's window handle"
         );
     }
 }

@@ -111,10 +111,10 @@ just benchmark-nervix-local kafka-filter-map \
 name ends in `_flush_each`. The example therefore runs for 240 seconds. `--duration-seconds N`
 overrides that policy for reproduction or smoke testing.
 
-Nervix consumes the flush values directly as NSPL durations and binary sizes. The runner derives
+Nervix consumes the flush values directly as Plexus durations and binary sizes. The runner derives
 Vector's `batch.timeout_secs`, `batch.max_bytes`, and `end_every_period_ms` from those same
-settings. Flink uses its native Kafka producer and SQL operators; its source and sink batching
-cannot be equated to Nervix route flushes or Vector sink batches. Reports retain each product's
+settings. Flink uses its native Kafka producer and SQL operators; its ingestor and emitter batching
+cannot be equated to Nervix route flushes or Vector emitter batches. Reports retain each product's
 native settings. Vector measures its native maximum before serialization, while Nervix limits an
 Arrow batch, so byte caps do not imply byte-for-byte equivalence.
 
@@ -134,7 +134,7 @@ Vector's `dedupe` evicts by cache size; Nervix deduplication expires by `MAX TIM
 and retains buffered records. The Vector cache is sized above the live keyspace, and its period
 matches `window_max_delay`, so both produce the record total that parity checks. Flink uses
 processing-time `ROW_NUMBER` deduplication and a tumbling SQL window of `window_max_delay`; it has
-no `window_messages` closure bound. The optional Nervix sketch and the NSPL-only
+no `window_messages` closure bound. The optional Nervix sketch and the Plexus-only
 `transform_expression` override are not comparable competitor settings; use the manifest defaults
 for three-way comparisons.
 
@@ -142,7 +142,7 @@ The `hot-path-remote-delivery` Nervix graph places the source and destination on
 The Vector and Flink graphs exercise the same Kafka input-to-output contract in one container but
 do not add a corresponding remote hop. Their rates are Kafka pipeline references; the comparison
 report omits relative deltas and rankings for this workload. The fanout graphs each produce four
-output records per input; Vector attaches four sinks, while Flink duplicates rows with a
+output records per input; Vector attaches four emitters, while Flink duplicates rows with a
 four-value cross join.
 
 ## Load shapes
@@ -187,10 +187,18 @@ consumes the output topic from its beginning on a run-scoped assignment and accu
 which also drives the live backlog signal, the warm-up handshake, and the drain wait. This checks
 the aggregate total, not each input key's identity; the report labels that distinction.
 
-Duplicates of one key are `keys_per_cycle` messages apart on one partition. That is far enough to
-exercise a live keyspace and close enough that the deduplicator's `MAX TIME` can never expire a key
-between its copies and re-emit one. Raising `dedup_max_time` widens the retained keyspace and the
-memory it costs without changing the expected output.
+Duplicates of one key are `keys_per_cycle` messages apart on one partition, far enough to exercise
+a live keyspace. Distance alone does not keep them together: the broker appends and serves records
+in record batches, and nothing bounds the time between two batches of one partition, so a broker
+that stalls between the batch holding a key's first copy and the batch holding its second delays
+only the second. When that delay exceeds `MAX TIME`, the deduplicator correctly expires the key and
+emits the second copy as well. The driver therefore sends every keyed cycle as exactly one record
+batch: `batch.num.messages` is the cycle's message count, so a batch is sent when the cycle's last
+message is queued, and a batch waits up to 50 seconds for the rest of its cycle rather than the 5
+milliseconds the uniform shapes use. A cycle that cannot fit one record batch of 1,000,000 bytes is
+refused before the run starts, and a run fails when a cycle takes 50 seconds or longer to queue.
+Raising `dedup_max_time` widens the retained keyspace and the memory it costs without changing the
+expected output.
 
 Warm-up sends at least one complete cycle per partition and continues under the same backlog bound
 for `load.warmup_seconds`. It then waits for the exact records those cycles owe and requires both
@@ -399,10 +407,10 @@ emitter_max_batch_size = "8MiB"
 
 [implementations.nervix]
 kind = "nervix"
-template = "nervix.nspl.upon"
+template = "nervix.plexus.upon"
 # Optional: start up to three Nervix nodes and run placement commands after START.
 nodes = 2
-after_start = "after-start.nspl.upon"
+after_start = "after-start.plexus.upon"
 
 [implementations.competitor]
 kind = "container"

@@ -52,7 +52,7 @@ fn execution_reference(raw: &str) -> CommandExecutionReference {
     CommandExecutionReference::parse(raw).expect("scenario execution references are valid")
 }
 
-#[when(expr = "the active session sends request {string} with this NSPL command")]
+#[when(expr = "the active session sends request {string} with this Plexus command")]
 async fn when_active_session_sends_named_command(
     world: &mut ScenarioWorld,
     name: String,
@@ -69,7 +69,7 @@ async fn when_active_session_sends_named_command(
 
 #[when(
     expr = "the active session sends request {string} with execution reference {string} and this \
-            NSPL command"
+            Plexus command"
 )]
 async fn when_active_session_sends_named_referenced_command(
     world: &mut ScenarioWorld,
@@ -221,6 +221,21 @@ async fn then_completion_search_used_pages_without_duplicates(
     let values = &world.last_completion_values;
     let unique = values.iter().collect::<std::collections::BTreeSet<_>>();
     assert_eq!(unique.len(), values.len(), "completion pages: {values:?}");
+}
+
+#[then("the collected completion candidates are")]
+fn then_collected_completion_candidates_are(world: &mut ScenarioWorld, #[step] step: &Step) {
+    let expected = docstring(step)
+        .trim()
+        .lines()
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = world
+        .last_completion_values
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual.len(), world.last_completion_values.len());
+    assert_eq!(actual, expected);
 }
 
 #[when(expr = "the active session cancels request {string}")]

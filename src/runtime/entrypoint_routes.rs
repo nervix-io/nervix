@@ -8,7 +8,7 @@
 //!   bound route gives its records their branch key.
 //! - **Depends on.** Decision-layer entrypoint plans, the installed domain surfaces, the VM
 //!   bindings and the runtime planner that parses route cadences.
-//! - **Must not know.** NSPL text, the schedule, registry validation, or placement. Flush and
+//! - **Must not know.** Plexus text, the schedule, registry validation, or placement. Flush and
 //!   input-collection cadences and materialized-state dependencies still arrive as their declared
 //!   Model values, which the decisions layer does not yet type.
 
@@ -499,9 +499,9 @@ struct RouteBranchSchemas {
 mod tests {
     use nervix_models::{
         AckMode, CreateClientZeroMq, CreateIngestor, CreateReingestor, FlushPolicy,
-        GeneralErrorPolicy, IngestQuiesceMode, IngestSource, Model, OutputBranch, ParseAsType,
-        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, ZeroMqIngestMode, ZeroMqPullSource,
-        ZeroMqSource,
+        GeneralErrorPolicy, IngestQuiesceMode, IngestorEntity, Model, OutputBranch, ParseAsType,
+        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, ZeroMqIngestMode, ZeroMqIngestor,
+        ZeroMqPullIngestor,
     };
 
     use super::*;
@@ -568,7 +568,7 @@ mod tests {
                     .with_branch(branched_by("keyed", &["tenant"])),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::ZeroMq(ZeroMqSource::Pull(ZeroMqPullSource {
+                        source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(ZeroMqPullIngestor {
                             client: named("zmq"),
                             mode: ZeroMqIngestMode::NoAck,
                             quiesce: IngestQuiesceMode::Suspend,

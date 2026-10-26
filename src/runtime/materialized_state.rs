@@ -4,7 +4,7 @@
 //! - **Owns.** Exclusive branch records and immutable row and membership publications,
 //!   assignment-fenced installation, exact branch-generation capture and sealed artifact retention.
 //! - **Depends on.** Typed placements, assignment fences, Arrow row views, codecs and admission.
-//! - **Must not know.** Models, NSPL text, archive layouts or consensus restore policies.
+//! - **Must not know.** Models, Plexus text, archive layouts or consensus restore policies.
 
 #![cfg_attr(
     nervix_lint,
@@ -34,8 +34,8 @@ use nervix_primitives::{
 };
 
 use super::{
-    BranchKey, RuntimeStateOperationError, RuntimeStatePlacement, StateAssignmentAuthority,
-    StateAssignmentToken, StateCapability, StateReplicationRoles,
+    BranchInstanceRegistry, BranchKey, RuntimeStateOperationError, RuntimeStatePlacement,
+    StateAssignmentAuthority, StateAssignmentToken, StateCapability, StateReplicationRoles,
     lsm_sequence::LsmSequence,
     materialized_snapshot::{
         MaterializedGeneration, MaterializedGenerationRecord, MaterializedSnapshotError,
@@ -546,16 +546,19 @@ impl MaterializedRelayStateRead {
         })
     }
 
-    pub(super) fn restored_branch_watermarks(
+    /// Restore the materializer's nonpersisted activity registry at its domain-clock activation
+    /// time. Row event watermarks keep their ordering meaning and are never activity timestamps.
+    pub(super) fn restored_branch_instances(
         &self,
-    ) -> Vec<(Option<BranchKey>, nervix_models::Timestamp)> {
-        let mut watermarks = Vec::new();
+        activated_at: nervix_models::Timestamp,
+    ) -> BranchInstanceRegistry<Option<BranchKey>, ()> {
+        let mut instances = BranchInstanceRegistry::new();
         for (branch, published) in self.state.entries.load().iter() {
-            if let Some(row) = published.load_full() {
-                watermarks.push((branch.clone(), row.metadata().ingested_at_high_watermark()));
+            if published.load_full().is_some() {
+                instances.insert_changed(branch.clone(), activated_at, ());
             }
         }
-        watermarks
+        instances
     }
 }
 

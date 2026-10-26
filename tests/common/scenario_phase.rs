@@ -3,21 +3,24 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** The phases a scenario passes through, the registry of the scenarios that have
-//!   started and not yet finished, which attempt of a scenario each of them is, and when each of
-//!   them entered the phase it is in.
-//! - **Depends on.** Tokio's monotonic clock.
+//!   started and not yet finished, which attempt of a scenario each of them is, what length it
+//!   declares and how many run slots it holds, when each of them entered the phase it is in, and
+//!   the suite summary of their times.
+//! - **Depends on.** Tokio's monotonic clock, and the admission vocabulary of the run slots.
 //! - **Must not know.** What a phase does, how a cluster is torn down, or scenario state.
 
-use std::{collections::BTreeMap, fmt, time::Duration};
+use std::{collections::BTreeMap, fmt, num::NonZeroU32, time::Duration};
 
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use nervix_primitives::{
     sync::blocking::{LazyLock, Mutex},
     time::Instant,
 };
 
-use super::scenario_schedule::AdmissionWait;
+use super::scenario_schedule::{
+    AdmissionWait, LONG_RUNNING_ATTEMPT, LONG_RUNNING_TAG, ScenarioLength, ScenarioRun,
+};
 
 /// Where one scenario is between its first step and the end of its cleanup.
 ///
@@ -78,13 +81,37 @@ pub(crate) struct ActiveScenario {
     /// Which run of this scenario is in flight, counted from one.
     pub(crate) attempt: u32,
     pub(crate) phase: ScenarioPhase,
+    declared: ScenarioLength,
     waiting_for: Option<AdmissionWait>,
     started_at: Instant,
     phase_started_at: Instant,
     slot_started_at: Option<Instant>,
+    /// The run slots this attempt holds while it runs: one, as a first run holds, unless its
+    /// admission granted a retry's larger share.
+    run_slots: u32,
 }
 
 impl ActiveScenario {
+    /// The slot time an attempt holds while it runs for `running`: that time for each run slot it
+    /// holds.
+    fn slot_work(&self, running: Duration) -> Duration {
+        running
+            .checked_mul(self.run_slots)
+            .assured("a run holds a few dozen slots for at most the suite budget")
+    }
+
+    /// The part of [`Self::slot_work`] beyond the one slot every attempt holds: what a retry's
+    /// larger share costs the suite.
+    fn extra_slot_work(&self, running: Duration) -> Duration {
+        let extra_slots = self
+            .run_slots
+            .checked_sub(1)
+            .assured("a run's share is at least one slot, and a registration starts at one");
+        running
+            .checked_mul(extra_slots)
+            .assured("a run holds a few dozen slots for at most the suite budget")
+    }
+
     /// How long ago this scenario started.
     pub(crate) fn age(&self) -> Duration {
         self.started_at.elapsed()
@@ -164,7 +191,22 @@ static SCENARIO_ATTEMPTS: LazyLock<Mutex<BTreeMap<ScenarioIdentity, u32>>> =
 struct AttemptTime {
     identity: ScenarioIdentity,
     attempt: u32,
+    declared: ScenarioLength,
     length: Duration,
+}
+
+impl AttemptTime {
+    /// The attempt as a row of the summary's attempt tables.
+    fn table_row(&self) -> String {
+        format!(
+            "| {:.1}s | {} | {} / {} (line {}) |",
+            self.length.as_secs_f64(),
+            self.attempt,
+            self.identity.feature,
+            self.identity.scenario,
+            self.identity.line
+        )
+    }
 }
 
 #[derive(Default)]
@@ -172,7 +214,11 @@ struct SuiteMeasurements {
     began: Option<Instant>,
     slots: usize,
     budget: Duration,
+    /// The slot time finished attempts held: each attempt's running time for every run slot its
+    /// admission held.
     slot_work: Duration,
+    /// The part of `slot_work` that retries held beyond one slot each.
+    retry_extra_slot_work: Duration,
     waiting: BTreeMap<AdmissionWait, Duration>,
     completed: Vec<AttemptTime>,
 }
@@ -200,6 +246,7 @@ pub(crate) fn suite_summary() -> String {
         .unwrap_or_default();
     let mut waiting = measurements.waiting.clone();
     let mut slot_work = measurements.slot_work;
+    let mut retry_extra_slot_work = measurements.retry_extra_slot_work;
     let mut longest = measurements.completed.clone();
     for scenario in &active {
         if scenario.phase == ScenarioPhase::Finished {
@@ -209,12 +256,14 @@ pub(crate) fn suite_summary() -> String {
             *waiting.entry(reason).or_default() += scenario.phase_age();
         }
         if let Some(started) = scenario.slot_started_at {
-            slot_work += started.elapsed();
+            slot_work += scenario.slot_work(started.elapsed());
+            retry_extra_slot_work += scenario.extra_slot_work(started.elapsed());
         }
         if let Some(started) = scenario.slot_started_at {
             longest.push(AttemptTime {
                 identity: scenario.identity.clone(),
                 attempt: scenario.attempt,
+                declared: scenario.declared,
                 length: started.elapsed(),
             });
         }
@@ -246,12 +295,14 @@ pub(crate) fn suite_summary() -> String {
             slot_work.as_secs_f64()
         ),
         format!(
-            "Attempts: {} completed, {} active; retries: {retries}.",
+            "Attempts: {} completed, {} active; retries: {retries}, holding {:.1} slot-seconds \
+             beyond one slot each.",
             measurements.completed.len(),
             active
                 .iter()
                 .filter(|scenario| scenario.phase != ScenarioPhase::Finished)
-                .count()
+                .count(),
+            retry_extra_slot_work.as_secs_f64()
         ),
         String::new(),
         "| Waiting reason | Cumulative time |".to_string(),
@@ -279,14 +330,35 @@ pub(crate) fn suite_summary() -> String {
         "| ---: | ---: | --- |".to_string(),
     ]);
     for attempt in longest.iter().take(10) {
-        lines.push(format!(
-            "| {:.1}s | {} | {} / {} (line {}) |",
-            attempt.length.as_secs_f64(),
-            attempt.attempt,
-            attempt.identity.feature,
-            attempt.identity.scenario,
-            attempt.identity.line
-        ));
+        lines.push(attempt.table_row());
+    }
+    // A scenario taken up late in feature order without its declaration can start in the run's
+    // last minutes and keep the suite running after the rest has ended; naming it here keeps the
+    // declared set current.
+    let mut undeclared = Vec::new();
+    for attempt in &longest {
+        if attempt.declared.lacks_declaration_for(attempt.length) {
+            undeclared.push(attempt);
+        }
+    }
+    lines.extend([
+        String::new(),
+        format!(
+            "### Attempts of at least {}s without @{LONG_RUNNING_TAG}",
+            LONG_RUNNING_ATTEMPT.as_secs()
+        ),
+        String::new(),
+    ]);
+    if undeclared.is_empty() {
+        lines.push("None.".to_string());
+    } else {
+        lines.extend([
+            "| Time | Attempt | Feature / scenario |".to_string(),
+            "| ---: | ---: | --- |".to_string(),
+        ]);
+        for attempt in undeclared {
+            lines.push(attempt.table_row());
+        }
     }
     lines.join("\n") + "\n"
 }
@@ -300,6 +372,7 @@ pub(crate) fn suite_summary() -> String {
 pub(crate) struct ActiveScenarioRegistration {
     registration: u64,
     identity: ScenarioIdentity,
+    run: ScenarioRun,
 }
 
 impl ActiveScenarioRegistration {
@@ -308,7 +381,12 @@ impl ActiveScenarioRegistration {
     /// Registering here rather than once the scenario is running is what makes a scenario that
     /// never gets its permits visible, and it gives every scenario an entry its own cleanup can
     /// reach.
-    pub(crate) fn start(feature: &str, scenario: &str, line: usize) -> Self {
+    pub(crate) fn start(
+        feature: &str,
+        scenario: &str,
+        line: usize,
+        declared: ScenarioLength,
+    ) -> Self {
         let identity = ScenarioIdentity {
             feature: feature.to_string(),
             scenario: scenario.to_string(),
@@ -320,15 +398,19 @@ impl ActiveScenarioRegistration {
             identity: identity.clone(),
             attempt,
             phase: ScenarioPhase::Queued,
+            declared,
             waiting_for: None,
             started_at,
             phase_started_at: started_at,
             slot_started_at: None,
+            run_slots: 1,
         };
         let registration = ACTIVE_SCENARIOS.lock().register(active);
+        let run = NonZeroU32::new(attempt).verified("take_up counts runs from one");
         Self {
             registration,
             identity,
+            run: ScenarioRun::new(run),
         }
     }
 
@@ -344,6 +426,27 @@ impl ActiveScenarioRegistration {
 
     pub(crate) fn identity(&self) -> &ScenarioIdentity {
         &self.identity
+    }
+
+    /// Which run of its scenario this registration is, counted from one.
+    pub(crate) fn run(&self) -> ScenarioRun {
+        self.run
+    }
+
+    /// Publishes that the scenario's admission holds `run_slots` run slots and its steps are
+    /// starting, and returns what a reader of the registry sees.
+    pub(crate) fn start_running(&self, run_slots: usize) -> ActiveScenario {
+        let run_slots = u32::try_from(run_slots)
+            .assured("a run holds at most the run slots of one machine, far fewer than 2^32");
+        {
+            let mut registry = ACTIVE_SCENARIOS.lock();
+            let active = registry
+                .entries
+                .get_mut(&self.registration)
+                .verified("a registration holds its registry entry until it is dropped");
+            active.run_slots = run_slots;
+        }
+        self.enter(ScenarioPhase::Body)
     }
 
     /// Publishes `phase` as the work now in flight and returns what a reader of the registry sees.
@@ -367,10 +470,12 @@ impl ActiveScenarioRegistration {
                 .take()
                 .map(|started| now - started)
                 .unwrap_or_default();
-            measurement.slot_work += work;
+            measurement.slot_work += active.slot_work(work);
+            measurement.retry_extra_slot_work += active.extra_slot_work(work);
             measurement.completed.push(AttemptTime {
                 identity: active.identity.clone(),
                 attempt: active.attempt,
+                declared: active.declared,
                 length: work,
             });
         }
@@ -408,10 +513,12 @@ impl Drop for ActiveScenarioRegistration {
                 .slot_started_at
                 .map(|started| started.elapsed())
                 .unwrap_or_default();
-            measurement.slot_work += length;
+            measurement.slot_work += active.slot_work(length);
+            measurement.retry_extra_slot_work += active.extra_slot_work(length);
             measurement.completed.push(AttemptTime {
                 identity: active.identity,
                 attempt: active.attempt,
+                declared: active.declared,
                 length,
             });
         }

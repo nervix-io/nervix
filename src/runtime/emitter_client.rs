@@ -4,7 +4,7 @@
 //! - **Owns.** Packing one source relay and concrete branch at a time into exact-schema Arrow IPC,
 //!   retaining prepared bytes and source members, and applying application ACKs or rejections.
 //! - **Depends on.** The emitter host's prepared-payload contract and client delivery owner.
-//! - **Must not know.** Session transport, cluster routing, NSPL text, or an external connector.
+//! - **Must not know.** Session transport, cluster routing, Plexus text, or an external connector.
 
 #![cfg_attr(
     nervix_lint,
@@ -14,7 +14,7 @@
     nervix_lint,
     nervix::context(
         lifecycle,
-        reason = "sink client setup resolves the configured driver and retained pool"
+        reason = "emitter client setup resolves the configured driver and retained pool"
     )
 )]
 
@@ -25,8 +25,8 @@ use bytes::Bytes;
 use error_stack::Report;
 use futures_util::future::join_all;
 use nervix_connector::{
-    PerRecordOutcome, RejectedSinkRecord, SinkLifecycle, SinkPublishError, SinkRecordId,
-    SinkRecordPosition,
+    EmitterFinish, EmitterFinishResult, EmitterLifecycle, EmitterRecordId, EmitterRecordPosition,
+    EmitterWriteError, PerRecordOutcome, RejectedEmitterMember,
 };
 use nervix_models::{EmitterBatchPolicy, MessageErrorOperation, Timestamp};
 use uuid::Uuid;
@@ -45,12 +45,12 @@ pub(super) struct ClientPayload {
 impl PreparedContent for ClientPayload {
     type Written = ClientEmitterPayload;
 
-    fn written(&self, _record: SinkRecordId, _occurred_at: Timestamp) -> Self::Written {
+    fn written(&self, _record: EmitterRecordId, _occurred_at: Timestamp) -> Self::Written {
         self.payload.clone()
     }
 }
 
-pub(super) struct ClientEmitterSink {
+pub(super) struct ClientConsumerConnector {
     endpoint: Arc<ClientEmitterEndpoint>,
     runtime: Runtime,
     key: DomainNodeRef,
@@ -58,7 +58,7 @@ pub(super) struct ClientEmitterSink {
     batch: EmitterBatchPolicy,
 }
 
-impl ClientEmitterSink {
+impl ClientConsumerConnector {
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -67,8 +67,8 @@ impl ClientEmitterSink {
         )
     )]
     pub(super) fn new(
-        context: &EmitterSinkContext,
-        plan: &ClientSinkPlan,
+        context: &EmitterConnectorContext,
+        plan: &ClientConsumerEmitterPlan,
         output_schema: Arc<CompiledSchema>,
         retry: nervix_connector::ParsedRetryPolicy,
     ) -> Self {
@@ -80,7 +80,9 @@ impl ClientEmitterSink {
         let fields = output_schema.declared_fields();
         let max_bytes = plan.batch.max_size.bytes().get();
         let max_rows = plan.batch.max_messages.get().get();
-        let endpoint = Arc::new(ClientEmitterEndpoint::new(
+        let endpoint = Arc::new(ClientEmitterEndpoint::of_emitter(
+            &context.domain,
+            &context.emitter,
             ClientEmitterDescription {
                 fields,
                 maximum_payload_bytes: max_bytes,
@@ -97,12 +99,18 @@ impl ClientEmitterSink {
                 .metrics
                 .client_emitter_series(&context.domain, &context.emitter),
         ));
-        if let Some(previous) = context
+        let replaced = context
             .runtime
             .inner
             .client_emitters
-            .insert(key.clone(), endpoint.clone())
-        {
+            .insert(key.clone(), endpoint.clone());
+        info!(
+            domain = context.domain.as_str(),
+            emitter = context.emitter.as_str(),
+            replaced = replaced.is_some(),
+            "started client emitter endpoint"
+        );
+        if let Some(previous) = replaced {
             previous.replace();
         }
         Self {
@@ -192,7 +200,7 @@ impl ClientEmitterSink {
                         break (rows, body);
                     }
                     if rows.len() == 1 {
-                        let position = SinkRecordPosition {
+                        let position = EmitterRecordPosition {
                             batch_index,
                             row_index: first_row,
                         };
@@ -200,7 +208,7 @@ impl ClientEmitterSink {
                             position,
                             reason: String::new(),
                             structured_error: Some(
-                                RejectedSinkRecord::oversize(
+                                RejectedEmitterMember::oversize(
                                     position,
                                     batch.execution_now(),
                                     format!("client output row exceeds {} IPC bytes", max_bytes),
@@ -227,7 +235,7 @@ impl ClientEmitterSink {
                 prepared.push(PreparedPayload {
                     members: rows
                         .iter()
-                        .map(|row_index| SinkRecordPosition {
+                        .map(|row_index| EmitterRecordPosition {
                             batch_index,
                             row_index: *row_index,
                         })
@@ -242,7 +250,7 @@ impl ClientEmitterSink {
     }
 }
 
-impl Drop for ClientEmitterSink {
+impl Drop for ClientConsumerConnector {
     fn drop(&mut self) {
         if self
             .runtime
@@ -251,30 +259,45 @@ impl Drop for ClientEmitterSink {
             .remove_if(&self.key, |_, current| Arc::ptr_eq(current, &self.endpoint))
             .is_some()
         {
+            info!(
+                domain = self.key.domain.as_str(),
+                emitter = self.key.identifier().as_str(),
+                "ended client emitter endpoint"
+            );
             self.endpoint.end();
         }
     }
 }
 
 #[async_trait]
-impl SinkLifecycle for ClientEmitterSink {
+impl EmitterLifecycle for ClientConsumerConnector {
+    fn kind(&self) -> nervix_models::EmitterEntityKind {
+        nervix_models::EmitterEntityKind::Client(nervix_models::ClientEmitterEntity::Consumer)
+    }
+
+    /// A batch is delivered only on its consumer's application ACK, and the batches still waiting
+    /// for one are the host's retained payloads, not a client's, so nothing is left to send.
+    async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
+        Ok(EmitterFinish::NothingHeld)
+    }
+
     fn keeps_client_on_publish_failure(&self) -> bool {
         false
     }
 }
 
 #[async_trait]
-impl EmitterSink for ClientEmitterSink {
-    fn lifecycle(&self) -> &dyn SinkLifecycle {
+impl EmitterConnector for ClientConsumerConnector {
+    fn lifecycle(&self) -> &dyn EmitterLifecycle {
         self
     }
-    fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
+    fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
         self
     }
 
     async fn publish_batches(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()> {
         let EmitterPublication {
@@ -301,7 +324,7 @@ impl EmitterSink for ClientEmitterSink {
                     let endpoint = endpoint.clone();
                     async move {
                         (
-                            SinkRecordId::new(index),
+                            EmitterRecordId::new(index),
                             payload.execution_now,
                             endpoint.publish(payload).await,
                         )
@@ -314,11 +337,13 @@ impl EmitterSink for ClientEmitterSink {
             match result {
                 Ok(ClientEmitterResult::Acknowledged) => outcome.deliver(id),
                 Ok(ClientEmitterResult::Rejected(reason)) => {
-                    outcome.reject(RejectedSinkRecord::external(id, occurred_at, reason));
+                    outcome.reject(RejectedEmitterMember::external(id, occurred_at, reason));
                 }
                 Err(refusal) => outcome.fail(
-                    Report::new(SinkPublishError::Publish { sink: "client" })
-                        .attach_printable(format!("client delivery unavailable: {refusal:?}")),
+                    Report::new(EmitterWriteError::Publish {
+                        connector: "client",
+                    })
+                    .attach_printable(format!("client delivery unavailable: {refusal:?}")),
                 ),
             }
         }

@@ -1,0 +1,1192 @@
+// Advanced datalake geo/Iceberg demo.
+//
+// The graph models three independent source systems instead of one uniform
+// landing shape:
+//
+// - IoT devices publish CBOR device activity over MQTT.
+// - Edge servers publish protobuf edge activity over NATS.
+// - Auth servers publish JSON auth decisions over Kafka.
+//
+// Device connect, edge connect, and auth-authorized events are correlated into
+// connected sessions. Device and edge disconnects are correlated when both sides
+// arrive; one-sided disconnects are projected with nullable missing-side fields.
+// Device location reports are stored as standalone activity. Uncorrelated or
+// denied auth attempts are emitted to a Kafka security topic. Device-to-edge
+// distance anomalies are emitted to Redis Pub/Sub and stored in Iceberg.
+//
+// Build the Rust geo guest first. The target downloads the ignored DB-IP City
+// Lite MMDB archive when it is missing:
+//
+//   just wasm-datalake-geo-guest
+//
+// Docker Compose initializes the RustFS bucket and the datalake Iceberg REST
+// catalog tables by default.
+//
+// The WASM ABI is non-WASI today, so the guest cannot open resource files at
+// runtime. The guest build embeds this DB-IP City Lite MMDB file into the WASM
+// artifact, then stages only that artifact in geo-wasm-guest/resource for
+// upload:
+//
+//   examples/datalake/geo-wasm-guest/dbip-city-lite.mmdb.gz
+
+CREATE UNPACED DOMAIN datalake_demo;
+
+USE datalake_demo;
+
+BEGIN;
+CREATE RESOURCE reference_data;
+COMMIT;
+UPLOAD RESOURCE reference_data VERSION './examples/datalake/reference-data';
+
+BEGIN;
+CREATE RESOURCE edge_activity_proto;
+COMMIT;
+UPLOAD RESOURCE edge_activity_proto VERSION './examples/datalake/proto';
+
+BEGIN;
+CREATE RESOURCE geoip_wasm;
+COMMIT;
+UPLOAD RESOURCE geoip_wasm VERSION './examples/datalake/geo-wasm-guest/resource';
+
+BEGIN;
+
+CREATE SCHEMA edge_site (
+  edge_id STRING,
+  edge_name STRING,
+  region STRING,
+  site_tier STRING,
+  edge_lat F64,
+  edge_lon F64
+);
+
+CREATE WIRE JSON SCHEMA edge_site_wire MODE STRICT (
+  edge_id STRING,
+  edge_name STRING,
+  region STRING,
+  site_tier STRING,
+  edge_lat NUMBER,
+  edge_lon NUMBER
+);
+
+CREATE CODEC edge_site_codec
+  FROM WIRE JSON SCHEMA edge_site_wire
+  TO SCHEMA edge_site;
+
+CREATE HASH MAP edge_sites_by_id KEY edge_id FROM RESOURCE reference_data VERSION 1 PATH 'edge_sites.jsonl' DECODE USING edge_site_codec;
+
+CREATE SCHEMA device_activity (
+  source STRING,
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  event_type STRING,
+  source_ip STRING,
+  device_lat F64,
+  device_lon F64,
+  battery_pct F64,
+  firmware STRING,
+  ts DATETIME,
+  seq I64
+);
+
+CREATE CODEC device_activity_cbor_codec
+  FROM CBOR
+  TO SCHEMA device_activity
+  WITH JAQ TRANSFORMATIONS ON INGESTION '.'
+  ENCODE ts AS RFC3339;
+
+CREATE SCHEMA edge_activity (
+  source STRING,
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  edge_name STRING,
+  event_type STRING,
+  protocol STRING,
+  ts DATETIME,
+  seq I64
+);
+
+CREATE CODEC edge_activity_protobuf_codec
+  FROM PROTOBUF USING RESOURCE edge_activity_proto VERSION 1
+  CONFIG {
+    'file' = 'edge_activity.proto',
+    'include' = '.'
+  }
+  MESSAGE 'nervix.examples.datalake.EdgeActivity'
+  TO SCHEMA edge_activity
+  WITH JAQ TRANSFORMATIONS ON INGESTION '.'
+  ENCODE ts AS RFC3339;
+
+CREATE SCHEMA auth_activity (
+  source STRING,
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  principal_id STRING,
+  event_type STRING,
+  auth_result STRING,
+  risk_score F64,
+  reason STRING OPTIONAL,
+  ts DATETIME,
+  seq I64
+);
+
+CREATE WIRE JSON SCHEMA auth_activity_wire MODE STRICT (
+  source STRING,
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  principal_id STRING,
+  event_type STRING,
+  auth_result STRING,
+  risk_score NUMBER,
+  reason STRING OPTIONAL,
+  ts STRING,
+  seq INTEGER
+);
+
+CREATE CODEC auth_activity_json_codec
+  FROM WIRE JSON SCHEMA auth_activity_wire
+  TO SCHEMA auth_activity
+  ENCODE ts AS RFC3339;
+
+CREATE SCHEMA edge_activity_enriched (
+  source STRING,
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  edge_name STRING,
+  event_type STRING,
+  protocol STRING,
+  ts DATETIME,
+  seq I64,
+  edge_region STRING OPTIONAL,
+  edge_site_tier STRING OPTIONAL,
+  edge_lat F64 OPTIONAL,
+  edge_lon F64 OPTIONAL
+);
+
+CREATE SCHEMA device_location_geo (
+  source STRING,
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  event_type STRING,
+  source_ip STRING,
+  device_lat F64,
+  device_lon F64,
+  battery_pct F64,
+  firmware STRING,
+  ts DATETIME,
+  seq I64,
+  geoip_database STRING,
+  geoip_continent STRING,
+  geoip_country STRING,
+  geoip_region STRING,
+  geoip_city STRING,
+  geoip_lat F64,
+  geoip_lon F64,
+  geoip_geohash STRING,
+  nearest_hub STRING,
+  distance_to_hub_km F64
+);
+
+CREATE SCHEMA device_location_checked (
+  source STRING,
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  event_type STRING,
+  source_ip STRING,
+  device_lat F64,
+  device_lon F64,
+  battery_pct F64,
+  firmware STRING,
+  ts DATETIME,
+  seq I64,
+  geoip_database STRING,
+  geoip_continent STRING,
+  geoip_country STRING,
+  geoip_region STRING,
+  geoip_city STRING,
+  geoip_lat F64,
+  geoip_lon F64,
+  geoip_geohash STRING,
+  nearest_hub STRING,
+  distance_to_hub_km F64,
+  edge_name STRING OPTIONAL,
+  edge_region STRING OPTIONAL,
+  edge_site_tier STRING OPTIONAL,
+  edge_lat F64 OPTIONAL,
+  edge_lon F64 OPTIONAL,
+  distance_to_edge_km F64 OPTIONAL
+);
+
+CREATE SCHEMA device_edge_connect (
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  device_event_id STRING,
+  edge_event_id STRING,
+  device_connected_at DATETIME,
+  edge_connected_at DATETIME,
+  source_ip STRING,
+  device_lat F64,
+  device_lon F64,
+  battery_pct F64,
+  firmware STRING,
+  edge_name STRING,
+  protocol STRING,
+  edge_region STRING OPTIONAL,
+  edge_site_tier STRING OPTIONAL,
+  edge_lat F64 OPTIONAL,
+  edge_lon F64 OPTIONAL,
+  distance_to_edge_km F64 OPTIONAL
+);
+
+CREATE SCHEMA connected_session (
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  principal_id STRING,
+  device_event_id STRING,
+  edge_event_id STRING,
+  auth_event_id STRING,
+  device_connected_at DATETIME,
+  edge_connected_at DATETIME,
+  authorized_at DATETIME,
+  source_ip STRING,
+  device_lat F64,
+  device_lon F64,
+  battery_pct F64,
+  firmware STRING,
+  edge_name STRING,
+  protocol STRING,
+  edge_region STRING OPTIONAL,
+  edge_site_tier STRING OPTIONAL,
+  edge_lat F64 OPTIONAL,
+  edge_lon F64 OPTIONAL,
+  distance_to_edge_km F64 OPTIONAL,
+  risk_score F64
+);
+
+CREATE SCHEMA disconnect_event_matched (
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  disconnect_kind STRING,
+  device_event_id STRING,
+  edge_event_id STRING,
+  device_disconnected_at DATETIME,
+  edge_disconnected_at DATETIME,
+  source_ip STRING,
+  device_lat F64,
+  device_lon F64,
+  battery_pct F64,
+  firmware STRING,
+  edge_name STRING,
+  protocol STRING,
+  edge_region STRING OPTIONAL,
+  edge_site_tier STRING OPTIONAL,
+  edge_lat F64 OPTIONAL,
+  edge_lon F64 OPTIONAL
+);
+
+CREATE SCHEMA disconnect_event_device_only (
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  disconnect_kind STRING,
+  device_event_id STRING,
+  edge_event_id STRING OPTIONAL,
+  device_disconnected_at DATETIME,
+  edge_disconnected_at DATETIME OPTIONAL,
+  source_ip STRING,
+  device_lat F64,
+  device_lon F64,
+  battery_pct F64,
+  firmware STRING,
+  edge_name STRING OPTIONAL,
+  protocol STRING OPTIONAL,
+  edge_region STRING OPTIONAL,
+  edge_site_tier STRING OPTIONAL,
+  edge_lat F64 OPTIONAL,
+  edge_lon F64 OPTIONAL
+);
+
+CREATE SCHEMA disconnect_event_edge_only (
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  disconnect_kind STRING,
+  device_event_id STRING OPTIONAL,
+  edge_event_id STRING,
+  device_disconnected_at DATETIME OPTIONAL,
+  edge_disconnected_at DATETIME,
+  source_ip STRING OPTIONAL,
+  device_lat F64 OPTIONAL,
+  device_lon F64 OPTIONAL,
+  battery_pct F64 OPTIONAL,
+  firmware STRING OPTIONAL,
+  edge_name STRING,
+  protocol STRING,
+  edge_region STRING OPTIONAL,
+  edge_site_tier STRING OPTIONAL,
+  edge_lat F64 OPTIONAL,
+  edge_lon F64 OPTIONAL
+);
+
+CREATE SCHEMA security_event (
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  principal_id STRING,
+  security_reason STRING,
+  auth_result STRING,
+  risk_score F64,
+  observed_at DATETIME,
+  source_event_id STRING
+);
+
+CREATE WIRE JSON SCHEMA security_event_wire MODE STRICT (
+  event_id STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  principal_id STRING,
+  security_reason STRING,
+  auth_result STRING,
+  risk_score NUMBER,
+  observed_at STRING,
+  source_event_id STRING
+);
+
+CREATE CODEC security_event_json_codec
+  FROM WIRE JSON SCHEMA security_event_wire
+  TO SCHEMA security_event
+  ENCODE observed_at AS RFC3339;
+
+CREATE SCHEMA distance_alert (
+  alert_id STRING,
+  alert_type STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  edge_label STRING OPTIONAL,
+  source_event_id STRING,
+  observed_at DATETIME,
+  distance_to_edge_km F64 OPTIONAL,
+  threshold_km F64,
+  device_lat F64,
+  device_lon F64,
+  edge_lat F64 OPTIONAL,
+  edge_lon F64 OPTIONAL
+);
+
+CREATE WIRE JSON SCHEMA distance_alert_wire MODE STRICT (
+  alert_id STRING,
+  alert_type STRING,
+  tenant_id STRING,
+  device_id STRING,
+  session_id STRING,
+  edge_id STRING,
+  edge_label STRING OPTIONAL,
+  source_event_id STRING,
+  observed_at STRING,
+  distance_to_edge_km NUMBER OPTIONAL,
+  threshold_km NUMBER,
+  device_lat NUMBER,
+  device_lon NUMBER,
+  edge_lat NUMBER OPTIONAL,
+  edge_lon NUMBER OPTIONAL
+);
+
+CREATE CODEC distance_alert_json_codec
+  FROM WIRE JSON SCHEMA distance_alert_wire
+  TO SCHEMA distance_alert
+  ENCODE observed_at AS RFC3339;
+
+CREATE IF NOT EXISTS SCHEMA device_branch (
+  tenant_id STRING,
+  device_id STRING
+);
+
+CREATE BRANCH by_device SCHEMA device_branch TTL 30m;
+
+CREATE RELAY device_activity_landing SCHEMA device_activity BRANCHED BY by_device CAPACITY 1024;
+CREATE RELAY edge_activity_landing SCHEMA edge_activity BRANCHED BY by_device CAPACITY 1024;
+CREATE RELAY auth_activity_landing SCHEMA auth_activity BRANCHED BY by_device CAPACITY 1024;
+CREATE RELAY edge_activity_enriched_landing SCHEMA edge_activity_enriched BRANCHED BY by_device CAPACITY 1024;
+
+CREATE RELAY device_connect_events SCHEMA device_activity BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY device_location_events SCHEMA device_activity BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY device_disconnect_events SCHEMA device_activity BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY edge_connect_events SCHEMA edge_activity_enriched BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY edge_disconnect_events SCHEMA edge_activity_enriched BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY auth_authorized_events SCHEMA auth_activity BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY auth_denied_events SCHEMA auth_activity BRANCHED BY by_device CAPACITY 256;
+
+CREATE RELAY device_location_geo_events SCHEMA device_location_geo BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY device_location_geo_audit_events SCHEMA device_location_geo BRANCHED BY by_device CAPACITY 256;
+CREATE RELAY device_location_checked_events SCHEMA device_location_checked BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY device_edge_connect_events SCHEMA device_edge_connect BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY device_edge_connect_scored_events SCHEMA device_edge_connect BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY connected_sessions SCHEMA connected_session BRANCHED BY by_device CAPACITY 512;
+CREATE RELAY connect_without_auth_events SCHEMA device_edge_connect BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY uncorrelated_auth_events SCHEMA auth_activity BRANCHED BY by_device CAPACITY 128;
+
+CREATE RELAY disconnect_events_matched SCHEMA disconnect_event_matched BRANCHED BY by_device CAPACITY 256;
+CREATE RELAY device_disconnect_unmatched SCHEMA device_activity BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY edge_disconnect_unmatched SCHEMA edge_activity_enriched BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY disconnect_events_device_only SCHEMA disconnect_event_device_only BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY disconnect_events_edge_only SCHEMA disconnect_event_edge_only BRANCHED BY by_device CAPACITY 128;
+
+CREATE RELAY security_auth_denied_events SCHEMA security_event BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY security_uncorrelated_auth_events SCHEMA security_event BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY security_connect_without_auth_events SCHEMA security_event BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY security_events SCHEMA security_event BRANCHED BY by_device CAPACITY 512;
+
+CREATE RELAY location_distance_alerts SCHEMA distance_alert BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY connection_distance_alerts SCHEMA distance_alert BRANCHED BY by_device CAPACITY 128;
+CREATE RELAY distance_alerts SCHEMA distance_alert BRANCHED BY by_device CAPACITY 256;
+
+CREATE KAFKA CLIENT kafka_auth
+  CONFIG {
+    'bootstrap.servers' = '127.0.0.1:9092'
+  };
+
+CREATE MQTT CLIENT mqtt_devices
+  CONFIG {
+    'addr' = 'mqtt://127.0.0.1:1883',
+    'client_id' = 'nervix-datalake-device-source-{{instance}}'
+  };
+
+CREATE NATS CLIENT nats_edge
+  CONFIG {
+    'addr' = 'nats://127.0.0.1:4222'
+  };
+
+CREATE REDIS CLIENT redis_security_alerts
+  POOL SIZE MIN 1 MAX 4
+  CONFIG {
+    'addr' = 'redis://127.0.0.1:6379'
+  };
+
+CREATE S3 CLIENT s3_lakehouse CONFIG {'endpoint' = 'http://127.0.0.1:9900', 'region' = 'us-east-1', 'access_key_id' = 'rustfsadmin', 'secret_access_key' = 'rustfsadmin', 'path_style_access' = 'true'};
+
+CREATE ICEBERG_REST CLIENT lakehouse_catalog
+  CONFIG {
+    'uri' = 'http://127.0.0.1:8181',
+    'warehouse' = 's3://nervix-iceberg/warehouse'
+  };
+
+CREATE MQTT TOPIC INGESTOR iot_device_activity
+  FROM mqtt_devices TOPIC 'datalake/device_activity' INSTANCES 2 MODE NO ACK ON QUIESCE DROP
+  DECODE USING device_activity_cbor_codec
+  TIMESTAMP AT ts
+  TO device_activity_landing
+    INHERIT ALL
+    SET source = 'iot_device',
+        event_type = lower(trim(message.event_type)),
+        edge_id = lower(trim(message.edge_id)),
+        firmware = lower(trim(message.firmware))
+    BRANCHED BY by_device SET tenant_id = message.tenant_id, device_id = message.device_id
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE NATS SUBJECT INGESTOR edge_server_activity
+  FROM nats_edge SUBJECT 'datalake_edge_activity' QUEUE GROUP 'datalake_edge_servers' INSTANCES 2 MODE NO ACK ON QUIESCE DROP
+  DECODE USING edge_activity_protobuf_codec
+  TIMESTAMP AT ts
+  TO edge_activity_landing
+    INHERIT ALL
+    SET source = 'edge_server',
+        event_type = lower(trim(message.event_type)),
+        edge_id = lower(trim(message.edge_id)),
+        edge_name = lower(trim(message.edge_name)),
+        protocol = lower(trim(message.protocol))
+    BRANCHED BY by_device SET tenant_id = message.tenant_id, device_id = message.device_id
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE KAFKA TOPIC INGESTOR auth_server_activity
+  FROM kafka_auth TOPIC 'datalake_auth_activity' OFFSET BY CONSUMER GROUP 'datalake_demo_auth' INSTANCES 4 MODE NO ACK ON QUIESCE SUSPEND
+  DECODE USING auth_activity_json_codec
+  TIMESTAMP AT ts
+  TO auth_activity_landing
+    INHERIT ALL
+    SET source = 'auth_server',
+        event_type = lower(trim(message.event_type)),
+        auth_result = lower(trim(message.auth_result)),
+        edge_id = lower(trim(message.edge_id))
+    BRANCHED BY by_device SET tenant_id = message.tenant_id, device_id = message.device_id
+    FLUSH EACH 250ms MAX BATCH SIZE 1MiB
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR edge_location_lookup
+  FROM edge_activity_landing
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO edge_activity_enriched_landing
+    INHERIT ALL
+    SET edge_region = lookup_hash_map('edge_sites_by_id', input.edge_id, 'region'),
+        edge_site_tier = lookup_hash_map('edge_sites_by_id', input.edge_id, 'site_tier'),
+        edge_lat = lookup_hash_map('edge_sites_by_id', input.edge_id, 'edge_lat'),
+        edge_lon = lookup_hash_map('edge_sites_by_id', input.edge_id, 'edge_lon')
+    WHERE NOT is_null(lookup_hash_map('edge_sites_by_id', input.edge_id, 'edge_lat'))
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR device_activity_splitter
+  FROM device_activity_landing
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO device_connect_events
+    INHERIT ALL
+    WHERE event_type = 'connect'
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG
+  TO device_location_events
+    INHERIT ALL
+    WHERE event_type = 'location'
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG
+  TO device_disconnect_events
+    INHERIT ALL
+    WHERE event_type = 'disconnect'
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR edge_activity_splitter
+  FROM edge_activity_enriched_landing
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO edge_connect_events
+    INHERIT ALL
+    WHERE event_type = 'connect'
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG
+  TO edge_disconnect_events
+    INHERIT ALL
+    WHERE event_type = 'disconnect'
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR auth_activity_splitter
+  FROM auth_activity_landing
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO auth_authorized_events
+    INHERIT ALL
+    WHERE event_type = 'authorized' AND auth_result = 'allow'
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG
+  TO auth_denied_events
+    INHERIT ALL
+    WHERE auth_result != 'allow'
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED WASM PROCESSOR geoip_device_location_resolver
+  FROM device_location_events
+  USING RESOURCE geoip_wasm VERSION 1
+  FILE 'nervix_datalake_geo_wasm_guest.wasm'
+  MAX FUEL 1000000000
+  MAX MEMORY 64MiB
+  BRANCHED BY by_device
+  TO device_location_geo_events
+    SET source = source,
+        event_id = event_id,
+        tenant_id = tenant_id,
+        device_id = device_id,
+        session_id = session_id,
+        edge_id = edge_id,
+        event_type = event_type,
+        source_ip = source_ip,
+        device_lat = device_lat,
+        device_lon = device_lon,
+        battery_pct = battery_pct,
+        firmware = firmware,
+        ts = ts,
+        seq = seq,
+        geoip_database = geoip_database,
+        geoip_continent = geoip_continent,
+        geoip_country = geoip_country,
+        geoip_region = geoip_region,
+        geoip_city = geoip_city,
+        geoip_lat = geoip_lat,
+        geoip_lon = geoip_lon,
+        geoip_geohash = geoip_geohash,
+        nearest_hub = nearest_hub,
+        distance_to_hub_km = distance_to_hub_km
+    ON MESSAGE ERROR LOG
+  TO device_location_geo_audit_events
+    SET source = source,
+        event_id = event_id,
+        tenant_id = tenant_id,
+        device_id = device_id,
+        session_id = session_id,
+        edge_id = edge_id,
+        event_type = event_type,
+        source_ip = source_ip,
+        device_lat = device_lat,
+        device_lon = device_lon,
+        battery_pct = battery_pct,
+        firmware = firmware,
+        ts = ts,
+        seq = seq,
+        geoip_database = geoip_database,
+        geoip_continent = geoip_continent,
+        geoip_country = geoip_country,
+        geoip_region = geoip_region,
+        geoip_city = geoip_city,
+        geoip_lat = geoip_lat,
+        geoip_lon = geoip_lon,
+        geoip_geohash = geoip_geohash,
+        nearest_hub = nearest_hub,
+        distance_to_hub_km = distance_to_hub_km
+    WHERE distance_to_hub_km > 0.0
+    ON MESSAGE ERROR LOG
+  ON REJECTED STATE PRESERVE
+  ON GLOBAL ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR device_location_distance
+  FROM device_location_geo_events
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO device_location_checked_events
+    INHERIT ALL
+    SET edge_name = lookup_hash_map('edge_sites_by_id', input.edge_id, 'edge_name'),
+        edge_region = lookup_hash_map('edge_sites_by_id', input.edge_id, 'region'),
+        edge_site_tier = lookup_hash_map('edge_sites_by_id', input.edge_id, 'site_tier'),
+        edge_lat = lookup_hash_map('edge_sites_by_id', input.edge_id, 'edge_lat'),
+        edge_lon = lookup_hash_map('edge_sites_by_id', input.edge_id, 'edge_lon'),
+        distance_to_edge_km = 111.32 * sqrt(pow(lookup_hash_map('edge_sites_by_id', input.edge_id, 'edge_lat') - input.device_lat, 2.0) + pow((lookup_hash_map('edge_sites_by_id', input.edge_id, 'edge_lon') - input.device_lon) * cos(input.device_lat * 0.017453292519943295), 2.0))
+    WHERE NOT is_null(lookup_hash_map('edge_sites_by_id', input.edge_id, 'edge_lat'))
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED CORRELATOR device_edge_connect_correlator
+  LEFT FROM device_connect_events
+  RIGHT FROM edge_connect_events
+  CORRELATE WHERE left.session_id = right.session_id AND left.edge_id = right.edge_id
+  MATCH EARLIEST
+  MAX TIME 5s
+  ON CORRELATION TIMEOUT DROP, DROP
+  BRANCHED BY by_device
+  TO device_edge_connect_events
+    SET event_id = concat(left.event_id, '-', right.event_id),
+        tenant_id = left.tenant_id,
+        device_id = left.device_id,
+        session_id = left.session_id,
+        edge_id = left.edge_id,
+        device_event_id = left.event_id,
+        edge_event_id = right.event_id,
+        device_connected_at = left.ts,
+        edge_connected_at = right.ts,
+        source_ip = left.source_ip,
+        device_lat = left.device_lat,
+        device_lon = left.device_lon,
+        battery_pct = left.battery_pct,
+        firmware = left.firmware,
+        edge_name = right.edge_name,
+        protocol = right.protocol,
+        edge_region = right.edge_region,
+        edge_site_tier = right.edge_site_tier,
+        edge_lat = right.edge_lat,
+        edge_lon = right.edge_lon,
+        distance_to_edge_km = NULL
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR connect_distance_score
+  FROM device_edge_connect_events
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO device_edge_connect_scored_events
+    INHERIT ALL
+    SET distance_to_edge_km = 111.32 * sqrt(pow(input.edge_lat - input.device_lat, 2.0) + pow((input.edge_lon - input.device_lon) * cos(input.device_lat * 0.017453292519943295), 2.0))
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED CORRELATOR connected_session_correlator
+  LEFT FROM device_edge_connect_scored_events
+  RIGHT FROM auth_authorized_events
+  CORRELATE WHERE left.session_id = right.session_id AND left.edge_id = right.edge_id
+  MATCH EARLIEST
+  MAX TIME 10s
+  ON CORRELATION TIMEOUT SEND TO connect_without_auth_events, SEND TO uncorrelated_auth_events
+  BRANCHED BY by_device
+  TO connected_sessions
+    SET event_id = concat(left.event_id, '-', right.event_id),
+        tenant_id = left.tenant_id,
+        device_id = left.device_id,
+        session_id = left.session_id,
+        edge_id = left.edge_id,
+        principal_id = right.principal_id,
+        device_event_id = left.device_event_id,
+        edge_event_id = left.edge_event_id,
+        auth_event_id = right.event_id,
+        device_connected_at = left.device_connected_at,
+        edge_connected_at = left.edge_connected_at,
+        authorized_at = right.ts,
+        source_ip = left.source_ip,
+        device_lat = left.device_lat,
+        device_lon = left.device_lon,
+        battery_pct = left.battery_pct,
+        firmware = left.firmware,
+        edge_name = left.edge_name,
+        protocol = left.protocol,
+        edge_region = left.edge_region,
+        edge_site_tier = left.edge_site_tier,
+        edge_lat = left.edge_lat,
+        edge_lon = left.edge_lon,
+        distance_to_edge_km = left.distance_to_edge_km,
+        risk_score = right.risk_score
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED CORRELATOR disconnect_correlator
+  LEFT FROM device_disconnect_events
+  RIGHT FROM edge_disconnect_events
+  CORRELATE WHERE left.session_id = right.session_id AND left.edge_id = right.edge_id
+  MATCH EARLIEST
+  MAX TIME 5s
+  ON CORRELATION TIMEOUT SEND TO device_disconnect_unmatched, SEND TO edge_disconnect_unmatched
+  BRANCHED BY by_device
+  TO disconnect_events_matched
+    SET event_id = concat(left.event_id, '-', right.event_id),
+        tenant_id = left.tenant_id,
+        device_id = left.device_id,
+        session_id = left.session_id,
+        edge_id = left.edge_id,
+        disconnect_kind = 'device_and_edge',
+        device_event_id = left.event_id,
+        edge_event_id = right.event_id,
+        device_disconnected_at = left.ts,
+        edge_disconnected_at = right.ts,
+        source_ip = left.source_ip,
+        device_lat = left.device_lat,
+        device_lon = left.device_lon,
+        battery_pct = left.battery_pct,
+        firmware = left.firmware,
+        edge_name = right.edge_name,
+        protocol = right.protocol,
+        edge_region = right.edge_region,
+        edge_site_tier = right.edge_site_tier,
+        edge_lat = right.edge_lat,
+        edge_lon = right.edge_lon
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR device_disconnect_only_projector
+  FROM device_disconnect_unmatched
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO disconnect_events_device_only
+    INHERIT ALL EXCEPT source, event_type, ts, seq
+    SET event_id = concat('device-only-', input.event_id),
+        disconnect_kind = 'device_only',
+        device_event_id = input.event_id,
+        edge_event_id = NULL,
+        device_disconnected_at = input.ts,
+        edge_disconnected_at = NULL,
+        edge_name = NULL,
+        protocol = NULL,
+        edge_region = NULL,
+        edge_site_tier = NULL,
+        edge_lat = NULL,
+        edge_lon = NULL
+    FLUSH EACH 250ms MAX BATCH SIZE 256kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR edge_disconnect_only_projector
+  FROM edge_disconnect_unmatched
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO disconnect_events_edge_only
+    INHERIT ALL EXCEPT source, event_type, ts, seq
+    SET event_id = concat('edge-only-', input.event_id),
+        disconnect_kind = 'edge_only',
+        device_event_id = NULL,
+        edge_event_id = input.event_id,
+        device_disconnected_at = NULL,
+        edge_disconnected_at = input.ts,
+        source_ip = NULL,
+        device_lat = NULL,
+        device_lon = NULL,
+        battery_pct = NULL,
+        firmware = NULL
+    FLUSH EACH 250ms MAX BATCH SIZE 256kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR denied_auth_security_mapper
+  FROM auth_denied_events
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO security_auth_denied_events
+    INHERIT ALL EXCEPT source, event_type, reason, ts, seq
+    SET event_id = concat('security-', input.event_id),
+        security_reason = 'auth_denied',
+        observed_at = input.ts,
+        source_event_id = input.event_id
+    FLUSH EACH 250ms MAX BATCH SIZE 256kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR uncorrelated_auth_security_mapper
+  FROM uncorrelated_auth_events
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO security_uncorrelated_auth_events
+    INHERIT ALL EXCEPT source, event_type, reason, ts, seq
+    SET event_id = concat('security-', input.event_id),
+        security_reason = 'authorized_without_device_edge_connect',
+        observed_at = input.ts,
+        source_event_id = input.event_id
+    FLUSH EACH 250ms MAX BATCH SIZE 256kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR connect_without_auth_security_mapper
+  FROM connect_without_auth_events
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO security_connect_without_auth_events
+    INHERIT ALL EXCEPT device_event_id, edge_event_id, device_connected_at, edge_connected_at, source_ip, device_lat, device_lon, battery_pct, firmware, edge_name, protocol, edge_region, edge_site_tier, edge_lat, edge_lon, distance_to_edge_km
+    SET event_id = concat('security-', input.event_id),
+        security_reason = 'device_edge_connect_without_auth',
+        observed_at = input.edge_connected_at,
+        source_event_id = input.event_id,
+        principal_id = 'unknown',
+        auth_result = 'missing',
+        risk_score = 0.0
+    FLUSH EACH 250ms MAX BATCH SIZE 256kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED JUNCTION security_event_junction
+  FROM security_auth_denied_events, security_uncorrelated_auth_events, security_connect_without_auth_events
+  BRANCHED BY by_device
+  TO security_events
+    INHERIT ALL
+    FLUSH EACH 250ms MAX BATCH SIZE 512kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR location_distance_alert_mapper
+  FROM device_location_checked_events
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO location_distance_alerts
+    INHERIT ALL EXCEPT source, event_id, event_type, source_ip, battery_pct, firmware, ts, seq, geoip_database, geoip_continent, geoip_country, geoip_region, geoip_city, geoip_lat, geoip_lon, geoip_geohash, nearest_hub, distance_to_hub_km, edge_name, edge_region, edge_site_tier
+    SET alert_id = concat('distance-', input.event_id),
+        alert_type = 'device_location_too_far_from_edge',
+        edge_label = coalesce(input.edge_name, input.edge_id),
+        source_event_id = input.event_id,
+        observed_at = input.ts,
+        threshold_km = 500.0
+    WHERE distance_to_edge_km > 500.0
+    FLUSH EACH 250ms MAX BATCH SIZE 256kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR connection_distance_alert_mapper
+  FROM connected_sessions
+  DEDUPLICATE ON input.event_id
+  MAX TIME 30m
+  BRANCHED BY by_device
+  TO connection_distance_alerts
+    INHERIT ALL EXCEPT event_id, principal_id, device_event_id, edge_event_id, auth_event_id, device_connected_at, edge_connected_at, authorized_at, source_ip, battery_pct, firmware, edge_name, protocol, edge_region, edge_site_tier, risk_score
+    SET alert_id = concat('distance-', input.event_id),
+        alert_type = 'connected_session_too_far_from_edge',
+        edge_label = lookup_hash_map('edge_sites_by_id', input.edge_id, 'edge_name'),
+        source_event_id = input.event_id,
+        observed_at = input.authorized_at,
+        threshold_km = 500.0
+    WHERE distance_to_edge_km > 500.0
+    FLUSH EACH 250ms MAX BATCH SIZE 256kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED JUNCTION distance_alert_junction
+  FROM location_distance_alerts, connection_distance_alerts
+  BRANCHED BY by_device
+  TO distance_alerts
+    INHERIT ALL
+    FLUSH EACH 250ms MAX BATCH SIZE 256kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED KAFKA TOPIC EMITTER kafka_security_events
+  FROM security_events
+  TO kafka_auth TOPIC 'datalake_security_events'
+    MODE ACK PARALLEL MAX 1000 ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING security_event_json_codec
+  INHERIT ALL
+  FLUSH EACH 1s MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED REDIS PUBSUB EMITTER redis_distance_alerts
+  FROM distance_alerts
+  TO redis_security_alerts CHANNEL 'datalake_distance_alerts'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING distance_alert_json_codec
+  INHERIT ALL
+  FLUSH EACH 1s MAX BATCH SIZE 512kb
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions
+  FROM connected_sessions
+  TO s3_lakehouse TABLE 'datalake_connected_sessions' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    VALUES {
+      'event_id' = input.event_id,
+      'tenant_id' = input.tenant_id,
+      'device_id' = input.device_id,
+      'session_id' = input.session_id,
+      'edge_id' = input.edge_id,
+      'principal_id' = input.principal_id,
+      'device_event_id' = input.device_event_id,
+      'edge_event_id' = input.edge_event_id,
+      'auth_event_id' = input.auth_event_id,
+      'device_connected_at' = input.device_connected_at,
+      'edge_connected_at' = input.edge_connected_at,
+      'authorized_at' = input.authorized_at,
+      'source_ip' = input.source_ip,
+      'device_lat' = input.device_lat,
+      'device_lon' = input.device_lon,
+      'battery_pct' = input.battery_pct,
+      'firmware' = input.firmware,
+      'edge_name' = input.edge_name,
+      'protocol' = input.protocol,
+      'edge_region' = input.edge_region,
+      'edge_site_tier' = input.edge_site_tier,
+      'edge_lat' = input.edge_lat,
+      'edge_lon' = input.edge_lon,
+      'distance_to_edge_km' = input.distance_to_edge_km,
+      'risk_score' = input.risk_score
+    }
+  FLUSH EACH 10s MAX BATCH SIZE 8MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_device_locations
+  FROM device_location_checked_events
+  TO s3_lakehouse TABLE 'datalake_device_locations' LOCATION 's3://nervix-iceberg/tables/datalake_device_locations' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    VALUES {
+      'event_id' = input.event_id,
+      'tenant_id' = input.tenant_id,
+      'device_id' = input.device_id,
+      'session_id' = input.session_id,
+      'edge_id' = input.edge_id,
+      'source_ip' = input.source_ip,
+      'device_lat' = input.device_lat,
+      'device_lon' = input.device_lon,
+      'battery_pct' = input.battery_pct,
+      'firmware' = input.firmware,
+      'ts' = input.ts,
+      'seq' = input.seq,
+      'geoip_database' = input.geoip_database,
+      'geoip_continent' = input.geoip_continent,
+      'geoip_country' = input.geoip_country,
+      'geoip_region' = input.geoip_region,
+      'geoip_city' = input.geoip_city,
+      'geoip_lat' = input.geoip_lat,
+      'geoip_lon' = input.geoip_lon,
+      'geoip_geohash' = input.geoip_geohash,
+      'nearest_hub' = input.nearest_hub,
+      'distance_to_hub_km' = input.distance_to_hub_km,
+      'edge_name' = input.edge_name,
+      'edge_region' = input.edge_region,
+      'edge_site_tier' = input.edge_site_tier,
+      'edge_lat' = input.edge_lat,
+      'edge_lon' = input.edge_lon,
+      'distance_to_edge_km' = input.distance_to_edge_km
+    }
+  FLUSH EACH 10s MAX BATCH SIZE 8MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_matched_events
+  FROM disconnect_events_matched
+  TO s3_lakehouse TABLE 'datalake_disconnect_matched_events' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_matched_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    VALUES {
+      'event_id' = input.event_id,
+      'tenant_id' = input.tenant_id,
+      'device_id' = input.device_id,
+      'session_id' = input.session_id,
+      'edge_id' = input.edge_id,
+      'disconnect_kind' = input.disconnect_kind,
+      'device_event_id' = input.device_event_id,
+      'edge_event_id' = input.edge_event_id,
+      'device_disconnected_at' = input.device_disconnected_at,
+      'edge_disconnected_at' = input.edge_disconnected_at,
+      'source_ip' = input.source_ip,
+      'device_lat' = input.device_lat,
+      'device_lon' = input.device_lon,
+      'battery_pct' = input.battery_pct,
+      'firmware' = input.firmware,
+      'edge_name' = input.edge_name,
+      'protocol' = input.protocol,
+      'edge_region' = input.edge_region,
+      'edge_site_tier' = input.edge_site_tier,
+      'edge_lat' = input.edge_lat,
+      'edge_lon' = input.edge_lon
+    }
+  FLUSH EACH 10s MAX BATCH SIZE 8MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_device_only_events
+  FROM disconnect_events_device_only
+  TO s3_lakehouse TABLE 'datalake_disconnect_device_only_events' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_device_only_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    VALUES {
+      'event_id' = input.event_id,
+      'tenant_id' = input.tenant_id,
+      'device_id' = input.device_id,
+      'session_id' = input.session_id,
+      'edge_id' = input.edge_id,
+      'disconnect_kind' = input.disconnect_kind,
+      'device_event_id' = input.device_event_id,
+      'edge_event_id' = input.edge_event_id,
+      'device_disconnected_at' = input.device_disconnected_at,
+      'edge_disconnected_at' = input.edge_disconnected_at,
+      'source_ip' = input.source_ip,
+      'device_lat' = input.device_lat,
+      'device_lon' = input.device_lon,
+      'battery_pct' = input.battery_pct,
+      'firmware' = input.firmware,
+      'edge_name' = input.edge_name,
+      'protocol' = input.protocol,
+      'edge_region' = input.edge_region,
+      'edge_site_tier' = input.edge_site_tier,
+      'edge_lat' = input.edge_lat,
+      'edge_lon' = input.edge_lon
+    }
+  FLUSH EACH 10s MAX BATCH SIZE 8MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_disconnect_edge_only_events
+  FROM disconnect_events_edge_only
+  TO s3_lakehouse TABLE 'datalake_disconnect_edge_only_events' LOCATION 's3://nervix-iceberg/tables/datalake_disconnect_edge_only_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    VALUES {
+      'event_id' = input.event_id,
+      'tenant_id' = input.tenant_id,
+      'device_id' = input.device_id,
+      'session_id' = input.session_id,
+      'edge_id' = input.edge_id,
+      'disconnect_kind' = input.disconnect_kind,
+      'device_event_id' = input.device_event_id,
+      'edge_event_id' = input.edge_event_id,
+      'device_disconnected_at' = input.device_disconnected_at,
+      'edge_disconnected_at' = input.edge_disconnected_at,
+      'source_ip' = input.source_ip,
+      'device_lat' = input.device_lat,
+      'device_lon' = input.device_lon,
+      'battery_pct' = input.battery_pct,
+      'firmware' = input.firmware,
+      'edge_name' = input.edge_name,
+      'protocol' = input.protocol,
+      'edge_region' = input.edge_region,
+      'edge_site_tier' = input.edge_site_tier,
+      'edge_lat' = input.edge_lat,
+      'edge_lon' = input.edge_lon
+    }
+  FLUSH EACH 10s MAX BATCH SIZE 8MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_security_events
+  FROM security_events
+  TO s3_lakehouse TABLE 'datalake_security_events' LOCATION 's3://nervix-iceberg/tables/datalake_security_events' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    VALUES {
+      'event_id' = input.event_id,
+      'tenant_id' = input.tenant_id,
+      'device_id' = input.device_id,
+      'session_id' = input.session_id,
+      'edge_id' = input.edge_id,
+      'principal_id' = input.principal_id,
+      'security_reason' = input.security_reason,
+      'auth_result' = input.auth_result,
+      'risk_score' = input.risk_score,
+      'observed_at' = input.observed_at,
+      'source_event_id' = input.source_event_id
+    }
+  FLUSH EACH 10s MAX BATCH SIZE 8MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE DETACHED ICEBERG TABLE EMITTER iceberg_distance_alerts
+  FROM distance_alerts
+  TO s3_lakehouse TABLE 'datalake_distance_alerts' LOCATION 's3://nervix-iceberg/tables/datalake_distance_alerts' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB
+    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    VALUES {
+      'alert_id' = input.alert_id,
+      'alert_type' = input.alert_type,
+      'tenant_id' = input.tenant_id,
+      'device_id' = input.device_id,
+      'session_id' = input.session_id,
+      'edge_id' = input.edge_id,
+      'edge_label' = input.edge_label,
+      'source_event_id' = input.source_event_id,
+      'observed_at' = input.observed_at,
+      'distance_to_edge_km' = input.distance_to_edge_km,
+      'threshold_km' = input.threshold_km,
+      'device_lat' = input.device_lat,
+      'device_lon' = input.device_lon,
+      'edge_lat' = input.edge_lat,
+      'edge_lon' = input.edge_lon
+    }
+  FLUSH EACH 10s MAX BATCH SIZE 8MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;
+
+START;

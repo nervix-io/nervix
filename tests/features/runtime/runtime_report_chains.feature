@@ -2,17 +2,17 @@ Feature: Runtime report chains
   Scenario Outline: A source cadence event preserves the clock arithmetic cause
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA cadence_record ( value I64 );
       CREATE WIRE JSON SCHEMA cadence_wire MODE STRICT ( value integer );
       CREATE CODEC cadence_codec FROM WIRE JSON SCHEMA cadence_wire TO SCHEMA cadence_record;
       CREATE RELAY cadence_records SCHEMA cadence_record UNBRANCHED;
-      CREATE CLIENT cadence_http TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT cadence_http CONFIG {
         'endpoint' = 'http://127.0.0.1:1/events',
         'method' = 'GET'
       };

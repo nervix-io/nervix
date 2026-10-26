@@ -4,7 +4,7 @@
 //! Owns: the connector instance behind each named client on this node, the interest its local
 //! users hold in it, and the wait a user sits in between asking for a connection and being handed
 //! one.
-//! Depends on: the vocabulary that names a domain and a client, the pooled client a sink's start
+//! Depends on: the vocabulary that names a domain and a client, the pooled client an emitter's start
 //! plan decides, the resolved client configuration, and the connector drivers.
 //! Must not know: which graph node asked for a connection, how a batch is built, or how a
 //! schedule was decided.
@@ -26,7 +26,7 @@
 )]
 
 use error_stack::Report;
-use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, SinkStartError};
+use nervix_connector::{ClientResourceMounts, EmitterOpenError, ResolvedClientConfig};
 use nervix_connector_mongodb::MongoDbClient;
 use nervix_connector_mysql::MySqlPool;
 use nervix_connector_postgres::PostgresPool;
@@ -51,6 +51,9 @@ pub(in crate::runtime) enum OpenClientError {
         transport: &'static str,
         reason: String,
     },
+    /// One of the client's deadline keys breaks the deadline rule; the cause beneath names it.
+    #[error("invalid {transport} client deadline")]
+    InvalidDeadline { transport: &'static str },
     #[error("failed to connect to {transport}: {reason}")]
     Connect {
         transport: &'static str,
@@ -70,6 +73,7 @@ impl OpenClientError {
                 transport: "Redis",
                 reason: reason.clone(),
             },
+            RedisClientError::InvalidConnectTimeout => Self::InvalidDeadline { transport: "Redis" },
             RedisClientError::Connect { reason } => Self::Connect {
                 transport: "Redis",
                 reason: reason.clone(),
@@ -83,7 +87,7 @@ impl OpenClientError {
     }
 }
 
-/// Configuration keys and address parameters that would size a pool behind NSPL's back.
+/// Configuration keys and address parameters that would size a pool behind Plexus's back.
 ///
 /// Each driver reads at least one of these: `mysql_async` takes `pool_min`/`pool_max` from its URL
 /// and the MongoDB driver takes `minPoolSize`/`maxPoolSize` from its own. Whichever won would be a
@@ -283,7 +287,7 @@ impl PoolWait {
     }
 }
 
-/// Publication retained by one pooled sink. Its connector serializes connection borrows.
+/// Publication retained by one pooled emitter. Its connector serializes connection borrows.
 pub(in crate::runtime) struct PoolWaitSlot {
     client: ClientName,
     active: ArcSwapOption<PoolWait>,
@@ -334,7 +338,7 @@ impl Drop for PoolWaitGuard {
     }
 }
 
-/// Registry interest follows the sink lifetime, independently of individual connection borrows.
+/// Registry interest follows the emitter lifetime, independently of individual connection borrows.
 pub(in crate::runtime) struct PoolWaitRegistration {
     pub(in crate::runtime) slot: Arc<PoolWaitSlot>,
     runtime: Runtime,
@@ -360,7 +364,7 @@ impl Runtime {
         nervix_lint,
         nervix::context(
             lifecycle,
-            reason = "sink installation retains one shared-client lease for its configuration"
+            reason = "emitter installation retains one shared-client lease for its configuration"
         )
     )]
     pub(in crate::runtime) async fn lease_shared_client(
@@ -432,7 +436,7 @@ impl Runtime {
             })
         };
         // A connector states its own start failure, and the client names which one could not open.
-        let started = |error: Report<SinkStartError>| {
+        let started = |error: Report<EmitterOpenError>| {
             error.change_context(SharedClientError::Open {
                 client: name.as_str().to_string(),
             })
@@ -485,7 +489,7 @@ impl Runtime {
         nervix_lint,
         nervix::context(
             lifecycle,
-            reason = "sink teardown releases its exact shared-client lease"
+            reason = "emitter teardown releases its exact shared-client lease"
         )
     )]
     fn release_shared_client(&self, key: &DomainNodeRef) {
@@ -504,12 +508,12 @@ impl Runtime {
         }
     }
 
-    /// Register one pooled sink's stable wait publication for observers.
+    /// Register one pooled emitter's stable wait publication for observers.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             lifecycle,
-            reason = "sink installation retains one pool-wait publication slot"
+            reason = "emitter installation retains one pool-wait publication slot"
         )
     )]
     pub(in crate::runtime) fn register_pool_wait(
@@ -550,7 +554,7 @@ mod tests {
         let key = DomainNodeRef::node_in(
             domain("pool_wait"),
             ModelKind::Emitter,
-            named::<EmitterName>("sink"),
+            named::<EmitterName>("emitter"),
         );
         let registration = runtime.register_pool_wait(key.clone(), named("database"));
         let slot = registration.slot.clone();
@@ -586,12 +590,12 @@ mod tests {
     }
 
     #[test]
-    fn pool_registration_teardown_preserves_a_replacement_sink() {
+    fn pool_registration_teardown_preserves_a_replacement_emitter() {
         let runtime = Runtime::new();
         let key = DomainNodeRef::node_in(
             domain("pool_wait"),
             ModelKind::Emitter,
-            named::<EmitterName>("sink"),
+            named::<EmitterName>("emitter"),
         );
         let first = runtime.register_pool_wait(key.clone(), named("database"));
         let replacement = runtime.register_pool_wait(key.clone(), named("database"));

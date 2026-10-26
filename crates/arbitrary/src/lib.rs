@@ -12,7 +12,7 @@
 //!   vocabulary values, expressions, Models and statements, and the documented domain each draws
 //!   from.
 //! - **Depends on.** The vocabulary and the current guest message protocol.
-//! - **Must not know.** The language or its parser. What NSPL can spell is stated here as a rule
+//! - **Must not know.** The language or its parser. What Plexus can spell is stated here as a rule
 //!   over values, never learned by calling the parser, so the vocabulary's own properties can use
 //!   these generators without a language dependency.
 
@@ -36,6 +36,7 @@ mod impact;
 mod infrastructure;
 mod ingestor;
 mod model;
+mod prerequisites;
 mod processor;
 mod remote;
 mod route;
@@ -59,20 +60,20 @@ pub use wasm::WasmValues;
 /// Which values a generator may produce.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Domain {
-    /// Values canonical NSPL spells and reads back as themselves.
+    /// Values canonical Plexus spells and reads back as themselves.
     ///
-    /// This excludes vocabulary states NSPL has no spelling for: a negative or non-finite numeric
+    /// This excludes vocabulary states Plexus has no spelling for: a negative or non-finite numeric
     /// literal (a negative number is written as a negation of its magnitude), an empty array or a
-    /// `CASE` without a `WHEN`, a cast to a collection type, a `DROP` of a kind NSPL cannot drop, a
+    /// `CASE` without a `WHEN`, a cast to a collection type, a `DROP` of a kind Plexus cannot drop, a
     /// batching HTTP emitter, a correlator filter, a relay named `message` or `branch`, a
     /// placement member named like an `ALTER` operation keyword, and a Postgres update whose
     /// conflict target includes every mapped column.
-    Nspl,
-    /// Every value the vocabulary types hold, including the states NSPL cannot spell. Stored and
+    Plexus,
+    /// Every value the vocabulary types hold, including the states Plexus cannot spell. Stored and
     /// archived forms carry these, so their round trips draw from this domain.
     ///
-    /// In both domains a generated name is one lower-case identifier, and any NSPL keyword may be
-    /// one. Only the NSPL domain avoids the keywords NSPL refuses for a kind of name or at a
+    /// In both domains a generated name is one lower-case identifier, and any Plexus keyword may be
+    /// one. Only the Plexus domain avoids the keywords Plexus refuses for a kind of name or at a
     /// position, such as `message` for a relay. The name properties cover the rest of the name rule
     /// on each name type directly.
     Vocabulary,
@@ -106,7 +107,7 @@ impl<'bytes> Arbitrary<'bytes> {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{EmitSinkKind, IngestSourceKind, PostgresSinkEntity};
+    use nervix_models::{EmitterEntityKind, IngestorEntityKind, PostgresEmitterEntity};
     use strum::IntoEnumIterator as _;
 
     use super::{Arbitrary, Domain, Entropy, ExpressionForm, ModelVariant, StatementVariant};
@@ -134,18 +135,18 @@ mod tests {
     }
 
     #[test]
-    fn every_sink_is_built_as_requested_in_both_domains() {
-        for domain in [Domain::Nspl, Domain::Vocabulary] {
-            for kind in EmitSinkKind::all() {
+    fn every_emitter_is_built_as_requested_in_both_domains() {
+        for domain in [Domain::Plexus, Domain::Vocabulary] {
+            for kind in EmitterEntityKind::all() {
                 for seed in 0..4 {
                     let bytes = seeded_bytes(seed);
                     let mut arbitrary = Arbitrary::new(&bytes, domain);
                     let emitter = arbitrary.create_emitter_to(kind);
-                    assert_eq!(emitter.sink.kind(), kind, "{domain:?}");
+                    assert_eq!(emitter.connector.kind(), kind, "{domain:?}");
                     assert!(
-                        emitter
-                            .sink
-                            .accepts_publishing_mode(&emitter.publishing_mode),
+                        kind.capabilities()
+                            .publishing_modes
+                            .contains(&emitter.connector.publishing().kind()),
                         "{domain:?} {kind:?}"
                     );
                 }
@@ -155,13 +156,13 @@ mod tests {
 
     #[test]
     fn every_source_is_built_as_requested_in_both_domains() {
-        for domain in [Domain::Nspl, Domain::Vocabulary] {
-            for kind in IngestSourceKind::all() {
+        for domain in [Domain::Plexus, Domain::Vocabulary] {
+            for kind in IngestorEntityKind::all() {
                 for seed in 0..4 {
                     let bytes = seeded_bytes(seed);
                     let mut arbitrary = Arbitrary::new(&bytes, domain);
                     let ingestor = arbitrary.create_ingestor_from(kind);
-                    assert_eq!(ingestor.input.source_kind(), kind, "{domain:?}");
+                    assert_eq!(ingestor.input.entity_kind(), kind, "{domain:?}");
                     assert!(
                         ingestor.input.supports_quiesce(ingestor.input.quiesce()),
                         "{domain:?} {kind:?}"
@@ -173,7 +174,7 @@ mod tests {
 
     #[test]
     fn every_model_family_is_built_as_requested_in_both_domains() {
-        for domain in [Domain::Nspl, Domain::Vocabulary] {
+        for domain in [Domain::Plexus, Domain::Vocabulary] {
             for variant in ModelVariant::ALL {
                 for seed in 0..4 {
                     let bytes = seeded_bytes(seed);
@@ -188,7 +189,7 @@ mod tests {
 
     #[test]
     fn every_statement_form_is_built_as_requested_in_both_domains() {
-        for domain in [Domain::Nspl, Domain::Vocabulary] {
+        for domain in [Domain::Plexus, Domain::Vocabulary] {
             for variant in StatementVariant::iter() {
                 for seed in 0..4 {
                     let bytes = seeded_bytes(seed);
@@ -202,7 +203,7 @@ mod tests {
 
     #[test]
     fn every_expression_form_is_built_as_requested_in_both_domains() {
-        for domain in [Domain::Nspl, Domain::Vocabulary] {
+        for domain in [Domain::Plexus, Domain::Vocabulary] {
             for form in ExpressionForm::ALL {
                 for depth in 0..=super::EXPRESSION_DEPTH {
                     let bytes = seeded_bytes(depth);
@@ -251,21 +252,24 @@ mod tests {
     }
 
     #[test]
-    fn a_postgres_update_leaves_a_mapped_column_to_update_in_nspl() {
+    fn a_postgres_update_leaves_a_mapped_column_to_update_in_plexus() {
         for seed in 0..=u8::MAX {
             let bytes = seeded_bytes(seed);
-            let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
-            let emitter =
-                arbitrary.create_emitter_to(EmitSinkKind::Postgres(PostgresSinkEntity::Table));
-            let nervix_models::EmitSink::Postgres(nervix_models::PostgresSink::Table(
-                nervix_models::PostgresTableSink {
+            let mut arbitrary = Arbitrary::new(&bytes, Domain::Plexus);
+            let emitter = arbitrary
+                .create_emitter_to(EmitterEntityKind::Postgres(PostgresEmitterEntity::Table));
+            let nervix_models::EmitterEntity::Postgres(nervix_models::PostgresEmitter::Table(
+                nervix_models::PostgresTableEmitter {
                     values,
                     conflict_action,
                     ..
                 },
-            )) = emitter.sink.as_ref()
+            )) = emitter.connector.as_ref()
             else {
-                panic!("a Postgres sink was requested, found {:?}", emitter.sink);
+                panic!(
+                    "a Postgres emitter was requested, found {:?}",
+                    emitter.connector
+                );
             };
             if let nervix_models::PostgresConflictAction::DoUpdate { target } = conflict_action {
                 assert!(!target.is_empty(), "{values:?}");
@@ -285,7 +289,7 @@ mod tests {
         for seed in 0..=u8::MAX {
             // The first byte declines a keyword spelling, so the rest draws an identifier.
             let bytes = [0, seed, seed.wrapping_mul(13), seed.wrapping_add(1), 0, 0];
-            let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+            let mut arbitrary = Arbitrary::new(&bytes, Domain::Plexus);
             let name = arbitrary.name_text();
             assert!(!name.is_empty() && name.len() <= 128, "{name:?}");
             lengths.insert(name.len());
@@ -300,7 +304,7 @@ mod tests {
         for high in 0..=u8::MAX {
             for low in 0..=u8::MAX {
                 let bytes = [3, high, low];
-                let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Plexus);
                 spelled.insert(arbitrary.name_text());
             }
         }
@@ -505,11 +509,11 @@ mod tests {
     }
 
     #[test]
-    fn the_nspl_domain_names_a_relay_by_no_word_nspl_reserves_for_one() {
+    fn the_plexus_domain_names_a_relay_by_no_word_plexus_reserves_for_one() {
         for high in 0..=u8::MAX {
             for low in 0..=u8::MAX {
                 let bytes = [3, high, low];
-                let mut arbitrary = Arbitrary::new(&bytes, Domain::Nspl);
+                let mut arbitrary = Arbitrary::new(&bytes, Domain::Plexus);
                 let relay = arbitrary.name::<nervix_models::RelayName>();
                 assert!(!matches!(relay.as_str(), "message" | "branch"), "{relay}");
             }

@@ -558,9 +558,11 @@ impl JaqNativeFormat {
             }
         }?;
         let writer = JaqWriter {
-            format: self.jaq_format(),
-            // YAML reads `{1:2}` as the key `"1:2"`, so a space after the separator is required
-            // rather than cosmetic.
+            // JSON-compatible YAML flow syntax quotes every string, preserving its contents.
+            format: match self {
+                Self::Yaml => JaqFormat::Json,
+                _ => self.jaq_format(),
+            },
             pp: jaq_json::write::Pp {
                 sep_space: true,
                 ..Default::default()
@@ -735,6 +737,9 @@ fn jaq_num_to_json(value: JaqNum) -> error_stack::Result<JsonValue, JaqProgramEr
 
 #[cfg(test)]
 mod number_properties;
+
+#[cfg(test)]
+mod string_properties;
 
 #[cfg(test)]
 mod tests {

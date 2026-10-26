@@ -82,7 +82,7 @@ pub(super) struct WasmAckContext {
 #[derive(Debug, Clone)]
 pub(super) struct BranchInstanceTemplate {
     pub(super) revision: ProcessorPlanRevision,
-    pub(super) source_kind: ModelKind,
+    pub(super) entity_kind: ModelKind,
     pub(super) source: RelayName,
     pub(super) root_relay: RelayName,
     pub(super) branch: Option<BranchName>,
@@ -1138,7 +1138,7 @@ pub(super) enum PlannedSidecar {
 }
 
 /// How a planned failure names the program whose rejected messages report `operation`: by the
-/// clause the node's NSPL spells it with, or by the operation's own name.
+/// clause the node's Plexus spells it with, or by the operation's own name.
 pub(super) struct ProgramName(MessageErrorOperation);
 
 impl ProgramName {

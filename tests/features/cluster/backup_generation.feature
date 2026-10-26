@@ -1,7 +1,7 @@
 Feature: Bounded complete restore generations
   Restoring a complete state set publishes one durable generation before START.
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: A complete restore generation with <branches> saves of <save_mib> MiB on <cluster_size> nodes preserves branches and source offsets
     Given Kafka is running
     And runtime replication is configured with replica count <replicas> and snapshot interval "10m"
@@ -10,13 +10,13 @@ Feature: Bounded complete restore generations
     And the active domain is "{{domain}}"
     And node "node-1" has a state-counting WASM fixture with <save_mib> MiB saves in resource directory "wasm_processor"
     And Kafka topic "backup_wasm_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -26,7 +26,7 @@ Feature: Bounded complete restore generations
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -53,11 +53,11 @@ Feature: Bounded complete restore generations
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       START;
       """
@@ -77,12 +77,12 @@ Feature: Bounded complete restore generations
     When the CLI restores "domain {{domain}} --as {{domain}}_durable_failure" from "stateful.nvxb" on node "{{leader}}" reporting JSON with memory measurements
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
     Given the active domain is "{{source_domain}}_durable_failure"
-    When these NSPL commands fail with "restore state installation is incomplete"
+    When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
     When the cluster is restarted
-    And these NSPL commands fail with "restore state installation is incomplete"
+    And these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
@@ -96,7 +96,7 @@ Feature: Bounded complete restore generations
     And the CLI restore reports domain "{{domain}}_copy" as "RUNNING" at start version 1
     Given the active domain is "{{domain}}_copy"
     When the cluster is restarted
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -104,7 +104,7 @@ Feature: Bounded complete restore generations
       """
       key={"tenant":"restore-tenant-0"} payload={"tenant":"restore-tenant-0","value":2}
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       STOP;
       START;
@@ -149,11 +149,11 @@ Feature: Bounded complete restore generations
     Then the CLI restore succeeded, restoring domain "{{source_domain}}_purged" with 1 resource versions and 11 models
     Given the active domain is "{{source_domain}}_purged"
     And node "restored-1" has a state-counting WASM fixture with <save_mib> MiB saves in resource directory "wasm_processor"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       REBIND RESOURCE wasm_filter TO VERSION 2 FOR WASM PROCESSOR filter_even_rows;
       START;

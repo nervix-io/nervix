@@ -1,4 +1,4 @@
-//! The declarations that nest source and sink Models connector by entity.
+//! The declarations that nest source and emitter Models connector by entity.
 //!
 //! Layer: vocabulary.
 //!
@@ -6,12 +6,12 @@
 //!   data enum over the entity Models, the kind that names each entity, the alterations of the
 //!   ingestors that read each entity, and the conversions from an entity Model or its operations
 //!   into the enums that hold them.
-//! - **Depends on.** The source and sink declarations each entity Model implements, and the
+//! - **Depends on.** The source and emitter declarations each entity Model implements, and the
 //!   alteration operations an ingestor applies.
 //! - **Must not know.** Any one connector, entity or capability.
 //!
-//! A connector module declares its own entities with [`connector_sources`] and
-//! [`connector_sinks`]. The unions are declared once each with [`entity_union`] and
+//! A connector module declares its own entities with [`connector_ingestors`] and
+//! [`connector_emitters`]. The unions are declared once each with [`entity_union`] and
 //! [`ingestor_alteration_union`], which list connectors and never entities, so adding an entity to
 //! a connector touches that connector's module alone.
 
@@ -24,9 +24,9 @@
 /// Model is a source of.
 ///
 /// Each line gives the entity's keyword and the label a form shows for it. What the entity
-/// declares is read from its Model's [`SourceEntity`](crate::SourceEntity) implementation, so the
+/// declares is read from its Model's [`IngestorDeclaration`](crate::IngestorDeclaration) implementation, so the
 /// kind states nothing a second time.
-macro_rules! connector_source_kinds {
+macro_rules! connector_ingestor_kinds {
     (
         connector $Connector:ident = $connector_keyword:literal;
         $(#[$entity_meta:meta])*
@@ -51,7 +51,7 @@ macro_rules! connector_source_kinds {
             pub const ALL: &'static [Self] = &[$(Self::$Variant,)+];
         }
 
-        impl $crate::connector::source::SourceEntityKind for $Entity {
+        impl $crate::connector::ingestor::IngestorEntityMetadata for $Entity {
             fn connector(&self) -> $crate::ConnectorKind {
                 $crate::ConnectorKind::$Connector
             }
@@ -74,17 +74,17 @@ macro_rules! connector_source_kinds {
                 }
             }
 
-            fn capabilities(&self) -> $crate::IngestSourceCapabilities {
+            fn capabilities(&self) -> $crate::IngestorEntityCapabilities {
                 match self {
-                    $(Self::$Variant => <$Model as $crate::SourceEntity>::CAPABILITIES,)+
+                    $(Self::$Variant => <$Model as $crate::IngestorDeclaration>::CAPABILITIES,)+
                 }
             }
         }
 
         $(
             impl $crate::IngestorEntityModel for $Model {
-                const KIND: $crate::IngestSourceKind =
-                    $crate::IngestSourceKind::$Connector($Entity::$Variant);
+                const KIND: $crate::IngestorEntityKind =
+                    $crate::IngestorEntityKind::$Connector($Entity::$Variant);
             }
         )+
     };
@@ -102,7 +102,7 @@ pub(crate) const ALTERED_PAIR_CHECKED: &str =
 /// An alteration of one entity holds operations whose `SET FROM` states that entity's own Model,
 /// so it can set no source of another entity, and its operations decode a transport's payloads
 /// with the codec `SET DECODE USING` names.
-macro_rules! connector_sources {
+macro_rules! connector_ingestors {
     (
         connector $Connector:ident = $connector_keyword:literal;
         $(#[$source_meta:meta])*
@@ -145,38 +145,34 @@ macro_rules! connector_sources {
             }
         }
 
-        impl $crate::SourceBody for $Source {
-            fn reference(&self) -> $crate::SourceReference<'_> {
+        impl $crate::IngestorEntityBody for $Source {
+            fn reference(&self) -> $crate::IngestorReference<'_> {
                 match self {
-                    $(Self::$Variant(source) => $crate::SourceBody::reference(source),)+
+                    $(Self::$Variant(source) => $crate::IngestorEntityBody::reference(source),)+
                 }
             }
 
             fn quiesce(&self) -> &$crate::IngestQuiesceMode {
                 match self {
-                    $(Self::$Variant(source) => $crate::SourceBody::quiesce(source),)+
+                    $(Self::$Variant(source) => $crate::IngestorEntityBody::quiesce(source),)+
                 }
             }
 
             fn quiesce_mut(&mut self) -> &mut $crate::IngestQuiesceMode {
                 match self {
-                    $(Self::$Variant(source) => $crate::SourceBody::quiesce_mut(source),)+
-                }
-            }
-
-            fn supports_quiesce(&self, quiesce: &$crate::IngestQuiesceMode) -> bool {
-                match self {
-                    $(
-                        Self::$Variant(source) => {
-                            $crate::SourceBody::supports_quiesce(source, quiesce)
-                        }
-                    )+
+                    $(Self::$Variant(source) => $crate::IngestorEntityBody::quiesce_mut(source),)+
                 }
             }
 
             fn acknowledgement(&self) -> $crate::IngestAcknowledgement<'_> {
                 match self {
-                    $(Self::$Variant(source) => $crate::SourceBody::acknowledgement(source),)+
+                    $(Self::$Variant(source) => $crate::IngestorEntityBody::acknowledgement(source),)+
+                }
+            }
+
+            fn chosen(&self, option: &str) -> Option<&'static str> {
+                match self {
+                    $(Self::$Variant(source) => $crate::IngestorEntityBody::chosen(source, option),)+
                 }
             }
         }
@@ -188,7 +184,7 @@ macro_rules! connector_sources {
                 }
             }
 
-            impl From<$Model> for $crate::IngestSource {
+            impl From<$Model> for $crate::IngestorEntity {
                 fn from(source: $Model) -> Self {
                     Self::$Connector($Source::$Variant(source))
                 }
@@ -236,14 +232,14 @@ macro_rules! connector_sources {
                 }
             }
 
-            /// The canonical NSPL of each operation, in order.
-            pub(crate) fn operations_to_nspl(
+            /// The canonical Plexus of each operation, in order.
+            pub(crate) fn operations_to_plexus(
                 &self,
-            ) -> ::error_stack::Result<Vec<String>, $crate::CanonicalNsplError> {
+            ) -> ::error_stack::Result<Vec<String>, $crate::CanonicalPlexusError> {
                 match self {
                     $(
                         Self::$Variant(operations) => {
-                            $crate::canonical::alter_transport_ingestor_operations_to_nspl(
+                            $crate::canonical::alter_transport_ingestor_operations_to_plexus(
                                 operations,
                             )
                         }
@@ -267,7 +263,7 @@ macro_rules! connector_sources {
                 }
             }
 
-            impl $crate::connector::source::AlteredIngestorSource for $Model {
+            impl $crate::connector::ingestor::AlteredIngestorEntity for $Model {
                 fn set_into(&self, input: &mut $crate::IngestorInput) {
                     let source = ::meticulous::OptionExt::verified(
                         input.transport_source_mut(),
@@ -289,7 +285,7 @@ macro_rules! connector_sources {
             }
         )+
 
-        $crate::connector::entity_union::connector_source_kinds! {
+        $crate::connector::entity_union::connector_ingestor_kinds! {
             connector $Connector = $connector_keyword;
             $(#[$entity_meta])*
             pub enum $Entity {
@@ -302,25 +298,27 @@ macro_rules! connector_sources {
     };
 }
 
-/// Declares the sinks of one connector: the union of its entity Models and the kind that names
+/// Declares the emitters of one connector: the union of its entity Models and the kind that names
 /// each entity.
 ///
-/// What an entity declares is read from its Model's [`SinkEntity`](crate::SinkEntity)
+/// What an entity declares is read from its Model's [`EmitterDeclaration`](crate::EmitterDeclaration)
 /// implementation, so the kind states nothing a second time.
-macro_rules! connector_sinks {
+macro_rules! connector_emitters {
     (
         connector $Connector:ident = $connector_keyword:literal;
-        $(#[$sink_meta:meta])*
-        pub enum $Sink:ident;
+        $(#[$emitter_meta:meta])*
+        pub enum $Emitter:ident;
+        $(#[$change_meta:meta])*
+        pub enum $ModeChange:ident;
         $(#[$entity_meta:meta])*
         pub enum $Entity:ident {
             $(
                 $(#[$variant_meta:meta])*
-                $Variant:ident($Model:ident) = $keyword:literal;
+                $Variant:ident($Model:ident, $Mode:ident) = $keyword:literal;
             )+
         }
     ) => {
-        $(#[$sink_meta])*
+        $(#[$emitter_meta])*
         #[derive(
             Debug,
             Clone,
@@ -332,15 +330,71 @@ macro_rules! connector_sinks {
             ::rkyv::Serialize,
             ::rkyv::Deserialize,
         )]
-        pub enum $Sink {
+        pub enum $Emitter {
             $(
                 $(#[$variant_meta])*
                 $Variant($Model),
             )+
         }
 
-        impl $Sink {
-            /// The entity this sink writes.
+        $(#[$change_meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize,
+                 ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
+        pub enum $ModeChange { $($Variant($Mode),)+ }
+
+        impl $ModeChange {
+            pub const fn entity(&self) -> $Entity {
+                match self { $(Self::$Variant(_) => $Entity::$Variant,)+ }
+            }
+            pub fn publishing(&self) -> $crate::EmitterPublishing<'_> {
+                match self { $(Self::$Variant(mode) => mode.publishing(),)+ }
+            }
+        }
+
+        impl $crate::EmitterPublication for $Emitter {
+            fn publishing(&self) -> $crate::EmitterPublishing<'_> {
+                match self { $(Self::$Variant(destination) => $crate::EmitterPublication::publishing(destination),)+ }
+            }
+            fn mode_change(&self) -> $crate::EmitterModeChange {
+                match self { $(Self::$Variant(destination) => $crate::EmitterPublication::mode_change(destination),)+ }
+            }
+            fn replace_mode(&mut self, mode: &$crate::EmitterModeChange)
+                -> ::error_stack::Result<(), $crate::AlterEmitterError> {
+                match self { $(Self::$Variant(destination) => $crate::EmitterPublication::replace_mode(destination, mode),)+ }
+            }
+        }
+
+        $(
+            impl $crate::EmitterEntityModel for $Model {
+                type PublishingMode = $Mode;
+                const KIND: $crate::EmitterEntityKind = $crate::EmitterEntityKind::$Connector($Entity::$Variant);
+            }
+            impl $crate::EmitterPublication for $Model {
+                fn publishing(&self) -> $crate::EmitterPublishing<'_> { self.mode.publishing() }
+                fn mode_change(&self) -> $crate::EmitterModeChange { self.mode.clone().into() }
+                fn replace_mode(&mut self, requested: &$crate::EmitterModeChange)
+                    -> ::error_stack::Result<(), $crate::AlterEmitterError> {
+                    if let $crate::EmitterModeChange::$Connector($ModeChange::$Variant(mode)) = requested {
+                        self.mode = mode.clone();
+                        Ok(())
+                    } else {
+                        Err(::error_stack::Report::new($crate::AlterEmitterError::DestinationKindMismatch {
+                            stored: <Self as $crate::EmitterEntityModel>::KIND,
+                            requested: requested.kind(),
+                        }))
+                    }
+                }
+            }
+            impl From<$Mode> for $ModeChange {
+                fn from(mode: $Mode) -> Self { Self::$Variant(mode) }
+            }
+            impl From<$Mode> for $crate::EmitterModeChange {
+                fn from(mode: $Mode) -> Self { Self::$Connector($ModeChange::$Variant(mode)) }
+            }
+        )+
+
+        impl $Emitter {
+            /// The entity this emitter writes.
             pub const fn entity(&self) -> $Entity {
                 match self {
                     $(Self::$Variant(_) => $Entity::$Variant,)+
@@ -348,54 +402,60 @@ macro_rules! connector_sinks {
             }
         }
 
-        impl $crate::SinkBody for $Sink {
-            fn reference(&self) -> $crate::SinkReference<'_> {
+        impl $crate::EmitterEntityBody for $Emitter {
+            fn reference(&self) -> $crate::EmitterReference<'_> {
                 match self {
-                    $(Self::$Variant(sink) => $crate::SinkBody::reference(sink),)+
+                    $(Self::$Variant(connector) => $crate::EmitterEntityBody::reference(connector),)+
                 }
             }
 
             fn client_mut(&mut self) -> Option<&mut $crate::ClientName> {
                 match self {
-                    $(Self::$Variant(sink) => $crate::SinkBody::client_mut(sink),)+
+                    $(Self::$Variant(connector) => $crate::EmitterEntityBody::client_mut(connector),)+
                 }
             }
 
-            fn catalog_client(&self) -> Option<$crate::SinkClientReference<'_>> {
+            fn catalog_client(&self) -> Option<$crate::EmitterClientReference<'_>> {
                 match self {
-                    $(Self::$Variant(sink) => $crate::SinkBody::catalog_client(sink),)+
+                    $(Self::$Variant(connector) => $crate::EmitterEntityBody::catalog_client(connector),)+
                 }
             }
 
-            fn value_mappings(&self) -> $crate::SinkValueMappings<'_> {
+            fn value_mappings(&self) -> $crate::EmitterValueMappings<'_> {
                 match self {
-                    $(Self::$Variant(sink) => $crate::SinkBody::value_mappings(sink),)+
+                    $(Self::$Variant(connector) => $crate::EmitterEntityBody::value_mappings(connector),)+
+                }
+            }
+
+            fn mapped_value_types(&self) -> Option<$crate::MappedValueTypes> {
+                match self {
+                    $(Self::$Variant(connector) => $crate::EmitterEntityBody::mapped_value_types(connector),)+
                 }
             }
 
             fn commit_policy(&self) -> Option<(&str, &str)> {
                 match self {
-                    $(Self::$Variant(sink) => $crate::SinkBody::commit_policy(sink),)+
+                    $(Self::$Variant(connector) => $crate::EmitterEntityBody::commit_policy(connector),)+
                 }
             }
         }
 
         $(
-            impl From<$Model> for $Sink {
-                fn from(sink: $Model) -> Self {
-                    Self::$Variant(sink)
+            impl From<$Model> for $Emitter {
+                fn from(connector: $Model) -> Self {
+                    Self::$Variant(connector)
                 }
             }
 
-            impl From<$Model> for $crate::EmitSink {
-                fn from(sink: $Model) -> Self {
-                    Self::$Connector($Sink::$Variant(sink))
+            impl From<$Model> for $crate::EmitterEntity {
+                fn from(connector: $Model) -> Self {
+                    Self::$Connector($Emitter::$Variant(connector))
                 }
             }
         )+
 
         $(#[$entity_meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ::serde::Serialize, ::serde::Deserialize, ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
         pub enum $Entity {
             $(
                 $(#[$variant_meta])*
@@ -404,11 +464,11 @@ macro_rules! connector_sinks {
         }
 
         impl $Entity {
-            /// Every sink entity of this connector, in declared order.
+            /// Every emitter entity of this connector, in declared order.
             pub const ALL: &'static [Self] = &[$(Self::$Variant,)+];
         }
 
-        impl $crate::connector::sink::SinkEntityKind for $Entity {
+        impl $crate::connector::emitter::EmitterEntityMetadata for $Entity {
             fn connector(&self) -> $crate::ConnectorKind {
                 $crate::ConnectorKind::$Connector
             }
@@ -425,19 +485,9 @@ macro_rules! connector_sinks {
                 }
             }
 
-            fn capabilities(&self) -> $crate::EmitSinkCapabilities {
+            fn capabilities(&self) -> $crate::EmitterEntityCapabilities {
                 match self {
-                    $(Self::$Variant => <$Model as $crate::SinkEntity>::CAPABILITIES,)+
-                }
-            }
-
-            fn accepts_publishing_mode(&self, mode: &$crate::EmitterPublishingMode) -> bool {
-                match self {
-                    $(
-                        Self::$Variant => {
-                            <$Model as $crate::SinkEntity>::accepts_publishing_mode(mode)
-                        }
-                    )+
+                    $(Self::$Variant => <$Model as $crate::EmitterDeclaration>::CAPABILITIES,)+
                 }
             }
         }
@@ -580,7 +630,7 @@ macro_rules! entity_union {
 ///
 /// A line names a connector with the alteration enum its module declared, whose variants name the
 /// connector's entities. The union states the pair the statement's head names, applies the
-/// operations to an ingestor that reads it, and writes them back as canonical NSPL.
+/// operations to an ingestor that reads it, and writes them back as canonical Plexus.
 macro_rules! ingestor_alteration_union {
     (
         $(#[$union_meta:meta])*
@@ -605,11 +655,11 @@ macro_rules! ingestor_alteration_union {
 
         impl $Union {
             /// The connector and entity the statement's head names.
-            pub const fn kind(&self) -> $crate::IngestSourceKind {
+            pub const fn kind(&self) -> $crate::IngestorEntityKind {
                 match self {
                     $(
                         Self::$Connector(alteration) => {
-                            $crate::IngestSourceKind::$Connector(alteration.entity())
+                            $crate::IngestorEntityKind::$Connector(alteration.entity())
                         }
                     )+
                 }
@@ -625,12 +675,12 @@ macro_rules! ingestor_alteration_union {
                 }
             }
 
-            /// The canonical NSPL of each operation, in order.
-            pub(crate) fn operations_to_nspl(
+            /// The canonical Plexus of each operation, in order.
+            pub(crate) fn operations_to_plexus(
                 &self,
-            ) -> ::error_stack::Result<Vec<String>, $crate::CanonicalNsplError> {
+            ) -> ::error_stack::Result<Vec<String>, $crate::CanonicalPlexusError> {
                 match self {
-                    $(Self::$Connector(alteration) => alteration.operations_to_nspl(),)+
+                    $(Self::$Connector(alteration) => alteration.operations_to_plexus(),)+
                 }
             }
         }
@@ -645,8 +695,40 @@ macro_rules! ingestor_alteration_union {
     };
 }
 
-pub(crate) use connector_sinks;
-pub(crate) use connector_source_kinds;
-pub(crate) use connector_sources;
+pub(crate) use connector_emitters;
+pub(crate) use connector_ingestor_kinds;
+pub(crate) use connector_ingestors;
 pub(crate) use entity_union;
 pub(crate) use ingestor_alteration_union;
+
+/// Declare destination Models, their kinds and policy changes from one connector catalog.
+macro_rules! emitter_destinations {
+    (
+        $(#[$model_meta:meta])* pub enum $Model:ident as $Body:path;
+        $(#[$kind_meta:meta])* pub enum $Kind:ident as $EntityKind:path;
+        pub enum $Change:ident;
+        models { $($Connector:ident($Destination:ident, $Entity:ident, $Mode:ident),)+ }
+    ) => {
+        $crate::connector::entity_union::entity_union! {
+            $(#[$model_meta])* pub enum $Model as $Body;
+            $(#[$kind_meta])*
+            #[derive(::serde::Serialize, ::serde::Deserialize, ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
+            pub enum $Kind as $EntityKind;
+            kinds {}
+            models { $($Connector($Destination, $Entity),)+ }
+        }
+        /// A typed publishing-policy update whose variant names its exact emitter entity.
+        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize,
+                 ::rkyv::Archive, ::rkyv::Serialize, ::rkyv::Deserialize)]
+        pub enum $Change { $($Connector($Mode),)+ }
+        impl $Change {
+            pub const fn kind(&self) -> $Kind {
+                match self { $(Self::$Connector(mode) => $Kind::$Connector(mode.entity()),)+ }
+            }
+            pub fn publishing(&self) -> $crate::EmitterPublishing<'_> {
+                match self { $(Self::$Connector(mode) => mode.publishing(),)+ }
+            }
+        }
+    };
+}
+pub(crate) use emitter_destinations;

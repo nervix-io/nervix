@@ -1,5 +1,7 @@
 # Domains And Time
 
+*Plexus, the Nervix graph definition language.*
+
 Every runtime graph in Nervix runs inside a domain.
 
 This chapter describes the public language and runtime behavior. See
@@ -15,7 +17,7 @@ Nervix currently supports:
 
 Domain creation is never transaction content. A transaction is bound to one already-existing
 domain, so `CREATE DOMAIN` runs on its own before `BEGIN`; queueing it is rejected. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
+[Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions).
 
 ## Paced Domains
 
@@ -23,7 +25,7 @@ Paced domains maintain a domain clock.
 
 `PERIOD` must be positive and no larger than `18446744073709551615ns`. `SKEW` may be zero but must
 fit in that same 64-bit nanosecond duration range. Invalid durations are rejected before the domain
-is stored. Duration text anywhere in NSPL whose spans could add up to 18446744073709551615 seconds,
+is stored. Duration text anywhere in Plexus whose spans could add up to 18446744073709551615 seconds,
 however they are written, is rejected: a duration literal when the statement is parsed, and a
 duration string argument, such as the delay of `PERCENTILE_LINEAR_HISTOGRAM`, when the statement is
 validated.
@@ -81,7 +83,7 @@ producer-to-relay edge and a relay-to-consumer edge each receive the default ind
 clause is optional on every domain-creation form, and omission means `NEUTRAL` so ordinary
 scheduler heuristics remain active:
 
-```nspl
+```plexus
 CREATE PACED DOMAIN production
   WITH PERIOD 1s SKEW 100ms
   PLACEMENT REQUIRE COLOCATION;
@@ -92,7 +94,7 @@ CREATE UNPACED DOMAIN archive
 
 Change the default for the session's active domain with the nameless domain alteration:
 
-```nspl
+```plexus
 ALTER DOMAIN SET PLACEMENT PREFER COLOCATION;
 ```
 
@@ -120,8 +122,9 @@ Important runtime consequences:
 Successful lifecycle commands are completion boundaries. `START` returns after every current live
 node has prepared the same revision and every configured listener and assigned source has completed
 startup. `STOP` returns after intake and runtime work have stopped remotely, including when it is the
-last running domain. A dependent connection, observation, or publish can follow immediately through
-any live node.
+last running domain, and after every deduplicator and window branch it ended has written the state
+it published last, so a backup taken as soon as `STOP` returns holds that state. A dependent
+connection, observation, or publish can follow immediately through any live node.
 
 The lifecycle state, active paced-clock anchor, and one clock authority are replicated. The
 authority identifies a concrete incarnation of a named cluster node and carries a revision that
@@ -224,8 +227,8 @@ physical and run before route-local flushing. Connector retry and backoff timers
 physical controls; none of these operational waits is projected through the domain clock.
 
 An emitter's publish cadence and its publish attempts are separate state. Retry backoff, the
-acknowledgement keepalive that holds an upstream `MODE ACK` source open while a sink is
-unavailable, the sink acknowledgement timeout, the stop and drain deadlines, and an HTTP
+acknowledgement keepalive that holds an upstream `MODE ACK` source open while an emitter is
+unavailable, the emitter acknowledgement timeout, the stop and drain deadlines, and an HTTP
 `Retry-After` a server returns are all physical: a paced domain never shortens or lengthens the
 real wait an external system asked for. A failed attempt keeps the emitter's pending batches, their
 acknowledgements, and its unchanged cadence deadline; while a retry is scheduled the emitter waits
@@ -236,7 +239,7 @@ maximum batch size releases a buffer that has reached it as soon as no retry is 
 
 A client session can follow the active domain's clock instead of inferring it from the domain list:
 
-```nspl
+```plexus
 ATTACH DOMAIN CLOCK;
 DETACH DOMAIN CLOCK;
 ```
@@ -292,7 +295,7 @@ physical monotonic wait.
 Nervix derives a quiesce level from the complete validated model diff. `ALTER SCHEMA`,
 `ALTER WIRE ... SCHEMA`, relay schema changes, and relay branching changes use an internal paused
 lifecycle state when their domain is running. Dynamic changes such as relay capacity do not pause
-the domain. There is no NSPL `PAUSE` or `RESUME` statement.
+the domain. There is no Plexus `PAUSE` or `RESUME` statement.
 
 Before changing the live graph, the leader validates the complete candidate graph without writing
 it while holding the domain's exclusive ALTER lock. For an entity-pause alteration, Nervix gates
@@ -326,8 +329,8 @@ eligible handoff residue are preserved across the quiesce cycle.
 mapping after installing all compatible runtime state. That mapping projects the downtime, so
 `TIMESTAMP AT` admission uses the restored clock's reached windows. Unpaced domains resume without
 a mapping. A default restore stays stopped. A later normal `START` advances the generation and
-clears materialized relay rows while preserving compatible WASM state, source offsets and branch
-lifecycle. To start from the archived frontier with a new mapping, use a default restore and
+clears materialized relay rows while preserving compatible WASM state, source offsets, branch
+lifecycle, deduplicator keys and windows. To start from the archived frontier with a new mapping, use a default restore and
 explicit `START AT '<frontier>' TIME RATE <rate>`. `DESCRIBE DOMAIN` exposes the generation, start
 point and mapping; `LIST DOMAINS` exposes pace, status and generation. See
 [Backup And Restore](backup-and-restore.md#restoring).

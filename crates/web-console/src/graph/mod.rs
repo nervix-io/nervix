@@ -159,8 +159,8 @@ mod tests {
         assert!(item.width >= RELAY_MIN_WIDTH && item.width <= RELAY_MAX_WIDTH);
 
         let emitter = DataflowNode::new(
-            "emitter:sink",
-            "sink",
+            "emitter:emitter",
+            "emitter",
             DataflowNodeRole::Emitter {
                 transport: "REDIS".to_string(),
             },

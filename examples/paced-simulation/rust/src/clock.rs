@@ -102,7 +102,7 @@ impl Pace {
     }
 }
 
-/// The text of a duration the way NSPL writes it, in the largest unit that divides it.
+/// The text of a duration the way Plexus writes it, in the largest unit that divides it.
 pub(crate) fn duration_text(duration: Duration) -> String {
     let nanos = duration.as_nanos();
     if nanos.is_multiple_of(1_000_000_000) {

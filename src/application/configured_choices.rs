@@ -23,8 +23,8 @@ use nervix_client_wire::{
     ChoiceValue,
 };
 use nervix_models::{
-    BranchName, CanonicalNsplError, CreateBranch, CreateRelay, CreateSchema, DomainName,
-    IngestSourceKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
+    BranchName, CanonicalPlexusError, CreateBranch, CreateRelay, CreateSchema, DomainName,
+    IngestorEntityKind, Model, ModelIndex, ModelKind, NodeRef, RelayBranching,
     RequestedResourceVersion, ResourceName, ResourceVersionStatus, SchemaField,
 };
 
@@ -48,7 +48,7 @@ pub(in crate::application) enum ConfiguredQuestion {
     RelayFields(NodeRef),
     /// Fields of the selected codec's output schema.
     CodecFields(NodeRef),
-    IngestSource(IngestSourceKind),
+    IngestorEntity(IngestorEntityKind),
     IngestCodecs,
     IngestRelays(Option<BranchName>),
     BranchFields(NodeRef),
@@ -80,7 +80,7 @@ impl<'a> ConfiguredQuery<'a> {
             };
             return Some(Self {
                 domain,
-                question: ConfiguredQuestion::IngestSource(kind),
+                question: ConfiguredQuestion::IngestorEntity(kind),
             });
         }
         let question = match request.target() {
@@ -337,7 +337,7 @@ impl ConfiguredChoices {
             | ConfiguredQuestion::WireJsonSchemas
             | ConfiguredQuestion::WireCborSchemas
             | ConfiguredQuestion::WireAvroSchemas => self.models(question, &search),
-            ConfiguredQuestion::IngestSource(_)
+            ConfiguredQuestion::IngestorEntity(_)
             | ConfiguredQuestion::IngestCodecs
             | ConfiguredQuestion::IngestRelays(_)
             | ConfiguredQuestion::ProcessorCompatibleInputRelays(_)
@@ -384,7 +384,7 @@ impl ConfiguredChoices {
                     NodeRef::new(ModelKind::Codec, &codec.name),
                     format!("output schema {}", codec.schema),
                     "Codec",
-                    Model::<RequestedResourceVersion>::Codec(codec.clone()).to_canonical_nspl(),
+                    Model::<RequestedResourceVersion>::Codec(codec.clone()).to_canonical_plexus(),
                 )?,
                 (ConfiguredQuestion::IngestCodecs, Model::Codec(codec))
                     if codec.wire_format.supports_decoding() =>
@@ -393,20 +393,21 @@ impl ConfiguredChoices {
                         NodeRef::new(ModelKind::Codec, &codec.name),
                         format!("decodes into schema {}", codec.schema),
                         "Decoding codec",
-                        Model::<RequestedResourceVersion>::Codec(codec.clone()).to_canonical_nspl(),
+                        Model::<RequestedResourceVersion>::Codec(codec.clone())
+                            .to_canonical_plexus(),
                     )?
                 }
-                (ConfiguredQuestion::IngestSource(kind), Model::Endpoint(endpoint))
+                (ConfiguredQuestion::IngestorEntity(kind), Model::Endpoint(endpoint))
                     if kind.capabilities().reference.admits(model) =>
                 {
                     ModelCandidate::new(
                         NodeRef::new(ModelKind::Endpoint, &endpoint.name),
                         format!("{} endpoint", endpoint.endpoint_type),
                         "Endpoint source",
-                        model.to_canonical_nspl(),
+                        model.to_canonical_plexus(),
                     )?
                 }
-                (ConfiguredQuestion::IngestSource(kind), model)
+                (ConfiguredQuestion::IngestorEntity(kind), model)
                     if model.kind() == ModelKind::Client
                         && kind.capabilities().reference.admits(model) =>
                 {
@@ -414,7 +415,7 @@ impl ConfiguredChoices {
                         model.node_ref(),
                         format!("{} client", kind.form_label()),
                         "Client source",
-                        model.to_canonical_nspl(),
+                        model.to_canonical_plexus(),
                     )?
                 }
                 (ConfiguredQuestion::IngestRelays(branch), Model::Relay(relay))
@@ -444,7 +445,7 @@ impl ConfiguredChoices {
                     NodeRef::new(ModelKind::Vhost, &vhost.name),
                     format!("{} hostnames", vhost.hostnames.len()),
                     "VHOST",
-                    Model::<RequestedResourceVersion>::Vhost(vhost.clone()).to_canonical_nspl(),
+                    Model::<RequestedResourceVersion>::Vhost(vhost.clone()).to_canonical_plexus(),
                 )?,
                 (ConfiguredQuestion::SignalingProtocols, Model::SignalingProtocol(protocol)) => {
                     ModelCandidate::new(
@@ -452,7 +453,7 @@ impl ConfiguredChoices {
                         "WebSocket handshake".to_string(),
                         "Signaling protocol",
                         Model::<RequestedResourceVersion>::SignalingProtocol(protocol.clone())
-                            .to_canonical_nspl(),
+                            .to_canonical_plexus(),
                     )?
                 }
                 (ConfiguredQuestion::WireJsonSchemas, Model::WireJsonSchema(schema)) => {
@@ -461,7 +462,7 @@ impl ConfiguredChoices {
                         format!("{} fields", schema.fields.len()),
                         "Wire JSON schema",
                         Model::<RequestedResourceVersion>::WireJsonSchema(schema.clone())
-                            .to_canonical_nspl(),
+                            .to_canonical_plexus(),
                     )?
                 }
                 (ConfiguredQuestion::WireCborSchemas, Model::WireCborSchema(schema)) => {
@@ -470,7 +471,7 @@ impl ConfiguredChoices {
                         format!("{} fields", schema.fields.len()),
                         "Wire CBOR schema",
                         Model::<RequestedResourceVersion>::WireCborSchema(schema.clone())
-                            .to_canonical_nspl(),
+                            .to_canonical_plexus(),
                     )?
                 }
                 (ConfiguredQuestion::WireAvroSchemas, Model::WireAvroSchema(schema)) => {
@@ -479,7 +480,7 @@ impl ConfiguredChoices {
                         format!("{} fields", schema.fields.len()),
                         "Wire AVRO schema",
                         Model::<RequestedResourceVersion>::WireAvroSchema(schema.clone())
-                            .to_canonical_nspl(),
+                            .to_canonical_plexus(),
                     )?
                 }
                 _ => continue,
@@ -497,7 +498,7 @@ impl ConfiguredChoices {
         let mut digest = blake3::Hasher::new();
         if let Some(input) = input {
             let definition = input
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .map_err(|_| ChoiceStatus::LookupFailed)?;
             hash_choice_text(&mut digest, &definition);
         }
@@ -625,10 +626,10 @@ impl ConfiguredChoices {
         };
         // Every configured Model renders; one that cannot is a lookup that failed.
         let relay_definition = relay
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .map_err(|_| ChoiceStatus::LookupFailed)?;
         let schema_definition = schema
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .map_err(|_| ChoiceStatus::LookupFailed)?;
         let mut digest = blake3::Hasher::new();
         hash_choice_text(&mut digest, &relay_definition);
@@ -655,10 +656,10 @@ impl ConfiguredChoices {
             return Err(ChoiceStatus::LookupFailed);
         };
         let codec_definition = codec
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .map_err(|_| ChoiceStatus::LookupFailed)?;
         let schema_definition = schema
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .map_err(|_| ChoiceStatus::LookupFailed)?;
         let mut digest = blake3::Hasher::new();
         hash_choice_text(&mut digest, &codec_definition);
@@ -691,13 +692,13 @@ impl ConfiguredChoices {
         hash_choice_text(
             &mut digest,
             &branch
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .map_err(|_| ChoiceStatus::LookupFailed)?,
         );
         hash_choice_text(
             &mut digest,
             &schema
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .map_err(|_| ChoiceStatus::LookupFailed)?,
         );
         let choices = schema
@@ -746,7 +747,7 @@ impl ModelCandidate {
         node: NodeRef,
         detail: String,
         group: &str,
-        definition: error_stack::Result<String, CanonicalNsplError>,
+        definition: error_stack::Result<String, CanonicalPlexusError>,
     ) -> Result<Self, ChoiceStatus> {
         let definition = definition.map_err(|_| ChoiceStatus::LookupFailed)?;
         Ok(Self {
@@ -765,7 +766,7 @@ impl ModelCandidate {
     fn schema(schema: &CreateSchema) -> Result<Self, ChoiceStatus> {
         let detail = format!("{} fields", schema.fields.len());
         let node = NodeRef::new(ModelKind::Schema, &schema.name);
-        Self::new(node, detail, "Schema", schema.to_canonical_nspl())
+        Self::new(node, detail, "Schema", schema.to_canonical_plexus())
     }
 
     fn branch(branch: &CreateBranch) -> Result<Self, ChoiceStatus> {
@@ -777,7 +778,7 @@ impl ModelCandidate {
             ));
         }
         let node = NodeRef::new(ModelKind::Branch, &branch.name);
-        Self::new(node, detail, "Branch", branch.to_canonical_nspl())
+        Self::new(node, detail, "Branch", branch.to_canonical_plexus())
     }
 
     fn relay(relay: &CreateRelay) -> Result<Self, ChoiceStatus> {
@@ -790,7 +791,7 @@ impl ModelCandidate {
             detail.push_str(" · materialized");
         }
         let node = NodeRef::new(ModelKind::Relay, &relay.name);
-        Self::new(node, detail, "Relay", relay.to_canonical_nspl())
+        Self::new(node, detail, "Relay", relay.to_canonical_plexus())
     }
 
     fn matches(&self, search: &str) -> bool {
@@ -813,13 +814,13 @@ mod tests {
     use nervix_models::{
         AvroType, BranchEviction, BranchName, CodecName, CodecWireFormat, CreateBranch,
         CreateCodec, CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost,
-        CreateWireSchema, DomainName, FieldName, HttpSourceEntity, JsonType, KafkaSourceEntity,
+        CreateWireSchema, DomainName, FieldName, HttpIngestorEntity, JsonType, KafkaIngestorEntity,
         MaterializedRelayState, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayBranching,
         RelayName, RequestedResourceVersion, ResourceName, ResourceUpload, ResourceUploadIdentity,
         ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceVersionCounter,
         ResourceVersionStatus, SchemaField, SchemaName, SignalingProtocolName,
         SignalingProtocolOnConnect, SignalingStep, SignalingWireFormat, UserName, VhostName,
-        WebsocketsSourceEntity, WireSchemaField, WireSchemaName, WireSchemaStrictness,
+        WebsocketsIngestorEntity, WireSchemaField, WireSchemaName, WireSchemaStrictness,
     };
     use sorted_vec::SortedVec;
 
@@ -931,12 +932,12 @@ mod tests {
 
     #[test]
     fn ingestor_questions_keep_source_kind_branch_and_field_dependencies_typed() {
-        use nervix_models::IngestSourceKind;
+        use nervix_models::IngestorEntityKind;
 
         let in_domain = vec![ChoiceSelection {
             value: ChoiceValue::Domain(domain()),
         }];
-        for kind in IngestSourceKind::modeled() {
+        for kind in IngestorEntityKind::modeled() {
             let request = ChoiceLookupRequest::new(
                 ChoiceTarget::for_ingest_source(kind),
                 in_domain.clone(),
@@ -944,7 +945,7 @@ mod tests {
             );
             assert_eq!(
                 ConfiguredQuery::of(&request).map(|query| query.question),
-                Some(ConfiguredQuestion::IngestSource(kind)),
+                Some(ConfiguredQuestion::IngestorEntity(kind)),
             );
         }
         assert_eq!(
@@ -1099,7 +1100,7 @@ mod tests {
     fn ingestor_source_and_codec_choices_offer_only_matching_capabilities() {
         use nervix_models::{
             ClientName, CodecJaqFormat, CodecJaqTransformations, CreateClientHttp,
-            CreateClientKafka, CreateEndpoint, EndpointName, EndpointType, IngestSourceKind,
+            CreateClientKafka, CreateEndpoint, EndpointName, EndpointType, IngestorEntityKind,
         };
 
         let models = vec![
@@ -1168,26 +1169,26 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Http(
-                HttpSourceEntity::Request
-            ))),
+            labels(ConfiguredQuestion::IngestorEntity(
+                IngestorEntityKind::Http(HttpIngestorEntity::Request)
+            )),
             ["http_input"]
         );
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Kafka(
-                KafkaSourceEntity::Topic
-            ))),
+            labels(ConfiguredQuestion::IngestorEntity(
+                IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic)
+            )),
             ["kafka_input"]
         );
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(IngestSourceKind::Http(
-                HttpSourceEntity::Endpoint
-            ))),
+            labels(ConfiguredQuestion::IngestorEntity(
+                IngestorEntityKind::Http(HttpIngestorEntity::Endpoint)
+            )),
             ["listener"]
         );
         assert_eq!(
-            labels(ConfiguredQuestion::IngestSource(
-                IngestSourceKind::Websockets(WebsocketsSourceEntity::Endpoint)
+            labels(ConfiguredQuestion::IngestorEntity(
+                IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint)
             )),
             ["socket"]
         );

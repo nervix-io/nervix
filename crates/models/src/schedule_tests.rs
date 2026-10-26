@@ -3,10 +3,10 @@ use nonzero_ext::nonzero;
 use crate::{
     AckMode, BranchSelection, ClusterNodeName, ClusterSchedule, CreateIngestor, CreateJunction,
     CreateSchema, DomainName, DomainSchedule, EndpointIngestMode, FlushPolicy, GeneralErrorPolicy,
-    HttpEndpointSource, HttpSource, IngestQuiesceMode, IngestSource, KafkaPartitionSchedule, Model,
-    ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, ResolvedBranching,
-    ScheduledNode, SchemaField, SchemaFingerprint, SyslogIngestMode, SyslogListenerSource,
-    SyslogSource,
+    HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode, IngestorEntity, KafkaPartitionSchedule,
+    Model, OwnershipStateComponent, ParseAsType, ProcessorInputs, ProcessorOutput,
+    ProcessorOutputs, ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint,
+    SyslogIngestMode, SyslogIngestor, SyslogListenerIngestor,
 };
 
 fn named<N>(raw: &str) -> N
@@ -173,7 +173,7 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
                 },
             )]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Http(HttpSource::Endpoint(HttpEndpointSource {
+                source: IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
                     endpoint: named("public_http"),
                     mode: EndpointIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::EndpointBuffer {
@@ -207,7 +207,7 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
                 },
             )]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Syslog(SyslogSource::Listener(SyslogListenerSource {
+                source: IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
                     client: named("syslog_listener"),
                     mode: SyslogIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,
@@ -228,17 +228,37 @@ fn scheduled_node_execution_uses_primary_except_for_server_listener_ingestors() 
         ],
     );
 
+    let both_nodes = [
+        named::<ClusterNodeName>("node-a"),
+        named::<ClusterNodeName>("node-b"),
+    ];
+    let unprimaried_junction = replicated_junction
+        .clone()
+        .placed_on(None, both_nodes.to_vec());
+    let unplaced_junction = replicated_junction.clone().placed_on(None, Vec::new());
+
     assert_eq!(replicated_junction.execution_node(), Some(&named("node-a")));
     assert!(replicated_junction.executes_on(&named::<ClusterNodeName>("node-a")));
     assert!(!replicated_junction.executes_on(&named::<ClusterNodeName>("node-b")));
+    assert_eq!(
+        replicated_junction.execution_nodes(),
+        [named::<ClusterNodeName>("node-a")]
+    );
+
+    assert!(unprimaried_junction.executes_on(&named::<ClusterNodeName>("node-a")));
+    assert!(unprimaried_junction.executes_on(&named::<ClusterNodeName>("node-b")));
+    assert_eq!(unprimaried_junction.execution_nodes(), both_nodes);
+    assert!(unplaced_junction.execution_nodes().is_empty());
 
     assert_eq!(endpoint_ingestor.execution_node(), None);
     assert!(endpoint_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
     assert!(endpoint_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
+    assert_eq!(endpoint_ingestor.execution_nodes(), both_nodes);
 
     assert_eq!(syslog_ingestor.execution_node(), None);
     assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-a")));
     assert!(syslog_ingestor.executes_on(&named::<ClusterNodeName>("node-b")));
+    assert_eq!(syslog_ingestor.execution_nodes(), both_nodes);
 }
 
 #[test]
@@ -248,4 +268,55 @@ fn kafka_partition_schedule_assigns_partitions_round_robin_by_instance() {
     assert_eq!(schedule.observed_partitions, vec![0, 1, 2, 3]);
     assert_eq!(schedule.rebalance_epoch, 7);
     assert_eq!(schedule.instance_assignments, vec![vec![0, 2], vec![1, 3]]);
+}
+
+fn placed_schema(raw: &str, primary: &str, assigned: &[&str]) -> ScheduledNode {
+    let assigned = assigned
+        .iter()
+        .map(|node| named::<ClusterNodeName>(node))
+        .collect();
+    ScheduledNode::new(
+        Model::Schema(CreateSchema {
+            name: named(raw),
+            fields: Vec::new(),
+        }),
+        SchemaFingerprint::from_digest([1; 32]),
+    )
+    .placed_on(Some(named(primary)), assigned)
+}
+
+#[test]
+fn a_domain_schedule_names_the_entities_a_node_is_the_primary_of_in_schedule_order() {
+    let schedule = DomainSchedule::new(
+        domain("alpha"),
+        vec![
+            placed_schema("orders", "node-b", &["node-b", "node-a"]),
+            placed_schema("payments", "node-a", &["node-a", "node-b"]),
+            placed_schema("refunds", "node-b", &["node-b"]),
+        ],
+        Vec::new(),
+    );
+
+    let primaries = schedule.primary_entities_on(&named("node-b"));
+    let names = primaries
+        .iter()
+        .map(|entity| entity.identifier.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["orders", "refunds"]);
+    assert!(schedule.primary_entities_on(&named("node-c")).is_empty());
+}
+
+#[test]
+fn every_ownership_component_but_branch_aggregated_metrics_is_archived() {
+    assert!(!OwnershipStateComponent::BranchAggregated.is_archived());
+    for component in [
+        OwnershipStateComponent::BranchLifecycle,
+        OwnershipStateComponent::Deduplicator,
+        OwnershipStateComponent::KafkaOffsets,
+        OwnershipStateComponent::MaterializedRelay,
+        OwnershipStateComponent::WasmProcessor,
+        OwnershipStateComponent::WindowProcessor,
+    ] {
+        assert!(component.is_archived(), "{component:?}");
+    }
 }

@@ -26,7 +26,7 @@ use crate::{
     wire,
 };
 
-/// Executes NSPL statements.
+/// Executes Plexus statements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRequest {
     pub query: String,
@@ -41,7 +41,7 @@ pub struct CommandRequest {
     pub expected_preview: Option<TransactionPreviewIdentity>,
 }
 
-/// Asks for completions of NSPL source at a cursor.
+/// Asks for completions of Plexus source at a cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuggestRequest {
     input: String,

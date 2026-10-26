@@ -538,7 +538,7 @@ struct ReportedField {
 }
 
 impl ReportedField {
-    /// The field's type in NSPL's spelling, with nested fixed-size lists as dimensions.
+    /// The field's type in Plexus's spelling, with nested fixed-size lists as dimensions.
     fn type_text(&self) -> String {
         Self::levels_text(&self.levels)
     }

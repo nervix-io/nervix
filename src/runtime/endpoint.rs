@@ -6,7 +6,7 @@
 //!   dispatch, and response disposition.
 //! - **Depends on.** The request intakes endpoint sources bind, Arrow decoding and actual-UTC
 //!   observation.
-//! - **Must not know.** When a route is bound or unbound, which the endpoint source owns; NSPL
+//! - **Must not know.** When a route is bound or unbound, which the endpoint source owns; Plexus
 //!   parsing, placement policy or consensus storage.
 
 #![cfg_attr(
@@ -48,6 +48,7 @@ pub(super) struct RoutedEndpoint {
 /// The intake one ingestor admits an endpoint's requests through, bound to every route the
 /// endpoint publishes while the ingestor's endpoint source runs.
 pub(crate) struct EndpointIngestBinding {
+    pub(super) request: EndpointRequestPolicy,
     pub(super) handles: IngestTaskHandles,
     pub(super) quiesce: Arc<IngestorQuiesceControl>,
     pub(super) domain: DomainName,
@@ -58,18 +59,49 @@ pub(crate) struct EndpointIngestBinding {
     pub(super) codec: Arc<CompiledCodec>,
     pub(super) metrics: MessageMetricsHandle,
     pub(super) branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
+    /// Consumes a body the ingestor's codec refuses.
+    pub(super) decode_rejections: DecodeRejections,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct EndpointDispatchOutcome {
+pub(crate) struct EndpointAdmission {
     pub(in crate::runtime) accepted: usize,
     pub(in crate::runtime) rejected: usize,
     pub(crate) retry_after: Option<Duration>,
 }
 
-impl EndpointDispatchOutcome {
+impl EndpointAdmission {
     pub(crate) fn is_accepted(self) -> bool {
         self.accepted > 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndpointDispatchOutcome {
+    NoAck(EndpointAdmission),
+    Ack(EndpointRequestReply),
+}
+
+impl EndpointDispatchOutcome {
+    pub(crate) fn is_accepted(self) -> bool {
+        match self {
+            Self::NoAck(admission) => admission.is_accepted(),
+            Self::Ack(reply) => reply.outcome == EndpointRequestOutcome::Completed,
+        }
+    }
+
+    pub(crate) fn acknowledgement(self) -> Option<EndpointRequestReply> {
+        match self {
+            Self::NoAck(_) => None,
+            Self::Ack(reply) => Some(reply),
+        }
+    }
+
+    pub(crate) fn retry_after(self) -> Option<Duration> {
+        match self {
+            Self::NoAck(admission) => admission.retry_after,
+            Self::Ack(reply) => Some(reply.retry_after),
+        }
     }
 }
 
@@ -113,8 +145,11 @@ impl Runtime {
 }
 
 impl EndpointIntakeRoute<EndpointIngestBinding> {
-    pub(crate) fn admission(&self) -> EndpointDispatchOutcome {
-        let mut outcome = EndpointDispatchOutcome::default();
+    /// Refuses unavailable intake before HTTP reads a body or upgrades a WebSocket. Actual
+    /// dispatch still acquires its own permit, so racing requests cannot exceed the window.
+    pub(crate) fn refusal(&self) -> Option<EndpointDispatchOutcome> {
+        let mut outcome = EndpointAdmission::default();
+        let mut acknowledgement = None;
         let mut retry_after = Vec::new();
         for lifetime in self.bindings() {
             let lease = lifetime.intake();
@@ -122,33 +157,51 @@ impl EndpointIntakeRoute<EndpointIngestBinding> {
                 outcome.rejected = outcome
                     .rejected
                     .checked_add(1)
-                    .assured("the bindings counted here are endpoint routes held in memory");
+                    .assured("endpoint bindings have in-memory owners");
                 retry_after.push(None);
                 continue;
             };
-            match binding.quiesce.endpoint_admission() {
-                Ok(()) => {
-                    outcome.accepted = outcome
-                        .accepted
-                        .checked_add(1)
-                        .assured("the bindings counted here are endpoint routes held in memory");
-                }
-                Err(duration) => {
-                    outcome.rejected = outcome
-                        .rejected
-                        .checked_add(1)
-                        .assured("the bindings counted here are endpoint routes held in memory");
-                    retry_after.push(duration);
-                }
+            let availability = binding.quiesce.endpoint_admission();
+            if availability.is_ok() && binding.request.has_capacity() {
+                outcome.accepted = outcome
+                    .accepted
+                    .checked_add(1)
+                    .assured("endpoint bindings have in-memory owners");
+                continue;
             }
+            outcome.rejected = outcome
+                .rejected
+                .checked_add(1)
+                .assured("endpoint bindings have in-memory owners");
+            let mut delay = match availability {
+                Ok(()) => None,
+                Err(delay) => delay,
+            };
+            if let EndpointRequestPolicy::Ack(window) = &binding.request {
+                let refusal = if availability.is_err() {
+                    nervix_models::ClientSubmissionRefusal::Suspended
+                } else {
+                    nervix_models::ClientSubmissionRefusal::Busy
+                };
+                let reply = EndpointRequestReply {
+                    outcome: EndpointRequestOutcome::NotAdmitted(refusal),
+                    retry_after: window.retry_after,
+                };
+                acknowledgement.get_or_insert(reply);
+                delay = Some(window.retry_after);
+            }
+            retry_after.push(delay);
         }
-        if outcome.accepted == 0
-            && !retry_after.is_empty()
-            && retry_after.iter().all(Option::is_some)
-        {
+        if outcome.accepted > 0 {
+            return None;
+        }
+        if !retry_after.is_empty() && retry_after.iter().all(Option::is_some) {
             outcome.retry_after = retry_after.into_iter().flatten().max();
         }
-        outcome
+        Some(match acknowledgement {
+            Some(reply) => EndpointDispatchOutcome::Ack(reply),
+            None => EndpointDispatchOutcome::NoAck(outcome),
+        })
     }
 
     pub(crate) async fn dispatch(
@@ -156,84 +209,277 @@ impl EndpointIntakeRoute<EndpointIngestBinding> {
         runtime: &Runtime,
         payload: &[u8],
         headers: &dyn IngestMessageHeaders,
+        shutdown: &CancellationToken,
     ) -> EndpointDispatchOutcome {
         let protocol = match self.endpoint_type() {
             EndpointType::Http => "http",
             EndpointType::Websockets => "websocket",
         };
-        let mut outcome = EndpointDispatchOutcome::default();
-        let mut retry_after = Vec::new();
+        let mut dispatches = Vec::with_capacity(self.bindings().len());
         for lifetime in self.bindings() {
-            let lease = lifetime.intake();
-            let Some(binding) = lease.as_deref() else {
-                outcome.rejected = outcome
-                    .rejected
-                    .checked_add(1)
-                    .assured("the bindings counted here are endpoint routes held in memory");
-                retry_after.push(None);
-                continue;
-            };
-            // A binding may buffer this request until it resumes, so its copy of the
-            // request headers is taken here and only here.
-            let payload = BufferedIngestPayload::new(
-                payload,
-                BufferedIngestMetadata::Headers(RetainedIngestHeaders::capture(headers)),
-                actual_utc_now(),
+            dispatches.push(
+                runtime.dispatch_endpoint_intake(lifetime, payload, headers, shutdown, protocol),
             );
-            match binding.quiesce.intake(0, payload, true) {
-                IngestorQuiesceIntake::Dispatch(payload) => {
-                    match runtime
-                        .dispatch_endpoint_binding(binding, payload, protocol)
-                        .await
-                    {
-                        EndpointBindingDispatch::Taken => {
-                            outcome.accepted = outcome.accepted.checked_add(1).assured(
-                                "the bindings counted here are endpoint routes held in memory",
-                            );
-                        }
-                        EndpointBindingDispatch::NotAdmitted => {
-                            outcome.rejected = outcome.rejected.checked_add(1).assured(
-                                "the bindings counted here are endpoint routes held in memory",
-                            );
-                            retry_after.push(None);
-                        }
-                    }
-                }
-                IngestorQuiesceIntake::Buffered => {
+        }
+        dispatch_endpoint_bindings(dispatches).await
+    }
+}
+
+/// Poll every binding together: one downstream consumer may wait for another binding's batch
+/// before acknowledging its own. Preserve binding order when selecting the first failure.
+pub(super) async fn dispatch_endpoint_bindings<I>(dispatches: I) -> EndpointDispatchOutcome
+where
+    I: IntoIterator,
+    I::Item: std::future::Future<Output = EndpointDispatchOutcome>,
+{
+    let mut outcome = EndpointAdmission::default();
+    let mut acknowledgement: Option<EndpointRequestReply> = None;
+    let mut retry_after = Vec::new();
+    for dispatched in futures_util::future::join_all(dispatches).await {
+        match dispatched {
+            EndpointDispatchOutcome::Ack(reply) => {
+                if matches!(reply.outcome, EndpointRequestOutcome::NotAdmitted(_)) {
+                    outcome.rejected = outcome
+                        .rejected
+                        .checked_add(1)
+                        .assured("endpoint bindings have in-memory owners");
+                } else {
                     outcome.accepted = outcome
                         .accepted
                         .checked_add(1)
-                        .assured("the bindings counted here are endpoint routes held in memory");
+                        .assured("endpoint bindings have in-memory owners");
                 }
-                IngestorQuiesceIntake::Dropped => {
-                    outcome.rejected = outcome
-                        .rejected
-                        .checked_add(1)
-                        .assured("the bindings counted here are endpoint routes held in memory");
-                    retry_after.push(None);
+                match &mut acknowledgement {
+                    None => acknowledgement = Some(reply),
+                    Some(current) if current.outcome == EndpointRequestOutcome::Completed => {
+                        *current = reply;
+                    }
+                    Some(_) => {}
                 }
-                IngestorQuiesceIntake::Rejected {
-                    retry_after: binding_retry_after,
-                } => {
-                    outcome.rejected = outcome
-                        .rejected
-                        .checked_add(1)
-                        .assured("the bindings counted here are endpoint routes held in memory");
-                    retry_after.push(binding_retry_after);
+            }
+            EndpointDispatchOutcome::NoAck(admission) => {
+                outcome.accepted = outcome
+                    .accepted
+                    .checked_add(admission.accepted)
+                    .assured("endpoint bindings have in-memory owners");
+                outcome.rejected = outcome
+                    .rejected
+                    .checked_add(admission.rejected)
+                    .assured("endpoint bindings have in-memory owners");
+                if admission.rejected > 0 {
+                    retry_after.push(admission.retry_after);
                 }
             }
         }
-        if outcome.accepted == 0
-            && !retry_after.is_empty()
-            && retry_after.iter().all(Option::is_some)
-        {
-            outcome.retry_after = retry_after.into_iter().flatten().max();
+    }
+    if outcome.accepted == 0 && !retry_after.is_empty() && retry_after.iter().all(Option::is_some) {
+        outcome.retry_after = retry_after.into_iter().flatten().max();
+    }
+    match acknowledgement {
+        Some(mut reply) => {
+            // A multi-binding request may already have entered another ingestor. It must
+            // never tell its sender that no input was admitted in that case.
+            if outcome.accepted > 0
+                && (matches!(reply.outcome, EndpointRequestOutcome::NotAdmitted(_))
+                    || (outcome.rejected > 0 && reply.outcome == EndpointRequestOutcome::Completed))
+            {
+                reply.outcome = EndpointRequestOutcome::ProcessingFailed(
+                    nervix_models::ClientProcessingFailure::Rejected,
+                );
+            }
+            EndpointDispatchOutcome::Ack(reply)
         }
-        outcome
+        None => EndpointDispatchOutcome::NoAck(outcome),
     }
 }
 
 impl Runtime {
+    async fn dispatch_endpoint_intake(
+        &self,
+        lifetime: &endpoint_route_table::EndpointBinding<EndpointIngestBinding>,
+        payload: &[u8],
+        headers: &dyn IngestMessageHeaders,
+        shutdown: &CancellationToken,
+        protocol: &str,
+    ) -> EndpointDispatchOutcome {
+        let lease = lifetime.intake();
+        let Some(binding) = lease.as_deref() else {
+            return EndpointDispatchOutcome::NoAck(EndpointAdmission {
+                rejected: 1,
+                ..EndpointAdmission::default()
+            });
+        };
+        if let EndpointRequestPolicy::Ack(window) = &binding.request {
+            let outcome = if binding.quiesce.endpoint_admission().is_err() {
+                EndpointRequestOutcome::NotAdmitted(
+                    nervix_models::ClientSubmissionRefusal::Suspended,
+                )
+            } else {
+                window
+                    .run_until(
+                        async {
+                            nervix_primitives::select! {
+                                () = lifetime.ended() => {},
+                                () = binding.quiesce.wait_until_intake_stops() => {},
+                                () = shutdown.cancelled() => {},
+                            }
+                        },
+                        nervix_primitives::time::sleep(window.timeout),
+                        self.dispatch_acknowledged_endpoint_binding(
+                            binding, payload, headers, protocol,
+                        ),
+                    )
+                    .await
+            };
+            return EndpointDispatchOutcome::Ack(EndpointRequestReply {
+                outcome,
+                retry_after: window.retry_after,
+            });
+        }
+        // A binding may buffer this request until it resumes, so its copy of the
+        // request headers is taken here and only here.
+        let payload = BufferedIngestPayload::new(
+            payload,
+            BufferedIngestMetadata::Headers(RetainedIngestHeaders::capture(headers)),
+            actual_utc_now(),
+        );
+        let admission = match binding.quiesce.intake(0, payload, true) {
+            IngestorQuiesceIntake::Dispatch(payload) => {
+                match self
+                    .dispatch_endpoint_binding(binding, payload, protocol)
+                    .await
+                {
+                    EndpointBindingDispatch::Taken => EndpointAdmission {
+                        accepted: 1,
+                        ..EndpointAdmission::default()
+                    },
+                    EndpointBindingDispatch::NotAdmitted => EndpointAdmission {
+                        rejected: 1,
+                        ..EndpointAdmission::default()
+                    },
+                }
+            }
+            IngestorQuiesceIntake::Buffered => EndpointAdmission {
+                accepted: 1,
+                ..EndpointAdmission::default()
+            },
+            IngestorQuiesceIntake::Dropped => EndpointAdmission {
+                rejected: 1,
+                ..EndpointAdmission::default()
+            },
+            IngestorQuiesceIntake::Rejected { retry_after } => EndpointAdmission {
+                rejected: 1,
+                retry_after,
+                ..EndpointAdmission::default()
+            },
+        };
+        EndpointDispatchOutcome::NoAck(admission)
+    }
+}
+
+impl Runtime {
+    async fn dispatch_acknowledged_endpoint_binding(
+        &self,
+        binding: &EndpointIngestBinding,
+        payload: &[u8],
+        headers: &dyn IngestMessageHeaders,
+        protocol: &str,
+    ) -> EndpointRequestOutcome {
+        let mut collector =
+            IngestRouteCollector::new(IngestorMetadataScope::Headers, 1, binding.metrics.clone());
+        let (root, mut completion) = binding.handles.tracked_root();
+        let observed_at = actual_utc_now();
+        let metadata = BufferedIngestMetadata::Headers(RetainedIngestHeaders::capture(headers));
+        match collector
+            .decode_payload(
+                self.executor(),
+                QueueAdmission::RefuseWhenFull,
+                &binding.codec,
+                payload,
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(PayloadDecodeFailure::NotAdmitted(report)) => {
+                debug!(
+                    domain = binding.domain.as_str(), ingestor = binding.ingestor.as_str(),
+                    error = %format_args!("{report:#}"), protocol,
+                    "the node could not take an acknowledged endpoint message now"
+                );
+                root.ack_success();
+                return EndpointRequestOutcome::NotAdmitted(
+                    nervix_models::ClientSubmissionRefusal::Busy,
+                );
+            }
+            Err(PayloadDecodeFailure::Codec(report)) => {
+                root.no_ack("codec refused the endpoint payload");
+                let rejection =
+                    DecodeRejection::new(&binding.codec, &metadata.row(), &report, observed_at);
+                binding.decode_rejections.consume(
+                    self,
+                    &binding.domain,
+                    &binding.ingestor,
+                    rejection,
+                );
+                return EndpointRequestOutcome::Refused;
+            }
+        }
+        let routed_ack = if binding.branched_senders.is_empty() {
+            root.clone()
+        } else {
+            root.attached()
+        };
+        let metadata = [metadata.row()];
+        let dispatch = self
+            .dispatch_ingested_records(IngestGroupDispatch {
+                handles: &binding.handles,
+                collector: &mut collector,
+                domain: &binding.domain,
+                ingestor: &binding.ingestor,
+                timestamp_source: binding.timestamp_source.as_ref(),
+                output_routes: &binding.output_routes,
+                filter_where: binding.filter_where.as_ref(),
+                metadata: &metadata,
+                ingested_at: observed_at,
+                acks: vec![routed_ack],
+            })
+            .await;
+        let flush = self
+            .flush_ingest_collector(
+                &binding.domain,
+                &binding.ingestor,
+                &binding.branched_senders,
+                &mut collector,
+            )
+            .await;
+        root.ack_success();
+        if let Err(error) = dispatch.and(flush) {
+            self.inner.events.report_error(format!(
+                "failed to dispatch {protocol} message for ingestor '{}' in domain '{}': {error:#}",
+                binding.ingestor.as_str(),
+                binding.domain.as_str(),
+            ));
+            return EndpointRequestOutcome::ProcessingFailed(
+                nervix_models::ClientProcessingFailure::Rejected,
+            );
+        }
+        if collector.input_refused() {
+            return EndpointRequestOutcome::Refused;
+        }
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            match completion.wait_for_progress().await {
+                AckProgress::Alive => {}
+                AckProgress::Complete(AckOutcome::Ack) => return EndpointRequestOutcome::Completed,
+                AckProgress::Complete(AckOutcome::NoAck(_)) => {
+                    return EndpointRequestOutcome::ProcessingFailed(
+                        nervix_models::ClientProcessingFailure::Rejected,
+                    );
+                }
+            }
+        }
+    }
+
     async fn dispatch_endpoint_binding(
         &self,
         binding: &EndpointIngestBinding,
@@ -243,7 +489,7 @@ impl Runtime {
         // One request is one group, so its builders are sized for the single payload this binding
         // decodes; a payload that unfolds into several messages grows them.
         let mut collector =
-            IngestRouteCollector::new(SourceMetadataScope::Headers, 1, binding.metrics.clone());
+            IngestRouteCollector::new(IngestorMetadataScope::Headers, 1, binding.metrics.clone());
         // The sender is answered, so a body the extension workers have no room for is refused
         // rather than held.
         let decoded = collector
@@ -306,21 +552,20 @@ impl Runtime {
                 );
                 return EndpointBindingDispatch::NotAdmitted;
             }
-            Err(PayloadDecodeFailure::Codec(error)) => {
-                // The codec's context names the codec and field; the causes beneath it say why.
-                let reason = format!("{error:#}");
-                self.inner.events.report_error(format!(
-                    "failed to decode {protocol} message for ingestor '{}' in domain '{}': \
-                     {reason}",
-                    binding.ingestor.as_str(),
-                    binding.domain.as_str(),
-                ));
-                warn!(
-                    domain = binding.domain.as_str(),
-                    ingestor = binding.ingestor.as_str(),
-                    error = %reason,
-                    protocol,
-                    "failed to decode endpoint message"
+            Err(PayloadDecodeFailure::Codec(report)) => {
+                // Sending the body again would only repeat the refusal, so the endpoint accepts it
+                // and consumes it as a decode rejection.
+                let rejection = DecodeRejection::new(
+                    &binding.codec,
+                    &payload.first_metadata_row(),
+                    &report,
+                    payload.observed_at(),
+                );
+                binding.decode_rejections.consume(
+                    self,
+                    &binding.domain,
+                    &binding.ingestor,
+                    rejection,
                 );
             }
         }

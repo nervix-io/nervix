@@ -1,4 +1,4 @@
-Feature: HTTP emitter retries, acknowledgements and backpressure
+Feature: HTTP REQUEST emitter retries, acknowledgements and backpressure
   A request whose outcome is unresolved stays with the emitter host, which resends exactly that
   prepared request on the declared physical backoff, or later when a retryable response names a
   valid Retry-After delay. Delivered and definitively rejected requests leave every retry, later
@@ -17,11 +17,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -43,11 +43,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO later_events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM first_events, later_events
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER published FROM first_events, later_events
+        TO api
           METHOD 'POST'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 200ms
@@ -114,11 +114,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -131,11 +131,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -177,11 +177,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -194,11 +194,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -245,11 +245,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -262,11 +262,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 300ms MAX 600ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -292,7 +292,7 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
       | 3            |
 
   @http_emitter_retries
-  Scenario Outline: An <attachment> HTTP emitter <acknowledgement> while its request is unresolved
+  Scenario Outline: An <attachment> HTTP REQUEST emitter <acknowledgement> while its request is unresolved
     Given Kafka is running
     And HTTP receiver "api" is running
     And HTTP receiver "api" answers with
@@ -303,18 +303,18 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "http_leases_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -329,11 +329,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE <attachment> EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE <attachment> HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         INVOKE write_header('X-Attempt-Key', uuid_v4())
         FLUSH IMMEDIATE
@@ -387,11 +387,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -427,12 +427,12 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER guarded FROM outgoing
+      CREATE HTTP REQUEST EMITTER guarded FROM outgoing
         USING MATERIALIZED STATE routes REQUIRED WAIT
-        TO HTTP api
+        TO api
           METHOD 'POST'
           PATH concat(relay_state.routes.prefix, '/events/', event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms
@@ -505,11 +505,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -531,11 +531,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER tenant_events FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER tenant_events FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat('/tenants/', input.tenant, '/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms
@@ -596,11 +596,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -614,11 +614,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         TIMESTAMP NOW
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = <timeout_ms>
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF <backoff> MAX <backoff> WITHOUT BODY
         INVOKE write_header('X-Domain-Year', format_datetime('%Y', now()))
         FLUSH EACH 300s MAX BATCH SIZE 1MiB
@@ -660,11 +660,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -679,11 +679,11 @@ Feature: HTTP emitter retries, acknowledgements and backpressure
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api
           METHOD 'PUT'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms

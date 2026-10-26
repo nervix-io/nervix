@@ -8,7 +8,7 @@
 #   "paho-mqtt>=2.0",
 # ]
 # ///
-"""Stream source-specific datalake activity into examples/datalake/datalake.nspl."""
+"""Stream source-specific datalake activity into examples/datalake/datalake.plexus."""
 
 from __future__ import annotations
 

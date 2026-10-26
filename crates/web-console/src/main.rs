@@ -50,9 +50,9 @@ use nervix_models::{
     CommandExecutionReference, CreateSubscription, DomainName, DomainPace, DomainStatus, ModelKind,
     RelayName, ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
     ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName, Timestamp,
-    TransactionLifecycle, TransactionStatus, expression_to_nspl,
+    TransactionLifecycle, TransactionStatus, expression_to_plexus,
 };
-use nervix_nspl::client_statement::{
+use nervix_plexus::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
 use nervix_primitives::unmodeled::futures::{AbortHandle, Abortable};
@@ -181,6 +181,10 @@ struct WebConsoleSignals {
     cluster_counters: RwSignal<ClusterCounters>,
     active_domain: RwSignal<Option<DomainName>>,
     clock_display: RwSignal<ClockDisplay>,
+    /// The clock attachment each connection asked for. The session loop records the one a
+    /// connection opens with and forgets it when the connection ends; the clock effect follows
+    /// selection changes on the confirmed connection.
+    clock_selection: RwSignal<ClockSelection>,
     transaction_status: RwSignal<Option<TransactionStatus>>,
     inspector: InspectorSignals,
     domains: RwSignal<Vec<DomainView>>,
@@ -250,6 +254,40 @@ impl WebConsoleSignals {
                 });
             }
         }
+    }
+
+    /// The requests a new connection sends before any ordered request it holds: the active domain's
+    /// selection, the selected domain's clock, the restorations of the interrupted subscription
+    /// tabs, and the session's transaction. The clock and the tabs go out before the transaction,
+    /// because a session that holds a transaction refuses clock attachments and subscriptions.
+    fn connection_opening(self, connection_generation: u64) -> Vec<ConsoleRequest> {
+        let mut opening = Vec::new();
+        let active_domain = self.active_domain.get_untracked();
+        if let Some(domain) = active_domain.clone() {
+            opening.push(ConsoleRequest::SelectDomain(SelectDomainRequest { domain }));
+        }
+        let mut selection = self.clock_selection.get_untracked();
+        let clock = selection.open(connection_generation, active_domain);
+        self.clock_selection.set(selection);
+        if let Some(domain) = clock {
+            self.clock_display
+                .set(ClockDisplay::selected(Some(domain.clone()), true));
+            opening.push(ConsoleRequest::DomainClockAttach {
+                request: AttachDomainClockRequest { domain },
+                connection_generation,
+                origin: ClockRequestOrigin::Automatic,
+            });
+        }
+        opening.extend(self.begin_restorations());
+        let transaction_id = self
+            .transaction_status
+            .with_untracked(|status| transaction_to_attach(status.as_ref()));
+        if let Some(transaction_id) = transaction_id {
+            opening.push(ConsoleRequest::AttachTransaction(
+                AttachTransactionRequest { transaction_id },
+            ));
+        }
+        opening
     }
 
     /// A replacement credential starts a separate view of the cluster. No tab, suggestion, or
@@ -476,7 +514,7 @@ struct SuggestionQuery {
 /// A request the console sends over its session, together with what its reply is for.
 #[derive(Clone)]
 enum ConsoleRequest {
-    /// Executes NSPL statements.
+    /// Executes Plexus statements.
     Command {
         request: CommandRequest,
         purpose: CommandPurpose,
@@ -1257,6 +1295,7 @@ fn initialize_test_executor() {
 fn App() -> impl IntoView {
     let active_domain = RwSignal::new(None::<DomainName>);
     let clock_display = RwSignal::new(ClockDisplay::NoDomain);
+    let clock_selection = RwSignal::new(ClockSelection::default());
     let clock_now = RwSignal::new(clock_display::browser_utc_now());
     let clock_interval = set_interval_with_handle(
         move || clock_now.set(clock_display::browser_utc_now()),
@@ -1311,6 +1350,7 @@ fn App() -> impl IntoView {
         cluster_counters,
         active_domain,
         clock_display,
+        clock_selection,
         transaction_status,
         inspector,
         domains,
@@ -1383,7 +1423,6 @@ fn App() -> impl IntoView {
         }
     });
     let clock_session = web_console_session;
-    let clock_selection = RwSignal::new(ClockSelection::default());
     Effect::new(move |_| {
         let domain = active_domain.get();
         let connected = clock_session.state.get() == ConsoleConnectionState::Connected;
@@ -2141,17 +2180,18 @@ async fn run_websocket_session(
                             .checked_add(1)
                             .assured("a console cannot open 2^64 websocket connections");
                     });
-                    Some(
-                        serve_connection(
-                            signals,
-                            state,
-                            socket,
-                            &mut requests,
-                            &mut queued,
-                            &current_auth_token,
-                        )
-                        .await,
+                    let ended = serve_connection(
+                        signals,
+                        state,
+                        socket,
+                        &mut requests,
+                        &mut queued,
+                        &current_auth_token,
                     )
+                    .await;
+                    // The connection's clock attachment ended with its session.
+                    signals.clock_selection.update(ClockSelection::close);
+                    Some(ended)
                 } else {
                     // A server that ends the session at once, such as a follower redirecting to the
                     // leader, can close the connection before this loop sees it open. Its frames
@@ -2282,10 +2322,10 @@ async fn drain_closed_connection(
 /// Serves one connection until it ends.
 ///
 /// The connection first selects the active domain again, so the domain's observations resume,
-/// restores the interrupted subscription tabs, and attaches the session's transaction again. The
-/// tabs come before the transaction, because a session that holds a transaction refuses
-/// subscriptions. Ordered requests wait until the server confirms that the serving node leads and
-/// the transaction is attached, and then go out in the order the console issued them.
+/// attaches the selected domain's clock, restores the interrupted subscription tabs, and attaches
+/// the session's transaction again; see [`WebConsoleSignals::connection_opening`]. Ordered requests
+/// wait until the server confirms that the serving node leads and the transaction is attached, and
+/// then go out in the order the console issued them.
 async fn serve_connection(
     signals: WebConsoleSignals,
     state: RwSignal<ConsoleConnectionState>,
@@ -2295,19 +2335,7 @@ async fn serve_connection(
     current_auth_token: &str,
 ) -> ConnectionEnd {
     let codec = ClientWebSocketCodec::new(SESSION_LIMITS);
-    let mut opening = Vec::new();
-    if let Some(domain) = signals.active_domain.get_untracked() {
-        opening.push(ConsoleRequest::SelectDomain(SelectDomainRequest { domain }));
-    }
-    opening.extend(signals.begin_restorations());
-    let transaction_id = signals
-        .transaction_status
-        .with_untracked(|status| transaction_to_attach(status.as_ref()));
-    if let Some(transaction_id) = transaction_id {
-        opening.push(ConsoleRequest::AttachTransaction(
-            AttachTransactionRequest { transaction_id },
-        ));
-    }
+    let opening = signals.connection_opening(signals.session_generation.get_untracked());
     for request in opening {
         if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
             return ConnectionEnd::Dropped;
@@ -3774,8 +3802,8 @@ fn subscription_tab_title(subscription: &CreateSubscription) -> String {
     let Some(filter) = &subscription.where_clause else {
         return relay;
     };
-    let filter = expression_to_nspl(filter)
-        .assured("an expression the NSPL parser produced renders back to NSPL");
+    let filter = expression_to_plexus(filter)
+        .assured("an expression the Plexus parser produced renders back to Plexus");
     format!("{relay} {filter}")
 }
 
@@ -5960,7 +5988,7 @@ fn ReplPanel(
                     }
                 >
                     <SidebarIcon kind="terminal" />
-                    <span>"NSPL REPL"</span>
+                    <span>"Plexus REPL"</span>
                 </button>
                 <For
                     each=move || subscription_tabs.get()
@@ -8064,6 +8092,7 @@ mod tests {
             cluster_counters: RwSignal::new(ClusterCounters::default()),
             active_domain: RwSignal::new(Some(domain.clone())),
             clock_display: RwSignal::new(ClockDisplay::selected(Some(domain.clone()), true)),
+            clock_selection: RwSignal::new(ClockSelection::default()),
             transaction_status,
             inspector: InspectorSignals::new(),
             domains: RwSignal::new(Vec::new()),
@@ -8411,6 +8440,65 @@ mod tests {
             assert!(
                 requests.release_held().is_empty(),
                 "a restoration is never held"
+            );
+        });
+    }
+
+    #[test]
+    fn a_new_connection_attaches_its_clock_and_restores_its_tabs_before_its_transaction() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Interrupted);
+            let domain = domain_name("tenant");
+            let transaction = TransactionStatus::new(
+                "attached".to_string(),
+                domain.clone(),
+                TransactionLifecycle::Open,
+                TransactionPosition::new(1),
+                0,
+            )
+            .assured("an open transaction's accepted operation has not applied");
+            signals.transaction_status.set(Some(transaction));
+            signals
+                .clock_display
+                .set(ClockDisplay::selected(Some(domain.clone()), false));
+
+            let opening = signals.connection_opening(4);
+            let [
+                ConsoleRequest::SelectDomain(selected),
+                ConsoleRequest::DomainClockAttach {
+                    request: clock,
+                    connection_generation,
+                    origin: clock_origin,
+                },
+                ConsoleRequest::SubscriptionStart {
+                    origin: restoration,
+                    ..
+                },
+                ConsoleRequest::AttachTransaction(attach),
+            ] = opening.as_slice()
+            else {
+                panic!(
+                    "a connection selects its domain, attaches its clock, restores its tab and \
+                     attaches its transaction, in that order"
+                );
+            };
+            assert_eq!(selected.domain, domain);
+            assert_eq!(clock.domain, domain);
+            assert_eq!(*connection_generation, 4);
+            assert!(*clock_origin == ClockRequestOrigin::Automatic);
+            assert_eq!(*restoration, SubscriptionOrigin::Restoration);
+            assert_eq!(attach.transaction_id, "attached");
+            assert_eq!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::selected(Some(domain.clone()), true)
+            );
+
+            let mut selection = signals.clock_selection.get_untracked();
+            let confirmed = selection.change(true, 4, Some(domain));
+            assert_eq!(confirmed.detach, None);
+            assert_eq!(
+                confirmed.attach, None,
+                "the confirmed connection does not attach its clock again"
             );
         });
     }

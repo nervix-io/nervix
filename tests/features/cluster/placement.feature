@@ -1,9 +1,9 @@
 Feature: Placement policies
 
-  Scenario Outline: Placement rules and domain defaults are inspectable through NSPL
+  Scenario Outline: Placement rules and domain defaults are inspectable through Plexus
     Given the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT PREFER COLOCATION;
       CREATE SCHEMA placement_event ( id I64 );
@@ -15,11 +15,11 @@ Feature: Placement policies
         TO placement_stage_one INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE JUNCTION corridor_middle FROM placement_stage_one UNBRANCHED
         TO placement_stage_two INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage_two UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage_two UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT corridor_policy
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         PREFER COLOCATION
         RANK 3;
       START;
@@ -27,9 +27,9 @@ Feature: Placement policies
       """
     Then the last command output contains
       """
-      CREATE PLACEMENT corridor_policy FROM corridor_source TO corridor_sink PREFER COLOCATION RANK 3;
+      CREATE PLACEMENT corridor_policy FROM corridor_source TO corridor_emitter PREFER COLOCATION RANK 3;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW PLACEMENTS;
       """
@@ -49,7 +49,7 @@ Feature: Placement policies
       """
       coverage=effective
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE PLACEMENT corridor_policy;
       """
@@ -71,13 +71,13 @@ Feature: Placement policies
       """
     And the last command output contains
       """
-      covered: corridor_source, placement_stage_one, corridor_middle, placement_stage_two, corridor_sink
+      covered: corridor_source, placement_stage_one, corridor_middle, placement_stage_two, corridor_emitter
       """
     And the last command output contains
       """
-      witness: corridor_source -> placement_stage_one -> corridor_middle -> placement_stage_two -> corridor_sink
+      witness: corridor_source -> placement_stage_one -> corridor_middle -> placement_stage_two -> corridor_emitter
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE DOMAIN;
       """
@@ -102,7 +102,7 @@ Feature: Placement policies
   Scenario: REQUIRE COLOCATION keeps a complete corridor on one cluster node
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
       CREATE SCHEMA placement_event ( id I64 );
@@ -114,11 +114,11 @@ Feature: Placement policies
         TO placement_stage_one INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE JUNCTION corridor_middle FROM placement_stage_one UNBRANCHED
         TO placement_stage_two INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage_two UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage_two UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT keep_corridor_local
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION
         RANK 1;
       START;
@@ -128,14 +128,14 @@ Feature: Placement policies
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage_one" owner equals placeholder "corridor_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_middle" owner equals placeholder "corridor_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage_two" owner equals placeholder "corridor_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "corridor_owner"
-    When these NSPL commands are executed on the leader node
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "corridor_owner"
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE DOMAIN;
       """
     Then the last command output contains
       """
-      members: corridor_middle, corridor_sink, corridor_source, placement_stage_one, placement_stage_two
+      members: corridor_emitter, corridor_middle, corridor_source, placement_stage_one, placement_stage_two
       """
     And the last command output contains
       """
@@ -145,7 +145,7 @@ Feature: Placement policies
   Scenario: A materialized-state dependency forms a placement corridor
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
       CREATE SCHEMA placement_event ( id I64 );
@@ -179,7 +179,7 @@ Feature: Placement policies
       """
       covered: state_cache, state_reader
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -189,7 +189,7 @@ Feature: Placement policies
   Scenario: PREFER COLOCATION overrides the spreading domain default for a new assignment
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
       BEGIN;
@@ -202,7 +202,7 @@ Feature: Placement policies
       CREATE RELAY control_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE JUNCTION control_source FROM control_input UNBRANCHED
         TO control_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -210,7 +210,7 @@ Feature: Placement policies
         TO control_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT prefer_local
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         PREFER COLOCATION;
       COMMIT;
       START;
@@ -218,7 +218,7 @@ Feature: Placement policies
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "source_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner equals placeholder "source_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "source_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "source_owner"
     And the last cluster status owner for scheduled "junction" "control_source" is saved as placeholder "control_owner"
     And the last cluster status owner for scheduled "relay" "control_stage" is saved as placeholder "control_stage_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "control_stage" owner different from placeholder "control_owner"
@@ -227,7 +227,7 @@ Feature: Placement policies
   Scenario: SUGGEST SEPARATION overrides upstream locality for a new assignment
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT PREFER COLOCATION;
       BEGIN;
@@ -237,11 +237,11 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT spread_corridor
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         SUGGEST SEPARATION;
       COMMIT;
       START;
@@ -250,12 +250,12 @@ Feature: Placement policies
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "source_owner"
     And the last cluster status owner for scheduled "relay" "placement_stage" is saved as placeholder "stage_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner different from placeholder "source_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "stage_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner different from placeholder "stage_owner"
 
   Scenario: Changing a soft placement policy does not migrate existing assignments
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       BEGIN;
@@ -265,11 +265,11 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT existing_soft_policy
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         SUGGEST SEPARATION;
       COMMIT;
       START;
@@ -277,24 +277,24 @@ Feature: Placement policies
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "original_source_owner"
     And the last cluster status owner for scheduled "relay" "placement_stage" is saved as placeholder "original_stage_owner"
-    And the last cluster status owner for scheduled "junction" "corridor_sink" is saved as placeholder "original_sink_owner"
+    And the last cluster status owner for scheduled "junction" "corridor_emitter" is saved as placeholder "original_sink_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner different from placeholder "original_source_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "original_stage_owner"
-    When these NSPL commands are executed on the leader node
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner different from placeholder "original_stage_owner"
+    When these Plexus commands are executed on the leader node
       """
       ALTER PLACEMENT existing_soft_policy SET POLICY PREFER COLOCATION;
       SHOW CLUSTER STATUS;
       """
     Then within "5s" node "node-1" eventually reports scheduled "junction" "corridor_source" owner equals placeholder "original_source_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner equals placeholder "original_stage_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "original_sink_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "original_sink_owner"
     And within "5s" node "node-1" eventually reports scheduled "relay" "placement_stage" owner different from placeholder "original_source_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner different from placeholder "original_stage_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner different from placeholder "original_stage_owner"
 
   Scenario Outline: A stronger rank overrides a claim and equal-rank policy claims conflict
     Given the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA placement_event ( id I64 );
@@ -303,16 +303,16 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT keep_local
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION
         RANK 2;
       CREATE PLACEMENT carve_out
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         NEUTRAL
         RANK 1;
       DESCRIBE PLACEMENT keep_local;
@@ -325,7 +325,7 @@ Feature: Placement policies
       """
       effective policy: NEUTRAL
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       ALTER PLACEMENT carve_out SET RANK 2;
       """
@@ -345,13 +345,13 @@ Feature: Placement policies
       """
       runtime nodes
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE PLACEMENT carve_out;
       """
     Then the last command output contains
       """
-      CREATE PLACEMENT carve_out FROM corridor_source TO corridor_sink NEUTRAL RANK 1;
+      CREATE PLACEMENT carve_out FROM corridor_source TO corridor_emitter NEUTRAL RANK 1;
       """
 
     Examples:
@@ -362,7 +362,7 @@ Feature: Placement policies
   Scenario Outline: A placement with no connected endpoint pair is valid and visibly empty
     Given the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA placement_event ( id I64 );
@@ -388,7 +388,7 @@ Feature: Placement policies
       """
       coverage=empty
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE PLACEMENT disconnected_corridor;
       """
@@ -409,7 +409,7 @@ Feature: Placement policies
   Scenario: Placement coverage grows and shrinks with topology edits
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA placement_event ( id I64 );
@@ -437,7 +437,7 @@ Feature: Placement policies
       """
       covered: (none)
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE JUNCTION corridor_bridge FROM left_output UNBRANCHED
         TO right_input INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -455,7 +455,7 @@ Feature: Placement policies
       """
       witness: disconnected_source -> left_output -> corridor_bridge -> right_input -> disconnected_sink
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DROP JUNCTION corridor_bridge;
       DESCRIBE PLACEMENT changing_corridor;
@@ -472,7 +472,7 @@ Feature: Placement policies
   Scenario Outline: ALTER and DROP PLACEMENT preserve operation order and member pins
     Given the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA placement_event ( id I64 );
@@ -481,11 +481,11 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT managed_corridor
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION
         RANK 3;
       ALTER PLACEMENT managed_corridor
@@ -497,24 +497,24 @@ Feature: Placement policies
       """
     Then the last command output contains
       """
-      CREATE PLACEMENT renamed_corridor FROM corridor_source TO corridor_sink PREFER COLOCATION;
+      CREATE PLACEMENT renamed_corridor FROM corridor_source TO corridor_emitter PREFER COLOCATION;
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
-      DROP JUNCTION corridor_sink;
+      DROP JUNCTION corridor_emitter;
       """
     Then the last command error contains
       """
-      corridor_sink
+      corridor_emitter
       """
     And the last command error contains
       """
       renamed_corridor
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DROP PLACEMENT renamed_corridor;
-      DROP JUNCTION corridor_sink;
+      DROP JUNCTION corridor_emitter;
       SHOW PLACEMENTS;
       """
     Then the last command output does not contain
@@ -530,7 +530,7 @@ Feature: Placement policies
   Scenario Outline: Invalid placement ranks and members report semantic diagnostics
     Given the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA placement_event ( id I64 );
@@ -550,14 +550,14 @@ Feature: Placement policies
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE PLACEMENT bad_rank
         FROM corridor_source
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION
         RANK 0;
       """
@@ -565,22 +565,22 @@ Feature: Placement policies
       """
       RANK 0
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE PLACEMENT unknown_member
         FROM missing_runtime_node
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION;
       """
     Then the last command error contains
       """
       missing_runtime_node
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE PLACEMENT endpoint_member
         FROM endpoint_source
-        TO corridor_sink
+        TO corridor_emitter
         REQUIRE COLOCATION;
       """
     Then the last command error contains
@@ -601,7 +601,7 @@ Feature: Placement policies
   Scenario: Changing the domain default to REQUIRE COLOCATION uses one gated handoff
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
       CREATE SCHEMA placement_event ( id I64 );
@@ -610,37 +610,37 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       SHOW CLUSTER STATUS;
       """
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     Then the last command output contains
       """
       quiesce level: ENTITY_PAUSE
       planned relocations:
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "consolidated_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "consolidated_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "consolidated_owner"
 
   @command_completion
   Scenario: A disconnected standalone command resumes by execution reference
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
       CREATE SCHEMA detached_event ( id I64 );
@@ -654,14 +654,14 @@ Feature: Placement policies
       START;
       """
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When this NSPL command request with execution reference "detached-placement" begins executing in the background on the leader node
+    When this Plexus command request with execution reference "detached-placement" begins executing in the background on the leader node
       """
       ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     When the background command request connection is dropped
     And the entity gate pause for domain "{{domain}}" is released
-    And this NSPL command request with execution reference "detached-placement" is executed on the leader node
+    And this Plexus command request with execution reference "detached-placement" is executed on the leader node
       """
       ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
       """
@@ -669,7 +669,7 @@ Feature: Placement policies
       """
       set domain '{{domain}}' placement to REQUIRE COLOCATION
       """
-    When these NSPL commands are executed on node "node-2"
+    When these Plexus commands are executed on node "node-2"
       """
       DESCRIBE DOMAIN;
       """
@@ -683,7 +683,7 @@ Feature: Placement policies
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
       CREATE SCHEMA deadline_event ( id I64 );
@@ -697,14 +697,14 @@ Feature: Placement policies
       START;
       """
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When this NSPL command request with execution reference "deadline-placement" begins executing in the background on the leader node
+    When this Plexus command request with execution reference "deadline-placement" begins executing in the background on the leader node
       """
       ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     When the background command caller deadline expires after "100ms"
     And the entity gate pause for domain "{{domain}}" is released
-    And this NSPL command request with execution reference "deadline-placement" is executed on the leader node
+    And this Plexus command request with execution reference "deadline-placement" is executed on the leader node
       """
       ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
       """
@@ -712,7 +712,7 @@ Feature: Placement policies
       """
       set domain '{{domain}}' placement to REQUIRE COLOCATION
       """
-    When these NSPL commands are executed on node "node-3"
+    When these Plexus commands are executed on node "node-3"
       """
       DESCRIBE DOMAIN;
       """
@@ -725,7 +725,7 @@ Feature: Placement policies
   Scenario: A transactional placement consolidation commits one gated schedule
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
       CREATE SCHEMA transaction_placement_event ( id I64 );
@@ -743,7 +743,7 @@ Feature: Placement policies
     And the last cluster status owner for scheduled "junction" "transaction_corridor_sink" is saved as placeholder "transaction_sink_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "transaction_corridor_sink" owner different from placeholder "transaction_source_owner"
     Given client "owner" is connected to the leader node
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       CREATE PLACEMENT transaction_corridor_local
@@ -752,7 +752,7 @@ Feature: Placement policies
         REQUIRE COLOCATION;
       """
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When client "owner" begins executing these NSPL commands in the background
+    When client "owner" begins executing these Plexus commands in the background
       """
       COMMIT;
       """
@@ -760,7 +760,7 @@ Feature: Placement policies
     And within "5s" node "node-1" eventually reports scheduled "junction" "transaction_corridor_source" owner equals placeholder "transaction_source_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "transaction_corridor_sink" owner equals placeholder "transaction_sink_owner"
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And the last command output contains
       """
       quiesce level: ENTITY_PAUSE
@@ -769,7 +769,7 @@ Feature: Placement policies
       """
       planned relocations: 2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -781,7 +781,7 @@ Feature: Placement policies
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}} PLACEMENT SUGGEST SEPARATION;
       CREATE SCHEMA placement_timeout_event ( seq I64 );
@@ -800,12 +800,12 @@ Feature: Placement policies
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION placement_timeout_junction FROM placement_timeout_input UNBRANCHED
         TO placement_timeout_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT placement_timeout_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT placement_timeout_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER placement_timeout_emitter FROM placement_timeout_output
-        TO ZEROMQ placement_timeout_sink MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE ZEROMQ PUSH EMITTER placement_timeout_emitter FROM placement_timeout_output
+        TO placement_timeout_sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING placement_timeout_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -824,14 +824,14 @@ Feature: Placement policies
       transient error: fault injector stalled emitter publish
       """
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
-    When these NSPL commands fail with "timed out draining domain"
+    When these Plexus commands fail with "timed out draining domain"
       """
       CREATE PLACEMENT placement_timeout_local
         FROM placement_timeout_junction
         TO placement_timeout_emitter
         REQUIRE COLOCATION;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -842,7 +842,7 @@ Feature: Placement policies
       """
       "seq":1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE PLACEMENT placement_timeout_local
         FROM placement_timeout_junction
@@ -857,7 +857,7 @@ Feature: Placement policies
       """
       planned relocations: 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -867,7 +867,7 @@ Feature: Placement policies
   Scenario: Draining a REQUIRE COLOCATION host relocates the group atomically
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA placement_event ( id I64 );
@@ -876,28 +876,28 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT keep_corridor_local
-        FROM corridor_source TO corridor_sink REQUIRE COLOCATION RANK 1;
+        FROM corridor_source TO corridor_emitter REQUIRE COLOCATION RANK 1;
       START;
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "drained_group_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "drained_group_owner"
-    When these NSPL commands are executed on the leader node
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "drained_group_owner"
+    When these Plexus commands are executed on the leader node
       """
       DRAIN NODE {{drained_group_owner}};
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "relocated_group_owner"
     And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_source" owner different from placeholder "drained_group_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "relocated_group_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "relocated_group_owner"
 
   Scenario: Failover relocates a REQUIRE COLOCATION group atomically
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA placement_event ( id I64 );
@@ -906,18 +906,18 @@ Feature: Placement policies
       CREATE RELAY placement_output SCHEMA placement_event UNBRANCHED;
       CREATE JUNCTION corridor_source FROM placement_input UNBRANCHED
         TO placement_stage INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE JUNCTION corridor_sink FROM placement_stage UNBRANCHED
+      CREATE JUNCTION corridor_emitter FROM placement_stage UNBRANCHED
         TO placement_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE PLACEMENT keep_corridor_local
-        FROM corridor_source TO corridor_sink REQUIRE COLOCATION RANK 1;
+        FROM corridor_source TO corridor_emitter REQUIRE COLOCATION RANK 1;
       START;
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "failed_group_owner"
-    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "failed_group_owner"
+    And within "5s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "failed_group_owner"
     And a node other than placeholder "failed_group_owner" is saved as placeholder "failover_query_node"
     When node "{{failed_group_owner}}" is stopped
     Then node "{{failover_query_node}}" eventually observes a stable leader
     And within "20s" node "{{failover_query_node}}" eventually reports scheduled "junction" "corridor_source" owner different from placeholder "failed_group_owner"
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "failover_group_owner"
-    And within "5s" node "{{failover_query_node}}" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "failover_group_owner"
+    And within "5s" node "{{failover_query_node}}" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "failover_group_owner"

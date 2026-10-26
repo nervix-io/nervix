@@ -1,17 +1,9 @@
-//! Outbound WebSocket source transport and shared signaling execution.
+//! WebsocketsConnectionIngestor connector entities.
 //!
 //! Layer: engines and infrastructure.
-//!
-//! - **Owns.** The outbound client's transport requirements, source lifecycle, configuration and
-//!   frames, and signaling compilation and execution shared with server endpoint sessions.
-//! - **Depends on.** The connector contract, typed plans and host services, vocabulary values,
-//!   execution primitives, WebSocket transport, jaq, protobuf reflection, and contextual errors.
-//! - **Must not know.** Configuration Models, NSPL, runtime collectors, relays, branches,
-//!   schedules, registry state, endpoint routing or listeners, or another connector implementation.
-//!
-//! Current boundary violation: the signaling compiler consumes configuration Model steps and
-//! parses their timeout text. Converting those inputs into a typed signaling plan belongs to the
-//! decision layer; this engine's ownership contract does not grant permission to consume Models.
+//! - **Owns.** The public connection connector implementation surface.
+//! - **Depends on.** The connector contract, vocabulary values and its own driver stack.
+//! - **Must not know.** Graph routing, registry state, placement or other connector engines.
 
 #![cfg_attr(
     nervix_lint,
@@ -25,13 +17,5 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
-mod signaling;
-mod source;
-
-pub use signaling::{
-    CompiledSignalingProtocol, SignalingDataSink, SignalingProtobufDescriptors,
-    SignalingProtocolCompileError, WebsocketSignalingError, WebsocketSignalingSession,
-};
-pub use source::{
-    WebsocketSource, WebsocketSourceMessage, WebsocketSourcePlan, WebsocketSourcePlanError,
-};
+pub mod connection;
+pub use connection::*;

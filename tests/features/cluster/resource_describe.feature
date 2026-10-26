@@ -3,11 +3,11 @@ Feature: Resource lifecycle
   Scenario: Describing a missing resource version reports a clear error
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "resource 'fraud_model@1' does not exist"
+    When these Plexus commands fail with "resource 'fraud_model@1' does not exist"
       """
       DESCRIBE RESOURCE fraud_model VERSION 1;
       """
@@ -15,7 +15,7 @@ Feature: Resource lifecycle
   Scenario: Created resource is visible before upload
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE fraud_model;
@@ -38,7 +38,7 @@ Feature: Resource lifecycle
         "schema/types/common.proto": "message Common {}"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
@@ -58,11 +58,11 @@ Feature: Resource lifecycle
         "schema.proto": "syntax = \"proto3\";"
       }
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "resource 'proto' does not exist"
+    When these Plexus commands fail with "resource 'proto' does not exist"
       """
       UPLOAD RESOURCE proto VERSION '{{proto_dir}}';
       """
@@ -77,7 +77,7 @@ Feature: Resource lifecycle
         "schema.proto": "syntax = \"proto3\";"
       }
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
@@ -94,7 +94,7 @@ Feature: Resource lifecycle
       """
       uploaded resource version 1
       """
-    When client "uploader" executes these NSPL commands
+    When client "uploader" executes these Plexus commands
       """
       DESCRIBE RESOURCE proto;
       """
@@ -114,7 +114,7 @@ Feature: Resource lifecycle
         "assets/lookup.csv": "id,name\n1,Alice\n2,Bob\n"
       }
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
@@ -124,7 +124,7 @@ Feature: Resource lifecycle
       """
       uploaded resource version 1
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       DESCRIBE RESOURCE proto;
       """
@@ -132,7 +132,7 @@ Feature: Resource lifecycle
       """
       versions: 1
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       DESCRIBE RESOURCE proto VERSION 1;
       """
@@ -157,13 +157,13 @@ Feature: Resource lifecycle
         "assets/lookup.csv": "id,name\n1,Alice\n2,Bob\n"
       }
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
       UPLOAD RESOURCE proto VERSION '{{proto_dir}}';
       """
-    When these NSPL commands are executed on node "node-2"
+    When these Plexus commands are executed on node "node-2"
       """
       DESCRIBE RESOURCE proto VERSION 1;
       """
@@ -193,7 +193,7 @@ Feature: Resource lifecycle
     And the active domain is "{{domain}}"
     Then the current leader node is saved as placeholder "upload_leader"
     And a node other than placeholder "upload_leader" is saved as placeholder "successor"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE zip_codes;
@@ -205,7 +205,7 @@ Feature: Resource lifecycle
     When client "uploader" selects domain "{{domain}}"
     And client "uploader" begins uploading resource "zip_codes" from "{{lookup_dir}}" with identity "delayed-install" in the background
     Then the resource installation pause on node "node-3" is reached
-    When these NSPL commands are executed on node "node-2"
+    When these Plexus commands are executed on node "node-2"
       """
       SHOW CLUSTER STATUS;
       """
@@ -224,7 +224,7 @@ Feature: Resource lifecycle
       """
       uploaded resource version 1
       """
-    When these NSPL commands are executed through the client on node "node-2"
+    When these Plexus commands are executed through the client on node "node-2"
       """
       CREATE HASH MAP zip_by_code
         KEY zip
@@ -232,7 +232,7 @@ Feature: Resource lifecycle
         PATH 'lookup.jsonl'
         DECODE USING zip_codec;
       """
-    And these NSPL commands are executed on node "node-1"
+    And these Plexus commands are executed on node "node-1"
       """
       LOOKUP zip_by_code KEY '60601';
       """
@@ -240,7 +240,7 @@ Feature: Resource lifecycle
       """
       "city":"Chicago"
       """
-    When these NSPL commands are executed on node "node-2"
+    When these Plexus commands are executed on node "node-2"
       """
       LOOKUP zip_by_code KEY '60601';
       """
@@ -248,7 +248,7 @@ Feature: Resource lifecycle
       """
       "city":"Chicago"
       """
-    When these NSPL commands are executed on node "node-3"
+    When these Plexus commands are executed on node "node-3"
       """
       LOOKUP zip_by_code KEY '60601';
       """
@@ -264,7 +264,7 @@ Feature: Resource lifecycle
     And node "node-1" has TLS resource directory "tls_v2" for hosts "api.example.com"
     And node "node-1" has TLS resource directory "tls_v3" for hosts "api.example.com"
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE tls_bundle;
@@ -282,11 +282,11 @@ Feature: Resource lifecycle
     When client "uploader" selects domain "{{domain}}"
     And client "uploader" begins uploading resource "tls_bundle" from "{{tls_v2}}" with identity "applying-version" in the background
     Then the resource installation pause on node "<held_node>" is reached
-    When these NSPL commands fail with "resource 'tls_bundle@2' is not a completed version in domain '{{domain}}'"
+    When these Plexus commands fail with "resource 'tls_bundle@2' is not a completed version in domain '{{domain}}'"
       """
       CREATE VHOST applying_edge api.example.com WITH TLS tls_bundle VERSION 2;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE tls_bundle;
       """
@@ -296,8 +296,8 @@ Feature: Resource lifecycle
       latest: 1
       """
     When the resource installation pause on node "<held_node>" is released
-    Then the background NSPL execution succeeds
-    When these NSPL commands are executed on the leader node
+    Then the background Plexus execution succeeds
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE tls_bundle;
       """
@@ -314,11 +314,11 @@ Feature: Resource lifecycle
       """
       injected resource installation failure
       """
-    When these NSPL commands fail with "resource 'tls_bundle@3' is not a completed version in domain '{{domain}}'"
+    When these Plexus commands fail with "resource 'tls_bundle@3' is not a completed version in domain '{{domain}}'"
       """
       CREATE VHOST failed_edge failed.example.com WITH TLS tls_bundle VERSION 3;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE tls_bundle;
       """
@@ -351,7 +351,7 @@ Feature: Resource lifecycle
       }
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
@@ -371,7 +371,7 @@ Feature: Resource lifecycle
       """
     And the last client upload recovered version 1 from an earlier upload
     When client "uploader" upload of resource "proto" from "{{different_proto_dir}}" with identity "retry-one" fails with "already assigned version 1 with digest"
-    When client "uploader" executes these NSPL commands
+    When client "uploader" executes these Plexus commands
       """
       DESCRIBE RESOURCE proto;
       """
@@ -401,7 +401,7 @@ Feature: Resource lifecycle
       """
     And the active domain is "{{domain}}"
     And node "node-1" eventually reports leader "node-1"
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
@@ -422,7 +422,7 @@ Feature: Resource lifecycle
       """
       uploaded resource version 1
       """
-    When client "retrying-uploader" executes these NSPL commands
+    When client "retrying-uploader" executes these Plexus commands
       """
       DESCRIBE RESOURCE proto;
       """
@@ -448,7 +448,7 @@ Feature: Resource lifecycle
         "data.csv": "id,name\n1,Alice\n2,Bob\n"
       }
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
@@ -473,12 +473,12 @@ Feature: Resource lifecycle
         "schema/types/common.proto": "message Common {}"
       }
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
       """
-    And these NSPL commands are executed through the client on a follower node
+    And these Plexus commands are executed through the client on a follower node
       """
       UPLOAD RESOURCE proto VERSION '{{proto_dir}}';
       """
@@ -498,7 +498,7 @@ Feature: Resource lifecycle
         "assets/lookup.csv": "id,name\n1,Alice\n2,Bob\n"
       }
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
@@ -533,7 +533,7 @@ Feature: Resource lifecycle
     And node "node-1" eventually reports leader "node-1"
     And node "node-3" is stopped
     Then node "node-1" eventually reports status containing "raft member 'node-3' is marked unavailable"
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE proto;
@@ -560,7 +560,7 @@ Feature: Resource lifecycle
     And node "node-1" has resource directory "large_resource" with file "model.bin" of 48 MiB
     And node "node-1" eventually reports leader "node-1"
     And node "node-3" is stopped
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE large_model;
@@ -571,11 +571,30 @@ Feature: Resource lifecycle
       uploaded resource version 1
       """
     When node "node-3" is started
-    Then within "1s" these NSPL commands complete on node "node-3"
+    And client "control_probe" connects to node "node-3"
+    Then within "300s" node "node-3" observability metric "nervix_interconnect_bulk_bytes_total" with labels eventually reaches at least 1
+      """
+      class="bulk"
+      direction="received"
+      """
+    And within "1s" client "control_probe" completes these Plexus statements
       """
       SHOW CLUSTER STATUS;
       """
-    And within "30s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
+    And the last command output contains
+      """
+      raft.id: node-3
+      """
+    And within "300s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
       """
       DESCRIBE RESOURCE large_model VERSION 1;
+      """
+    And the last command output contains
+      """
+      file_count: 1
+      total_bytes: 50331648
+      """
+    And the last command output contains
+      """
+      type=file path=model.bin size=50331648
       """

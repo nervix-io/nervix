@@ -18,6 +18,11 @@ use super::*;
 /// ingestor's, emitter's or generator's start report, stays beneath it.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error("failed to retire the source of ingestor '{ingestor}' in domain '{domain}'")]
+    RetireIngestorEntity {
+        domain: DomainName,
+        ingestor: IngestorName,
+    },
     #[error("ingestor '{ingestor}' in domain '{domain}' is not running")]
     IngestorNotRunning {
         domain: DomainName,

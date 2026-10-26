@@ -131,10 +131,11 @@ impl ScheduledNodeTask {
 
     pub(super) async fn checkpoint_via(
         commands: &mpsc::Sender<ProcessorNodeCommand>,
+        purpose: ProcessorCheckpointPurpose,
     ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
         let (response, receiver) = oneshot::channel();
         commands
-            .send(ProcessorNodeCommand::Checkpoint { response })
+            .send(ProcessorNodeCommand::Checkpoint { purpose, response })
             .await
             .map_err(|_| {
                 OwnershipHandoffError::checkpoint(
@@ -201,8 +202,8 @@ impl ScheduledNodeTask {
 mod tests {
     use nervix_models::{
         CreateClientKafka, CreateIngestor, FlushPolicy, GeneralErrorPolicy, IngestQuiesceMode,
-        IngestSource, KafkaConsumerGroupName, KafkaIngestMode, KafkaOffsetMode, KafkaSource,
-        KafkaTopicSource, Model, OutputBranch, ParseAsType, ProcessorOutputs,
+        IngestorEntity, KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
+        KafkaTopicIngestor, Model, OutputBranch, ParseAsType, ProcessorOutputs,
     };
     use nonzero_ext::nonzero;
 
@@ -215,7 +216,7 @@ mod tests {
                 .with_flush_policy(FlushPolicy::Immediate)
                 .with_branch(OutputBranch::Unbranched),
             input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-                source: IngestSource::Kafka(KafkaSource::Topic(KafkaTopicSource {
+                source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                     client: named("kafka"),
                     topic: named("events"),
                     offset_mode,

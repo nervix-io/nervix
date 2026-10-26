@@ -3,7 +3,7 @@
 //! and the rejection a peer receives for one.
 //! May depend on: the model vocabulary, the interconnect's handoff failure envelope, and
 //! `error-stack` reports, which keep a runtime state persistence failure beneath them.
-//! Must not know: schedules, consensus transactions, NSPL, or edge protocols.
+//! Must not know: schedules, consensus transactions, Plexus, or edge protocols.
 
 #![cfg_attr(
     nervix_lint,
@@ -12,7 +12,7 @@
 
 use error_stack::Report;
 use nervix_interconnect::OwnershipHandoffFailure;
-use nervix_models::{ModelKind, ModelName};
+use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName, NodeRef};
 use thiserror::Error;
 
 pub(crate) type OwnershipHandoffResult<T> = Result<T, Report<OwnershipHandoffError>>;
@@ -23,6 +23,10 @@ pub(crate) enum OwnershipHandoffError {
     Checkpoint(String),
     #[error("ownership handoff participant validation failed: {0}")]
     Participant(String),
+    /// The destination's own process incarnation advertised that it is terminating, so it is not a
+    /// new placement destination, whatever its coordinator's view still shows.
+    #[error("destination node '{node}' is terminating")]
+    DestinationTerminating { node: ClusterNodeName },
     #[error("ownership handoff schedule validation failed: {0}")]
     Schedule(String),
     #[error("ownership handoff state validation failed: {0}")]
@@ -31,6 +35,11 @@ pub(crate) enum OwnershipHandoffError {
     Transport(String),
     #[error("ownership handoff deadline elapsed: {0}")]
     Deadline(String),
+    #[error(
+        "forced recovery of {} '{}' in domain '{}' timed out waiting for its local schedule installation",
+        .node.kind.as_str(), .node.identifier.as_str(), .domain.as_str()
+    )]
+    ScheduleInstallationDeadline { domain: DomainName, node: NodeRef },
     #[error("ownership handoff WASM restore failed for wasm processor '{}'", .processor.as_str())]
     WasmRestore { processor: ModelName },
     #[error("ownership handoff checkpoint failed for wasm processor '{}'", .processor.as_str())]

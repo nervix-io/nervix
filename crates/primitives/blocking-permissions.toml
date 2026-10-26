@@ -51,21 +51,14 @@ bound = "Two small files, read once for each resolver built; a node builds one w
 items = ["task::spawn_blocking"]
 owner = "The resolver's configuration load in nervix-dns."
 path = "crates/dns/src/lib.rs"
-reason = "A node reads its resolver configuration before it builds its executor, and the Rust client and the CLI build the same resolver without one."
+reason = "The resolver names no executor: the Rust client and the CLI build it without one, and a node's startup preflight loads it through the same call."
 
 [[permission]]
 bound = "The flush returns by the physical deadline the host hands the sink's finish."
 items = ["task::spawn_blocking"]
 owner = "The Kafka sink's final producer-queue drain."
-path = "crates/connectors/kafka/src/lib.rs"
+path = "crates/connectors/kafka/src/topic/mod.rs"
 reason = "librdkafka's flush parks its calling thread until the broker answers. It waits on the network and computes nothing, so it would hold a CPU or storage worker idle for the whole drain."
-
-[[permission]]
-bound = "Each metadata request carries a five-second timeout, and a partition watch makes one request per watch interval."
-items = ["task::spawn_blocking"]
-owner = "The Kafka source's partition inspection."
-path = "crates/connectors/kafka/src/source.rs"
-reason = "librdkafka's metadata fetch parks its calling thread until the broker answers. It waits on the network and computes nothing, so it would hold a CPU or storage worker idle for the whole request."
 
 [[permission]]
 bound = "One rename of the archive the client already wrote and synchronized."
@@ -238,8 +231,8 @@ reason = "Epoch interruption must progress while a guest occupies an executor wo
 [[permission]]
 bound = "At most the configured jobs per frontier level; each worker claims a finite level entry, and the scope joins all workers before the next level or the walk budget is checked."
 items = ["thread::Builder", "thread::scope"]
-owner = "The NSPL completion graph walker."
-path = "crates/nspl/tests/completion_walk/walker.rs"
+owner = "The Plexus completion graph walker."
+path = "crates/plexus/tests/completion_walk/walker.rs"
 reason = "The test harness evaluates a finite grammar frontier in parallel and has no node executor."
 
 [[permission]]

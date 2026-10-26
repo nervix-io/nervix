@@ -6,17 +6,17 @@ Feature: Runtime startup admission
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "runtime_admission_out_{{test_id}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-1;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA admission_event (
         sequence U64
@@ -56,17 +56,16 @@ Feature: Runtime startup admission
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE EMITTER admission_emitter
+      CREATE KAFKA TOPIC EMITTER admission_emitter
         FROM admission_output
-        TO KAFKA kafka_main TOPIC runtime_admission_out_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO kafka_main TOPIC 'runtime_admission_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING admission_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -89,7 +88,7 @@ Feature: Runtime startup admission
       """
       {"sequence":1}
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       """
@@ -101,7 +100,7 @@ Feature: Runtime startup admission
       """
     When node "node-2" is started while consensus connectivity is blocked
     Then node "node-2" eventually reports interconnect to "node-1" as "connected"
-    When these NSPL commands are executed on node "node-2"
+    When these Plexus commands are executed on node "node-2"
       """
       SHOW CLUSTER STATUS;
       """

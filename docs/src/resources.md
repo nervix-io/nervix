@@ -1,5 +1,7 @@
 # Resources
 
+*Plexus, the Nervix graph definition language.*
+
 `RESOURCE` is Nervix's versioned file-distribution primitive.
 
 A resource is an uploaded directory tree that is stored and replicated across the cluster. It is used for binary or multi-file assets that runtime nodes need locally, such as:
@@ -9,7 +11,7 @@ A resource is an uploaded directory tree that is stored and replicated across th
 - CSV lookup tables
 - TLS certificate bundles
 
-This chapter describes the NSPL statements and their observable behavior. See
+This chapter describes the Plexus statements and their observable behavior. See
 [Resource Versions And Bindings](./resource-versions.md) for the architecture behind them: how a
 version is installed and completed on every node, what each binding loads and when, and how a
 rebinding is validated, classified, and applied.
@@ -24,7 +26,7 @@ The same resource name in two domains is two independent resources: they have se
 
 Resources are managed in two phases:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] RESOURCE <name>;
 UPLOAD RESOURCE <name> VERSION '<local_directory>';
 DESCRIBE RESOURCE <name>;
@@ -89,7 +91,7 @@ moves an existing binding.
 
 `REBIND RESOURCE` moves existing bindings without changing the resource catalog:
 
-```nspl,ignore
+```plexus,ignore
 REBIND RESOURCE fraud_model TO VERSION LATEST;
 REBIND RESOURCE fraud_model TO VERSION 3
   FOR INFERENCER score_model, HASH MAP scores_by_id, CLIENT model_store;
@@ -122,7 +124,7 @@ quiesce level: DOMAIN_PAUSE
 Rotate a resource by uploading the replacement first and then moving its usages. The upload must
 complete everywhere before the rebind can select it:
 
-```nspl,ignore
+```plexus,ignore
 UPLOAD RESOURCE fraud_model VERSION './models/2026-09-17';
 REBIND RESOURCE fraud_model TO VERSION LATEST;
 ```
@@ -180,7 +182,7 @@ Client configs can mount a resource version into a temporary directory at runtim
 
 Declare the mount directly on the client:
 
-```nspl,ignore
+```plexus,ignore
 MOUNT <resource_name> VERSION <n>|LATEST
 ```
 
@@ -191,15 +193,14 @@ files, and `SHOW CREATE CLIENT` renders the stored number.
 
 Inside other client config values, Nervix renders values with a lightweight Jinja-like template language. The mounted resource path is exposed as a template variable named after the mounted resource:
 
-```nspl,ignore
+```plexus,ignore
 {{ <resource_name> }}
 ```
 
 Example:
 
-```nspl
-CREATE IF NOT EXISTS CLIENT kafka_tls
-  TYPE KAFKA
+```plexus
+CREATE IF NOT EXISTS KAFKA CLIENT kafka_tls
   MOUNT dev_tls VERSION 1
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9094',
@@ -220,12 +221,11 @@ The general pattern for TLS-enabled external clients is:
 
 Example:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS RESOURCE dev_tls;
 UPLOAD RESOURCE dev_tls VERSION './tls/dev';
 
-CREATE IF NOT EXISTS CLIENT redis_tls
-  TYPE REDIS
+CREATE IF NOT EXISTS REDIS CLIENT redis_tls
   POOL SIZE MIN 1 MAX 4
   MOUNT dev_tls VERSION 1
   CONFIG {
@@ -258,6 +258,6 @@ Client types that currently support TLS-oriented configuration through mounted r
 - SQS
 - Syslog
 
-`ZEROMQ` remains plain pass-through transport configuration and does not currently expose a Nervix-specific TLS helper surface.
+A `ZEROMQ` client has no TLS: its driver offers plain `tcp://` and `ipc://` transports and no ZMTP security mechanism. Its `CONFIG` values are still rendered over its `MOUNT`, for its ingestors and its emitters alike.
 
 Pulsar currently supports mounted `tls_ca_file` server trust configuration, but not mounted client certificate authentication.

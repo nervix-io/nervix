@@ -5,7 +5,7 @@
 //! - **Owns.** The valid origin, method, target and application-header values of an outbound HTTP
 //!   request, including the bounds that are checked both for literals and evaluated records.
 //! - **Depends on.** The URL Standard parser and semantic error vocabulary.
-//! - **Must not know.** NSPL parsing, registry state, Arrow batches or connector I/O.
+//! - **Must not know.** Plexus parsing, registry state, Arrow batches or connector I/O.
 
 #![cfg_attr(
     nervix_lint,
@@ -137,6 +137,16 @@ impl HttpMethod {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether the method defines a meaning for content a request encloses: `POST`, `PUT` and
+    /// `PATCH`, in any ASCII case, as their case variants count for the body rules too. A request
+    /// with such a method declares its length even when it encloses nothing, as RFC 9110
+    /// section 8.6 asks of a client.
+    pub fn defines_content(&self) -> bool {
+        self.0.eq_ignore_ascii_case("POST")
+            || self.0.eq_ignore_ascii_case("PUT")
+            || self.0.eq_ignore_ascii_case("PATCH")
     }
 }
 
@@ -343,6 +353,23 @@ mod tests {
     }
 
     #[test]
+    fn methods_that_define_request_content_are_recognized_in_every_ascii_case() {
+        for method in ["POST", "PUT", "PATCH", "post", "pUt", "Patch"] {
+            let parsed = HttpMethod::parse(method, HttpBodyMode::WithoutBody)
+                .assured("the method is a valid HTTP token");
+            assert!(parsed.defines_content(), "{method} defines request content");
+        }
+        for method in ["DELETE", "GET", "HEAD", "OPTIONS", "purge", "POSTS", "PUTS"] {
+            let parsed = HttpMethod::parse(method, HttpBodyMode::WithoutBody)
+                .assured("the method is a valid HTTP token");
+            assert!(
+                !parsed.defines_content(),
+                "{method} defines no request content"
+            );
+        }
+    }
+
+    #[test]
     fn request_fields_enforce_method_and_header_contracts() {
         assert!(HttpMethod::parse("PATCH", HttpBodyMode::Codec).is_ok());
         assert!(HttpMethod::parse("get", HttpBodyMode::Codec).is_err());
@@ -390,6 +417,31 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    /// HTTP REQUEST emitters declare sorted by name with lowercase names: the application headers
+    /// keep one value per name as ASCII lowercase records it, the last one written, and a request
+    /// carries them in ascending order of name.
+    #[test]
+    fn application_headers_keep_the_last_value_of_each_lowercase_name_in_name_order() {
+        let mut headers = HttpApplicationHeaders::default();
+        for (name, value) in [
+            ("X-Trace", "a"),
+            ("Tenant", "x"),
+            ("x-trace", "b"),
+            ("Accept", "y"),
+        ] {
+            let name = HttpHeaderName::parse(name).assured("each name is an application field");
+            let value = HttpHeaderValue::parse(value).assured("each value is a valid field value");
+            headers
+                .insert(name, value)
+                .assured("four short headers fit the application envelope");
+        }
+        let mut carried = Vec::new();
+        for (name, value) in headers.iter() {
+            carried.push(format!("{}={}", name.as_str(), value.as_str()));
+        }
+        assert_eq!(carried, ["accept=y", "tenant=x", "x-trace=b"]);
     }
 
     #[test]

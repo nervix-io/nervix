@@ -1,7 +1,7 @@
 Feature: Deduplicator and window state in backup archives
 
   Background:
-    Given these NSPL commands are saved as placeholder "branch_state_models"
+    Given these Plexus commands are saved as placeholder "branch_state_models"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA payment ( tenant STRING, transaction_id STRING, amount I64 );
@@ -57,13 +57,13 @@ Feature: Deduplicator and window state in backup archives
       START;
       """
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: Deduplicator keys and half-filled windows captured at a quiesced cut continue per branch after RESUME
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       {{branch_state_models}}
       CREATE SUBSCRIPTION source_payments TO unique_payments;
@@ -87,7 +87,7 @@ Feature: Deduplicator and window state in backup archives
       key={"tenant":"beta"} | "transaction_id":"txn-2"
       key={"tenant":"alpha"} | "transaction_id":"txn-3"
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION source_summaries TO metric_summaries;
       """
@@ -133,7 +133,7 @@ Feature: Deduplicator and window state in backup archives
     When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "branch-state-resumed.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "branch-state.nvxb" and "branch-state-resumed.nvxb" have identical deduplicator state
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restored_summaries TO metric_summaries;
       """
@@ -150,7 +150,7 @@ Feature: Deduplicator and window state in backup archives
       key={"tenant":"alpha"} | "samples":2 | "total":100 | "first_latency":70 | "last_latency":30 | "smallest":30 | "largest":70 | "latency_p0":15.0
       key={"tenant":"beta"} | "samples":2 | "total":120 | "first_latency":80 | "last_latency":40 | "smallest":40 | "largest":80 | "latency_p0":25.0
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restored_payments TO unique_payments;
       """
@@ -196,13 +196,70 @@ Feature: Deduplicator and window state in backup archives
       | 1            | 0             |
       | 3            | 1             |
 
-  @restore_installation @deloxide_stress_restore
+  @long_running
+  Scenario Outline: A stopped cut taken as soon as STOP returns holds the windows whose last writes outlast the stop grace
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      {{branch_state_models}}
+      CREATE SUBSCRIPTION source_summaries TO metric_summaries;
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/payments"
+      """
+      {"tenant":"alpha","transaction_id":"txn-1","amount":10}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"alpha","latency":10}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/payments"
+      """
+      {"tenant":"beta","transaction_id":"txn-2","amount":20}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","latency":20}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"alpha","latency":70}
+      """
+    And http payload is posted to host "backup-branch-state-{{test_id}}.example.com" path "/metrics"
+      """
+      {"tenant":"beta","latency":80}
+      """
+    Then within "30s" the relay subscription receives exactly one payload for each fragment set
+      """
+      key={"tenant":"alpha"} | "total":80 | "latency_p0":15.0
+      key={"tenant":"beta"} | "total":100 | "latency_p0":25.0
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}}" from node "{{leader}}" into "running.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given every branch of window processor "latency_window" takes "15s" to write its state as it stops
+    When these Plexus commands are executed on the leader node
+      """
+      STOP;
+      """
+    And the CLI backs up "domain {{domain}}" from node "{{leader}}" into "stopped.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And backup archives "running.nvxb" and "stopped.nvxb" have identical deduplicator and window state
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: A stopped restore re-exports identical deduplicator and window sections, an interrupted installation keeps START gated, and WITHOUT STATE installs neither
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       {{branch_state_models}}
       CREATE SUBSCRIPTION source_summaries TO metric_summaries;
@@ -245,7 +302,7 @@ Feature: Deduplicator and window state in backup archives
     And restoring domain "{{domain}}" fails before installing its first deduplicator or window checkpoint
     When the CLI restores "domain {{domain}} --resume" from "branch-state.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
-    When these NSPL commands fail with "restore state installation is incomplete"
+    When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
@@ -272,7 +329,7 @@ Feature: Deduplicator and window state in backup archives
       """
       {"tenant":"probe","latency":1}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION restored_payments TO unique_payments;
       CREATE SUBSCRIPTION restored_summaries TO metric_summaries;
@@ -306,7 +363,7 @@ Feature: Deduplicator and window state in backup archives
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       {{branch_state_models}}
       CREATE SUBSCRIPTION source_summaries TO metric_summaries;
@@ -357,7 +414,7 @@ Feature: Deduplicator and window state in backup archives
       """
       {"tenant":"probe","latency":1}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION resumed_payments TO unique_payments;
       CREATE SUBSCRIPTION resumed_summaries TO metric_summaries;
@@ -393,7 +450,7 @@ Feature: Deduplicator and window state in backup archives
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       {{branch_state_models}}
       CREATE SUBSCRIPTION source_summaries TO metric_summaries;
@@ -435,7 +492,7 @@ Feature: Deduplicator and window state in backup archives
       """
       {"tenant":"probe","latency":1}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION changed_summaries TO metric_summaries;
       """
@@ -462,7 +519,7 @@ Feature: Deduplicator and window state in backup archives
       """
       {"tenant":"probe","latency":1}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION advanced_summaries TO metric_summaries;
       """

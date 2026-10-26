@@ -1,4 +1,4 @@
-Feature: HTTP emitter lifecycle
+Feature: HTTP REQUEST emitter lifecycle
   A configuration change drains requests with the client and request fields that admitted them.
   A stopped emitter retains no prepared HTTP request; an attached source decides redelivery.
 
@@ -14,11 +14,11 @@ Feature: HTTP emitter lifecycle
     And HTTP receiver "second" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (event_id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
@@ -30,14 +30,14 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT first_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT first_api CONFIG {
         'endpoint' = '{{http_receiver.first}}', 'timeout_ms' = 60000
       };
-      CREATE CLIENT second_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP first_api METHOD 'POST' PATH concat('/first/', input.event_id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO first_api METHOD 'POST' PATH concat('/first/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -47,14 +47,14 @@ Feature: HTTP emitter lifecycle
       [{"event_id":"1"}]
       """
     Then HTTP receiver "first" eventually receives at least 1 requests
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
-      ALTER EMITTER published SET TO HTTP second_api
+      ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.event_id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
     And HTTP receiver "first" releases its held responses with "respond 204"
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And the last command output contains
       """
       quiesce level: ENTITY_PAUSE
@@ -81,7 +81,7 @@ Feature: HTTP emitter lifecycle
       | 3            |
 
   @http_emitter_failed_drain
-  Scenario Outline: A failed HTTP emitter drain leaves the admitted request and active destination intact
+  Scenario Outline: A failed HTTP REQUEST emitter drain leaves the admitted request and active destination intact
     Given HTTP receiver "first" is running
     And HTTP receiver "first" answers with
       """
@@ -92,11 +92,11 @@ Feature: HTTP emitter lifecycle
     And HTTP receiver "second" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (event_id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
@@ -108,14 +108,14 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT first_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT first_api CONFIG {
         'endpoint' = '{{http_receiver.first}}', 'timeout_ms' = 60000
       };
-      CREATE CLIENT second_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP first_api METHOD 'POST' PATH concat('/first/', input.event_id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO first_api METHOD 'POST' PATH concat('/first/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -126,19 +126,19 @@ Feature: HTTP emitter lifecycle
       """
     Then HTTP receiver "first" eventually receives at least 1 requests
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
-    When these NSPL commands fail with "timed out draining domain"
+    When these Plexus commands fail with "timed out draining domain"
       """
-      ALTER EMITTER published SET TO HTTP second_api
+      ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.event_id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER published;
       """
     Then the last command output contains
       """
-      TO HTTP first_api METHOD 'POST' PATH concat('/first/', input.event_id)
+      TO first_api METHOD 'POST' PATH concat('/first/', input.event_id)
       """
     When HTTP receiver "first" releases its held responses with "respond 204"
     And http payload is posted to host "http-drain-{{test_id}}.example.com" path "/events"
@@ -163,11 +163,11 @@ Feature: HTTP emitter lifecycle
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
@@ -188,21 +188,21 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'POST' PATH '/coded'
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'POST' PATH '/coded'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         INHERIT id INVOKE write_header('X-Mode', 'coded')
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER set_body FROM spare
-        TO HTTP api_client METHOD 'POST' PATH '/set'
+      CREATE HTTP REQUEST EMITTER set_body FROM spare
+        TO api_client METHOD 'POST' PATH '/set'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         SET id = input.id
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER scoped FROM spare
-        TO HTTP api_client METHOD 'POST' PATH '/scoped'
+      CREATE HTTP REQUEST EMITTER scoped FROM spare
+        TO api_client METHOD 'POST' PATH '/scoped'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING optional_codec
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_requests
@@ -222,13 +222,13 @@ Feature: HTTP emitter lifecycle
 
       {"id":"1"}
       """
-    When these NSPL commands fail with "emitter body selection does not support the retained construction"
+    When these Plexus commands fail with "emitter body selection does not support the retained construction"
       """
-      ALTER EMITTER published SET TO HTTP api_client
+      ALTER HTTP REQUEST EMITTER published SET TO api_client
         METHOD 'DELETE' PATH '/empty'
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER published;
       """
@@ -240,15 +240,15 @@ Feature: HTTP emitter lifecycle
       """
       INHERIT id
       """
-    When these NSPL commands fail with "emitter body selection does not support the retained construction"
+    When these Plexus commands fail with "emitter body selection does not support the retained construction"
       """
-      ALTER EMITTER set_body SET TO HTTP api_client
+      ALTER HTTP REQUEST EMITTER set_body SET TO api_client
         METHOD 'DELETE' PATH '/empty'
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
-    When these NSPL commands fail with "partial_output"
+    When these Plexus commands fail with "partial_output"
       """
-      ALTER EMITTER scoped SET TO HTTP api_client
+      ALTER HTTP REQUEST EMITTER scoped SET TO api_client
         METHOD 'DELETE' PATH '/empty'
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
@@ -260,12 +260,12 @@ Feature: HTTP emitter lifecycle
     # replacement cannot support its request fields or its construction fails, and the active
     # emitter keeps delivering as it was.
     Given client "owner" is connected to the leader node
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'GET' PATH '/refused'
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'GET' PATH '/refused'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         INHERIT id
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -277,12 +277,12 @@ Feature: HTTP emitter lifecycle
       GET and HEAD require WITHOUT BODY
       """
     And transaction "{{refused_request_transaction}}" eventually has state "FAILED"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'DELETE' PATH '/refused'
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'DELETE' PATH '/refused'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING required_codec
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
@@ -305,18 +305,18 @@ Feature: HTTP emitter lifecycle
 
       {"id":"kept"}
       """
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       DROP EMITTER published;
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'DELETE' PATH '/empty'
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'DELETE' PATH '/empty'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms ENCODE USING optional_codec
         INVOKE write_header('X-Mode', 'replacement')
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       COMMIT;
       """
@@ -325,9 +325,9 @@ Feature: HTTP emitter lifecycle
       quiesce level: ENTITY_PAUSE
       """
     And transaction "{{transaction_id}}" report step 1 eventually records planned quiesce "ENTITY_PAUSE", actual quiesce "ENTITY_PAUSE", execution "APPLIED", and outcomes "REQUESTED,CONFIRMED,RELEASED"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published SET TO HTTP api_client
+      ALTER HTTP REQUEST EMITTER published SET TO api_client
         METHOD 'DELETE' PATH '/empty'
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
@@ -353,16 +353,16 @@ Feature: HTTP emitter lifecycle
       | 3            |
 
   @http_emitter_impact
-  Scenario Outline: HTTP emitter changes use their effective quiesce levels
+  Scenario Outline: HTTP REQUEST emitter changes use their effective quiesce levels
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
@@ -375,30 +375,30 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT first_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT first_api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE CLIENT second_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER published FROM outgoing
-        TO HTTP first_api METHOD 'POST' PATH '/first'
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO first_api METHOD 'POST' PATH '/first'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published SET MODE ACK RETRY POLICY BACKOFF 200ms MAX 200ms;
+      ALTER HTTP REQUEST EMITTER published SET MODE ACK RETRY POLICY BACKOFF 200ms MAX 200ms;
       """
     Then the last command output contains
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published SET CLIENT second_api;
+      ALTER HTTP REQUEST EMITTER published SET CLIENT second_api;
       """
     Then the last command output contains
       """
@@ -408,9 +408,9 @@ Feature: HTTP emitter lifecycle
       """
       [{"id":"1"}]
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published SET FLUSH IMMEDIATE;
+      ALTER HTTP REQUEST EMITTER published SET FLUSH IMMEDIATE;
       """
     Then the last command output contains
       """
@@ -421,24 +421,24 @@ Feature: HTTP emitter lifecycle
       """
       POST /first
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published ADD FROM backup;
+      ALTER HTTP REQUEST EMITTER published ADD FROM backup;
       """
     Then the last command output contains
       """
       quiesce level: DOMAIN_PAUSE
       """
     Given client "owner" is connected to the leader node
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       DROP CLIENT second_api;
-      CREATE CLIENT second_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 6000
       };
       """
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       COMMIT;
       """
@@ -468,18 +468,18 @@ Feature: HTTP emitter lifecycle
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And Kafka topic "http_recovery_{{test_id}}" exists with 1 partitions
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       <cordon>
       CREATE SCHEMA event (id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
       };
       CREATE KAFKA TOPIC INGESTOR source
@@ -489,11 +489,11 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'POST' PATH concat('/events/', input.id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'POST' PATH concat('/events/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -522,7 +522,7 @@ Feature: HTTP emitter lifecycle
       | 3            | CORDON NODE node-2; CORDON NODE node-3; |
 
   @http_emitter_shutdown_flush
-  Scenario Outline: Graceful shutdown force-flushes an HTTP emitter inside the drain deadline
+  Scenario Outline: Graceful shutdown force-flushes an HTTP REQUEST emitter inside the drain deadline
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And graceful shutdown drain is enabled
@@ -530,11 +530,11 @@ Feature: HTTP emitter lifecycle
     And the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       <cordon>
       CREATE SCHEMA event (id STRING);
@@ -547,11 +547,11 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'POST' PATH concat('/events/', input.id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'POST' PATH concat('/events/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -586,17 +586,17 @@ Feature: HTTP emitter lifecycle
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And Kafka topic "http_stop_{{test_id}}" exists with 1 partitions
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (id STRING);
       CREATE CODEC event_codec FROM JSON TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}', 'auto.offset.reset' = 'earliest'
       };
       CREATE KAFKA TOPIC INGESTOR source
@@ -606,14 +606,14 @@ Feature: HTTP emitter lifecycle
         ON QUIESCE SUSPEND DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT first_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT first_api CONFIG {
         'endpoint' = '{{http_receiver.first}}', 'timeout_ms' = 60000
       };
-      CREATE CLIENT second_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT second_api CONFIG {
         'endpoint' = '{{http_receiver.second}}', 'timeout_ms' = 5000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP first_api METHOD 'POST' PATH concat('/first/', input.id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO first_api METHOD 'POST' PATH concat('/first/', input.id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -626,15 +626,15 @@ Feature: HTTP emitter lifecycle
     Then HTTP receiver "first" eventually receives at least 1 request
     # The first destination never answers, so a live alteration cannot drain the admitted request.
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
-    When these NSPL commands fail with "timed out draining domain"
+    When these Plexus commands fail with "timed out draining domain"
       """
-      ALTER EMITTER published SET TO HTTP second_api
+      ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       """
     # Stopping the domain ends the request instead: its connection is released and its record stays
     # unacknowledged at the attached source.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
@@ -642,9 +642,9 @@ Feature: HTTP emitter lifecycle
     And within "2s" Kafka consumer group "http_stop_group_{{test_id}}" next offset for topic "http_stop_{{test_id}}" partition 0 is "below 1"
     # While the domain is stopped, the replacement needs no drain, and the restarted source
     # redelivers the record, which the replacement sends to the second destination.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER published SET TO HTTP second_api
+      ALTER HTTP REQUEST EMITTER published SET TO second_api
         METHOD 'PUT' PATH concat('/second/', input.id)
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY;
       START;

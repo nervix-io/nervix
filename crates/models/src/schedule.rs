@@ -28,8 +28,8 @@ use strum::AsRefStr;
 
 use crate::{
     BranchKeyFingerprint, ClusterNodeName, CommandExecutionReference, CreateWasmProcessor,
-    DomainName, IngestSource, KafkaOffsetMode, KafkaSource, Model, ModelKind, ModelName, NodeRef,
-    ResolvedBranching, SchemaFingerprint, UniquelyKindedModel, WasmSavedStateRejection,
+    DomainName, IngestorEntity, KafkaIngestor, KafkaOffsetMode, Model, ModelKind, ModelName,
+    NodeRef, ResolvedBranching, SchemaFingerprint, UniquelyKindedModel, WasmSavedStateRejection,
     WasmStateGeneration, WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
     WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetReason,
     WasmStateResetScope,
@@ -114,6 +114,17 @@ impl DomainSchedule {
             node,
         })
     }
+
+    /// The entities this schedule names `node` the primary of, in the order it places them.
+    pub fn primary_entities_on(&self, node: &ClusterNodeName) -> Vec<NodeRef> {
+        let mut entities = Vec::new();
+        for (entity, scheduled) in &self.nodes {
+            if scheduled.primary_node() == Some(node) {
+                entities.push(entity.clone());
+            }
+        }
+        entities
+    }
 }
 
 /// One scheduled node with its configuration already narrowed to the shape its kind names.
@@ -165,6 +176,22 @@ pub enum OwnershipStateComponent {
     MaterializedRelay,
     WasmProcessor,
     WindowProcessor,
+}
+
+impl OwnershipStateComponent {
+    /// Whether a backup archive carries this component's state. Branch-aggregated metrics are
+    /// never archived: a restored entity starts its metrics afresh.
+    pub fn is_archived(self) -> bool {
+        match self {
+            Self::BranchAggregated => false,
+            Self::BranchLifecycle
+            | Self::Deduplicator
+            | Self::KafkaOffsets
+            | Self::MaterializedRelay
+            | Self::WasmProcessor
+            | Self::WindowProcessor => true,
+        }
+    }
 }
 
 #[derive(
@@ -494,7 +521,7 @@ impl ScheduledNode {
         }
         if let Model::Ingestor(ingestor) = self.config.as_ref()
             && let crate::IngestorInput::Transport(input) = &ingestor.input
-            && let IngestSource::Kafka(KafkaSource::Topic(topic)) = &input.source
+            && let IngestorEntity::Kafka(KafkaIngestor::Topic(topic)) = &input.source
             && topic.offset_mode == KafkaOffsetMode::Domain
         {
             components.push(OwnershipStateComponent::KafkaOffsets);
@@ -576,6 +603,18 @@ impl ScheduledNode {
             self.is_assigned_to(node_id)
         } else {
             self.is_primary_on(node_id)
+        }
+    }
+
+    /// Every node [`Self::executes_on`] accepts: each assigned node of an entity that runs on every
+    /// cluster node, and otherwise the primary, or each assigned node when there is no primary.
+    pub fn execution_nodes(&self) -> &[ClusterNodeName] {
+        if self.executes_on_every_cluster_node() {
+            return &self.assigned_nodes;
+        }
+        match &self.primary_node {
+            Some(primary) => std::slice::from_ref(primary),
+            None => &self.assigned_nodes,
         }
     }
 

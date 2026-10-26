@@ -50,7 +50,7 @@ name = "json"
 
 [implementations.nervix]
 kind = "nervix"
-template = "graph.nspl.upon"
+template = "graph.plexus.upon"
 
 [implementations.flink]
 kind = "container"
@@ -63,7 +63,7 @@ command = ["bin/flink", "run"]
         ),
     );
     write(
-        &directory.join("graph.nspl.upon"),
+        &directory.join("graph.plexus.upon"),
         concat!(
             "bootstrap={{ kafka_bootstrap_servers }}\n",
             "input={{ input_topic }}\n",
@@ -192,12 +192,13 @@ fn nervix_catalog_workloads_use_a_dedicated_idempotent_kafka_producer() {
             )
             .expect("Nervix benchmark template should render");
 
-        assert!(rendered.contains("CREATE CLIENT kafka_input"));
-        assert!(rendered.contains("CREATE CLIENT kafka_output"));
+        assert!(rendered.contains("CREATE KAFKA CLIENT kafka_input"));
+        assert!(rendered.contains("CREATE KAFKA CLIENT kafka_output"));
         assert!(rendered.contains("'enable.idempotence' = 'true'"));
         assert!(rendered.contains("'acks' = 'all'"));
         assert!(rendered.contains("CREATE KAFKA TOPIC INGESTOR kafka_in_0\n  FROM kafka_input\n"));
-        assert!(rendered.contains("TO KAFKA kafka_output"));
+        assert!(rendered.contains("CREATE KAFKA TOPIC EMITTER kafka_out_0\n"));
+        assert!(rendered.contains("TO kafka_output TOPIC 'bench-output'"));
     }
 }
 
@@ -251,11 +252,11 @@ kind = "uniform-passthrough"
 [parameters]
 [implementations.nervix]
 kind = "nervix"
-template = "graph.nspl.upon"
+template = "graph.plexus.upon"
 "#,
             ),
         );
-        write(&directory.join("graph.nspl.upon"), "BEGIN; COMMIT;");
+        write(&directory.join("graph.plexus.upon"), "BEGIN; COMMIT;");
         assert!(matches!(
             load_failure(&catalog, slug).current_context(),
             BenchmarkError::InvalidDefinition { .. }
@@ -284,11 +285,11 @@ kind = "uniform-passthrough"
 [parameters]
 [implementations.nervix]
 kind = "nervix"
-template = "graph.nspl.upon"
+template = "graph.plexus.upon"
 "#,
     );
     write(
-        &unsupported_dependency.join("graph.nspl.upon"),
+        &unsupported_dependency.join("graph.plexus.upon"),
         "BEGIN; COMMIT;",
     );
     assert!(matches!(
@@ -347,11 +348,11 @@ kind = "uniform-passthrough"
 [parameters]
 [implementations.nervix]
 kind = "nervix"
-template = "graph.nspl.upon"
+template = "graph.plexus.upon"
 "#,
     );
     write(
-        &invalid_duration_directory.join("graph.nspl.upon"),
+        &invalid_duration_directory.join("graph.plexus.upon"),
         "BEGIN; COMMIT;",
     );
     assert!(matches!(
@@ -381,11 +382,11 @@ kind = "uniform-passthrough"
 [parameters]
 [implementations.nervix]
 kind = "nervix"
-template = "graph.nspl.upon"
+template = "graph.plexus.upon"
 "#,
     );
     write(
-        &invalid_partition_directory.join("graph.nspl.upon"),
+        &invalid_partition_directory.join("graph.plexus.upon"),
         "BEGIN; COMMIT;",
     );
     assert!(matches!(
@@ -456,14 +457,14 @@ kind = "uniform-passthrough"
 [parameters]
 [implementations.nervix]
 kind = "nervix"
-template = "../outside.nspl"
+template = "../outside.plexus"
 "#,
     );
     write(
         &escaping_directory
             .parent()
             .expect("benchmark should have a parent")
-            .join("outside.nspl"),
+            .join("outside.plexus"),
         "BEGIN; COMMIT;",
     );
     let error = catalog
@@ -501,11 +502,11 @@ kind = "keyed-windowed"
 
 [implementations.nervix]
 kind = "nervix"
-template = "graph.nspl.upon"
+template = "graph.plexus.upon"
 "#,
         ),
     );
-    write(&directory.join("graph.nspl.upon"), "BEGIN; COMMIT;");
+    write(&directory.join("graph.plexus.upon"), "BEGIN; COMMIT;");
 }
 
 #[test]
@@ -621,7 +622,7 @@ fn locates_a_template_syntax_error_once_beneath_the_template_it_belongs_to() {
     write(
         &repository
             .path()
-            .join("benches/benchmarks/broken-template/graph.nspl.upon"),
+            .join("benches/benchmarks/broken-template/graph.plexus.upon"),
         "bootstrap={{ kafka_bootstrap_servers }}\ninput={{ input_topic \n",
     );
     let catalog = BenchmarkCatalog::from_repository_root(repository.path());
@@ -633,13 +634,13 @@ fn locates_a_template_syntax_error_once_beneath_the_template_it_belongs_to() {
         BenchmarkError::CompileTemplate { slug, implementation, path }
             if slug == "broken-template"
                 && implementation == "nervix"
-                && path == Path::new("graph.nspl.upon")
+                && path == Path::new("graph.plexus.upon")
     ));
     assert!(error.contains::<TemplateDiagnostic>());
     let rendered = format!("{error:#}");
     assert!(
         rendered.starts_with(
-            "benchmark 'broken-template' implementation 'nervix' template 'graph.nspl.upon' is \
+            "benchmark 'broken-template' implementation 'nervix' template 'graph.plexus.upon' is \
              invalid: invalid syntax"
         ),
         "{rendered}"
@@ -664,7 +665,7 @@ fn names_a_missing_template_and_keeps_the_file_system_cause() {
     fs::remove_file(
         repository
             .path()
-            .join("benches/benchmarks/missing-template/graph.nspl.upon"),
+            .join("benches/benchmarks/missing-template/graph.plexus.upon"),
     )
     .expect("the fixture template should be removable");
     let catalog = BenchmarkCatalog::from_repository_root(repository.path());
@@ -676,7 +677,7 @@ fn names_a_missing_template_and_keeps_the_file_system_cause() {
         BenchmarkError::ReadTemplate { slug, implementation, path }
             if slug == "missing-template"
                 && implementation == "nervix"
-                && path == Path::new("graph.nspl.upon")
+                && path == Path::new("graph.plexus.upon")
     ));
     assert!(matches!(
         error.downcast_ref::<BenchmarkFileError>(),
@@ -690,7 +691,7 @@ fn names_a_missing_template_and_keeps_the_file_system_cause() {
     assert!(
         rendered.starts_with(
             "failed to read benchmark 'missing-template' implementation 'nervix' template \
-             'graph.nspl.upon': the path does not resolve: "
+             'graph.plexus.upon': the path does not resolve: "
         ),
         "{rendered}"
     );
@@ -741,7 +742,7 @@ fn template_failure(catalog: &BenchmarkCatalog, slug: &str) -> String {
             BenchmarkError::ReadTemplate { slug: failed, implementation, path }
                 if failed == slug
                     && implementation == "nervix"
-                    && path == Path::new("graph.nspl.upon")
+                    && path == Path::new("graph.plexus.upon")
         ),
         "{error:?}"
     );
@@ -847,11 +848,11 @@ fn refuses_templates_outside_the_benchmark_and_templates_that_are_not_files() {
     let catalog = BenchmarkCatalog::from_repository_root(repository.path());
 
     write_benchmark(repository.path(), "linked-template", "\"auto\"");
-    let outside = repository.path().join("outside.nspl.upon");
+    let outside = repository.path().join("outside.plexus.upon");
     write(&outside, "BEGIN; COMMIT;");
     let template = repository
         .path()
-        .join("benches/benchmarks/linked-template/graph.nspl.upon");
+        .join("benches/benchmarks/linked-template/graph.plexus.upon");
     fs::remove_file(&template).expect("the fixture template should be removable");
     std::os::unix::fs::symlink(&outside, &template).expect("the template link should be created");
     assert_eq!(
@@ -862,7 +863,7 @@ fn refuses_templates_outside_the_benchmark_and_templates_that_are_not_files() {
     write_benchmark(repository.path(), "directory-template", "\"auto\"");
     let template = repository
         .path()
-        .join("benches/benchmarks/directory-template/graph.nspl.upon");
+        .join("benches/benchmarks/directory-template/graph.plexus.upon");
     fs::remove_file(&template).expect("the fixture template should be removable");
     fs::create_dir(&template).expect("a directory should take the template's place");
     assert_eq!(
@@ -898,7 +899,7 @@ fn locates_a_value_a_template_renders_but_the_run_does_not_provide() {
     write(
         &repository
             .path()
-            .join("benches/benchmarks/missing-value/graph.nspl.upon"),
+            .join("benches/benchmarks/missing-value/graph.plexus.upon"),
         "bootstrap={{ kafka_bootstrap_servers }}\nwindow={{ parameters.window_seconds }}\n",
     );
     let benchmark = BenchmarkCatalog::from_repository_root(repository.path())
@@ -915,14 +916,14 @@ fn locates_a_value_a_template_renders_but_the_run_does_not_provide() {
         BenchmarkError::RenderTemplate { slug, implementation, path }
             if slug == "missing-value"
                 && implementation == "nervix"
-                && path == Path::new("graph.nspl.upon")
+                && path == Path::new("graph.plexus.upon")
     ));
     assert!(error.contains::<TemplateDiagnostic>());
     let rendered = format!("{error:#}");
     assert!(
         rendered.starts_with(
             "failed to render benchmark 'missing-value' implementation 'nervix' template \
-             'graph.nspl.upon': render error"
+             'graph.plexus.upon': render error"
         ),
         "{rendered}"
     );

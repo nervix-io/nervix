@@ -1515,7 +1515,7 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 }
 
 // The header identifies the current persisted Model shape before archive decoding.
-const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL PHR";
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL EPR";
 
 #[cfg(test)]
 #[cfg_attr(
@@ -1553,30 +1553,30 @@ mod tests {
 
     #[test]
     fn runnable_example_graphs_validate() {
-        assert_example_graph_validates("iot", include_str!("../../examples/iot/iot.nspl"));
+        assert_example_graph_validates("iot", include_str!("../../examples/iot/iot.plexus"));
         assert_example_graph_validates(
             "nats_factory_windows",
-            include_str!("../../examples/nats-factory-windows/nats_factory_windows.nspl"),
+            include_str!("../../examples/nats-factory-windows/nats_factory_windows.plexus"),
         );
         assert_example_graph_validates(
             "datalake",
-            include_str!("../../examples/datalake/datalake.nspl"),
+            include_str!("../../examples/datalake/datalake.plexus"),
         );
         assert_example_graph_validates(
             "wasm_dual",
-            include_str!("../../examples/wasm-processors/wasm-dual.nspl"),
+            include_str!("../../examples/wasm-processors/wasm-dual.plexus"),
         );
         assert_example_graph_validates(
             "binance_websocket",
-            include_str!("../../examples/binance-websocket/binance_websocket.nspl"),
+            include_str!("../../examples/binance-websocket/binance_websocket.plexus"),
         );
         assert_example_graph_validates(
             "onnx_batched",
-            include_str!("../../examples/onnx-inference/batched.nspl"),
+            include_str!("../../examples/onnx-inference/batched.plexus"),
         );
         assert_example_graph_validates(
             "onnx_per_message",
-            include_str!("../../examples/onnx-inference/per-message.nspl"),
+            include_str!("../../examples/onnx-inference/per-message.plexus"),
         );
     }
 
@@ -2068,7 +2068,7 @@ mod tests {
                 &[RegistryMutation::AlterJunction(AlterJunction {
                     junction: named("route_events"),
                     operations: vec![AlterProcessorOperation::SetFilterWhere {
-                        where_clause: nervix_nspl::parse_expression("input.value != ''")
+                        where_clause: nervix_plexus::parse_expression("input.value != ''")
                             .expect("valid expression"),
                     }],
                 })],
@@ -2104,10 +2104,10 @@ mod tests {
                     schema("event_schema"),
                     wire_schema("event_wire"),
                     codec("event_codec", "event_schema"),
-                    client_model("sink_a"),
-                    client_model("sink_b"),
+                    client_model("emitter_a"),
+                    client_model("emitter_b"),
                     relay("outgoing", "event_schema"),
-                    emitter("event_sink", "outgoing", "event_codec", "sink_a"),
+                    emitter("event_emitter", "outgoing", "event_codec", "emitter_a"),
                 ],
             )
             .expect("initial graph should succeed");
@@ -2116,7 +2116,10 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterEmitter(AlterEmitter {
-                    emitter: named("event_sink"),
+                    kind: nervix_models::EmitterEntityKind::Kafka(
+                        nervix_models::KafkaEmitterEntity::Topic,
+                    ),
+                    emitter: named("event_emitter"),
                     operations: vec![nervix_models::AlterEmitterOperation::SetFlush {
                         flush_policy: FlushPolicy::Immediate,
                     }],
@@ -2129,9 +2132,12 @@ mod tests {
             .plan_mutations(
                 &domain,
                 &[RegistryMutation::AlterEmitter(AlterEmitter {
-                    emitter: named("event_sink"),
+                    kind: nervix_models::EmitterEntityKind::Kafka(
+                        nervix_models::KafkaEmitterEntity::Topic,
+                    ),
+                    emitter: named("event_emitter"),
                     operations: vec![nervix_models::AlterEmitterOperation::SetClient {
-                        client: named("sink_b"),
+                        client: named("emitter_b"),
                     }],
                 })],
             )
@@ -2141,7 +2147,7 @@ mod tests {
             entity_pause.quiesce().affected_entities(),
             &[super::NodeRef {
                 kind: ModelKind::Emitter,
-                identifier: named("event_sink"),
+                identifier: named("event_emitter"),
             }]
         );
 

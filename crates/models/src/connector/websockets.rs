@@ -2,27 +2,54 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The WebSockets client Model with the signaling protocol it speaks, the connection
-//!   source Model with its delivery mode, the source that reads a WebSockets endpoint this cluster
-//!   serves, and what each entity declares.
-//! - **Depends on.** The shared source declarations and the names a body references.
-//! - **Must not know.** The WebSockets driver, its configuration keys, how a connection is opened,
-//!   signaled or read, or how an endpoint is published, routed to or served.
+//! - **Owns.** The client's closed configuration schema and signaling reference, the connection's
+//!   literal upgrade fields and frame kind, the endpoint source Model, and their declarations.
+//! - **Depends on.** Shared source/client declarations, HTTP field rules and referenced names.
+//! - **Must not know.** Drivers, sockets, TLS file contents, signaling execution, or how endpoints
+//!   are published, routed to or served.
 
 #![cfg_attr(
     nervix_lint,
     nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
 )]
 
+use std::time::Duration;
+
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::entity_union::connector_sources;
+mod config;
+#[cfg(test)]
+mod config_tests;
+mod frame;
+mod upgrade_headers;
+#[cfg(test)]
+mod upgrade_headers_tests;
+
+pub use config::{WebsocketsClientConfig, WebsocketsClientConfigError, WebsocketsClientKey};
+pub use frame::WebsocketsFrameType;
+pub use upgrade_headers::{
+    WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders, WebsocketsUpgradeHeadersError,
+};
+
+/// The existing transport budget shared by ping writes and the close handshake.
+pub const WEBSOCKETS_CONTROL_FRAME_BUDGET: Duration = Duration::from_secs(1);
+
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+        DeclaredBounds, DeclaredBuffer, DeclaredWait, OmittedDeadline, WaitBound,
+    },
+    entity_union::connector_ingestors,
+};
 use crate::{
-    ClientConfigEntry, ClientName, ClientResourceMount, ConnectorKind, EndpointIngestMode,
-    EndpointName, EndpointType, IngestAcknowledgement, IngestQuiesceMode, IngestSourceCapabilities,
-    PositionClass, SignalingProtocolName, SourceBody, SourceEntity, SourceMetadataScope,
-    SourceReference, SourceReferenceKind,
+    AcknowledgementConfirmation, ClientConfigEntry, ClientConfigOwner, ClientDeclaration,
+    ClientName, ClientPooling, ClientResourceMount, ConnectorKind, DeclaredDelivery,
+    DeclaredQuiesce, EndpointIngestMode, EndpointName, EndpointType, HeaderLayout, HeaderModel,
+    IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
+    IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference, IngestorReferenceKind,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
+    SignalingProtocolName,
 };
 
 #[derive(
@@ -40,31 +67,150 @@ pub type WebsocketsConfigEntry = ClientConfigEntry;
 impl<Version> CreateClientWebsockets<Version> {
     /// The connector this client configures.
     pub const CONNECTOR: ConnectorKind = ConnectorKind::Websockets;
+
+    /// What every WebSockets client declares: the signaling protocol its connection may speak.
+    pub const DECLARATION: ClientDeclaration = ClientDeclaration {
+        pooling: ClientPooling::Unpooled,
+        config: ClientConfigOwner::Nervix,
+        options: &[OptionDeclaration {
+            keywords: "WITH SIGNALING PROTOCOL",
+            presence: OptionPresence::Optional { default: None },
+            form: OptionForm::Value {
+                value: OptionValue::Clause,
+                example: "WITH SIGNALING PROTOCOL signaling",
+            },
+        }],
+    };
 }
 
 /// The connection a WebSockets client opens to the server its configuration addresses.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct WebsocketsConnectionSource {
+pub struct WebsocketsConnectionIngestor {
     pub client: ClientName,
+    pub headers: Vec<WebsocketsUpgradeHeader>,
     pub mode: WebsocketsIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
 
-impl SourceEntity for WebsocketsConnectionSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: false,
-        metadata: SourceMetadataScope::Headers,
+/// What the connector of a WEBSOCKETS CONNECTION holds and how long it waits.
+const WEBSOCKETS_CONNECTION_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[
+        DeclaredBuffer {
+            holds: "accepted signaling frames retained for source reads",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting(
+                    "handshake_buffer_capacity messages (default 16), each at most \
+                     max_message_size bytes",
+                ),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "one accepted frame waiting for handoff room",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("max_message_size bytes (default 67108864)"),
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+        DeclaredBuffer {
+            holds: "the incoming message assembled by the transport",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting(
+                    "max_message_size bytes (default 67108864), with each frame bounded by \
+                     max_frame_size bytes (default 16777216)",
+                ),
+                overflow: BufferOverflow::FailRead,
+            },
+        },
+    ],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, address attempts, TLS and the opening upgrade",
+            bound: WaitBound::Key {
+                key: DeadlineKey::ConnectTimeout,
+                omitted: OmittedDeadline::Default(DEFAULT_CONNECT_TIMEOUT),
+            },
+        },
+        DeclaredWait {
+            wait: "the signaling handshake",
+            bound: WaitBound::Clause("the signaling protocol's TIMEOUT"),
+        },
+        DeclaredWait {
+            wait: "reading the next frame",
+            bound: WaitBound::Key {
+                key: DeadlineKey::IdleTimeout,
+                omitted: OmittedDeadline::Derived(
+                    "three ping_interval_ms intervals, or 30 s without configured pings",
+                ),
+            },
+        },
+        DeclaredWait {
+            wait: "writing a configured ping",
+            bound: WaitBound::Fixed(WEBSOCKETS_CONTROL_FRAME_BUDGET),
+        },
+        DeclaredWait {
+            wait: "close",
+            bound: WaitBound::Fixed(WEBSOCKETS_CONTROL_FRAME_BUDGET),
+        },
+    ],
+    driver_limits: &[],
+};
+
+/// What the connector of a WEBSOCKETS ENDPOINT holds and how long it waits.
+const WEBSOCKETS_ENDPOINT_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "unresolved data frames under MODE ACK, per node and ingestor",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("MODE ACK MAX"),
+            overflow: BufferOverflow::RefuseRequest,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "graph acknowledgement under MODE ACK",
+            bound: WaitBound::Clause("ACK TIMEOUT, or the exact intake lifetime ending"),
+        },
+        DeclaredWait {
+            wait: "the signaling handshake",
+            bound: WaitBound::Clause("the signaling protocol's TIMEOUT"),
+        },
+        DeclaredWait {
+            wait: "reading the next frame",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["A message above 64 MiB or a frame above 16 MiB ends the session."],
+};
+
+impl IngestorDeclaration for WebsocketsConnectionIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
+        metadata: IngestorMetadataScope::Websockets,
         executes_on_every_cluster_node: false,
-        reference: SourceReferenceKind::Client(ConnectorKind::Websockets),
+        reference: IngestorReferenceKind::Client(ConnectorKind::Websockets),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK],
+        // Both keep reading: stopping reads would starve ping/pong and disconnect the peer.
+        quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
+        locator: None,
+        options: &[OptionDeclaration {
+            keywords: "HEADERS",
+            presence: OptionPresence::Optional { default: None },
+            form: OptionForm::Value {
+                value: OptionValue::Clause,
+                example: "HEADERS { 'authorization' = 'Bearer token' }",
+            },
+        }],
+        bounds: WEBSOCKETS_CONNECTION_BOUNDS,
     };
 }
 
-impl SourceBody for WebsocketsConnectionSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Client(&self.client)
+impl IngestorEntityBody for WebsocketsConnectionIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Client(&self.client)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -73,13 +219,6 @@ impl SourceBody for WebsocketsConnectionSource {
 
     fn quiesce_mut(&mut self) -> &mut IngestQuiesceMode {
         &mut self.quiesce
-    }
-
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        matches!(
-            quiesce,
-            IngestQuiesceMode::Buffer { .. } | IngestQuiesceMode::Drop
-        )
     }
 
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
@@ -107,25 +246,33 @@ impl WebsocketsIngestMode {
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct WebsocketsEndpointSource {
+pub struct WebsocketsEndpointIngestor {
     pub endpoint: EndpointName,
     pub mode: EndpointIngestMode,
     pub quiesce: IngestQuiesceMode,
 }
 
-impl SourceEntity for WebsocketsEndpointSource {
-    const CAPABILITIES: IngestSourceCapabilities = IngestSourceCapabilities {
-        reads_headers: true,
-        metadata: SourceMetadataScope::Headers,
+impl IngestorDeclaration for WebsocketsEndpointIngestor {
+    const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        // The opening HTTP upgrade request's fields, as the server's header map keeps them: names in
+        // lowercase, every value of a repeated field together under its name.
+        headers: Some(HeaderModel::lowercase(HeaderLayout::RepeatsByName)),
+        metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: true,
-        reference: SourceReferenceKind::Endpoint(EndpointType::Websockets),
+        reference: IngestorReferenceKind::Endpoint(EndpointType::Websockets),
         position_class: PositionClass::None,
+        acknowledgement_confirmation: AcknowledgementConfirmation::None,
+        delivery: &[DeclaredDelivery::NO_ACK, DeclaredDelivery::ACK_REQUEST],
+        quiesce: &[DeclaredQuiesce::REJECT, DeclaredQuiesce::ENDPOINT_BUFFER],
+        locator: None,
+        options: &[],
+        bounds: WEBSOCKETS_ENDPOINT_BOUNDS,
     };
 }
 
-impl SourceBody for WebsocketsEndpointSource {
-    fn reference(&self) -> SourceReference<'_> {
-        SourceReference::Endpoint(&self.endpoint)
+impl IngestorEntityBody for WebsocketsEndpointIngestor {
+    fn reference(&self) -> IngestorReference<'_> {
+        IngestorReference::Endpoint(&self.endpoint)
     }
 
     fn quiesce(&self) -> &IngestQuiesceMode {
@@ -136,24 +283,20 @@ impl SourceBody for WebsocketsEndpointSource {
         &mut self.quiesce
     }
 
-    fn supports_quiesce(&self, quiesce: &IngestQuiesceMode) -> bool {
-        self.mode.supports_quiesce(quiesce)
-    }
-
     fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
         self.mode.acknowledgement()
     }
 }
 
-connector_sources! {
+connector_ingestors! {
     connector Websockets = "WEBSOCKETS";
     /// What a WebSockets source reads.
-    pub enum WebsocketsSource;
+    pub enum WebsocketsIngestor;
     /// The alterations of the ingestors that read a WebSockets entity.
     pub enum WebsocketsIngestorAlteration;
     /// The entities a WebSockets source reads.
-    pub enum WebsocketsSourceEntity {
-        Connection(WebsocketsConnectionSource) = "CONNECTION", "WebSocket client";
-        Endpoint(WebsocketsEndpointSource) = "ENDPOINT", "WebSocket endpoint";
+    pub enum WebsocketsIngestorEntity {
+        Connection(WebsocketsConnectionIngestor) = "CONNECTION", "WebSocket client";
+        Endpoint(WebsocketsEndpointIngestor) = "ENDPOINT", "WebSocket endpoint";
     }
 }

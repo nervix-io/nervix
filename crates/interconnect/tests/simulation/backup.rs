@@ -320,6 +320,239 @@ fn window_sections_larger_than_the_bulk_budget_stream_across_a_partition() {
     });
 }
 
+#[test]
+fn backup_inventory_is_bounded_across_a_partition_and_a_held_link() {
+    Scenario {
+        name: "backup inventory faults",
+        fault_plan: "partition the link, then hold it, while the coordinator asks the capture \
+                     owner for its staged section inventory; each request fails at its deadline \
+                     and the repaired or released link lists the complete unchanged stage",
+        seeds: &[104],
+    }
+    .check(fault_config, exercise_backup_inventory_faults);
+}
+
+/// The capture owner's staged sections, as an inventory request lists them.
+fn staged_inventory(staged: &BTreeSet<usize>) -> Vec<CapturedSectionInventory> {
+    staged
+        .iter()
+        .map(|index| CapturedSectionInventory {
+            path: SectionSet::Materialized.path(*index),
+            length: u64::try_from(SECTION_BYTES).assured("fixture length fits"),
+            digest: section_digest(*index),
+            kind: SectionSet::Materialized.kind(*index),
+        })
+        .collect()
+}
+
+/// Requires the coordinator's inventory request over a disrupted link to fail at the request's own
+/// deadline rather than return or wait longer.
+async fn assert_inventory_deadline(
+    client: &Transport,
+    peer: &ClusterNodeName,
+    coordination: &CoordinationIdentity,
+) {
+    let started = turmoil::elapsed();
+    let error = match client
+        .request(
+            peer,
+            CaptureInventoryRequest {
+                coordination: coordination.clone(),
+                domain: domain(),
+            },
+        )
+        .await
+    {
+        Ok(_) => panic!("an inventory request over a disrupted link must reach its deadline"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            error.current_context(),
+            RequestError::Timeout { timeout, .. } if *timeout == CaptureInventoryRequest::TIMEOUT
+        ),
+        "{error:?}"
+    );
+    assert!(turmoil::elapsed() >= started + CaptureInventoryRequest::TIMEOUT);
+}
+
+/// Requires the capture owner to list exactly the complete stage its capture produced.
+async fn assert_complete_inventory(
+    client: &Transport,
+    peer: &ClusterNodeName,
+    coordination: &CoordinationIdentity,
+) {
+    let inventory = client
+        .request(
+            peer,
+            CaptureInventoryRequest {
+                coordination: coordination.clone(),
+                domain: domain(),
+            },
+        )
+        .await
+        .assured("the restored link carries the inventory request")
+        .assured("the fixture inventory succeeds");
+    assert_eq!(
+        inventory,
+        staged_inventory(&(0..SECTION_COUNT).collect()),
+        "a disrupted inventory request must leave the staged sections complete and unchanged"
+    );
+}
+
+fn exercise_backup_inventory_faults(run: ScenarioRun) -> Result<(), SimulationError> {
+    let seed = run.seed();
+    let authority = Authority::new();
+    let server_credentials = authority.issue("server");
+    let client_credentials = authority.issue("client");
+    let (ready_tx, ready_rx) = watch::channel(false);
+    let (done_tx, done_rx) = watch::channel(false);
+    let (finished_tx, finished_rx) = watch::channel(0_usize);
+    let server_trace = run.trace();
+    let client_trace = run.trace();
+    run.simulate(move |simulation| {
+        let server_finished = finished_tx.clone();
+        simulation.host("server", move || {
+            let credentials = server_credentials.clone();
+            let ready = ready_tx.clone();
+            let mut done = done_rx.clone();
+            let finished = server_finished.clone();
+            let trace = server_trace.clone();
+            async move {
+                let result = HostSupervisor::run(async move {
+                    let server = bind("server", credentials, seed).await;
+                    let staged = StdArc::new(Mutex::new(BTreeSet::<usize>::new()));
+                    let captures = StdArc::new(Mutex::new(0_usize));
+                    let capture_stage = staged.clone();
+                    let capture_count = captures.clone();
+                    server
+                        .register_handler::<CaptureDomainStateRequest, _, _>(move |_, _| {
+                            let staged = capture_stage.clone();
+                            let captures = capture_count.clone();
+                            async move {
+                                *staged.lock() = (0..SECTION_COUNT).collect();
+                                *captures.lock() += 1;
+                                Ok(())
+                            }
+                        })
+                        .assured("capture handler registers");
+                    let inventory_stage = staged.clone();
+                    server
+                        .register_handler::<CaptureInventoryRequest, _, _>(move |_, _| {
+                            let staged = inventory_stage.clone();
+                            async move { Ok(staged_inventory(&staged.lock())) }
+                        })
+                        .assured("inventory handler registers");
+                    server
+                        .register_handler::<LivenessRequest, _, _>(|context, _| async move {
+                            LivenessResponse {
+                                peer: context.peer_node_id().clone(),
+                            }
+                        })
+                        .assured("liveness handler registers");
+                    server.replace_live_nodes(&BTreeSet::from([
+                        server.node_id().clone(),
+                        ClusterNodeName::parse("client").assured("fixture node is valid"),
+                    ]));
+                    ready.send_replace(true);
+                    if !*done.borrow() {
+                        nervix_primitives::time::timeout(TRANSFER_DEADLINE, done.changed())
+                            .await
+                            .assured("the disrupted inventories finish within their deadline")
+                            .assured("the fixture client remains alive");
+                    }
+                    assert_eq!(
+                        *staged.lock(),
+                        (0..SECTION_COUNT).collect::<BTreeSet<_>>(),
+                        "inventory requests never consume or change the stage"
+                    );
+                    assert_eq!(*captures.lock(), 1, "the owner captured exactly once");
+                    trace.record(
+                        "server",
+                        "one capture staged six sections, all still staged",
+                    );
+                    server.shutdown().await;
+                    Ok::<(), io::Error>(())
+                })
+                .await;
+                finished.send_modify(|count| *count += 1);
+                result
+            }
+        });
+        let client_finished = finished_tx.clone();
+        simulation.host("client", move || {
+            let credentials = client_credentials.clone();
+            let mut ready = ready_rx.clone();
+            let done = done_tx.clone();
+            let finished = client_finished.clone();
+            let trace = client_trace.clone();
+            async move {
+                let result = HostSupervisor::run(async move {
+                    let client = bind("client", credentials, seed + 1).await;
+                    let peer = ClusterNodeName::parse("server").assured("fixture node is valid");
+                    client.replace_live_nodes(&BTreeSet::from([
+                        client.node_id().clone(),
+                        peer.clone(),
+                    ]));
+                    wait_for(&mut ready).await;
+                    register_peer(&client, "server").await;
+                    wait_for_connection(&client, &peer).await;
+                    let coordination = client
+                        .next_coordination_identity()
+                        .assured("fixture can allocate coordination identity");
+                    client
+                        .request(
+                            &peer,
+                            CaptureDomainStateRequest {
+                                coordination: coordination.clone(),
+                                domain: domain(),
+                                revision: 1,
+                                quiesced: true,
+                            },
+                        )
+                        .await
+                        .assured("capture request arrives")
+                        .assured("fixture capture succeeds");
+                    assert_complete_inventory(&client, &peer, &coordination).await;
+                    trace.record("client", "six sections staged and listed");
+                    turmoil::partition("client", "server");
+                    assert_inventory_deadline(&client, &peer, &coordination).await;
+                    trace.record("client", "partitioned inventory reached its deadline");
+                    turmoil::repair("client", "server");
+                    wait_for_liveness_recovery(&client, &peer).await;
+                    assert_complete_inventory(&client, &peer, &coordination).await;
+                    trace.record("client", "repaired link listed the unchanged stage");
+                    turmoil::hold("client", "server");
+                    assert_inventory_deadline(&client, &peer, &coordination).await;
+                    trace.record("client", "held inventory reached its deadline");
+                    turmoil::release("client", "server");
+                    wait_for_liveness_recovery(&client, &peer).await;
+                    assert_complete_inventory(&client, &peer, &coordination).await;
+                    trace.record("client", "released link listed the unchanged stage");
+                    done.send_replace(true);
+                    client.shutdown().await;
+                    Ok::<(), io::Error>(())
+                })
+                .await;
+                finished.send_modify(|count| *count += 1);
+                result
+            }
+        });
+        simulation.client("observer", async move {
+            let mut finished = finished_rx;
+            nervix_primitives::time::timeout(TRANSFER_DEADLINE, async {
+                while *finished.borrow() < 2 {
+                    nervix_primitives::task::consume_budget().await;
+                    finished.changed().await.assured("fixture hosts stay alive");
+                }
+            })
+            .await
+            .assured("the disrupted inventories finish within the simulated deadline");
+            Ok(())
+        });
+    })
+}
+
 fn exercise_backup_section(run: ScenarioRun, sections: SectionSet) -> Result<(), SimulationError> {
     let seed = run.seed();
     let authority = Authority::new();
@@ -595,8 +828,8 @@ fn exercise_backup_section(run: ScenarioRun, sections: SectionSet) -> Result<(),
                         offset,
                         u64::try_from(CONTAINER_BYTES).assured("fixture length fits")
                     );
-                    // Fetch and install use the same reserved snapshot stream slot. Complete
-                    // capture first, as the production archive staging boundary does.
+                    // Complete capture before installation begins, as the production archive
+                    // staging boundary does.
                     install_action(&client, &peer, &coordination, sections.begin_install()).await;
                     let mut offset = 0;
                     for index in 0..SECTION_COUNT {

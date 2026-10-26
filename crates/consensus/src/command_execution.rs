@@ -3,7 +3,7 @@
 //! Layer: engines and infrastructure.
 //! - **Owns.** Replicated command identities, semantic request digests, and retained outcomes.
 //! - **Depends on.** Vocabulary identities and timestamps.
-//! - **Must not know.** NSPL parsing, sessions, runtime activation, or transport responses.
+//! - **Must not know.** Plexus parsing, sessions, runtime activation, or transport responses.
 
 #![cfg_attr(
     nervix_lint,
@@ -13,7 +13,11 @@
     )
 )]
 
-use std::{collections::BTreeMap, io, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    time::Duration,
+};
 
 use error_stack::Report;
 use imbl::OrdSet;
@@ -37,7 +41,7 @@ use crate::{
 /// their embedded time, so this allowance cannot reopen a reclaimed identity.
 const COMMAND_EXECUTION_REFERENCE_FUTURE_SKEW: Duration = Duration::from_secs(5 * 60);
 
-/// The byte range of a command's NSPL source a diagnostic points at. `start` is not after `end`.
+/// The byte range of a command's Plexus source a diagnostic points at. `start` is not after `end`.
 #[derive(
     Debug,
     Clone,
@@ -835,6 +839,21 @@ impl CommandExecutionRecords {
 
     pub(crate) fn get(&self, reference: &CommandExecutionReference) -> Option<&CommandExecution> {
         self.entries.get(reference)
+    }
+
+    /// Transaction identities that applying transaction requests still need for exact recovery.
+    pub(crate) fn applying_transaction_targets(&self) -> BTreeSet<&str> {
+        let mut targets = BTreeSet::new();
+        for reference in &self.applying {
+            let execution = self
+                .entries
+                .get(reference)
+                .verified("the applying index names a retained execution");
+            if let Some(CommandExecutionEffect::TransactionRequest(request)) = execution.effect() {
+                targets.insert(request.target.id());
+            }
+        }
+        targets
     }
 
     #[cfg(test)]

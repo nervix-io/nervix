@@ -2,11 +2,11 @@ Feature: Websocket endpoint ingestion
   Scenario Outline: Websocket endpoint ingestor delivers JSON payloads to a subscribed relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -60,20 +60,20 @@ Feature: Websocket endpoint ingestion
   Scenario Outline: Secure websocket endpoint ingestor delivers JSON payloads to a subscribed relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has TLS resource directory "tls_bundle" for hosts "ws-{{test_id}}.example.com"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE tls_bundle;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE tls_bundle VERSION "{{tls_bundle}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64

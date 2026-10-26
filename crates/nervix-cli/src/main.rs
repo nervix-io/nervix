@@ -48,7 +48,7 @@ use nervix_client_core::{
 };
 use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
-use nervix_nspl::client_statement::{
+use nervix_plexus::client_statement::{
     ClientStatement, local_path_fragment, parse_client_statements, parse_upload_resource_query,
 };
 use nervix_primitives::{
@@ -126,10 +126,10 @@ struct Args {
     /// Overall BACKUP command wait across all domain cuts, redirects and reconnects (default 10m)
     #[arg(long, global = true, value_parser = nervix_models::parse_duration_text)]
     backup_wait_timeout: Option<std::time::Duration>,
-    /// Run NSPL statements once and exit instead of starting the interactive REPL
+    /// Run Plexus statements once and exit instead of starting the interactive REPL
     #[arg(long, conflicts_with = "suggest")]
     command: Option<String>,
-    /// Print completion candidates for NSPL input as JSON and exit
+    /// Print completion candidates for Plexus input as JSON and exit
     #[arg(long, conflicts_with = "command")]
     suggest: Option<String>,
     /// UTF-8 byte cursor in --suggest input; defaults to the end
@@ -161,7 +161,7 @@ enum Command {
         /// Optional per-arrival batch sample rate from 0.0 through 1.0
         #[arg(long)]
         batch_sample_rate: Option<String>,
-        /// Optional NSPL predicate applied to delivered records
+        /// Optional Plexus predicate applied to delivered records
         #[arg(long = "where")]
         where_clause: Option<String>,
     },
@@ -1720,7 +1720,7 @@ fn subscribe_request(
     let Some(where_clause) = where_clause else {
         return Ok(request);
     };
-    let where_clause = nervix_nspl::parse_expression(where_clause)
+    let where_clause = nervix_plexus::parse_expression(where_clause)
         .change_context(ClientError::InvalidSubscriptionWhere)?;
     Ok(request.with_where_clause(where_clause))
 }
@@ -1788,7 +1788,7 @@ mod tests {
             "--command",
             "BACKUP CLUSTER TO 'cluster.nvxb';",
         ])
-        .assured("NSPL accepts the global backup wait option");
+        .assured("Plexus accepts the global backup wait option");
         let options = connect_options_from_args(&args).assured("connect options are valid");
         assert_eq!(
             options.backup_wait_timeout,
@@ -1842,12 +1842,12 @@ mod tests {
     #[test]
     fn event_line_queue_bounds_records_and_bytes_without_waiting_for_the_printer() {
         let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
-        let sink = EventLineSender::new(sender);
+        let connector = EventLineSender::new(sender);
         for _ in 0..EVENT_BUFFER_RECORDS {
-            sink.push("é".repeat(EVENT_LINE_BYTES));
+            connector.push("é".repeat(EVENT_LINE_BYTES));
         }
-        sink.push("one more line".to_string());
-        assert_eq!(sink.take_dropped(), 1);
+        connector.push("one more line".to_string());
+        assert_eq!(connector.take_dropped(), 1);
         let mut retained_bytes = 0;
         for _ in 0..EVENT_BUFFER_RECORDS {
             let line = receiver
@@ -1863,16 +1863,16 @@ mod tests {
     #[test]
     fn draining_events_resets_the_visible_gap_after_a_full_queue() {
         let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(2);
-        let sink = EventLineSender::new(sender);
-        sink.push("first".to_string());
-        sink.push("second".to_string());
-        sink.push("dropped".to_string());
+        let connector = EventLineSender::new(sender);
+        connector.push("first".to_string());
+        connector.push("second".to_string());
+        connector.push("dropped".to_string());
 
-        drain_event_queue(&mut receiver, &sink);
+        drain_event_queue(&mut receiver, &connector);
 
         assert!(receiver.try_recv().is_err());
         assert_eq!(
-            sink.take_dropped(),
+            connector.take_dropped(),
             0,
             "the gap was reported during the drain"
         );
@@ -1881,15 +1881,15 @@ mod tests {
     #[test]
     fn an_event_gap_clamps_and_a_closed_printer_discards_new_lines() {
         let (sender, receiver) = nervix_primitives::sync::mpsc::channel(1);
-        let sink = EventLineSender::new(sender);
-        sink.push("retained".to_string());
-        sink.dropped.store(u64::MAX, Ordering::Relaxed);
-        sink.push("overflow".to_string());
-        assert_eq!(sink.take_dropped(), u64::MAX);
+        let connector = EventLineSender::new(sender);
+        connector.push("retained".to_string());
+        connector.dropped.store(u64::MAX, Ordering::Relaxed);
+        connector.push("overflow".to_string());
+        assert_eq!(connector.take_dropped(), u64::MAX);
 
         drop(receiver);
-        sink.push("printer stopped".to_string());
-        assert_eq!(sink.take_dropped(), 0);
+        connector.push("printer stopped".to_string());
+        assert_eq!(connector.take_dropped(), 0);
     }
 
     #[test]
@@ -2158,7 +2158,7 @@ mod tests {
 
     #[test]
     fn use_domain_parser_accepts_repl_command() {
-        use nervix_nspl::client_statement::parse_use_domain;
+        use nervix_plexus::client_statement::parse_use_domain;
 
         assert_eq!(
             parse_use_domain("USE prod;")
@@ -2183,7 +2183,7 @@ mod tests {
             "CREATE DOMAIN default; CREATE SCHEMA notification ( user_id U32 )\n"
         ));
         assert!(command_buffer_is_complete(
-            "CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://example.com/a;b' }\n"
+            "CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://example.com/a;b' }\n"
         ));
     }
 

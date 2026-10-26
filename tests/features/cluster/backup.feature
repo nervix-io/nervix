@@ -3,7 +3,7 @@ Feature: Configuration backup into a public archive
   Scenario Outline: A configuration-only backup needs no domain state cut
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -24,7 +24,7 @@ Feature: Configuration backup into a public archive
   Scenario Outline: A stopped domain backup records a stopped cut without a freeze
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -42,7 +42,7 @@ Feature: Configuration backup into a public archive
   Scenario Outline: A live backup reports a crash-consistent cut
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       START;
@@ -61,7 +61,7 @@ Feature: Configuration backup into a public archive
   Scenario Outline: A running domain backup quiesces and resumes its domain
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       START;
@@ -71,7 +71,7 @@ Feature: Configuration backup into a public archive
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     When the CLI describes backup archive "quiesced.nvxb" as text
     Then the CLI output contains "cut: quiesced"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -89,14 +89,14 @@ Feature: Configuration backup into a public archive
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the active domain is saved as placeholder "primary_domain"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       START;
       CREATE UNPACED DOMAIN {{domain}}_other;
       """
     Given the active domain is "{{primary_domain}}_other"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
@@ -112,12 +112,12 @@ Feature: Configuration backup into a public archive
       START;
       """
     Given the active domain is "{{primary_domain}}"
-    And the backup cut for domain "{{primary_domain}}" will pause after draining
+    And the backup cut for domain "{{primary_domain}}" will pause before its capture
     Then the current leader node is saved as placeholder "leader"
     When the CLI begins backing up "domain {{primary_domain}} --timeout 30s" from node "{{leader}}" into "isolated-cut.nvxb" in the background
     Then the backup cut for domain "{{primary_domain}}" has reached its pause
     Given the active domain is "{{primary_domain}}_other"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA still_writable ( id I64 );
       CREATE SUBSCRIPTION events_subscription TO events;
@@ -144,14 +144,14 @@ Feature: Configuration backup into a public archive
     Given NATS is running
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE CLIENT drop_nats TYPE NATS CONFIG { 'addr' = '{{nats_addr}}' };
+      CREATE NATS CLIENT drop_nats CONFIG { 'addr' = '{{nats_addr}}' };
       CREATE NATS SUBJECT INGESTOR event_source FROM drop_nats
         SUBJECT 'backup_drop_{{test_id}}' QUEUE GROUP 'backup_drop_group_{{test_id}}'
         INSTANCES 1 MODE NO ACK
@@ -162,7 +162,7 @@ Feature: Configuration backup into a public archive
       CREATE SUBSCRIPTION events_subscription TO events;
       START;
       """
-    Given the backup cut for domain "{{domain}}" will pause after draining
+    Given the backup cut for domain "{{domain}}" will pause before its capture
     Then the current leader node is saved as placeholder "leader"
     When the CLI begins backing up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "dropped.nvxb" in the background
     Then the backup cut for domain "{{domain}}" has reached its pause
@@ -194,7 +194,7 @@ Feature: Configuration backup into a public archive
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And Kafka topic "backup_wait_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA wait_event ( id I64, source STRING );
@@ -204,7 +204,7 @@ Feature: Configuration backup into a public archive
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
-      CREATE CLIENT wait_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT wait_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -248,7 +248,7 @@ Feature: Configuration backup into a public archive
     When the CLI restores "domain {{domain}} --as {{domain}}_copy" from "parked.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore succeeded, restoring domain "{{domain}}_copy" with 0 resource versions and 12 models
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION waiting_output_seen TO waiting_output;
       START;
@@ -277,7 +277,7 @@ Feature: Configuration backup into a public archive
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (event_id STRING);
@@ -290,11 +290,11 @@ Feature: Configuration backup into a public archive
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT api_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api_client CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api_client METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api_client METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -324,7 +324,7 @@ Feature: Configuration backup into a public archive
   Scenario Outline: A backup waits for a committing transaction's domain lease
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
@@ -333,13 +333,13 @@ Feature: Configuration backup into a public archive
       """
     Then the current leader node is saved as placeholder "leader"
     Given client "owner" is connected to node "{{leader}}"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       ALTER SCHEMA event ADD FIELD note STRING OPTIONAL;
       """
     Given transaction commit on node "{{leader}}" pauses after 1 statement
-    When client "owner" begins executing these NSPL commands in the background
+    When client "owner" begins executing these Plexus commands in the background
       """
       COMMIT;
       """
@@ -347,7 +347,7 @@ Feature: Configuration backup into a public archive
     When the CLI begins backing up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "after-commit.nvxb" in the background
     Then the background CLI backup remains pending for "1s"
     When the transaction commit pause on node "{{leader}}" after 1 statement is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And the background CLI backup finishes
     And the CLI backup succeeded with a JSON report naming domain "{{domain}}"
 
@@ -359,7 +359,7 @@ Feature: Configuration backup into a public archive
   Scenario: A coordinator leadership change in the cut resumes the domain and retries the backup
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
@@ -368,7 +368,7 @@ Feature: Configuration backup into a public archive
       """
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "survivor"
-    Given the backup cut for domain "{{domain}}" will pause after draining
+    Given the backup cut for domain "{{domain}}" will pause before its capture
     When the CLI begins backing up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "interrupted.nvxb" in the background
     Then the backup cut for domain "{{domain}}" has reached its pause
     When leadership is transferred from node "{{leader}}" to node "{{survivor}}"
@@ -389,13 +389,13 @@ Feature: Configuration backup into a public archive
     And the active domain is "{{domain}}"
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
     And Kafka topic "backup_wasm_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -404,7 +404,7 @@ Feature: Configuration backup into a public archive
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -431,11 +431,11 @@ Feature: Configuration backup into a public archive
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       START;
       """
@@ -472,7 +472,7 @@ Feature: Configuration backup into a public archive
     And node "{{leader}}" eventually reports a leader other than "{{leader}}"
     And restore "domain {{domain}} AS {{domain}}_copy RESUME" of backup archive "stateful.nvxb" completes on node "{{survivor}}" under execution reference "restore_reference"
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       SHOW RELAY raw_metrics MATERIALIZED STATE;
@@ -523,13 +523,13 @@ Feature: Configuration backup into a public archive
     And the active domain is "{{domain}}"
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
     And Kafka topic "backup_wasm_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -538,7 +538,7 @@ Feature: Configuration backup into a public archive
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5s;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -591,7 +591,7 @@ Feature: Configuration backup into a public archive
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{leader}}" into "stateful.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -619,7 +619,7 @@ Feature: Configuration backup into a public archive
       | 1            |
       | 3            |
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: A quiesced backup restores two WASM branches and Kafka domain offsets
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "10m"
@@ -627,13 +627,13 @@ Feature: Configuration backup into a public archive
     And the active domain is "{{domain}}"
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
     And Kafka topic "backup_wasm_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -642,7 +642,7 @@ Feature: Configuration backup into a public archive
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -669,11 +669,11 @@ Feature: Configuration backup into a public archive
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       START;
       """
@@ -712,7 +712,7 @@ Feature: Configuration backup into a public archive
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
     And abandoned restore storage is reclaimed across every node
     Given the active domain is "{{domain}}_incomplete"
-    When these NSPL commands fail with "restore state installation is incomplete"
+    When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
@@ -755,7 +755,7 @@ Feature: Configuration backup into a public archive
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}_copy"
     And backup archives "stateful.nvxb" and "stopped-restored.nvxb" preserve complete domain "{{domain}}" restored as stopped domain "{{domain}}_copy"
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       START;
@@ -776,6 +776,7 @@ Feature: Configuration backup into a public archive
       """
       ready: true
       """
+    And within "30s" node "{{leader}}" commands memory has room for 176 bytes
     And the relay subscription does not receive a payload within "2s"
     When Kafka message is published to topic "backup_wasm_in_{{test_id}}"
       """
@@ -822,7 +823,7 @@ Feature: Configuration backup into a public archive
         "schema/root.proto": "syntax = \"proto3\";"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE proto;
@@ -835,7 +836,7 @@ Feature: Configuration backup into a public archive
     Then the current leader node is saved as placeholder "leader"
     When the CLI backs up "cluster" from node "{{leader}}" into "cluster.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
-    And backup archive "cluster.nvxb" holds for domain "{{domain}}" exactly the models these NSPL commands create
+    And backup archive "cluster.nvxb" holds for domain "{{domain}}" exactly the models these Plexus commands create
       """
       CREATE SCHEMA order_event ( id I64, amount F64 );
       CREATE RELAY orders SCHEMA order_event UNBRANCHED;
@@ -864,7 +865,7 @@ Feature: Configuration backup into a public archive
         "schema/root.proto": "syntax = \"proto3\";"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE proto;
@@ -891,7 +892,7 @@ Feature: Configuration backup into a public archive
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And node "node-1" has resource directory "bulk_dir" holding a 65 MiB file
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE bulk;
@@ -911,7 +912,7 @@ Feature: Configuration backup into a public archive
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And node "node-1" has resource directory "bulk_dir" holding a 4 MiB file
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE bulk;
@@ -934,7 +935,7 @@ Feature: Configuration backup into a public archive
     Given command retry identities are valid for "5s"
     And a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -952,7 +953,7 @@ Feature: Configuration backup into a public archive
   Scenario: A backup sent to a follower runs on the leader, and a follower sends its download there
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event ( id I64 );
@@ -961,21 +962,21 @@ Feature: Configuration backup into a public archive
     And a node other than placeholder "leader" is saved as placeholder "follower"
     When the CLI backs up "cluster" from node "{{follower}}" into "follower.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
-    When the session backs up the cluster on node "{{leader}}" without downloading its archive
+    When the session backs up the cluster on node "{{follower}}" without downloading its archive
     And the backup's archive is downloaded from node "{{follower}}"
     Then the download is redirected to node "{{leader}}"
 
   Scenario Outline: A backup taken while models change holds one coherent revision
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA burst_event ( value I64 );
       """
     Then the current leader node is saved as placeholder "leader"
     Given client "writer" is connected to the leader node
-    When client "writer" begins executing these NSPL commands in the background
+    When client "writer" begins executing these Plexus commands in the background
       """
       CREATE RELAY burst_1 SCHEMA burst_event UNBRANCHED;
       CREATE RELAY burst_2 SCHEMA burst_event UNBRANCHED;
@@ -1001,7 +1002,7 @@ Feature: Configuration backup into a public archive
     And the CLI backs up "cluster --without-state" from node "{{leader}}" into "concurrent.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archive "concurrent.nvxb" holds for domain "{{domain}}" schema "burst_event" and relays "burst_" numbered contiguously from 1
-    And the background NSPL execution succeeds
+    And the background Plexus execution succeeds
 
     Examples:
       | cluster_size |
@@ -1011,7 +1012,7 @@ Feature: Configuration backup into a public archive
   Scenario: An archive with a foreign record kind or format version is refused at its header
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -1028,7 +1029,7 @@ Feature: Configuration backup into a public archive
   Scenario: The CLI exits with a failure and a JSON error when a backup is refused
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -1044,17 +1045,17 @@ Feature: Configuration backup into a public archive
   Scenario: BACKUP runs alone, outside a transaction, and DESCRIBE BACKUP never reaches a server
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then the current leader node is saved as placeholder "leader"
     Given client "operator" is connected to the leader node
-    When client "operator" executes these NSPL commands
+    When client "operator" executes these Plexus commands
       """
       BEGIN;
       """
-    And client "operator" fails to execute these NSPL commands
+    And client "operator" fails to execute these Plexus commands
       """
       BACKUP CLUSTER TO 'in-transaction.nvxb';
       """
@@ -1068,7 +1069,7 @@ Feature: Configuration backup into a public archive
   Scenario Outline: Downloads of another user's backup, or under a reference without an archive, are refused
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE USER backup_reader WITH PASSWORD 'reader-password';
@@ -1093,7 +1094,7 @@ Feature: Configuration backup into a public archive
   Scenario: A download without credentials is refused
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """

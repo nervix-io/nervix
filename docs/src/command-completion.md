@@ -1,6 +1,8 @@
 # Command Completion
 
-Nervix treats a successful NSPL administrative response as a completion boundary. When a command
+*Plexus, the Nervix graph definition language.*
+
+Nervix treats a successful Plexus administrative response as a completion boundary. When a command
 returns `OK`, its declared effect is durable, applied, and usable through every current live node
 that participates in that effect. A caller can issue the dependent command immediately through
 another session or node. Runtime data flow, subscription delivery, connector acknowledgements, and
@@ -35,11 +37,31 @@ found during replicated admission returns `ExecutionReferenceConflict` with the 
 Report retention is a separate contract: a transaction's report follows
 the transaction tombstone retention, so inspection can still read it after its command reference
 has expired, and a report that inspection no longer knows does not make its reference executable.
+Transaction tombstone retention is a minimum age: an applying request retains its finished target,
+and an applying ordinary command retains every internal transaction whose mutation owner names
+that command, including its planning refresh attempts. Their plans and reports follow the same
+lifetime. This protection ends when the last execution that needs the transaction finishes; an
+already aged tombstone can then be removed without another retention window. A command therefore
+keeps the recorded transaction outcomes it needs even when a leaderless interval exceeds the
+configured transaction retention.
 
 Finalization accepts a terminal command result. An `OutcomeUnknown`, leader redirect, or detached
 transaction leaves the execution applying and preserves the disposition and diagnostics for its
 current waiter. Reconciliation and repetition under the same reference resume that execution;
-an interrupted attempt never supplies a definitive failure for the execution ledger.
+an interrupted attempt never supplies a definitive failure for the execution ledger. An attempt
+whose proposal the leader refused because it lost its leadership, or could not confirm it, is
+interrupted in this sense. A leader whose lease lapsed refuses that way while it still leads. The
+attempt answers as a node that does not lead, never as a failure. A resumed
+transaction request whose transaction already finished answers each of its operations from what
+the finished transaction recorded: the same transaction for its opening, each append's recorded
+admission, and the transaction's terminal outcome for its commit or revert. The result it finalizes
+therefore describes the effects the interrupted attempt applied, and none of them applies again.
+
+A WASM state reset follows this rule in both its first application and recovery. A typed loss of
+Raft leadership during generation publication leaves the transaction step applying. The same
+reset request resumes against the committed schedule and completes only at `Ready`, without
+advancing an already published generation again. A genuine reset failure remains a retained
+failure; repeating its command reference returns that outcome.
 
 The retained history is bounded. Once it holds as many applying, finished, and expired executions as
 its capacity allows, a new reference is refused with an explicit capacity error. Admitted work is
@@ -55,6 +77,29 @@ An ordinary configuration command applies through a frozen internal transaction 
 captured planning inputs change before the effect is recorded, the command retains that failed
 attempt and starts a revision-derived attempt under the same execution reference. An explicit
 transaction remains frozen after `COMMIT` admission and reports the conflict instead of replanning.
+
+More than one coordinator can act on the same attempt: the leader that admitted the command and,
+after a leadership change, each leader whose reconciliation resumes the applying execution. A
+coordinator decides each preflight, queue, and commit-planning refusal against its own observation
+of the attempt, and another coordinator may have opened, committed, or paused the domain for that
+same attempt since then. Before a refusal becomes the command's outcome, its coordinator reads the
+attempt again. When the attempt moved since the observation the refusal was decided against, the
+coordinator recovers that progress under the same execution reference, joining the commit or
+returning its recorded outcome. Only a refusal decided against the attempt as it still stands
+becomes the command's outcome. A command's own domain pause therefore never fails that command.
+
+A coordinator also inherits the attempt's own domain pause. A leader whose lease lapsed refuses
+writes while it still leads, so the coordinator that paused the domain for a model step can stop
+before it publishes the step or releases the pause, and the next coordinator, on the same leader or
+a new one, finds the domain paused. That pause belongs to the step: the coordinator records it as
+engaged in the step's actual quiescence, drains it, checks the step's frozen inputs against the
+domain as the pause left it, and releases it before the step records any outcome, a planning-input
+refusal included. The pause therefore never refuses the attempt's revision-derived successor or
+the next command. When a coordinator stops on any other failure while the attempt is still
+committing, the command stays applying: it answers `OutcomeUnknown` with the `StillApplying` cause
+and keeps its domain mutation lease, which the committing attempt needs to finish its application
+and release its pause. Reconciliation, or a repetition under the same reference, finishes the
+attempt before the command records its outcome.
 
 Resource uploads follow the same replay rule with an upload identity instead. It is scoped to the
 user, domain, and resource, bound to the verified archive digest, and retained without expiry; see
@@ -134,9 +179,10 @@ target node. A failure names the step, and the steps before it stay applied. An 
 retains a replicated start gate even after failure releases the execution's mutation lease.
 Retrying the reference while the restore applies on the leader returns `OutcomeUnknown` with the
 `StillApplying` cause at once, and after it finished returns the recorded outcome with the typed
-restore report. Only the leader the archive was streamed to holds it, so a new leader resumes an
-applying restore from its first step not recorded when a retry streams the archive again, and ends
-it as failed once the reference's retry validity passes without one. See
+restore report. Only the leader the archive was streamed to holds it, so a leader that holds it
+resumes an applying restore from its first step not recorded, another leader does so when a retry
+streams the archive again, and a leader without the archive ends the restore as failed once the
+reference's retry validity passes without one. See
 [Backup And Restore](./backup-and-restore.md#retries-disconnects-and-leader-changes).
 
 `RESET WASM PROCESSOR ... STATE` uses the same durable execution reference and retained outcome.
@@ -159,11 +205,26 @@ This shared view lets a connected follower finish control commands even when its
 still see another follower that the leader has already retired. The retired process catches up on
 reconnection before it can participate again.
 
+While direct revision queries are outstanding, the barrier continues observing discovery and
+availability changes. A valid publication can satisfy the required phase without waiting for an
+earlier query to return its sampled revision. The query batch stays in flight across those changes,
+so frequent publications cannot starve queries by repeatedly cancelling them. An owned runtime
+task polls the batch while the barrier reads the leader's participant view: a probe can already
+hold the executor permit that the view request needs. Ending the barrier aborts that task. Every
+wake still checks the current leader tenure, required process incarnations, fixed revision and
+deadline.
+
 Runtime activation has two explicit phases. First, every required node applies the authoritative
 models, schedules, clocks, resource bindings, and stopped or running lifecycle state and reports
 `prepared` for that revision. Only after the preparation barrier may running-domain sources and
 listeners start. Each node then reports `ready`, and success waits for the readiness barrier. This
 prevents a source from publishing into a peer that still has the preceding graph.
+
+These barriers belong to commands. The ownership move a stopping node asks for during graceful
+shutdown is not a command, and the stopping node's drain budget bounds it. Each unit it moves
+activates once the live participants of the unit's hold have prepared the revision, and the other
+nodes complete the revision through their own installation; see
+[Draining Admitted Work](./shutdown.md#draining-admitted-work).
 
 Revision progress is cumulative. If a newer runtime revision arrives while a node is waiting at
 either barrier, that node applies the newer coherent state instead of waiting to finish the older
@@ -215,7 +276,10 @@ identified preview revision. The plan uses one captured set of relevant control-
 exact execution-step segmentation used at commit. Queue success means validation and staging only.
 It does not replace a live graph, start or stop a domain, install a resource, or engage a runtime
 gate. Other sessions continue to see the committed configuration. Retrying the exact append returns
-the retained admitted result and preview without touching the transaction.
+the retained admitted result and preview without touching the transaction. Finishing the
+transaction keeps the request identity and admitted result of every statement it accepted with its
+tombstone, so the exact append is still answered with its admitted result after the transaction
+committed, failed, reverted, or expired, while an append it never accepted is refused.
 
 `COMMIT` first computes a side-effect-free complete preview from replicated content and a new
 coherent snapshot. Its admission validates the identified basis and atomically freezes the report,
@@ -268,6 +332,15 @@ sequenceDiagram
 
 A leadership change resumes a `COMMITTING` transaction from its recorded applying step and frozen
 plan. It does not replan, repeat a completed effect, or advance past an incompletely applied effect.
+An engaged domain pause belongs to that applying step until its mutation owner releases it and
+the resumed runtime state becomes usable. A refused resume proposal keeps the step recoverable;
+it cannot finish the transaction or release its mutation lease while leaving the domain paused.
+This cleanup boundary applies to successful steps and definitive application failures alike.
+A step whose coordinator paused the domain and stopped before publishing the step's effect is not
+yet applying, so the coordinator that runs it again finds the pause engaged. It adopts the pause as
+the step's own, as recorded engaged quiescence, drains it, and validates the frozen inputs against
+the domain as that pause left it. Every outcome of the step, a planning-input refusal included,
+then releases the adopted pause under the transaction's lease before it is recorded.
 A reconnecting commit waiter attaches to the transaction and continues waiting for that terminal
 result. A definitive failure records one `FAILED` outcome, the failing step, and the committed
 prefix. The final operation and topology report remains with the transaction tombstone until the
@@ -287,8 +360,9 @@ readiness, and gate release. A no-op reapplies the current required state before
 
 `START` waits until every listener and assigned source has completed its startup boundary. `STOP`
 waits for remote source and listener teardown, including when it stops the cluster's last running
-domain. Paced-domain clock authority is part of the same revision. TLS-changing model effects wait
-for every affected listener to install the configuration. Each node installs the TLS VHOSTs of a
+domain, and for the last state write of every deduplicator and window branch it ends.
+Paced-domain clock authority is part of the same revision. TLS-changing model effects wait for
+every affected listener to install the configuration. Each node installs the TLS VHOSTs of a
 runtime revision before it reports that revision prepared, and the command then confirms the
 installation on every live process incarnation. A failed installation fails the command. A batch
 that did not pause is rolled back by the same record that stores the failure, and the command waits
@@ -345,6 +419,6 @@ outcomes. An expired reference produces an explicit result and never causes auto
 under a new identity.
 
 The public behavior is specified in
-[NSPL command completion](https://github.com/nervix-io/nervix/blob/main/docs/specifications/nspl-command-completion.md).
+[Plexus command completion](https://github.com/nervix-io/nervix/blob/main/docs/specifications/plexus-command-completion.md).
 The corresponding public scenario inventory is maintained in the repository's command-completion
 acceptance ledger.

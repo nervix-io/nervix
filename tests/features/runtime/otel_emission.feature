@@ -6,11 +6,11 @@ Feature: OTEL emission
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the OTEL gRPC endpoint is published under fixture DNS
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA audit_event (
         event_ts DATETIME,
@@ -52,17 +52,16 @@ Feature: OTEL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_main
       CONFIG {
         'endpoint' = '{{otel_collector_grpc_dns_addr}}',
         'protocol' = 'grpc',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER audit_to_otel
+      CREATE OTEL LOGS EMITTER audit_to_otel
       FROM audit_events
-      TO OTEL otel_main LOGS
-      VALUES {
+      TO otel_main
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s VALUES {
         'time' = input.event_ts,
         'severity_text' = input.level,
         'severity_number' = input.level_num,
@@ -81,15 +80,13 @@ Feature: OTEL emission
         'service.name' = 'nervix-cucumber',
         'deployment.environment.name' = '{{test_id}}'
       }
-      SCOPE 'nervix/audit' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      SCOPE 'nervix/audit' VERSION '1.0' FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE EMITTER audit_trace_to_otel
+      CREATE OTEL TRACES EMITTER audit_trace_to_otel
       FROM audit_events
-      TO OTEL otel_main TRACES
-      VALUES {
+      TO otel_main
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s VALUES {
         'trace_id' = input.trace_id,
         'span_id' = input.span_id,
         'name' = CASE
@@ -109,15 +106,13 @@ Feature: OTEL emission
         'service.name' = 'nervix-cucumber',
         'deployment.environment.name' = '{{test_id}}'
       }
-      SCOPE 'nervix/audit' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      SCOPE 'nervix/audit' VERSION '1.0' FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     When the DNS fixture answers "otel-grpc.nervix.test" with "name not found"
-    And sink client for emitter "audit_to_otel" enters unavailable fault mode
+    And emitter client for emitter "audit_to_otel" enters unavailable fault mode
     And http payload is posted to host "otel-{{test_id}}.example.com" path "/audit"
       """
       {
@@ -133,13 +128,13 @@ Feature: OTEL emission
       """
     Then within "5s" DESCRIBE EMITTER "audit_to_otel" on the leader node contains
       """
-      transient error: sink fault injector returned an unavailable client
+      transient error: emitter fault injector returned an unavailable client
       """
     And the last command output contains
       """
       reconnect backoff:
       """
-    When sink client for emitter "audit_to_otel" leaves fault mode
+    When emitter client for emitter "audit_to_otel" leaves fault mode
     Then within "10s" DESCRIBE EMITTER "audit_to_otel" on the leader node contains
       """
       transient error: OTEL gRPC export ended without an answer from the receiver
@@ -163,11 +158,11 @@ Feature: OTEL emission
     And the OTEL HTTP endpoint is published under fixture DNS
     And the OTEL gRPC endpoint is published under fixture DNS
     And the DNS fixture answers "otel-grpc.nervix.test" with addresses "127.0.5.3,127.0.0.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA request_count (
         window_start DATETIME,
@@ -201,58 +196,52 @@ Feature: OTEL emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_http
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_http
       CONFIG {
         'endpoint' = '{{otel_collector_dns_addr}}',
         'protocol' = 'http/protobuf',
         'compression' = 'gzip',
         'timeout_ms' = 5000
       };
-      CREATE CLIENT otel_grpc
-      TYPE OTEL
+      CREATE OTEL CLIENT otel_grpc
       CONFIG {
         'endpoint' = '{{otel_collector_grpc_dns_addr}}',
         'protocol' = 'grpc',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER request_count_to_otel
+      CREATE OTEL METRICS EMITTER request_count_to_otel
       FROM request_counts
-      TO OTEL otel_http
+      TO otel_http
       METRIC 'nervix.test.request.count' UNIT '1' DESCRIPTION 'Cucumber request count'
       SUM MONOTONIC DELTA
-      VALUES {
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
         'time' = input.window_end,
         'start_time' = input.window_start,
         'value' = input.value
       }
       ATTRIBUTES { 'http.route' = input.route }
       RESOURCE { 'service.name' = 'nervix-cucumber' }
-      SCOPE 'nervix/metrics' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      SCOPE 'nervix/metrics' VERSION '1.0' FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE EMITTER request_count_to_otel_grpc
+      CREATE OTEL METRICS EMITTER request_count_to_otel_grpc
       FROM request_counts
-      TO OTEL otel_grpc
+      TO otel_grpc
       METRIC 'nervix.test.request.count.grpc' UNIT '1' DESCRIPTION 'Cucumber request count over gRPC'
       SUM MONOTONIC DELTA
-      VALUES {
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
         'time' = input.window_end,
         'start_time' = input.window_start,
         'value' = input.value
       }
       ATTRIBUTES { 'http.route' = input.route }
       RESOURCE { 'service.name' = 'nervix-cucumber' }
-      SCOPE 'nervix/metrics' VERSION '1.0'
-      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      SCOPE 'nervix/metrics' VERSION '1.0' FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -290,3 +279,98 @@ Feature: OTEL emission
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
+
+  Scenario Outline: OTEL gauge and histogram metric emitters export their points
+    Given OpenTelemetry Collector is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA latency_point (
+        observed_at DATETIME,
+        temperature F64,
+        count U64,
+        bucket_counts <count_vector>,
+        explicit_bounds <bound_vector>
+      );
+      CREATE WIRE JSON SCHEMA latency_point_wire MODE STRICT (
+        observed_at string,
+        temperature number,
+        count integer,
+        bucket_counts array,
+        explicit_bounds array
+      );
+      CREATE CODEC latency_point_codec
+      FROM WIRE JSON SCHEMA latency_point_wire
+      TO SCHEMA latency_point
+      ENCODE observed_at AS RFC3339;
+      CREATE RELAY latency_points SCHEMA latency_point UNBRANCHED;
+      CREATE VHOST edge otel-points-{{test_id}}.example.com;
+      CREATE ENDPOINT point_ingress
+      ON edge
+      PATH '/points'
+      TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR point_source
+      FROM point_ingress MODE NO ACK
+      ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING latency_point_codec
+      TO latency_points
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE OTEL CLIENT otel_main
+      CONFIG {
+        'endpoint' = '{{otel_collector_http_addr}}',
+        'protocol' = 'http/protobuf',
+        'timeout_ms' = 5000
+      };
+      CREATE OTEL METRICS EMITTER temperature_to_otel
+      FROM latency_points
+      TO otel_main
+      METRIC 'nervix.test.gauge.{{test_id}}' UNIT 'Cel' DESCRIPTION 'Cucumber gauge'
+      GAUGE
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
+        'time' = input.observed_at,
+        'value' = input.temperature
+      }
+      RESOURCE { 'service.name' = 'nervix-cucumber' } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE OTEL METRICS EMITTER latency_to_otel
+      FROM latency_points
+      TO otel_main
+      METRIC 'nervix.test.histogram.{{test_id}}' UNIT 'ms' DESCRIPTION 'Cucumber histogram'
+      HISTOGRAM CUMULATIVE
+      MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
+        'time' = input.observed_at,
+        'count' = input.count,
+        'bucket_counts' = input.bucket_counts,
+        'explicit_bounds' = input.explicit_bounds
+      }
+      RESOURCE { 'service.name' = 'nervix-cucumber' } FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to host "otel-points-{{test_id}}.example.com" path "/points"
+      """
+      {
+        "observed_at":"2026-08-24T12:35:00Z",
+        "temperature":21.5,
+        "count":3,
+        "bucket_counts":[1,2,0],
+        "explicit_bounds":[10.0,100.0]
+      }
+      """
+    Then OpenTelemetry Collector eventually contains "nervix.test.gauge.{{test_id}}"
+    And OpenTelemetry Collector eventually contains "nervix.test.histogram.{{test_id}}"
+
+    Examples:
+      | cluster_size | count_vector | bound_vector |
+      | 1            | VEC<U64>     | VEC<F64>     |
+      | 3            | VEC<U64>     | VEC<F64>     |

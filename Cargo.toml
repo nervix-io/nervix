@@ -67,6 +67,7 @@ shuttle = [
   "nervix-connector-sentry/shuttle",
   "nervix-connector-sqs/shuttle",
   "nervix-connector-syslog/shuttle",
+  "nervix-connector-websockets/shuttle",
   "nervix-connector-zeromq/shuttle",
   "nervix-consensus/shuttle",
   "nervix-deadlock?/shuttle",
@@ -78,7 +79,11 @@ shuttle = [
 ]
 # Test-only feature used by the standard test recipes for fault injection, random multinode
 # scheduling, and lower intentionally expensive password hashing parameters.
-testing = ["nervix-connector-kafka/testing", "nervix-consensus/testing"]
+testing = [
+  "nervix-connector-kafka/testing",
+  "nervix-connector-syslog/testing",
+  "nervix-consensus/testing",
+]
 
 [dependencies]
 ahash = { workspace = true }
@@ -163,13 +168,14 @@ nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-jaq = { workspace = true }
 nervix-models = { workspace = true, features = ["arrow"] }
-nervix-nspl = { workspace = true }
+nervix-plexus = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
 nervix-simd-kernels = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
 nonzero_ext = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true, default-features = false, features = [
@@ -283,6 +289,7 @@ rstest = { workspace = true }
 rumqttc = { workspace = true }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
+tokio-util = { workspace = true, features = ["codec"] }
 zeromq = { workspace = true }
 
 [[test]]
@@ -378,8 +385,8 @@ members = [
   "crates/nervix-roto",
   "crates/web-console",
   "crates/nervix-vm",
-  "crates/nspl",
-  "crates/nspl-format",
+  "crates/plexus",
+  "crates/plexus-format",
   "crates/model-harness",
   "crates/models",
   "crates/primitives",
@@ -437,6 +444,7 @@ arrow-schema = "58"
 arrow-select = "58"
 arrow-string = "58"
 ascii-dag = "0.9"
+astral-tokio-tar = { version = "0.6.4", default-features = false }
 unicode-normalization = "0.1"
 # 0.49 uses provider-selectable rustls-webpki 0.103; the previous 0.42 line pulled in Ring.
 async-nats = { version = "0.49.1", default-features = false, features = [
@@ -476,6 +484,7 @@ ciborium = "0.2"
 clap = "4.6.0"
 clap_complete = "4.6.0"
 clickhouse = { version = "0.15.0", default-features = true }
+combine = { version = "4.6.8", features = ["tokio"] }
 concurrent-queue = "2.5.0"
 console_error_panic_hook = "0.1"
 criterion = "0.5"
@@ -603,7 +612,7 @@ nervix-interconnect = { package = "nervix-interconnect", path = "crates/intercon
 nervix-jaq = { package = "nervix-jaq", path = "crates/jaq" }
 nervix-model-harness = { package = "nervix-model-harness", path = "crates/model-harness" }
 nervix-models = { package = "nervix-models", path = "crates/models" }
-nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
+nervix-plexus = { package = "nervix-plexus", path = "crates/plexus", features = [
   "server",
 ] }
 nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }
@@ -652,8 +661,10 @@ prost-reflect = "0.15.3"
 prost-types = "0.13"
 protox = "0.8.0"
 # 6.9.0 with the broker's announced maxMessageSize kept per connection, a larger message refused
-# before it is written, and a broker SendError resolved with its server error.
-pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-max-message-size", default-features = false, features = [
+# before it is written, and a broker SendError resolved with its server error; acknowledgements
+# that wait for the broker's answer when a consumer enables ack receipts, and a negative
+# acknowledgement that reports a redelivery request it could not send.
+pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-message-size-ack-receipts", default-features = false, features = [
   "compression",
   "tokio-rustls-runtime",
 ] }
@@ -727,6 +738,7 @@ shuttle-tokio-util = { package = "shuttle-tokio-util", version = "0.7" }
 signal-hook = "0.4"
 simd-json = { version = "0.17.0", features = ["known-key"] }
 simdutf8 = "0.1.5"
+socket2 = "0.6"
 sorted-vec = "0.8"
 sqlx = { version = "0.9", default-features = false, features = [
   "postgres",

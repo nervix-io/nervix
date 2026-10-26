@@ -1347,11 +1347,7 @@ mod tests {
             interval: std::time::Duration::from_millis(1),
             max_batch_size: None,
         };
-        let (input, broadcast) = source("events", 1, Some(policy));
-        broadcast
-            .broadcast(batch(1))
-            .await
-            .expect("batch must queue");
+        let (input, _broadcast) = source("events", 1, Some(policy));
         let (_shutdown_tx, shutdown_rx) = nervix_primitives::sync::watch::channel(false);
         let mut interaction = RelayInteraction::new(vec![input], shutdown_rx, None, None)
             .expect("interaction must build");
@@ -1361,7 +1357,20 @@ mod tests {
             tokio::pin!(receive);
             assert!(futures_util::poll!(&mut receive).is_pending());
         }
-        nervix_primitives::time::sleep(std::time::Duration::from_millis(2)).await;
+        // Observe the empty input before arming a collection. Stage the accepted batch through
+        // its production owner, then establish that its domain-owned deadline is ready.
+        let accepted = interaction
+            .inputs
+            .accept(0, batch(1))
+            .assured("the fixture owns a live unpaced clock and a valid batch");
+        assert!(accepted.is_none(), "the batch must remain collected");
+        let deadlines = interaction.inputs.collection_deadlines();
+        let [(clock, deadline)] = deadlines.as_slice() else {
+            panic!("one collected unbranched batch must have one collection deadline");
+        };
+        wait_for_branch_buffer_deadline(clock, deadline.clone())
+            .await
+            .assured("the fixture keeps its domain clock installed throughout the wait");
 
         assert!(matches!(
             event(&mut interaction, wake_now()).await,

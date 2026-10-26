@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The MongoDB client Model with its connection pool, the collection sink Model with
+//! - **Owns.** The MongoDB client Model with its connection pool, the collection emitter Model with
 //!   its conflict action, and what it declares.
-//! - **Depends on.** The shared sink declarations and the names a body references.
+//! - **Depends on.** The shared emitter declarations and the names a body references.
 //! - **Must not know.** The MongoDB driver, its configuration keys, or how documents are written.
 
 #![cfg_attr(
@@ -15,24 +15,33 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use super::{configured_client::configured_client, entity_union::connector_sinks};
+use super::{
+    bounds::{
+        BufferBound, BufferCapacity, BufferOverflow, DeclaredBounds, DeclaredBuffer, DeclaredWait,
+        WaitBound,
+    },
+    configured_client::configured_client,
+    entity_union::connector_emitters,
+};
 use crate::{
-    ClientName, CollectionName, ConnectorKind, EmitSinkCapabilities, EmitterBatchRequirement,
-    EmitterPublishingMode, SinkBody, SinkClientReference, SinkEntity, SinkReference,
-    SinkValueMapping, SinkValueMappings,
+    ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
+    EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
+    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, LocatorDeclaration,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
 };
 
-configured_client!(MongoDb: pooled CreateClientMongoDb => MongoDbConfigEntry);
+configured_client!(MongoDb: pooled, config NervixWithAddressQuery, CreateClientMongoDb => MongoDbConfigEntry);
 
-pub type MongoDbValueMapping = SinkValueMapping;
+pub type MongoDbValueMapping = EmitterValueMapping;
 
 /// One collection a MongoDB client writes documents into.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct MongoDbCollectionSink {
+pub struct MongoDbCollectionEmitter {
+    pub mode: MongoDbCollectionPublishingMode,
     pub client: ClientName,
-    pub collection: CollectionName,
+    pub collection: MongoDbCollectionName,
     pub values: Vec<MongoDbValueMapping>,
     pub conflict_action: MongoDbConflictAction,
 }
@@ -46,23 +55,69 @@ pub enum MongoDbConflictAction {
     DoUpdate { target: Vec<String> },
 }
 
-impl SinkEntity for MongoDbCollectionSink {
-    const CAPABILITIES: EmitSinkCapabilities = EmitSinkCapabilities {
-        writes_headers: false,
-        requires_codec: false,
-        batch_requirement: EmitterBatchRequirement::Required,
-        requires_batch_transformation: false,
-        batch_size_maximum: None,
-    };
+/// What the connector of a MONGODB COLLECTION holds and how long it waits.
+const MONGODB_BOUNDS: DeclaredBounds = DeclaredBounds {
+    buffers: &[DeclaredBuffer {
+        holds: "connections the pool holds",
+        bound: BufferBound::Bounded {
+            capacity: BufferCapacity::Setting("POOL SIZE MAX"),
+            overflow: BufferOverflow::Backpressure,
+        },
+    }],
+    waits: &[
+        DeclaredWait {
+            wait: "connection: name resolution, TCP and TLS",
+            bound: WaitBound::Driver("connectTimeoutMS, 10 s"),
+        },
+        DeclaredWait {
+            wait: "server selection",
+            bound: WaitBound::Driver("30 s"),
+        },
+        DeclaredWait {
+            wait: "the handshake, a pool wait and a write",
+            bound: WaitBound::Unbounded,
+        },
+    ],
+    driver_limits: &["A document above 16 MiB is rejected."],
+};
 
-    fn accepts_publishing_mode(mode: &EmitterPublishingMode) -> bool {
-        matches!(mode, EmitterPublishingMode::RequestAck { .. })
-    }
+impl EmitterDeclaration for MongoDbCollectionEmitter {
+    const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        headers: None,
+        reference: EmitterReferenceKind::Client(ConnectorKind::MongoDb),
+        body: EmitterBodyForm::Values,
+        batch: EmitterBatchLegality::Required { maximum: None },
+        requires_batch_transformation: false,
+        publishing_modes: MongoDbCollectionPublishingMode::KINDS,
+        locator: Some(LocatorDeclaration {
+            keywords: "COLLECTION",
+            name: LocatorName::External(MongoDbCollectionName::DECLARATION),
+        }),
+        options: &[OptionDeclaration {
+            keywords: "ON CONFLICT",
+            presence: OptionPresence::Optional { default: None },
+            form: OptionForm::Choice(&[
+                OptionChoice {
+                    name: "DO NOTHING",
+                    value: None,
+                    example: "ON CONFLICT ('id') DO NOTHING",
+                },
+                OptionChoice {
+                    name: "DO UPDATE",
+                    value: None,
+                    example: "ON CONFLICT ('id') DO UPDATE",
+                },
+            ]),
+        }],
+        envelope: &[],
+        properties: &[],
+        bounds: MONGODB_BOUNDS,
+    };
 }
 
-impl SinkBody for MongoDbCollectionSink {
-    fn reference(&self) -> SinkReference<'_> {
-        SinkReference::Client(SinkClientReference {
+impl EmitterEntityBody for MongoDbCollectionEmitter {
+    fn reference(&self) -> EmitterReference<'_> {
+        EmitterReference::Client(EmitterClientReference {
             client: &self.client,
             connector: ConnectorKind::MongoDb,
         })
@@ -72,17 +127,35 @@ impl SinkBody for MongoDbCollectionSink {
         Some(&mut self.client)
     }
 
-    fn value_mappings(&self) -> SinkValueMappings<'_> {
-        SinkValueMappings::values(&self.values)
+    fn mapped_value_types(&self) -> Option<crate::MappedValueTypes> {
+        Some(crate::MappedValueTypes::Columns)
+    }
+
+    fn value_mappings(&self) -> EmitterValueMappings<'_> {
+        EmitterValueMappings::values(&self.values)
     }
 }
 
-connector_sinks! {
+connector_emitters! {
     connector MongoDb = "MONGODB";
-    /// What a MongoDB sink writes.
-    pub enum MongoDbSink;
-    /// The entities a MongoDB sink writes.
-    pub enum MongoDbSinkEntity {
-        Collection(MongoDbCollectionSink) = "COLLECTION";
+    /// What a MongoDB emitter writes.
+    pub enum MongoDbEmitter;
+    /// A publishing-policy change for one of this connector's emitter entities.
+    pub enum MongoDbCollectionEmitterMode;
+    /// The entities a MongoDB emitter writes.
+    pub enum MongoDbEmitterEntity {
+        Collection(MongoDbCollectionEmitter, MongoDbCollectionPublishingMode) = "COLLECTION";
     }
+}
+
+super::publishing::emitter_modes! {
+    pub enum MongoDbCollectionPublishingMode {
+        Ack { retry_policy: crate::RetryPolicy } => RequestAck,
+    }
+}
+
+super::external_name::external_names! {
+    /// The case-preserving external collection identifier this connector publishes to.
+    pub struct MongoDbCollectionName => super::external_name::external_identifier,
+        label "mongodb_collection", example "Orders";
 }

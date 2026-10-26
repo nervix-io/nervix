@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Resolving local or remote materialized rows and reporting dependency-read failures.
 //! - **Depends on.** Prepared materialized plans, runtime row carriers, state placement and exchange.
-//! - **Must not know.** Models, NSPL parsing or archive restore policy.
+//! - **Must not know.** Models, Plexus parsing or archive restore policy.
 
 #![cfg_attr(
     nervix_lint,
@@ -22,7 +22,141 @@ use std::pin::Pin;
 
 use error_stack::ResultExt as _;
 
-use super::{state_snapshot_exchange::MaterializedSnapshotExchangeError, *};
+use super::{
+    state_snapshot_exchange::MaterializedSnapshotExchangeError,
+    state_snapshot_transfer::SealedSnapshotEnvelope, *,
+};
+
+#[cfg(test)]
+#[path = "materialized_read_reuse_tests.rs"]
+mod reuse_tests;
+
+/// One generator task's admitted remote source view. Its selected owner must confirm the full
+/// sealed identity on every read; the view is neither installed state nor recovery authority.
+#[derive(Default)]
+pub(super) struct MaterializedGenerationReadCache {
+    remote: Option<CachedMaterializedGeneration>,
+}
+
+struct CachedMaterializedGeneration {
+    owner: ClusterNodeName,
+    placement: RuntimeStatePlacement,
+    envelope: SealedSnapshotEnvelope,
+    snapshot: Arc<RestoredMaterializedSnapshot>,
+}
+
+/// A read retains the cached generation's admission for as long as it can yield its rows. Local
+/// reads own their existing row vector; snapshot reads share the admitted immutable container.
+pub(super) enum MaterializedGenerationRead {
+    Rows(std::vec::IntoIter<MaterializedGenerationRecord>),
+    Snapshot {
+        snapshot: Arc<RestoredMaterializedSnapshot>,
+        next: usize,
+    },
+}
+
+impl From<Vec<MaterializedGenerationRecord>> for MaterializedGenerationRead {
+    fn from(records: Vec<MaterializedGenerationRecord>) -> Self {
+        Self::Rows(records.into_iter())
+    }
+}
+
+impl Iterator for MaterializedGenerationRead {
+    type Item = MaterializedGenerationRecord;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Rows(records) => records.next(),
+            Self::Snapshot { snapshot, next } => {
+                let record = snapshot.records.get(*next)?;
+                *next += 1;
+                Some(MaterializedGenerationRecord {
+                    branch: record.branch.clone(),
+                    row: record.row.clone(),
+                })
+            }
+        }
+    }
+}
+
+impl MaterializedGenerationReadCache {
+    pub(super) fn clear(&mut self) {
+        self.remote = None;
+    }
+
+    async fn records_from(
+        &mut self,
+        runtime: &Runtime,
+        owner: &ClusterNodeName,
+        placement: RuntimeStatePlacement,
+        schema: &StdArc<arrow_schema::Schema>,
+    ) -> error_stack::Result<MaterializedGenerationRead, MaterializedReadError> {
+        if self
+            .remote
+            .as_ref()
+            .is_some_and(|cached| cached.owner != *owner || cached.placement != placement)
+        {
+            self.clear();
+        }
+        let envelope = match runtime
+            .describe_materialized_snapshot_from(owner, &placement, None)
+            .await
+        {
+            Ok(Some(envelope)) => envelope,
+            Ok(None) => {
+                self.clear();
+                return Ok(Vec::new().into());
+            }
+            Err(error) => {
+                self.clear();
+                return Err(error.change_context(MaterializedReadError::RemoteSnapshot {
+                    target: owner.clone(),
+                    placement,
+                }));
+            }
+        };
+        if let Some(cached) = self.remote.as_ref()
+            && cached.envelope == envelope
+        {
+            return Ok(cached.records());
+        }
+        // Return the previous cache admission before trying to retain its replacement.
+        self.clear();
+        let mut snapshot = runtime
+            .fetch_described_materialized_snapshot(owner, &placement, schema, envelope)
+            .await
+            .change_context_lazy(|| MaterializedReadError::RemoteSnapshot {
+                target: owner.clone(),
+                placement: placement.clone(),
+            })?;
+        let retained = snapshot
+            .try_retain_for_reads(&runtime.inner.executor)
+            .change_context_lazy(|| MaterializedReadError::RemoteSnapshot {
+                target: owner.clone(),
+                placement: placement.clone(),
+            })?;
+        let cached = CachedMaterializedGeneration {
+            owner: owner.clone(),
+            placement,
+            envelope,
+            snapshot: Arc::new(snapshot),
+        };
+        let records = cached.records();
+        if retained {
+            self.remote = Some(cached);
+        }
+        Ok(records)
+    }
+}
+
+impl CachedMaterializedGeneration {
+    fn records(&self) -> MaterializedGenerationRead {
+        MaterializedGenerationRead::Snapshot {
+            snapshot: self.snapshot.clone(),
+            next: 0,
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum MaterializedReadError {
@@ -616,9 +750,10 @@ impl Runtime {
     pub(in crate::runtime) async fn materialized_records_from_owner(
         &self,
         routing: &mut DomainRoutingCache,
+        cache: &mut MaterializedGenerationReadCache,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> error_stack::Result<Vec<MaterializedGenerationRecord>, MaterializedReadError> {
+    ) -> error_stack::Result<MaterializedGenerationRead, MaterializedReadError> {
         let routing = routing.load().clone();
         let placement = self
             .state_placement(
@@ -628,6 +763,7 @@ impl Runtime {
                 relay,
                 None,
             )
+            .inspect_err(|_| cache.clear())
             .change_context_lazy(|| MaterializedReadError::StateIdentity {
                 domain: domain.clone(),
                 relay: relay.clone(),
@@ -642,27 +778,12 @@ impl Runtime {
             && !self.is_local_node(&owner)
         {
             let Some(schema) = self.materialized_relay_schema(Some(&routing), &placement) else {
-                return Ok(Vec::new());
+                cache.clear();
+                return Ok(Vec::new().into());
             };
-            let Some(restored) = self
-                .fetch_sealed_materialized_snapshot(&owner, &placement, &schema, None)
-                .await
-                .change_context(MaterializedReadError::RemoteSnapshot {
-                    target: owner.clone(),
-                    placement: placement.clone(),
-                })?
-            else {
-                return Ok(Vec::new());
-            };
-            return Ok(restored
-                .records
-                .into_iter()
-                .map(|record| MaterializedGenerationRecord {
-                    branch: record.branch,
-                    row: record.row,
-                })
-                .collect());
+            return cache.records_from(self, &owner, placement, &schema).await;
         }
+        cache.clear();
         let states = match routing.materialized_stream_reads.get(relay) {
             Some(published) => published.states(),
             None => Vec::new(),
@@ -672,16 +793,12 @@ impl Runtime {
                 .open_stored_materialized_snapshot(Some(&routing), &placement)
                 .await?
             else {
-                return Ok(Vec::new());
+                return Ok(Vec::new().into());
             };
-            return Ok(restored
-                .records
-                .into_iter()
-                .map(|record| MaterializedGenerationRecord {
-                    branch: record.branch,
-                    row: record.row,
-                })
-                .collect());
+            return Ok(MaterializedGenerationRead::Snapshot {
+                snapshot: Arc::new(restored),
+                next: 0,
+            });
         }
         let mut records = Vec::new();
         for state in states {
@@ -695,7 +812,7 @@ impl Runtime {
                 }
             }
         }
-        Ok(records)
+        Ok(records.into())
     }
 
     /// The record of exactly one branch of one relay, read from the node that owns it.
@@ -1417,7 +1534,7 @@ mod tests {
                 },
                 Assignment {
                     target: AssignmentTarget::bare(named("evaluated_at")),
-                    value: nervix_nspl::parse_expression("now()")
+                    value: nervix_plexus::parse_expression("now()")
                         .expect("NOW is a valid materialized default expression"),
                 },
             ]),

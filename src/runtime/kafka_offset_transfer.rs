@@ -4,7 +4,7 @@
 //! - **Owns.** Capturing a revision, staging its native encoding, transferring bounded chunks,
 //!   verifying a received checkpoint, and installing it through the replica's assignment token.
 //! - **Depends on.** Kafka offset state, admitted execution, quota-owned staging and interconnect.
-//! - **Must not know.** Brokers, consumer groups, NSPL, or scheduling policy.
+//! - **Must not know.** Brokers, consumer groups, Plexus, or scheduling policy.
 
 #![cfg_attr(
     nervix_lint,

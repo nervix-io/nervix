@@ -5,7 +5,7 @@
 //!   restoration against a concrete branch lifetime.
 //! - **Depends on.** Window accumulator plans, Arrow row views, the bulk executor, and runtime
 //!   state placement.
-//! - **Must not know.** NSPL text, connector protocols, control-plane transactions, or ACK state.
+//! - **Must not know.** Plexus text, connector protocols, control-plane transactions, or ACK state.
 
 #![cfg_attr(
     nervix_lint,

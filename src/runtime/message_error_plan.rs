@@ -4,7 +4,7 @@
 //! - **Owns.** Binding the registry's typed error-route decisions to node-local relay services,
 //!   lookup maps, UDFs and compiled VM programs before a revision is published.
 //! - **Depends on.** Typed route specs, the VM and installed runtime capabilities.
-//! - **Must not know.** Scheduled Models or how an error route was declared in NSPL.
+//! - **Must not know.** Scheduled Models or how an error route was declared in Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -229,7 +229,7 @@ mod tests {
 
         let mut invalid_set = spec(Some(FlushPolicy::Immediate));
         invalid_set.program = lowered_set(
-            nervix_nspl::parse_route_construction("SET missing = input.value")
+            nervix_plexus::parse_route_construction("SET missing = input.value")
                 .expect("the test assignment parses")
                 .assignments,
         );

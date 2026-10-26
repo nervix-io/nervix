@@ -3,8 +3,8 @@
 //! Layer: vocabulary.
 //!
 //! - **Owns.** The emitter Model with its body, batching contract and attachment, its `ALTER`
-//!   operations and their typed failures, and the publishing modes a sink accepts.
-//! - **Depends on.** The sink union, the batching policy, processor inputs and route
+//!   operations and their typed failures, and the publishing modes an emitter accepts.
+//! - **Depends on.** The emitter union, the batching policy, processor inputs and route
 //!   construction, and the acknowledgement and retry vocabulary.
 //! - **Must not know.** How an emitter is validated, planned, hosted or driven.
 
@@ -16,12 +16,13 @@
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use strum::{AsRefStr, EnumString, IntoStaticStr};
+use strum::{AsRefStr, EnumIter, EnumString, IntoStaticStr};
 use thiserror::Error;
 
 use crate::{
-    AckWindow, ClientName, CodecName, EmitSink, EmitterName, ErrorPolicies, FlushPolicy,
-    IcebergSink, InputCollectPolicy, ProcessorInputWhere, ProcessorInputs, RelayName, RetryPolicy,
+    AckWindow, BatchUnavailability, ClientName, CodecName, EmitterBatchLegality, EmitterEntity,
+    EmitterName, ErrorPolicies, FlushPolicy, IcebergEmitter, InputCollectPolicy,
+    ProcessorInputWhere, ProcessorInputs, RelayName, RetryPolicy,
 };
 
 #[derive(
@@ -31,13 +32,12 @@ pub struct CreateEmitter {
     pub name: EmitterName,
     pub from: ProcessorInputs,
     pub body: EmitterBody,
-    pub sink: Box<EmitSink>,
+    pub connector: Box<EmitterEntity>,
     /// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, absent when the emitter publishes one record per
-    /// message. A sink whose [`EmitSink::batch_requirement`] is required never omits it.
+    /// message. A emitter whose [`EmitterEntity::batch_legality`] requires it never omits it.
     pub batch: Option<crate::EmitterBatchPolicy>,
     pub flush_policy: FlushPolicy,
     pub error_policies: ErrorPolicies,
-    pub publishing_mode: EmitterPublishingMode,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default)]
@@ -46,7 +46,7 @@ pub struct CreateEmitter {
 }
 
 /// The complete payload selection of an emitter. HTTP distinguishes an encoded body from an
-/// explicit absence of content; direct-value sinks construct their own destination values.
+/// explicit absence of content; direct-value emitters construct their own destination values.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -74,6 +74,12 @@ impl CreateEmitter {
         &mut self,
         alter: &AlterEmitter,
     ) -> error_stack::Result<(), AlterEmitterError> {
+        if self.connector.kind() != alter.kind {
+            return Err(Report::new(AlterEmitterError::EmitterKindMismatch {
+                stored: self.connector.kind(),
+                requested: alter.kind,
+            }));
+        }
         if self.name != alter.emitter {
             return Err(Report::new(AlterEmitterError::EmitterNameMismatch {
                 stored: self.name.clone(),
@@ -92,8 +98,8 @@ impl CreateEmitter {
         Ok(())
     }
 
-    /// Checks the batching clause against what this emitter's sink requires of it: present where
-    /// the sink has no unbounded write, and no larger than a payload the destination can carry.
+    /// Checks the batching clause against what this emitter's emitter requires of it: present where
+    /// the emitter has no unbounded write, and no larger than a payload the destination can carry.
     pub fn validate_batch(&self) -> error_stack::Result<(), EmitterBatchContractError> {
         match self.batch_contract_violation() {
             Some(violation) => Err(Report::new(violation)),
@@ -101,30 +107,33 @@ impl CreateEmitter {
         }
     }
 
-    /// The requirement of its sink's batching contract that this emitter's clause breaks, if any.
+    /// The requirement of its emitter's batching contract that this emitter's clause breaks, if any.
     ///
     /// Both the standalone check and an alteration report a violation from here, each in its own
     /// error, so neither has to rebuild the other's report.
     fn batch_contract_violation(&self) -> Option<EmitterBatchContractError> {
-        let sink = self.sink.transport_label();
-        if let EmitSink::Http(_) = self.sink.as_ref()
-            && self.batch.is_some()
-        {
-            return Some(EmitterBatchContractError::HttpUnsupported);
-        }
+        let connector = self.connector.kind().phrase();
+        let legality = self.connector.batch_legality();
         let Some(batch) = &self.batch else {
-            return match self.sink.batch_requirement() {
-                crate::EmitterBatchRequirement::Optional => None,
-                crate::EmitterBatchRequirement::Required => {
-                    Some(EmitterBatchContractError::Required { sink })
+            return match legality {
+                EmitterBatchLegality::Required { .. } => {
+                    Some(EmitterBatchContractError::Required { connector })
                 }
+                EmitterBatchLegality::Optional { .. }
+                | EmitterBatchLegality::Unavailable { .. } => None,
             };
         };
-        if let Some(maximum) = self.sink.batch_size_maximum()
-            && batch.max_size.bytes() > maximum.bytes()
-        {
-            return Some(EmitterBatchContractError::SizeAboveSinkMaximum {
-                sink,
+        let maximum = match legality {
+            EmitterBatchLegality::Unavailable { reason } => {
+                return Some(EmitterBatchContractError::Unavailable { connector, reason });
+            }
+            EmitterBatchLegality::Required { maximum }
+            | EmitterBatchLegality::Optional { maximum } => maximum,
+        };
+        let maximum = maximum?;
+        if batch.max_size.bytes() > maximum.bytes() {
+            return Some(EmitterBatchContractError::SizeAboveEmitterMaximum {
+                connector,
                 declared: batch.max_size,
                 maximum,
             });
@@ -193,25 +202,25 @@ impl CreateEmitter {
                 };
                 self.from.r#where.remove(index);
             }
-            AlterEmitterOperation::SetSink {
-                sink,
-                publishing_mode,
+            AlterEmitterOperation::SetTo {
+                destination,
                 body,
+                construction,
             } => {
-                if !sink.accepts_publishing_mode(publishing_mode) {
-                    return Err(Report::new(AlterEmitterError::PublishingModeUnsupported {
-                        sink: sink.transport_label().to_string(),
-                        mode: publishing_mode.kind_label().to_string(),
+                if self.connector.kind() != destination.kind() {
+                    return Err(Report::new(AlterEmitterError::DestinationKindMismatch {
+                        stored: self.connector.kind(),
+                        requested: destination.kind(),
                     }));
                 }
-                self.sink = sink.clone();
-                self.publishing_mode = publishing_mode.clone();
-                if let Some(body) = body {
-                    self.body = body.clone();
+                self.connector = destination.clone();
+                self.body = body.clone();
+                if let Some(construction) = construction {
+                    self.construction = construction.clone();
                 }
             }
             AlterEmitterOperation::SetClient { client } => {
-                let Some(current) = self.sink.client_mut() else {
+                let Some(current) = self.connector.client_mut() else {
                     return Err(Report::new(AlterEmitterError::ClientUnsupported));
                 };
                 *current = client.clone();
@@ -222,8 +231,11 @@ impl CreateEmitter {
                 };
             }
             AlterEmitterOperation::DropEncode => {
-                if let EmitSink::Http(_) = self.sink.as_ref() {
-                    return Err(Report::new(AlterEmitterError::HttpDropEncode));
+                if self.connector.capabilities().body == crate::EmitterBodyForm::CodecOrWithoutBody
+                {
+                    return Err(Report::new(AlterEmitterError::BodySelectionRequired {
+                        entity: self.connector.kind(),
+                    }));
                 }
                 if self.body.codec().is_none() {
                     return Err(Report::new(AlterEmitterError::EncodeNotConfigured));
@@ -240,28 +252,7 @@ impl CreateEmitter {
                 self.mode = *mode;
             }
             AlterEmitterOperation::SetPublishingMode { mode } => {
-                let selected = match (self.sink.as_ref(), mode) {
-                    (
-                        EmitSink::Client(_),
-                        EmitterPublishingMode::BrokerAck {
-                            window,
-                            ack_timeout,
-                            retry_policy,
-                        },
-                    ) => EmitterPublishingMode::ClientAck {
-                        window: *window,
-                        ack_timeout: ack_timeout.clone(),
-                        retry_policy: retry_policy.clone(),
-                    },
-                    _ => mode.clone(),
-                };
-                if !self.sink.accepts_publishing_mode(&selected) {
-                    return Err(Report::new(AlterEmitterError::PublishingModeUnsupported {
-                        sink: self.sink.transport_label().to_string(),
-                        mode: mode.kind_label().to_string(),
-                    }));
-                }
-                self.publishing_mode = selected;
+                self.connector.replace_mode(mode)?;
             }
             AlterEmitterOperation::SetBatch { policy } => {
                 self.batch = Some(*policy);
@@ -278,7 +269,8 @@ impl CreateEmitter {
                 commit_each,
                 max_commit_size,
             } => {
-                let EmitSink::Iceberg(IcebergSink::Table(table)) = self.sink.as_mut() else {
+                let EmitterEntity::Iceberg(IcebergEmitter::Table(table)) = self.connector.as_mut()
+                else {
                     return Err(Report::new(AlterEmitterError::CommitPolicyUnsupported));
                 };
                 table.commit_each = commit_each.clone();
@@ -316,6 +308,7 @@ impl CreateEmitter {
 )]
 pub struct AlterEmitter {
     pub emitter: EmitterName,
+    pub kind: crate::EmitterEntityKind,
     pub operations: Vec<AlterEmitterOperation>,
 }
 
@@ -337,10 +330,10 @@ pub enum AlterEmitterOperation {
     AlterFromDropWhere {
         relay: RelayName,
     },
-    SetSink {
-        sink: Box<EmitSink>,
-        publishing_mode: EmitterPublishingMode,
-        body: Option<EmitterBody>,
+    SetTo {
+        destination: Box<EmitterEntity>,
+        body: EmitterBody,
+        construction: Option<crate::RouteConstruction>,
     },
     SetClient {
         client: ClientName,
@@ -357,7 +350,7 @@ pub enum AlterEmitterOperation {
         mode: AckMode,
     },
     SetPublishingMode {
-        mode: EmitterPublishingMode,
+        mode: crate::EmitterModeChange,
     },
     SetBatch {
         policy: crate::EmitterBatchPolicy,
@@ -374,6 +367,16 @@ pub enum AlterEmitterOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AlterEmitterError {
+    #[error("ALTER {requested} EMITTER targets an emitter declared as {stored}")]
+    EmitterKindMismatch {
+        stored: crate::EmitterEntityKind,
+        requested: crate::EmitterEntityKind,
+    },
+    #[error("{stored} EMITTER cannot change its destination to {requested}")]
+    DestinationKindMismatch {
+        stored: crate::EmitterEntityKind,
+        requested: crate::EmitterEntityKind,
+    },
     #[error("ALTER targets emitter `{requested}`, but the stored emitter is `{stored}`")]
     EmitterNameMismatch {
         stored: EmitterName,
@@ -389,89 +392,103 @@ pub enum AlterEmitterError {
     CannotDropLastInput,
     #[error("emitter encoding is not configured")]
     EncodeNotConfigured,
-    #[error("CLIENT emitters do not name an external client")]
+    #[error("CLIENT CONSUMER emitters do not name an external client")]
     ClientUnsupported,
-    #[error("HTTP emitters select an absent body with SET TO HTTP ... WITHOUT BODY")]
-    HttpDropEncode,
-    #[error("COMMIT policy is only supported by Iceberg emitters")]
+    #[error("{entity} emitters select an absent body with SET TO ... WITHOUT BODY")]
+    BodySelectionRequired { entity: crate::EmitterEntityKind },
+    #[error("COMMIT policy is only supported by ICEBERG TABLE emitters")]
     CommitPolicyUnsupported,
-    #[error("{sink} emitters do not support publishing mode {mode}")]
-    PublishingModeUnsupported { sink: String, mode: String },
     #[error("emitter batching is not configured")]
     BatchNotConfigured,
     #[error(transparent)]
     Batch(EmitterBatchContractError),
 }
 
-/// Why an emitter's batching clause does not fit the sink it publishes to.
+/// Why an emitter's batching clause does not fit the emitter it publishes to.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EmitterBatchContractError {
-    #[error("HTTP emitters send one request per record and do not support BATCH")]
-    HttpUnsupported,
+    #[error("{connector} emitters {reason} and do not support BATCH")]
+    Unavailable {
+        connector: &'static str,
+        reason: BatchUnavailability,
+    },
     #[error(
-        "{sink} emitters require BATCH MAX MESSAGES <n> MAX SIZE <bytes>, because every write \
-         carries several rows"
+        "{connector} emitters require BATCH MAX MESSAGES <n> MAX SIZE <bytes>, because every \
+         write carries several rows"
     )]
-    Required { sink: &'static str },
+    Required { connector: &'static str },
     #[error(
-        "{sink} emitters accept BATCH MAX SIZE up to {maximum}, the largest message the \
+        "{connector} emitters accept BATCH MAX SIZE up to {maximum}, the largest message the \
          destination carries, found {declared}"
     )]
-    SizeAboveSinkMaximum {
-        sink: &'static str,
+    SizeAboveEmitterMaximum {
+        connector: &'static str,
         declared: crate::PayloadSizeLimit,
         maximum: crate::PayloadSizeLimit,
     },
 }
 
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub enum EmitterPublishingMode {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumIter)]
+pub enum EmitterPublishingModeKind {
+    ClientAck,
+    NoAck,
+    BrokerAck,
+    MqttQos0,
+    MqttQos1,
+    MqttQos2,
+    NatsJetStream,
+    SqsSingle,
+    SqsBatch,
+    RequestAck,
+}
+
+/// A borrowed observation of an entity-owned publication policy. It is never stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitterPublishing<'a> {
     ClientAck {
-        window: AckWindow,
-        ack_timeout: String,
-        retry_policy: RetryPolicy,
+        window: &'a AckWindow,
+        ack_timeout: &'a str,
+        retry_policy: &'a RetryPolicy,
     },
     NoAck {
-        retry_policy: RetryPolicy,
+        retry_policy: &'a RetryPolicy,
     },
     BrokerAck {
-        window: AckWindow,
-        ack_timeout: String,
-        retry_policy: RetryPolicy,
+        window: &'a AckWindow,
+        ack_timeout: &'a str,
+        retry_policy: &'a RetryPolicy,
     },
     MqttQos0 {
-        retry_policy: RetryPolicy,
+        retry_policy: &'a RetryPolicy,
     },
     MqttQos1 {
-        window: AckWindow,
-        ack_timeout: String,
-        retry_policy: RetryPolicy,
+        window: &'a AckWindow,
+        ack_timeout: &'a str,
+        retry_policy: &'a RetryPolicy,
     },
     MqttQos2 {
-        window: AckWindow,
-        ack_timeout: String,
-        retry_policy: RetryPolicy,
+        window: &'a AckWindow,
+        ack_timeout: &'a str,
+        retry_policy: &'a RetryPolicy,
     },
     NatsJetStream {
-        window: AckWindow,
-        ack_timeout: String,
-        retry_policy: RetryPolicy,
+        window: &'a AckWindow,
+        ack_timeout: &'a str,
+        retry_policy: &'a RetryPolicy,
     },
     SqsSingle {
-        retry_policy: RetryPolicy,
+        retry_policy: &'a RetryPolicy,
     },
     SqsBatch {
-        retry_policy: RetryPolicy,
+        retry_policy: &'a RetryPolicy,
     },
     RequestAck {
-        retry_policy: RetryPolicy,
+        retry_policy: &'a RetryPolicy,
     },
 }
 
-impl EmitterPublishingMode {
-    pub fn retry_policy(&self) -> &RetryPolicy {
+impl<'a> EmitterPublishing<'a> {
+    pub fn retry_policy(self) -> &'a RetryPolicy {
         match self {
             Self::ClientAck { retry_policy, .. }
             | Self::NoAck { retry_policy }
@@ -485,8 +502,7 @@ impl EmitterPublishingMode {
             | Self::RequestAck { retry_policy } => retry_policy,
         }
     }
-
-    pub fn ack_timeout(&self) -> Option<&str> {
+    pub fn ack_timeout(self) -> Option<&'a str> {
         match self {
             Self::ClientAck { ack_timeout, .. }
             | Self::BrokerAck { ack_timeout, .. }
@@ -500,19 +516,56 @@ impl EmitterPublishingMode {
             | Self::RequestAck { .. } => None,
         }
     }
-
-    pub fn kind_label(&self) -> &'static str {
+    pub fn kind_label(self) -> &'static str {
+        self.kind().label()
+    }
+    pub fn kind(self) -> EmitterPublishingModeKind {
         match self {
-            Self::ClientAck { .. } => "ACK",
-            Self::NoAck { .. } => "NO_ACK",
-            Self::BrokerAck { .. } => "ACK",
-            Self::MqttQos0 { .. } => "QOS 0",
-            Self::MqttQos1 { .. } => "QOS 1 ACK",
-            Self::MqttQos2 { .. } => "QOS 2 ACK",
-            Self::NatsJetStream { .. } => "JETSTREAM ACK",
-            Self::SqsSingle { .. } => "SINGLE",
-            Self::SqsBatch { .. } => "BATCH",
-            Self::RequestAck { .. } => "ACK",
+            Self::ClientAck { .. } => EmitterPublishingModeKind::ClientAck,
+            Self::NoAck { .. } => EmitterPublishingModeKind::NoAck,
+            Self::BrokerAck { .. } => EmitterPublishingModeKind::BrokerAck,
+            Self::MqttQos0 { .. } => EmitterPublishingModeKind::MqttQos0,
+            Self::MqttQos1 { .. } => EmitterPublishingModeKind::MqttQos1,
+            Self::MqttQos2 { .. } => EmitterPublishingModeKind::MqttQos2,
+            Self::NatsJetStream { .. } => EmitterPublishingModeKind::NatsJetStream,
+            Self::SqsSingle { .. } => EmitterPublishingModeKind::SqsSingle,
+            Self::SqsBatch { .. } => EmitterPublishingModeKind::SqsBatch,
+            Self::RequestAck { .. } => EmitterPublishingModeKind::RequestAck,
+        }
+    }
+}
+
+impl EmitterPublishingModeKind {
+    /// How a `MODE` clause names the mode, as `DESCRIBE` and diagnostics name it.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ClientAck | Self::BrokerAck | Self::RequestAck => "ACK",
+            Self::NoAck => "NO ACK",
+            Self::MqttQos0 => "QOS 0",
+            Self::MqttQos1 => "QOS 1 ACK",
+            Self::MqttQos2 => "QOS 2 ACK",
+            Self::NatsJetStream => "JETSTREAM ACK",
+            Self::SqsSingle => "SINGLE",
+            Self::SqsBatch => "BATCH",
+        }
+    }
+
+    /// The mode written in full after `MODE`, as documentation and generated statements write it.
+    pub const fn example(self) -> &'static str {
+        match self {
+            Self::ClientAck | Self::BrokerAck => {
+                "ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
+            }
+            Self::NoAck => "NO ACK RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::MqttQos0 => "QOS 0 RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::MqttQos1 => "QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::MqttQos2 => "QOS 2 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::NatsJetStream => {
+                "JETSTREAM ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 30s"
+            }
+            Self::SqsSingle => "SINGLE RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::SqsBatch => "BATCH RETRY POLICY BACKOFF 1s MAX 30s",
+            Self::RequestAck => "ACK RETRY POLICY BACKOFF 1s MAX 30s",
         }
     }
 }

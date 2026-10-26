@@ -2,7 +2,7 @@
 
 Nothing built so far required tearing anything down — every step added nodes. `ALTER` statements
 change what already exists: junction logic, relay properties, schemas, ingestor sources, emitter
-sinks, stateful processor behavior, reingestor wiring, and generator cadence or routes. Nervix
+emitters, stateful processor behavior, reingestor wiring, and generator cadence or routes. Nervix
 classifies each validated change and pauses as little as possible — the statement result reports
 the executed level
 ([ALTER Lock And Quiesce Classification](control-plane.md#alter-lock-and-quiesce-classification)):
@@ -24,7 +24,7 @@ Lower the high-value threshold from `1000` to `500`. Route changes go through
 [`ALTER JUNCTION`](processors.md#altering-junctions); `REPLACE ROUTE` requires the **complete**
 route body, not a diff:
 
-```nspl
+```plexus
 ALTER JUNCTION route_orders
   REPLACE ROUTE TO high_value_orders
     INHERIT ALL
@@ -44,7 +44,7 @@ order and watch it reach `high_value_out`, which the old threshold would have dr
 Relay capacity is equally uneventful ([Altering Relays](relay.md#altering-relays), capacity
 semantics under [Capacity](relay.md#capacity)):
 
-```nspl
+```plexus
 ALTER RELAY orders SET CAPACITY 8;
 ```
 
@@ -54,7 +54,7 @@ Payments gain a `method`. A codec requires its wire schema to exactly match the 
 so both must change in **one transaction** — the registry validates the complete candidate graph
 before anything applies ([Altering Schemas](schemas-and-codecs.md#altering-schemas)):
 
-```nspl
+```plexus
 BEGIN;
 
 ALTER WIRE JSON SCHEMA payment_wire
@@ -86,7 +86,7 @@ Ingestors and emitters have their own operation sets —
 [Altering Ingestors](ingestors.md#altering-ingestors) (an ingestor's `ALTER` repeats its connector
 and entity, such as `ALTER KAFKA TOPIC INGESTOR kafka_orders`, and every ingestor change is
 entity-pause) and
-[Altering Emitters](emitters.md#altering-emitters) (flush changes are dynamic; sink, client, and
+[Altering Emitters](emitters.md#altering-emitters) (flush changes are dynamic; emitter, client, and
 codec changes are entity-pause; source-list membership changes are domain-pause). Processor
 operations are covered under
 [Altering Deduplicators](processors.md#altering-deduplicators),

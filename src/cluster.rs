@@ -48,7 +48,8 @@ use nervix_interconnect::{
     RequestError, RequestSubquota, Transport as InterconnectTransport, TransportError,
 };
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodeServiceUrl,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodePrerequisites,
+    NodeServiceUrl,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -65,6 +66,14 @@ use tracing::{debug, info, warn};
 #[cfg(test)]
 use crate::runtime::AdvertisedSubscriptionInterest;
 use crate::runtime::SubscriptionInterestIndex;
+
+mod prerequisites;
+mod settings;
+pub use prerequisites::{ClockSkew, PrerequisitesView, register_clock_probe_handler};
+pub use settings::{
+    ClockSkewTolerance, GossipInterval, MembershipSettings, MembershipSettingsError,
+    MembershipValues, NodeUnavailabilityTimeout,
+};
 
 const KEY_CLUSTER_ID: &str = "cluster_id";
 const KEY_NODE_ID: &str = "node_id";
@@ -99,6 +108,7 @@ pub struct ClusterHandle {
     /// The membership task owns the other reference and replaces this snapshot whenever the
     /// Chitchat live-node state watcher changes.
     subscription_interest: StdArc<SubscriptionInterestPublication>,
+    prerequisites: PrerequisitesView,
     /// The transport the gossip server and the membership task also hold, kept here so shutdown
     /// can close it before it asks the gossip server to stop.
     gossip_transport: InterconnectGossipTransport,
@@ -829,7 +839,8 @@ pub struct ClusterSettings {
     pub bootstrap_host: Option<String>,
     pub recovery_endpoints: BTreeSet<NodeEndpoint>,
     pub interconnect: InterconnectTransport,
-    pub node_unavailability_timeout: Duration,
+    pub membership: MembershipSettings,
+    pub prerequisites: NodePrerequisites,
     pub fault_injection: crate::ConfiguredFaultInjection,
 }
 
@@ -1346,10 +1357,10 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let config = chitchat::ChitchatConfig {
         chitchat_id,
         cluster_id: settings.cluster_id.clone(),
-        gossip_interval: Duration::from_millis(500),
+        gossip_interval: settings.membership.gossip_interval(),
         listen_addr: settings.interconnect.local_addr(),
         seed_nodes: seed_nodes.into_iter().collect(),
-        failure_detector_config: chitchat::FailureDetectorConfig::default(),
+        failure_detector_config: settings.membership.failure_detector_config(),
         marked_for_deletion_grace_period: Duration::from_secs(60),
         catchup_callback: None,
         extra_liveness_predicate: None,
@@ -1382,6 +1393,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
             KEY_BOOTSTRAP_HOST.to_string(),
             settings.bootstrap_host.clone().unwrap_or_default(),
         ),
+        prerequisites::initial_key_value(&settings.prerequisites),
     ];
 
     let chitchat = spawn_chitchat(config, initial_key_values, &transport)
@@ -1393,12 +1405,15 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let mut live_nodes = chitchat_state.lock().await.live_nodes_watch_stream();
     let subscription_interest = StdArc::new(SubscriptionInterestPublication::new());
     let subscription_interest_publisher = subscription_interest.clone();
+    let prerequisites = PrerequisitesView::new();
+    let prerequisites_publisher = prerequisites.clone();
     let event_tx = events.clone();
     let route_transport = transport.clone();
     let membership_task = nervix_primitives::task::spawn(async move {
         while let Some(nodes) = live_nodes.next().await {
             nervix_primitives::task::consume_budget().await;
             subscription_interest_publisher.publish(&nodes);
+            prerequisites_publisher.publish(&nodes);
             route_transport.refresh_routes(&nodes);
             let report = membership_report(&nodes);
             info!(members = ?report, "cluster membership updated");
@@ -1410,11 +1425,12 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         local_incarnation: nervix_models::ClusterNodeIncarnation::new(generation_id),
         chitchat: chitchat_state,
         subscription_interest,
+        prerequisites,
         gossip_transport: transport,
         chitchat_server: Mutex::new(Some(chitchat)),
         events,
         peer_health_state: watch::channel(PeerHealthStateSnapshot::default()).0,
-        node_unavailability_timeout: settings.node_unavailability_timeout,
+        node_unavailability_timeout: settings.membership.node_unavailability_timeout(),
         membership_task: Mutex::new(Some(membership_task)),
     })
 }
@@ -1596,6 +1612,15 @@ impl ClusterHandle {
             incarnation = local_id.generation_id,
             "advertised terminating process incarnation"
         );
+    }
+
+    /// Whether this process incarnation has advertised that it is terminating. It reads the
+    /// node's own state, so the answer never waits for gossip to carry the advertisement, and an
+    /// incarnation keeps the advertisement until it exits.
+    pub async fn local_incarnation_is_terminating(&self) -> bool {
+        let chitchat_handle = self.chitchat.clone();
+        let mut chitchat = chitchat_handle.lock().await;
+        chitchat.self_node_state().get(KEY_TERMINATING).is_some()
     }
 
     pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
@@ -2018,6 +2043,7 @@ fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode>
         client_url: advertised_service_url(state, KEY_GRPC_ADVERTISE_ADDR),
         console_url: advertised_service_url(state, KEY_WEB_CONSOLE_ADVERTISE_ADDR),
         interconnect_endpoint: advertised_endpoint(state),
+        prerequisites: prerequisites::advertised_prerequisites(&identity, state),
     })
 }
 

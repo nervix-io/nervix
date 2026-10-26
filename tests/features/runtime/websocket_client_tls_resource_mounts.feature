@@ -5,7 +5,7 @@ Feature: Websocket client TLS resource mounts
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the WebSocket mock endpoints are published under fixture DNS
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -16,15 +16,15 @@ Feature: Websocket client TLS resource mounts
         "ca.pem": "this is not a certificate\n"
       }
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -38,8 +38,7 @@ Feature: Websocket client TLS resource mounts
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
-        CREATE CLIENT ws_tls
-        TYPE WEBSOCKETS
+        CREATE WEBSOCKETS CLIENT ws_tls
         MOUNT dev_tls VERSION 1
         CONFIG {
           'endpoint' = '{{mock_wss_dns_addr}}/ws/{{test_id}}',
@@ -64,14 +63,14 @@ Feature: Websocket client TLS resource mounts
       """
     And the last relay subscription payload contains key fragment '{"user_id":42}'
     And the DNS fixture eventually receives a question for "websocket.nervix.test"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls_v2}}";
       """
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports status containing "{{domain}} status=Running"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE CLIENT ws_tls;
       """
@@ -79,7 +78,7 @@ Feature: Websocket client TLS resource mounts
       """
       MOUNT dev_tls VERSION 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """

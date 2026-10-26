@@ -12,27 +12,27 @@ Feature: ClickHouse name resolution
     And a <cluster_size> node nervix cluster is started
     And the ClickHouse endpoints are published under fixture DNS name "clickhouse.nervix.test"
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "clickhouse_dns_in_{{test_id}}" exists with 1 partitions
     And ClickHouse table "clickhouse_dns_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64, action STRING);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -47,20 +47,18 @@ Feature: ClickHouse name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT clickhouse_client TYPE CLICKHOUSE MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_client MOUNT dev_tls VERSION 1 CONFIG {
         <client_config>,
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE EMITTER to_clickhouse FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE clickhouse_dns_{{test_id}}
-        VALUES {
+      CREATE CLICKHOUSE TABLE EMITTER to_clickhouse FROM notifications
+        TO clickhouse_client TABLE 'clickhouse_dns_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
           "clickhouse_user_id" = input.user_id,
           "clickhouse_now" = NOW() AS STRING,
           "clickhouse_action" = LOWER(input.action)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -90,27 +88,27 @@ Feature: ClickHouse name resolution
     And a <cluster_size> node nervix cluster is started
     And the ClickHouse endpoints are published under fixture DNS name "clickhouse.unlisted.test"
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "clickhouse_dns_in_{{test_id}}" exists with 1 partitions
     And ClickHouse table "clickhouse_dns_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64, action STRING);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -125,21 +123,19 @@ Feature: ClickHouse name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT clickhouse_client TYPE CLICKHOUSE MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_client MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{clickhouse_tls_dns_addr}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem',
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE EMITTER to_clickhouse FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE clickhouse_dns_{{test_id}}
-        VALUES {
+      CREATE CLICKHOUSE TABLE EMITTER to_clickhouse FROM notifications
+        TO clickhouse_client TABLE 'clickhouse_dns_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
           "clickhouse_user_id" = input.user_id,
           "clickhouse_now" = NOW() AS STRING,
           "clickhouse_action" = LOWER(input.action)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -168,19 +164,19 @@ Feature: ClickHouse name resolution
     And a <cluster_size> node nervix cluster is started
     And ClickHouse is forwarded as "clickhouse.nervix.test" from the fixture addresses "127.0.5.1,127.0.5.2"
     And the DNS fixture answers "clickhouse.nervix.test" with addresses "127.0.5.3,127.0.5.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "clickhouse_dns_in_{{test_id}}" exists with 1 partitions
     And ClickHouse table "clickhouse_dns_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64, action STRING);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer, action string);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -195,20 +191,18 @@ Feature: ClickHouse name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT clickhouse_client TYPE CLICKHOUSE CONFIG {
+      CREATE CLICKHOUSE CLIENT clickhouse_client CONFIG {
         'addr' = '{{clickhouse_forwarded_addr}}',
         'user' = 'default',
         'password' = 'nervix'
       };
-      CREATE EMITTER to_clickhouse FROM notifications
-        TO CLICKHOUSE clickhouse_client INSERT TO TABLE clickhouse_dns_{{test_id}}
-        VALUES {
+      CREATE CLICKHOUSE TABLE EMITTER to_clickhouse FROM notifications
+        TO clickhouse_client TABLE 'clickhouse_dns_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
           "clickhouse_user_id" = input.user_id,
           "clickhouse_now" = NOW() AS STRING,
           "clickhouse_action" = LOWER(input.action)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

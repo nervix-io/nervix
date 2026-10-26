@@ -5,7 +5,7 @@
 //! - **Owns.** Installing committed mappings, observing progress, following installations for
 //!   client attachments, and adapting clock arithmetic to runtime lifecycle decisions.
 //! - **Depends on.** Vocabulary clock models and branch-local runtime state.
-//! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
+//! - **Must not know.** Plexus parsing, consensus decisions or clock-authority selection.
 
 #![cfg_attr(
     nervix_lint,
@@ -408,6 +408,13 @@ impl DomainClockLifecycle {
     #[cfg(test)]
     pub(in crate::runtime) fn stop(&self, generation: u64) {
         self.replace(DomainClockInstallation::Stopped { generation });
+    }
+
+    /// The receivers this clock's replacements wake: one for every logical deadline a bound handle
+    /// is waiting for, and one for every observer.
+    #[cfg(test)]
+    pub(in crate::runtime) fn notification_receivers(&self) -> usize {
+        self.inner.changes.receiver_count()
     }
 
     pub(in crate::runtime) fn mark_missing(&self) {

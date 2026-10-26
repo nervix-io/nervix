@@ -2,11 +2,11 @@ Feature: Session subscription delivery options
   Scenario Outline: Dropping sampled session subscriptions suppress matching records
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA telemetry (
         device STRING,
@@ -56,11 +56,11 @@ Feature: Session subscription delivery options
 
   Scenario Outline: A fractional sample rate passes part of the rows, drawn independently per subscription
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metric (
         value I64
@@ -104,11 +104,11 @@ Feature: Session subscription delivery options
 
   Scenario Outline: Rows a subscription filter cannot evaluate are skipped and reported
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA ratio (
         device STRING,
@@ -171,11 +171,11 @@ Feature: Session subscription delivery options
   Scenario Outline: Blocking sampled session subscriptions deliver records after filtering
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA telemetry (
         device STRING,

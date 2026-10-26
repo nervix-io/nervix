@@ -2,7 +2,7 @@ Feature: Web console domain clock
 
   Scenario Outline: The selected domain clock follows its mapping, ticks, and lifecycle
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       CREATE UNPACED DOMAIN {{domain}}_other;
@@ -61,7 +61,7 @@ Feature: Web console domain clock
 
   Scenario: A reconnected console restores one attachment to its selected domain
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 500ms SKEW 10ms;
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
@@ -74,6 +74,7 @@ Feature: Web console domain clock
     When leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
     Then node "{{old_leader}}" eventually reports leader "{{new_leader}}"
     And selector ".terminal" contains "connected to leader '{{new_leader}}'"
+    And selector ".domain-clock" contains "PACED"
     And selector ".domain-clock" contains "PACED" for 1500 milliseconds
     And selector ".domain-clock-tick-id" advances as a number within 10000 milliseconds
     And selector ".terminal" contains "domain clock [{{domain}}] attached" exactly 2 times

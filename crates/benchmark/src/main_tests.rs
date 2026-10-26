@@ -28,7 +28,7 @@ batch_bytes = 1048576
 
 [implementations.nervix]
 kind = "nervix"
-template = "graph.nspl.upon"
+template = "graph.plexus.upon"
 
 [implementations.vector]
 kind = "container"
@@ -60,7 +60,7 @@ fn repository_with(slugs: &[&str]) -> tempfile::TempDir {
         fs::write(directory.join("benchmark.toml"), MANIFEST)
             .expect("the manifest should be written");
         fs::write(
-            directory.join("graph.nspl.upon"),
+            directory.join("graph.plexus.upon"),
             "CREATE UNPACED DOMAIN {{ input_topic }};\n",
         )
         .expect("the Nervix template should be written");

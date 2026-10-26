@@ -32,7 +32,7 @@ WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does no
 
 Every declaration requires both limits immediately after `FILE`, in this order:
 
-```nspl,ignore
+```plexus,ignore
 FILE "processor.wasm"
 MAX FUEL 1000000000
 MAX MEMORY 64MiB
@@ -595,7 +595,7 @@ callback at a time, in this order:
    routes `message_errors` through the route's `ON MESSAGE ERROR` policy. It holds back the success
    of every other input the callback decided: inputs carried into output rows, `acked` inputs,
    handled message errors, and inputs that `ON GLOBAL ERROR IGNORE` accepts after a failed
-   callback. Output reaches downstream nodes, and can reach sinks, while its checkpoint is still on
+   callback. Output reaches downstream nodes, and can reach emitters, while its checkpoint is still on
    its way; only the acknowledgement waits. Until the checkpoint ends, Nervix reports the inputs it
    holds back alive to their source, so a source's `ACK TIMEOUT` shorter than the checkpoint does
    not deliver them again.
@@ -677,10 +677,10 @@ checkpoint on that node fails until the node restarts.
 
 ### Recovery, Replay And Duplicates
 
-A checkpoint is not a transaction that spans the guest, its output and external sinks. It guarantees
+A checkpoint is not a transaction that spans the guest, its output and external emitters. It guarantees
 exactly one thing: once a source has received a successful acknowledgement for an input, the guest
 state that reflects the input is on the stable storage of the branch's owner and of every replica the
-checkpoint was confirmed by. What that means differs for guest state, for the source, and for sinks.
+checkpoint was confirmed by. What that means differs for guest state, for the source, and for emitters.
 
 - **Guest state.** A restarted node restores each branch from the newest checkpoint on its own
   storage. After an owner is lost, [forced recovery](#state-generations) continues each branch from
@@ -694,7 +694,7 @@ checkpoint was confirmed by. What that means differs for guest state, for the so
   input: a guest counts buffered input as it accepts it, a checkpoint that failed at its replicas
   stays on the owner's storage, and a replica can hold a checkpoint whose acknowledgement it sent too
   late. A guest therefore applies a redelivered input again unless it recognizes the input itself.
-- **External delivery.** Output is dispatched before its checkpoint completes, so a sink can emit
+- **External delivery.** Output is dispatched before its checkpoint completes, so an emitter can emit
   output whose input is later negatively acknowledged and redelivered, and the redelivered input
   produces that output again. Delivery through a WASM processor is at least once; see
   [ACK Semantics And Effective Delivery](emitters.md#ack-semantics-and-effective-delivery).

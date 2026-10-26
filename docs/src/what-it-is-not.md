@@ -1,5 +1,7 @@
 # What It Is Not
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix is not an exactly-once transactional engine.
 
 With ACK-based ingestion modes, Nervix behaves as an at-least-once system. Without ACK tracking, it behaves as at-most-once. That is an intentional design choice: Nervix prioritizes throughput and low latency over transactional persistence on every action.
@@ -25,6 +27,6 @@ The data plane operates in two broad modes:
 2. Snapshot-style replicated runtime state.
    Selected runtime state such as Kafka domain offsets, deduplicator state, and materialized relay state is snapshotted to persistent storage and replicated to followers. WASM guest state is the one kind a source acknowledgement waits for: an `ATTACHED` WASM processor checkpoints its guest state to stable storage and to every assigned replica before it acknowledges the inputs the checkpoint covers. That checkpoint still does not make the path exactly once; see [Recovery, Replay And Duplicates](wasm-processor-guests.md#recovery-replay-and-duplicates).
 
-The execution graph itself is different: NSPL models and domain schedules are control-plane state and are persisted with strong consistency guarantees before the data plane runs them.
+The execution graph itself is different: Plexus models and domain schedules are control-plane state and are persisted with strong consistency guarantees before the data plane runs them.
 
 Each runtime graph node is scheduled onto one cluster node and may have replicas. Replicas maintain eventually consistent copies of replicated runtime state and are designed to catch up through the replication channel.

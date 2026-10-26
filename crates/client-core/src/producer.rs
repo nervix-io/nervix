@@ -47,6 +47,7 @@ use nervix_models::{
 use nervix_primitives::sync::{Arc, StdArc, StdWeak, blocking::Mutex as SyncMutex, oneshot, watch};
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
+use tracing::debug;
 
 use crate::{
     client::{Client, RecoveryMode, SessionRecovery},
@@ -562,7 +563,7 @@ impl Client {
             let exchange = self.inner.exchange.lock().await;
             (exchange.requests(), exchange.generation.clone())
         };
-        let registry = self.inner.events.sinks.producers.clone();
+        let registry = self.inner.events.emitters.producers.clone();
         let client = self.clone();
         let (answer, answered) = oneshot::channel();
         // The open runs in a task of its own, so a caller that stops waiting leaves behind a task
@@ -852,6 +853,14 @@ impl ProducerInner {
         self.request.clone()
     }
 
+    pub(crate) fn domain(&self) -> &DomainName {
+        &self.domain
+    }
+
+    pub(crate) fn ingestor(&self) -> &IngestorName {
+        &self.ingestor
+    }
+
     pub(crate) fn restoration_failed(&self, generation: &Arc<()>) {
         let mut phase = self.lifecycle.phase.lock();
         if !matches!(&*phase, ProducerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
@@ -898,6 +907,12 @@ impl ProducerInner {
             *phase = ProducerPhase::ReopenRequired(reason);
             drop(phase);
             self.lifecycle.changed.send_replace(());
+            debug!(
+                domain = self.domain.as_str(),
+                ingestor = self.ingestor.as_str(),
+                refusal = refusal.as_ref(),
+                "a producer restoration was refused for good"
+            );
             return false;
         }
         true

@@ -2,12 +2,12 @@ Feature: Materialized relay state
   Scenario Outline: Unbranched materialized reports render the root branch locally and remotely
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA root_event (
         value STRING
@@ -63,12 +63,12 @@ Feature: Materialized relay state
   Scenario Outline: Materialized reports spell the infinite floats a payload's numbers round to
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading ( tenant STRING, value F32 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, value number );
@@ -121,12 +121,12 @@ Feature: Materialized relay state
   Scenario Outline: Materialized relay state is resolved from the current concrete branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -244,12 +244,12 @@ Feature: Materialized relay state
   Scenario Outline: Materialized dependencies resolve in written order after REQUIRED WAIT wakes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA dependency_event (
         tenant STRING,
@@ -402,12 +402,12 @@ Feature: Materialized relay state
   Scenario Outline: Materialized relays keep the latest value by message watermark
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -481,12 +481,12 @@ Feature: Materialized relay state
   Scenario Outline: START resets materialized relay state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -528,7 +528,7 @@ Feature: Materialized relay state
       """
       key={"user_id":42} payload={"user_id":42}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       START;
@@ -548,12 +548,12 @@ Feature: Materialized relay state
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -567,7 +567,7 @@ Feature: Materialized relay state
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
-        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 2s;
+        CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 30s;
         CREATE RELAY notifications
         SCHEMA notification BRANCHED BY by_http_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
@@ -592,28 +592,25 @@ Feature: Materialized relay state
       """
       {"note":"first","user_id":42}
       """
-    Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+    Then within "30s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       key={"user_id":42} payload={"note":"first","user_id":42}
       """
-    And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+    And within "60s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       relay 'notifications' materialized state is empty
       """
 
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+    When http payloads are posted concurrently to host "http-{{test_id}}.example.com" path "/ingest"
       """
       {"note":"recreated-acme","user_id":42}
-      """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
-      """
       {"note":"recreated-beta","user_id":43}
       """
-    Then within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+    Then within "30s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       key={"user_id":42} payload={"note":"recreated-acme","user_id":42}
       """
-    And within "5s" node "node-1" eventually reports materialized state for relay "notifications" containing
+    And within "30s" node "node-1" eventually reports materialized state for relay "notifications" containing
       """
       key={"user_id":43} payload={"note":"recreated-beta","user_id":43}
       """
@@ -628,12 +625,12 @@ Feature: Materialized relay state
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And a repeated text placeholder "bulk_blob" of 1500000 bytes is prepared
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,

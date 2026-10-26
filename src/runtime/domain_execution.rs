@@ -561,7 +561,8 @@ impl Runtime {
         let build = || RuntimeError::build_domain_execution(domain);
         if let Some((_, mut existing)) = self.inner.executions.remove(domain) {
             existing.routing.deactivate();
-            self.stop_domain_execution(domain, existing).await;
+            self.stop_domain_execution(domain, existing, self.emitter_finish_deadline())
+                .await;
         }
 
         let Some(revision) = revision else {
@@ -1562,10 +1563,10 @@ mod tests {
             each: "100ms".parse().assured("the fixture cadence is positive"),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                 relay: named("generated"),
-                construction: nervix_nspl::parse_route_construction(
+                construction: nervix_plexus::parse_route_construction(
                     "SET tenant = relay_state.notifications.tenant",
                 )
-                .assured("the fixture route is valid NSPL"),
+                .assured("the fixture route is valid Plexus"),
                 flush_policy: Some(FlushPolicy::Immediate),
                 message_error_policy: MessageErrorPolicy::Log,
                 branch: None,

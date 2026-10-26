@@ -3,12 +3,12 @@ Feature: Emitter metrics
   Scenario Outline: DESCRIBE EMITTER and Prometheus report emitter traffic metrics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -34,13 +34,12 @@ Feature: Emitter metrics
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+        CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER emitter_metrics_node FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE ZEROMQ PUSH EMITTER emitter_metrics_node FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -59,7 +58,7 @@ Feature: Emitter metrics
       """
       "user_id":
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE EMITTER emitter_metrics_node;
       """
@@ -74,7 +73,7 @@ Feature: Emitter metrics
       """
     And the last command output contains
       """
-      sink: ZEROMQ client=zeromq_main
+      to: ZEROMQ PUSH zeromq_main
       """
     And the last command output contains
       """

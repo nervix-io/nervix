@@ -39,7 +39,7 @@ use h2::{Ping, PingPong, Reason, RecvStream, client, server};
 use http::{Method, Request, StatusCode, Version};
 use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_dns::ConnectionBudget;
+use nervix_dns::{LookupShare, OperationBudget};
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
@@ -53,7 +53,7 @@ use nervix_primitives::{
     sync::{
         Arc, CancellationToken, Notify, OwnedSemaphorePermit, Semaphore, StdArc, StdWeak,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-        mpsc,
+        mpsc, watch,
     },
     task::TaskTracker,
     time::{Instant, sleep, sleep_until, timeout},
@@ -62,14 +62,15 @@ use strum::EnumCount as _;
 use tracing::{debug, warn};
 
 use self::{
+    join::InboundBindingAnswer,
     published_tls::{ActiveTls, PublishedTls},
     stream_releases::StreamReleases,
 };
 use super::{
-    ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,
-    RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision, RelayAdmissionStatus,
-    RelayDelivery, RelayPayload, RequestSubquota, TlsConfigBundle, TransportError,
-    TransportIdentity, TransportOptions, wire,
+    ControlEnvelope, CoordinationIdentityAllocationError, Envelope, JoinProgress, JoinTerms,
+    PeerTarget, PoolClass, RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision,
+    RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload, RequestSubquota,
+    TlsConfigBundle, TransportError, TransportIdentity, TransportOptions, wire,
 };
 use crate::{
     identity::CertificateIdentity,
@@ -80,18 +81,21 @@ use crate::{
     peer_resolver::PeerResolver,
     request::RequestAdmission,
     wire::{
-        ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
-        RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, WIRE_CONTRACT_FINGERPRINT,
+        ConnectionAccepted, ConnectionAnswer, ConnectionHello, RelayAdmissionRequest,
+        RelayAdmissionResponse, RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse,
     },
 };
 
 mod body;
 mod dial;
 mod duplex;
+mod join;
 mod published_tls;
+mod receive_window;
 mod relay;
 mod relay_admission_choice;
 mod relay_owner;
+mod relay_watermarks;
 use relay_admission_choice::{AdmissionChoice, ChosenAdmission};
 mod stream;
 mod stream_releases;
@@ -105,7 +109,7 @@ pub use duplex::{
     ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
     DuplexSender, EncodedMessage,
 };
-use relay_owner::{RelayOwnersPublication, RelayPeerOwner};
+use relay_owner::{RelayGrantPosition, RelayOwnersPublication, RelayPeerOwner};
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
 use stream_slots::{StreamSlotQuotas, configure_client_builder, configure_server_builder};
@@ -122,7 +126,10 @@ const RELAY_PATH_PREFIX: &str = "/v1/relay/";
 const RELAY_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const RELAY_PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 const RELAY_CANCELLATION_RETRY_WINDOW: Duration = Duration::from_secs(30);
-const RELAY_CHANNEL_RETENTION: Duration = Duration::from_secs(600);
+/// How long a receiver retains a relay channel's watermark after it was last recorded or consulted,
+/// unless its peer's watermark budget needs the position first. A sender rotates a channel it
+/// leaves idle well within this, so a channel it resumes still finds its watermark.
+pub const RELAY_CHANNEL_RETENTION: Duration = Duration::from_secs(600);
 const RELAY_CHANNEL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const BODY_CHUNK_BYTES: usize = 16 * 1024;
@@ -330,6 +337,10 @@ fn increment(total: usize, addition: usize) -> usize {
 pub(crate) struct StreamLease {
     connection: StdArc<ClientConnection>,
     slot: Option<OwnedSemaphorePermit>,
+    /// The receive window a bulk stream grants its sender, reserved before its request leaves and
+    /// returned when the stream ends. A stream of any other pool grants the initial window, which
+    /// no reservation backs.
+    _receive_window: Option<Reservation>,
     state: TransportState,
     released: StreamRelease,
 }
@@ -813,6 +824,9 @@ pub(crate) struct TransportStateInner {
     cluster_id: String,
     node_id: ClusterNodeName,
     advertised_host: String,
+    join_terms: JoinTerms,
+    /// Written only by outbound connection attempts, and only while it still reads `Joining`.
+    join_progress: watch::Sender<JoinProgress>,
     process_epoch: u64,
     next_coordination_sequence: AtomicU64,
     next_binding_sequence: AtomicU64,
@@ -865,8 +879,10 @@ impl TransportState {
             cluster_id,
             node_id,
             advertised_host,
+            join_terms,
         } = identity;
         options.validate()?;
+        Self::validate_bulk_receive_window(&options, &executor)?;
         tls.certificate
             .validate_local(&cluster_id, &node_id, &advertised_host)
             .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
@@ -894,6 +910,8 @@ impl TransportState {
                 cluster_id,
                 node_id,
                 advertised_host,
+                join_terms,
+                join_progress: watch::channel(JoinProgress::Joining).0,
                 process_epoch,
                 next_coordination_sequence: AtomicU64::new(1),
                 next_binding_sequence: AtomicU64::new(1),
@@ -1040,11 +1058,13 @@ impl TransportState {
         let mut relay_channels = 0;
         let mut relay_attempts = 0;
         let mut relay_grants = 0;
+        let mut relay_channel_watermarks = 0;
         for owner in self.relay_owners.load().owners.values() {
             let snapshot = owner.snapshot();
             relay_channels = increment(relay_channels, snapshot.channels);
             relay_attempts = increment(relay_attempts, snapshot.attempts);
             relay_grants = increment(relay_grants, snapshot.grants);
+            relay_channel_watermarks = increment(relay_channel_watermarks, snapshot.watermarks);
             oldest_unresolved_outcome = oldest_unresolved_outcome.max(snapshot.oldest);
         }
 
@@ -1056,6 +1076,7 @@ impl TransportState {
             relay_channels,
             relay_attempts,
             relay_grants,
+            relay_channel_watermarks,
             oldest_unresolved_outcome,
         }
     }
@@ -1116,13 +1137,17 @@ impl TransportState {
             self.ensure_preconnected_slots(&outbound);
             Ok::<_, Report<TransportError>>(node_id)
         };
-        match timeout(self.options.connection_setup_timeout, setup).await {
+        let bootstrapped = match timeout(self.options.connection_setup_timeout, setup).await {
             Ok(result) => result,
             Err(_) => Err(Report::new(TransportError::ConnectionSetupTimeout {
                 peer: NodeEndpoint::from(peer_addr),
                 timeout: self.options.connection_setup_timeout,
             })),
+        };
+        if let Err(error) = &bootstrapped {
+            self.note_join_failure(error.current_context());
         }
+        bootstrapped
     }
 
     pub(crate) fn retire_departed_connections(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
@@ -1246,6 +1271,7 @@ impl TransportState {
                     match self.register_connection(&slot, connection.clone()) {
                         Ok(()) => {
                             self.observations.connection_established(key.class);
+                            self.note_joined(&key.node_id);
                             nervix_primitives::select! {
                                 _ = slot_cancel.cancelled() => {}
                                 _ = self.admission_closed.cancelled() => {}
@@ -1276,6 +1302,7 @@ impl TransportState {
                         key.class,
                         ConnectionFailureReason::of(error.current_context()),
                     );
+                    self.note_join_failure(error.current_context());
                     debug!(
                         ?error,
                         node = %key.node_id,
@@ -1433,7 +1460,8 @@ impl TransportState {
         slot_cancel: &CancellationToken,
     ) -> Result<StdArc<ClientConnection>, Report<TransportError>> {
         let binding_sequence = self.allocate_binding_sequence();
-        let budget = ConnectionBudget::start(self.options.connection_setup_timeout);
+        let budget =
+            OperationBudget::start(self.options.connection_setup_timeout, LookupShare::Whole);
         let setup = async {
             let DialedStream {
                 stream: tcp,
@@ -1496,12 +1524,13 @@ impl TransportState {
                 cancel,
                 closed,
             });
+            let local_prerequisites = self.prerequisites_with(&tls);
             let hello = ConnectionHello {
-                fingerprint: WIRE_CONTRACT_FINGERPRINT,
                 class: key.class,
                 process_epoch: self.process_epoch,
                 node_id: self.node_id.clone(),
                 advertised_host: self.advertised_host.clone(),
+                prerequisites: local_prerequisites.clone(),
             };
             let body = wire::encode_rkyv(
                 &self.executor,
@@ -1511,6 +1540,7 @@ impl TransportState {
                 hello,
             )
             .await?;
+            let binding_window = self.reserve_binding_receive_window(key).await?;
             let accepted = connection
                 .request_raw(
                     self,
@@ -1524,7 +1554,8 @@ impl TransportState {
                     },
                 )
                 .await?;
-            let accepted = wire::decode_rkyv::<ConnectionAccepted>(
+            drop(binding_window);
+            let answer = wire::decode_rkyv::<ConnectionAnswer>(
                 &self.executor,
                 MemoryClass::Management,
                 CpuClass::Control,
@@ -1532,12 +1563,7 @@ impl TransportState {
             )
             .await?
             .into_value();
-            if accepted.fingerprint != WIRE_CONTRACT_FINGERPRINT || accepted.node_id != key.node_id
-            {
-                return Err(Report::new(TransportError::InvalidHandshake(
-                    "wire fingerprint or addressed node identity differs".to_string(),
-                )));
-            }
+            let accepted = Self::accepted_answer(&key.node_id, &local_prerequisites, answer)?;
             let connection = StdArc::new(ClientConnection {
                 key: connection.key.clone(),
                 peer_addr: connection.peer_addr,
@@ -1571,6 +1597,9 @@ impl TransportState {
         }
     }
 
+    /// Lease a stream of `class` to `node_id` before `deadline`. A bulk stream also reserves the
+    /// receive window its connection grants it before the caller sends anything on it, so the
+    /// sender can never put more on the wire toward this node than the node has room for.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1580,6 +1609,29 @@ impl TransportState {
         )
     )]
     pub(crate) async fn lease(
+        &self,
+        node_id: &ClusterNodeName,
+        class: PoolClass,
+        subquota: RequestSubquota,
+        deadline: Instant,
+    ) -> Result<StreamLease, Report<TransportError>> {
+        let mut lease = self.lease_slot(node_id, class, subquota, deadline).await?;
+        if class.grants_bulk_receive_window() {
+            lease._receive_window =
+                Some(self.reserve_bulk_receive_window(node_id, deadline).await?);
+        }
+        Ok(lease)
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
+    async fn lease_slot(
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
@@ -1670,6 +1722,7 @@ impl TransportState {
             return StreamLeaseAttempt::Leased(StreamLease {
                 connection,
                 slot: Some(permit),
+                _receive_window: None,
                 state: self.clone(),
                 released: StreamRelease {
                     pool: Arc::clone(&target.pool),
@@ -1931,7 +1984,16 @@ impl TransportState {
                         binding_sequence,
                     ) => {
                         if let Err(error) = result {
-                            debug!(?error, %peer_addr, "interconnect connection rejected");
+                            match error.current_context() {
+                                TransportError::IncompatiblePeer { peer, mismatch } => warn!(
+                                    %peer,
+                                    %peer_addr,
+                                    prerequisite = %mismatch.prerequisite(),
+                                    refusal = %mismatch,
+                                    "refused an interconnect peer that cannot run beside this node"
+                                ),
+                                _ => debug!(?error, %peer_addr, "interconnect connection rejected"),
+                            }
                         }
                     }
                 }
@@ -2050,14 +2112,18 @@ impl TransportState {
             )
             .await?
             .into_value();
-            if hello.fingerprint != WIRE_CONTRACT_FINGERPRINT
-                || hello.node_id != peer_identity.node_id
+            if hello.node_id != peer_identity.node_id
                 || !peer_identity.matches_endpoint(&hello.advertised_host)
             {
                 return Err(Report::new(TransportError::InvalidHandshake(
-                    "wire fingerprint, certificate identity, or advertised endpoint differs"
-                        .to_string(),
+                    "certificate identity or advertised endpoint differs".to_string(),
                 )));
+            }
+            let local_prerequisites = self.local_prerequisites();
+            if let Err(mismatch) = local_prerequisites.verify_peer(&hello.prerequisites) {
+                return self
+                    .refuse_binding(respond, &peer_identity.node_id, mismatch)
+                    .await;
             }
             let non_management = if hello.class == PoolClass::Management {
                 None
@@ -2082,11 +2148,11 @@ impl TransportState {
             drop(handshake_permit);
             let registration =
                 self.register_inbound_pool(peer_identity.node_id.clone(), hello.class)?;
-            let accepted = ConnectionAccepted {
-                fingerprint: WIRE_CONTRACT_FINGERPRINT,
+            let accepted = ConnectionAnswer::Accepted(ConnectionAccepted {
                 process_epoch: self.process_epoch,
                 node_id: self.node_id.clone(),
-            };
+                prerequisites: local_prerequisites,
+            });
             let accepted = wire::encode_rkyv(
                 &self.executor,
                 MemoryClass::Management,
@@ -2104,7 +2170,7 @@ impl TransportState {
                 self.options.progress_timeout,
             )
             .await?;
-            Ok(BoundInboundConnection {
+            Ok(InboundBindingAnswer::Bound(BoundInboundConnection {
                 peer: InboundPeer {
                     addr: peer_addr,
                     node_id: peer_identity.node_id.clone(),
@@ -2116,20 +2182,30 @@ impl TransportState {
                 _registration: registration,
                 _non_management: non_management,
                 _non_preconnected: non_preconnected,
-            })
+            }))
         };
 
-        // Request and response flow-control windows advance only while the h2 connection is polled.
-        let connection_closed = poll_fn(|context| connection.poll_closed(context));
-        tokio::pin!(binding);
-        tokio::pin!(connection_closed);
-        nervix_primitives::select! {
-            result = &mut binding => result,
-            result = &mut connection_closed => {
-                result.map_err(TransportError::from)?;
-                Err(Report::new(TransportError::InvalidHandshake(
-                    "connection closed before its class binding completed".to_string(),
-                )))
+        let answer = {
+            // Request and response flow-control windows advance only while the h2 connection is
+            // polled.
+            let connection_closed = poll_fn(|context| connection.poll_closed(context));
+            tokio::pin!(binding);
+            tokio::pin!(connection_closed);
+            nervix_primitives::select! {
+                result = &mut binding => result,
+                result = &mut connection_closed => {
+                    result.map_err(TransportError::from)?;
+                    Err(Report::new(TransportError::InvalidHandshake(
+                        "connection closed before its class binding completed".to_string(),
+                    )))
+                }
+            }
+        };
+        match answer? {
+            InboundBindingAnswer::Bound(bound) => Ok(bound),
+            InboundBindingAnswer::Refused(refusal) => {
+                self.flush_refusal(connection).await;
+                Err(refusal)
             }
         }
     }

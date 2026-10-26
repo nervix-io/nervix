@@ -3,7 +3,7 @@ Feature: Web console backup and restore
   Scenario Outline: A console backup downloads a verified archive whose manifest lists the backed-up domains
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -39,27 +39,26 @@ Feature: Web console backup and restore
   Scenario Outline: A console backup download interrupted by a page reload resumes after the reload
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
       CREATE RELAY items SCHEMA item UNBRANCHED;
       """
-    Then the current leader node is saved as placeholder "leader"
-    Given backup archive downloads on node "{{leader}}" pause before the archive streams
+    Given backup archive downloads on every node pause before the archive streams
     When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".backup-menu-button" is clicked
     And selector ".backup-destination" is filled with "resumed.nvxb"
     Then selector ".backup-preview" contains "BACKUP DOMAIN {{domain}} TO 'resumed.nvxb';"
     When selector ".backup-submit" is clicked
-    Then the backup archive download pause on node "{{leader}}" is reached
+    Then the backup archive download pause on the node that serves the download is reached
     And selector ".backup-status" contains "downloading 0 of"
     When the web console page is reloaded and its next download is saved as backup archive "resumed.nvxb"
     Then selector ".backup-status" contains "downloaded 'resumed.nvxb'"
     And backup archive "resumed.nvxb" has the size and digest selector ".backup-status" shows
     And selector ".terminal" contains "resuming backup"
-    When the backup archive download pause on node "{{leader}}" is released
+    When the backup archive download pause is released on every node
     And the CLI describes backup archive "resumed.nvxb" as text
     Then the CLI output contains "- domain={{domain}} "
 
@@ -68,18 +67,48 @@ Feature: Web console backup and restore
       | 1            |
       | 3            |
 
-  @console_backup_foreign_record
-  Scenario Outline: A page reload forgets a pending backup record the console did not write and resumes nothing
-    Given a <cluster_size> node nervix cluster is started
+  @console_backup_reload
+  Scenario: A console backup download interrupted by a page reload resumes after leadership moved under the backup
+    Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
       CREATE RELAY items SCHEMA item UNBRANCHED;
       """
-    Then the current leader node is saved as placeholder "leader"
-    Given backup archive downloads on node "{{leader}}" pause before the archive streams
+    Given backup archive downloads on every node pause before the archive streams
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".backup-menu-button" is clicked
+    And selector ".backup-destination" is filled with "resumed.nvxb"
+    Then selector ".backup-preview" contains "BACKUP DOMAIN {{domain}} TO 'resumed.nvxb';"
+    And the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{leader}}" to node "{{successor}}" under its next durably admitted command
+    When selector ".backup-submit" is clicked
+    Then the backup archive download pause on the node that serves the download is reached
+    And the leadership move under the durably admitted command completed
+    And selector ".backup-status" contains "downloading 0 of"
+    When the web console page is reloaded and its next download is saved as backup archive "resumed.nvxb"
+    Then selector ".backup-status" contains "downloaded 'resumed.nvxb'"
+    And backup archive "resumed.nvxb" has the size and digest selector ".backup-status" shows
+    And selector ".terminal" contains "resuming backup"
+    When the backup archive download pause is released on every node
+    And the CLI describes backup archive "resumed.nvxb" as text
+    Then the CLI output contains "- domain={{domain}} "
+
+  @console_backup_foreign_record
+  Scenario Outline: A page reload forgets a pending backup record the console did not write and resumes nothing
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      CREATE RELAY items SCHEMA item UNBRANCHED;
+      """
+    Given backup archive downloads on every node pause before the archive streams
     When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When a pending backup of "BACKUP DOMAIN {{domain}} TO 'foreign.nvxb';" whose domain entry spells "{{domain}}" in upper case is written into the web console tab's session storage
@@ -96,7 +125,7 @@ Feature: Web console backup and restore
   Scenario Outline: A console restore uploads its archive with progress, shows the dry run, and restores the domain
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -126,7 +155,7 @@ Feature: Web console backup and restore
     And selector ".restore-result" contains "create domain '{{domain}}_copy': applied"
     And selector ".restore-result" contains "apply models of domain '{{domain}}_copy': applied"
     And selector ".terminal" contains "RESTORE DOMAIN {{domain}} AS {{domain}}_copy FROM 'source.nvxb';"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -150,13 +179,13 @@ Feature: Web console backup and restore
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA zip_code_entry ( zip STRING, city STRING );
       CREATE WIRE JSON SCHEMA zip_code_entry_wire MODE STRICT ( zip string, city string );
@@ -190,7 +219,7 @@ Feature: Web console backup and restore
     And selector ".restore-result" contains "create domain '{{domain}}_copy': applied"
     And selector ".restore-result" contains "import resource versions of domain '{{domain}}_copy': applied"
     And selector ".restore-result" contains "apply models of domain '{{domain}}_copy': failed"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """
@@ -208,7 +237,7 @@ Feature: Web console backup and restore
   Scenario Outline: A console restore lists the archived state it skipped beside its result
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( tenant STRING, latency I64 );
@@ -278,7 +307,7 @@ Feature: Web console backup and restore
   Scenario: The REPL and the backup controls share one console session and its leader redirect
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA item ( id I64 );
@@ -293,6 +322,7 @@ Feature: Web console backup and restore
     And selector ".prompt-row input" is pressed with "Enter" and the web console's download is saved as backup archive "typed.nvxb"
     Then selector ".backup-status" contains "downloaded 'typed.nvxb'"
     And selector ".terminal" contains "BACKUP DOMAIN {{domain}} TO 'typed.nvxb';"
+    And selector ".terminal" contains "backed up domain '{{domain}}'" exactly 1 times
     And selector ".terminal" contains "archive downloaded as 'typed.nvxb'"
     When selector ".prompt-row input" is filled with "RESTORE DOMAIN {{domain}} AS {{domain}}_typed FROM 'typed.nvxb';"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -303,9 +333,57 @@ Feature: Web console backup and restore
     Then selector ".restore-status" contains "dry run planned"
     When selector ".restore-submit" is clicked
     Then selector ".restore-status" contains "restored"
-    And selector ".terminal" contains "connected to leader '{{leader}}'" exactly 1 times
-    And selector ".terminal" does not contain "redirected"
-    When these NSPL commands are executed on the leader node
+    And the web console never held two session connections at once
+    And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}"
+    And the web console's backup downloads and restores reached node "{{leader}}"
+    When these Plexus commands are executed on the leader node
+      """
+      LIST DOMAINS;
+      """
+    Then the last command output contains
+      """
+      {{domain}}_typed pace=UNPACED status=STOPPED
+      """
+
+  @console_backup_shared_session
+  Scenario: The REPL's backup keeps one console session and its leader redirect when the session's connection is lost
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      CREATE RELAY items SCHEMA item UNBRANCHED;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "follower"
+    When the web console is opened on node "{{follower}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".terminal" contains "connected to leader '{{leader}}'"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    And the web console's next download is expected as backup archive "typed.nvxb"
+    When selector ".prompt-row input" is filled with "BACKUP DOMAIN {{domain}} TO 'typed.nvxb';"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the web console loses its session connection
+    And the command response delivery pause on node "{{leader}}" is released
+    Then the web console's expected download is saved
+    And the web console's session reconnected to node "{{leader}}" after it was lost
+    And selector ".backup-status" contains "downloaded 'typed.nvxb'"
+    And selector ".terminal" contains "backed up domain '{{domain}}'" exactly 1 times
+    And selector ".terminal" contains "archive downloaded as 'typed.nvxb'"
+    When selector ".prompt-row input" is filled with "RESTORE DOMAIN {{domain}} AS {{domain}}_typed FROM 'typed.nvxb';"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".restore-status" contains "choose the archive"
+    When selector ".restore-file" is given backup archive "typed.nvxb"
+    And selector ".restore-dry-run" is clicked
+    Then selector ".restore-status" contains "dry run planned"
+    When selector ".restore-submit" is clicked
+    Then selector ".restore-status" contains "restored"
+    And the web console never held two session connections at once
+    And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}"
+    And the web console's backup downloads and restores reached node "{{leader}}"
+    When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
       """

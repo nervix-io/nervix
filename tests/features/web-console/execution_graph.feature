@@ -1,7 +1,7 @@
 Feature: Web console execution graph
   Scenario: Execution graph draws an unbranched pipeline as a single straight line
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_record (
@@ -14,8 +14,8 @@ Feature: Web console execution graph
       );
       CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_record;
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
-      CREATE CLIENT kafka_in TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE CLIENT kafka_out TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
+      CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA CLIENT kafka_out CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
       CREATE KAFKA TOPIC INGESTOR orders_in
         FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec
@@ -25,7 +25,7 @@ Feature: Web console execution graph
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER orders_out FROM orders TO KAFKA kafka_out TOPIC orders_out_topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING order_codec
+      CREATE KAFKA TOPIC EMITTER orders_out FROM orders TO kafka_out TOPIC 'orders_out_topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING order_codec
         INHERIT ALL
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -47,7 +47,7 @@ Feature: Web console execution graph
 
   Scenario: Execution graph keeps fan-out clear of items and gives each route its own port
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_record (
@@ -62,8 +62,8 @@ Feature: Web console execution graph
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
       CREATE RELAY high_value_orders SCHEMA order_record UNBRANCHED;
       CREATE RELAY routine_orders SCHEMA order_record UNBRANCHED;
-      CREATE CLIENT kafka_in TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
-      CREATE CLIENT kafka_out TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
+      CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA CLIENT kafka_out CONFIG { 'bootstrap.servers' = '127.0.0.1:9093' };
       CREATE KAFKA TOPIC INGESTOR orders_in
         FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec
@@ -84,7 +84,7 @@ Feature: Web console execution graph
         INHERIT ALL
         FLUSH EACH 250ms MAX BATCH SIZE 512kb
         ON MESSAGE ERROR LOG;
-      CREATE EMITTER high_value_out FROM high_value_orders TO KAFKA kafka_out TOPIC high_value_topic MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING order_codec
+      CREATE KAFKA TOPIC EMITTER high_value_out FROM high_value_orders TO kafka_out TOPIC 'high_value_topic' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING order_codec
         INHERIT ALL
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -104,7 +104,7 @@ Feature: Web console execution graph
 
   Scenario: Execution graph draws a relay read both as input and as materialized state as two relations
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA reading_record (
@@ -137,7 +137,7 @@ Feature: Web console execution graph
 
   Scenario: Execution graph contains a branch group and names its branch and key fields
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification (
@@ -186,7 +186,7 @@ Feature: Web console execution graph
 
   Scenario: Execution graph marks a reingestor feedback loop as a return path
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA retry_record (
@@ -234,7 +234,7 @@ Feature: Web console execution graph
 
   Scenario: Execution graph reports its framing, feed state and every node kind
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_record (
@@ -247,7 +247,7 @@ Feature: Web console execution graph
       );
       CREATE CODEC order_codec FROM WIRE JSON SCHEMA order_wire TO SCHEMA order_record;
       CREATE RELAY orders SCHEMA order_record UNBRANCHED;
-      CREATE CLIENT kafka_in TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA CLIENT kafka_in CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR orders_in
         FROM kafka_in TOPIC 'orders_topic' OFFSET BY CONSUMER GROUP 'orders_group' INSTANCES 1 MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING order_codec

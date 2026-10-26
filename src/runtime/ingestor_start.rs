@@ -5,7 +5,7 @@
 //!   and binding the dependencies every ingestor start reads.
 //! - **Depends on.** Installed ingestor plans, installed domain capabilities and the source start
 //!   path.
-//! - **Must not know.** NSPL parsing, registry validation, placement selection, or which connector
+//! - **Must not know.** Plexus parsing, registry validation, placement selection, or which connector
 //!   a source runs on.
 
 #![cfg_attr(
@@ -79,9 +79,69 @@ pub(super) struct IngestorRuntime {
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) branched: Vec<Arc<IngestorRouteRuntime>>,
     pub(super) tasks: Vec<JoinHandle<()>>,
+    /// The originator a domain-offset Kafka ingestor commits through, which schedule application
+    /// replaces while this instance runs; absent for every other ingestor.
+    pub(super) domain_offsets: Option<StdArc<KafkaOffsetOriginatorSlot>>,
+}
+
+/// A locally owned input that the committed revision replaces or removes. Both sides are typed
+/// execution plans; no running driver or mutable registry guard survives into retirement.
+pub(super) struct RetiringIngestorInput {
+    pub(super) previous: Arc<IngestorStartPlan>,
+    pub(super) replacement: Option<Arc<IngestorStartPlan>>,
 }
 
 impl Runtime {
+    /// Snapshots obsolete local inputs before the installed execution is withdrawn. A stopped
+    /// domain retains its plans, so retirement also works when no source task is running.
+    pub(super) fn retiring_ingestor_inputs(
+        &self,
+        domain: &DomainName,
+        desired: Option<&ExecutionRevision>,
+        #[cfg_attr(
+            nervix_lint,
+            nervix::identity(
+                node,
+                reason = "identifies the node applying this execution revision"
+            )
+        )]
+        local_node_id: Option<&ClusterNodeName>,
+    ) -> BTreeMap<IngestorName, RetiringIngestorInput> {
+        let Some(execution) = self.inner.executions.get(domain) else {
+            return BTreeMap::new();
+        };
+        let mut retiring = BTreeMap::new();
+        for previous in execution.revision.entrypoints.ingestors() {
+            let identity = NodeRef::new(
+                ModelKind::Ingestor,
+                ModelName::from(&previous.ingestor.name),
+            );
+            let node = execution.revision.nodes.get(&identity).assured(
+                "every installed execution retains the nodes that own its entrypoint plans",
+            );
+            if !Self::scheduled_node_executes_locally(node, local_node_id) {
+                continue;
+            }
+            let replacement = match desired {
+                Some(desired) => desired
+                    .entrypoints
+                    .ingestor(&previous.ingestor.name)
+                    .cloned(),
+                None => None,
+            };
+            if previous.requires_entity_retirement(replacement.as_deref()) {
+                retiring.insert(
+                    previous.ingestor.name.clone(),
+                    RetiringIngestorInput {
+                        previous: previous.clone(),
+                        replacement,
+                    },
+                );
+            }
+        }
+        retiring
+    }
+
     pub(in crate::runtime) fn syslog_ingestor_bind_addr(&self, configured: &str) -> String {
         let dispatcher = self.inner.remote_dispatcher.load();
         if let Some(dispatcher) = dispatcher.as_deref() {
@@ -202,10 +262,12 @@ impl Runtime {
             }));
         };
 
+        // The stopped instance's originator ends with it, so no reassignment reaches it again.
         let IngestorRuntime {
             shutdown,
             branched,
             tasks,
+            domain_offsets: _,
         } = runtime;
         if shutdown.send(true).is_err() {
             warn!(
@@ -468,8 +530,8 @@ mod tests {
         ClientConfigEntry, ClientName, ClusterNodeName, ClusterSchedule, CodecName,
         CodecWireFormat, CreateClientMqtt, CreateCodec, CreateIngestor, CreateJsonWireSchema,
         CreateRelay, CreateSchema, DomainConfig, DomainPace, DomainSchedule, DomainState,
-        DomainStatus, GeneralErrorPolicy, IngestSource, IngestorName, JsonType, ModelKind,
-        MqttIngestMode, MqttQos, MqttSession, MqttSource, MqttTopicSource, OutputBranch,
+        DomainStatus, GeneralErrorPolicy, IngestorEntity, IngestorName, JsonType, ModelKind,
+        MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, OutputBranch,
         ParseAsType, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy, SchemaField,
         SchemaName, WireSchemaField, WireSchemaName,
     };
@@ -482,16 +544,12 @@ mod tests {
         let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
             .await
             .expect("the host's resolver configuration should load");
-        Runtime::with_persistence_and_temp_dir(
-            nervix_execution::Executor::default(),
-            Some(dns),
-            None,
-            DEFAULT_STATE_SNAPSHOT_INTERVAL,
-            ConfiguredFaultInjection::default(),
-            PathBuf::from(DEFAULT_TEMP_DIR),
-            DEFAULT_RESTORE_STAGING_MAX_BYTES,
-        )
-        .expect("a runtime without persistence builds")
+        let environment = RuntimeEnvironment {
+            dns: Some(dns),
+            ..RuntimeEnvironment::transient(nervix_execution::Executor::default())
+        };
+        Runtime::with_environment(environment, RuntimeSettings::default())
+            .expect("a runtime without persistence builds")
     }
 
     #[nervix_primitives::test]
@@ -586,8 +644,8 @@ mod tests {
                             .with_branch(OutputBranch::Unbranched),
                             input: nervix_models::IngestorInput::Transport(
                                 nervix_models::TransportIngestorInput {
-                                    source: IngestSource::Mqtt(MqttSource::Topic(
-                                        MqttTopicSource {
+                                    source: IngestorEntity::Mqtt(MqttIngestor::Topic(
+                                        MqttTopicIngestor {
                                             client,
                                             topic: nervix_models::MqttTopicFilter::parse(
                                                 "notifications",
@@ -719,7 +777,7 @@ mod tests {
                         .with_branch(OutputBranch::Unbranched),
                     input: nervix_models::IngestorInput::Transport(
                         nervix_models::TransportIngestorInput {
-                            source: IngestSource::Mqtt(MqttSource::Topic(MqttTopicSource {
+                            source: IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
                                 client,
                                 topic: nervix_models::MqttTopicFilter::parse("notifications")
                                     .expect("valid topic filter"),

@@ -1,13 +1,13 @@
-//! The endpoint source: the one request-scoped source, which the node's own HTTP listener feeds.
+//! The endpoint ingestor: the one request-scoped ingestor, which the node's own HTTP listener feeds.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Resolving the routes an endpoint ingestor receives requests on, and binding them to
-//!   the host's request intake for exactly as long as the source runs.
-//! - **Depends on.** The connector source contract, the domain's instantiated endpoint routes, and
+//!   the host's request intake for exactly as long as the ingestor runs.
+//! - **Depends on.** The connector ingestor contract, the domain's instantiated endpoint routes, and
 //!   the host's endpoint binding table.
 //! - **Must not know.** Request admission, the endpoint buffer, rejection with a retry delay, or
-//!   dispatch, all of which the host owns; NSPL parsing, registry validation, or placement
+//!   dispatch, all of which the host owns; Plexus parsing, registry validation, or placement
 //!   computation.
 
 #![cfg_attr(
@@ -18,53 +18,94 @@
 use async_trait::async_trait;
 use error_stack::ResultExt as _;
 use nervix_connector::{
-    SourceAckPolicy, SourceConnector, SourceHost, SourceHostServices as _, SourcePlan, SourceResult,
+    IngestorAckPolicy, IngestorConnector, IngestorHost, IngestorHostServices as _, IngestorPlan,
+    IngestorResult,
 };
 
 use super::{
     super::*,
-    IngestorStartError, SourceStartError,
-    source::{RuntimeSourceHost, SourceInstance, SourceStart, run_request_source},
+    IngestorConnectorStartError, IngestorStartError,
+    connector::{IngestorInstance, IngestorStart, RuntimeIngestorHost, run_request_ingestor},
 };
 
 /// The routes one endpoint ingestor receives requests on.
-pub(in crate::runtime) struct EndpointSourcePlan {
+pub(in crate::runtime) struct EndpointIntakePlan {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
+    mode: EndpointRequestPlan,
 }
 
-/// An endpoint ingestor's source: the binding between the routes it receives requests on and the
+/// An endpoint intake: the binding between the routes it receives requests on and the
 /// host's request intake.
 ///
-/// A request is admitted and dispatched by the host on the request path, so the source reads
+/// A request is admitted and dispatched by the host on the request path, so the ingestor reads
 /// nothing itself. Starting it binds its routes; closing it, or dropping it when its task ends any
 /// other way, unbinds them, so a stopped ingestor's routes never keep receiving requests.
-pub(in crate::runtime) struct EndpointSource {
+pub(in crate::runtime) struct EndpointIntake {
     runtime: Runtime,
     routes: Vec<HttpRouteKey>,
+    mode: EndpointRequestPlan,
     /// The ingestor whose intake the routes are bound to, while they are bound.
     bound: Option<EndpointBinding<EndpointIngestBinding>>,
 }
 
-#[async_trait]
-impl SourceConnector for EndpointSource {
-    type Plan = EndpointSourcePlan;
-
-    async fn open(plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
-        Ok(Self {
-            runtime: plan.runtime.clone(),
-            routes: plan.routes.clone(),
-            bound: None,
-        })
-    }
-
-    async fn close(&mut self) -> SourceResult<()> {
-        self.unbind();
-        Ok(())
-    }
+macro_rules! endpoint_entity {
+    ($name:ident, $connector:ident, $entity:ident) => {
+        pub(in crate::runtime) struct $name(EndpointIntake);
+        #[async_trait]
+        impl IngestorConnector for $name {
+            const KIND: nervix_models::IngestorEntityKind =
+                nervix_models::IngestorEntityKind::$connector(nervix_models::$entity::Endpoint);
+            type Plan = EndpointIntakePlan;
+            async fn open(plan: &Self::Plan, _instance_index: u64) -> IngestorResult<Self> {
+                Ok(Self(EndpointIntake {
+                    runtime: plan.runtime.clone(),
+                    routes: plan.routes.clone(),
+                    mode: plan.mode.clone(),
+                    bound: None,
+                }))
+            }
+            async fn close(&mut self) -> IngestorResult<()> {
+                self.0.unbind();
+                Ok(())
+            }
+        }
+        impl IngestorInstance for $name {
+            fn start(
+                mut self: Box<Self>,
+                host: RuntimeIngestorHost,
+                shutdown: watch::Receiver<bool>,
+            ) -> BoxFuture<'static, ()> {
+                let request = EndpointRequestPolicy::from(&self.0.mode);
+                self.0.bind(host.request_intake(request));
+                host.mark_ready();
+                Box::pin(run_request_ingestor(
+                    *self,
+                    IngestorHost::new(host),
+                    shutdown,
+                ))
+            }
+        }
+    };
 }
+endpoint_entity!(HttpEndpointIngestor, Http, HttpIngestorEntity);
+endpoint_entity!(
+    WebsocketsEndpointIngestor,
+    Websockets,
+    WebsocketsIngestorEntity
+);
+const _: () = assert!(matches!(
+    HttpEndpointIngestor::KIND,
+    nervix_models::IngestorEntityKind::Http(nervix_models::HttpIngestorEntity::Endpoint)
+));
+const _: () = assert!(matches!(
+    WebsocketsEndpointIngestor::KIND,
+    nervix_models::IngestorEntityKind::Websockets(
+        nervix_models::WebsocketsIngestorEntity::Endpoint
+    )
+));
 
-impl EndpointSource {
+impl EndpointIntake {
     /// Binds every route to `intake`, so the requests arriving on it enter the host.
     fn bind(&mut self, intake: EndpointIngestBinding) {
         let identity = DomainNodeRef::node_in(
@@ -90,34 +131,23 @@ impl EndpointSource {
     }
 }
 
-impl Drop for EndpointSource {
+impl Drop for EndpointIntake {
     fn drop(&mut self) {
         self.unbind();
     }
 }
 
-impl SourceInstance for EndpointSource {
-    fn start(
-        mut self: Box<Self>,
-        host: RuntimeSourceHost,
-        shutdown: watch::Receiver<bool>,
-    ) -> BoxFuture<'static, ()> {
-        // Requests may arrive as soon as the ingestor's start returns, so the routes are bound
-        // here rather than when the source loop first runs.
-        self.bind(host.request_intake());
-        host.mark_ready();
-        Box::pin(run_request_source(*self, SourceHost::new(host), shutdown))
-    }
-}
-
-impl EndpointIngestorStartPlan {
-    /// Resolves the routes the endpoint publishes, which its source binds when the host starts it.
-    pub(super) async fn compose(
+impl EndpointIntakeStartPlan {
+    /// Resolves the routes the endpoint publishes, which its ingestor binds when the host starts it.
+    async fn compose<C>(
         self,
         runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
-        let EndpointIngestorStartPlan { endpoint, mode: _ } = self;
+    ) -> error_stack::Result<IngestorStart, IngestorStartError>
+    where
+        C: IngestorConnector<Plan = EndpointIntakePlan> + IngestorInstance,
+    {
+        let EndpointIntakeStartPlan { endpoint, mode } = self;
         let route = {
             let Some(execution) = runtime.inner.executions.get(&ingestor.domain) else {
                 return Err(Report::new(
@@ -130,9 +160,35 @@ impl EndpointIngestorStartPlan {
             execution.endpoint_routes.get(&endpoint).cloned()
         };
         let Some(route) = route else {
-            return Err(ingestor
-                .source_start_failure(SourceStartError::EndpointNotInstantiated { endpoint }));
+            return Err(ingestor.connector_start_failure(
+                IngestorConnectorStartError::EndpointNotInstantiated { endpoint },
+            ));
         };
+        if let EndpointRequestPlan::Ack { retry_after, .. } = &mode
+            && route.endpoint_type == EndpointType::Websockets
+        {
+            let Some(protocol) = &route.signaling_protocol else {
+                return Err(ingestor.connector_start_failure(
+                    IngestorConnectorStartError::EndpointAcknowledgementProtocolMissing {
+                        endpoint,
+                    },
+                ));
+            };
+            for outcome in EndpointRequestOutcome::replies() {
+                let reply = EndpointRequestReply {
+                    outcome,
+                    retry_after: *retry_after,
+                };
+                protocol
+                    .encode_acknowledgement(reply.value())
+                    .change_context_lazy(|| {
+                        IngestorConnectorStartError::EndpointAcknowledgementEncoding {
+                            endpoint: endpoint.clone(),
+                        }
+                    })
+                    .change_context_lazy(|| ingestor.initialize_failure())?;
+            }
+        }
         let routes = route
             .hostnames
             .iter()
@@ -142,23 +198,25 @@ impl EndpointIngestorStartPlan {
             })
             .collect();
 
-        let acknowledgement = SourceAckPolicy::None;
-        let plan = SourcePlan {
-            connector: EndpointSourcePlan {
+        let acknowledgement = IngestorAckPolicy::None;
+        let plan = IngestorPlan {
+            connector: EndpointIntakePlan {
                 runtime: runtime.clone(),
                 routes,
+                mode,
             },
-            capabilities: ingestor.source_capabilities(NonZeroU64::MIN, acknowledgement.support()),
+            capabilities: ingestor
+                .ingestor_capabilities(NonZeroU64::MIN, acknowledgement.support()),
             acknowledgement,
         };
-        let source = EndpointSource::open(&plan.connector, 0)
+        let source = C::open(&plan.connector, 0)
             .await
             .change_context_lazy(|| ingestor.initialize_failure())?;
-        let instance: Box<dyn SourceInstance> = Box::new(source);
-        Ok(SourceStart {
+        let instance: Box<dyn IngestorInstance> = Box::new(source);
+        Ok(IngestorStart {
             instances: vec![instance],
             companions: Vec::new(),
-            // Requests never pass through the source loop's intake: the request path admits
+            // Requests never pass through the ingestor loop's intake: the request path admits
             // them. What the endpoint buffer retained replays one request per ingest group.
             buffered_intake: false,
             flush_each_intake: true,
@@ -166,8 +224,32 @@ impl EndpointIngestorStartPlan {
             // refusal its sender retries, so no request reaches the loop's live intake.
             unacknowledged_admission: QueueAdmission::RefuseWhenFull,
             client_mounts: Vec::new(),
-            connector_label: "endpoint",
+            connector_label: C::KIND.connector().keyword().to_ascii_lowercase(),
+            domain_offsets: None,
         })
+    }
+}
+
+impl HttpEndpointIngestorStartPlan {
+    pub(super) async fn compose(
+        self,
+        runtime: &Runtime,
+        ingestor: &IngestorSpec,
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
+        self.0
+            .compose::<HttpEndpointIngestor>(runtime, ingestor)
+            .await
+    }
+}
+impl WebsocketsEndpointIngestorStartPlan {
+    pub(super) async fn compose(
+        self,
+        runtime: &Runtime,
+        ingestor: &IngestorSpec,
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
+        self.0
+            .compose::<WebsocketsEndpointIngestor>(runtime, ingestor)
+            .await
     }
 }
 
@@ -186,15 +268,15 @@ pub(super) mod tests {
         ClusterNodeName, ClusterSchedule, CodecJaqFormat, CodecJaqTransformations, CodecName,
         CodecWireFormat, CreateCodec, CreateEndpoint, CreateJsonWireSchema, CreateRelay,
         CreateSchema, CreateVhost, DomainConfig, DomainPace, DomainState, DomainStatus,
-        EndpointIngestMode, EndpointName, HttpEndpointSource, JsonType, OutputBranch, ParseAsType,
-        ProcessorOutputs, RelayBranching, RelayName, SchemaField, SchemaName, VhostName,
-        WireSchemaField, WireSchemaName,
+        EndpointIngestMode, EndpointName, HttpEndpointIngestor, JsonType, OutputBranch,
+        ParseAsType, ProcessorOutputs, RelayBranching, RelayName, SchemaField, SchemaName,
+        VhostName, WireSchemaField, WireSchemaName,
     };
     use nervix_primitives::sync::atomic::{AtomicUsize, Ordering};
     use nonzero_ext::nonzero;
 
     use super::*;
-    use crate::runtime::endpoint::EndpointDispatchOutcome;
+    use crate::runtime::endpoint::{EndpointAdmission, EndpointDispatchOutcome};
 
     /// A running domain whose one endpoint ingestor reads `/events` on `edge.example.com` through
     /// its `event_wire` JSON wire schema.
@@ -298,7 +380,7 @@ pub(super) mod tests {
                                 .with_branch(OutputBranch::Unbranched),
                             input: nervix_models::IngestorInput::Transport(
                                 nervix_models::TransportIngestorInput {
-                                    source: IngestSource::from(HttpEndpointSource {
+                                    source: IngestorEntity::from(HttpEndpointIngestor {
                                         endpoint,
                                         mode: EndpointIngestMode::NoAck,
                                         quiesce: IngestQuiesceMode::EndpointBuffer {
@@ -353,7 +435,14 @@ pub(super) mod tests {
         };
         let references = Arc::strong_count(&probe.routes);
         for _ in 0..4 {
-            let outcome = route.dispatch(&runtime, br#"{"user_id":7}"#, &probe).await;
+            let outcome = route
+                .dispatch(
+                    &runtime,
+                    br#"{"user_id":7}"#,
+                    &probe,
+                    &CancellationToken::new(),
+                )
+                .await;
             assert!(outcome.is_accepted());
             assert_eq!(
                 probe.observed.load(Ordering::Relaxed),
@@ -361,7 +450,7 @@ pub(super) mod tests {
                 "request routing must borrow the prepared routes without cloning the intake"
             );
         }
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[cfg(feature = "benchmarks")]
@@ -382,7 +471,7 @@ pub(super) mod tests {
                     .resolve_endpoint("edge.example.com", "/events")
                     .assured("the benchmark route remains installed");
                 std::hint::black_box(route.endpoint_type());
-                std::hint::black_box(route.admission());
+                std::hint::black_box(route.refusal());
             }
             println!(
                 "endpoint-routing sample={sample} ns_per_request={} allocated_bytes_per_request={}",
@@ -402,7 +491,7 @@ pub(super) mod tests {
             let started = nervix_primitives::time::Instant::now();
             for _ in 0..10_000 {
                 nervix_primitives::task::consume_budget().await;
-                std::hint::black_box(retained.admission());
+                std::hint::black_box(retained.refusal());
             }
             println!(
                 "endpoint-retained sample={sample} ns_per_frame={} allocated_bytes_per_frame={}",
@@ -414,11 +503,13 @@ pub(super) mod tests {
                     / 10_000
             );
         }
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
+    /// A body its codec refuses is accepted and consumed as a decode rejection, which the
+    /// ingestor's `ON GENERAL ERROR LOG` reports with the codec's whole chain, counts and describes.
     #[nervix_primitives::test]
-    async fn a_payload_its_codec_rejects_is_reported_with_the_whole_codec_chain() {
+    async fn a_body_its_codec_refuses_is_consumed_as_a_decode_rejection() {
         let domain = domain("default");
         let ingestor = named::<IngestorName>("event_source");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
@@ -428,20 +519,41 @@ pub(super) mod tests {
             .resolve_endpoint("edge.example.com", "/events")
             .assured("the fixture installs its endpoint route");
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":"seven"}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":"seven"}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
 
         assert!(outcome.is_accepted());
         let RuntimeEvent::Error(message) = events
             .recv()
             .await
-            .expect("the rejected payload is reported to the node's observers");
+            .expect("the refused body is reported to the node's observers");
+        let described = runtime
+            .describe_local_ingestor(&domain, &ingestor)
+            .expect("the fixture's ingestor describes itself");
+        let rejection = described
+            .last_decode_rejection
+            .assured("the refused body is the ingestor's last decode rejection");
         assert_eq!(
             message,
-            "failed to decode http message for ingestor 'event_source' in domain 'default': codec \
-             'event_json' failed to parse field 'user_id': expected Integer, found a JSON string"
+            format!(
+                "ingestor 'event_source' general error in domain 'default': decode rejection \
+                 {rejection}"
+            )
         );
-        runtime.shutdown().await;
+        assert!(
+            rejection.to_string().ends_with(
+                ": codec 'event_json' refused the payload: codec 'event_json' failed to parse \
+                 field 'user_id': expected Integer, found a JSON string"
+            ),
+            "the rejection renders the codec's whole chain: {rejection}"
+        );
+        assert_eq!(described.decode_rejections_total, 1);
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -473,7 +585,7 @@ pub(super) mod tests {
             format!("{report:#}"),
             "ingestor 'event_source' in domain 'default' is already running"
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     #[nervix_primitives::test]
@@ -488,7 +600,7 @@ pub(super) mod tests {
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
 
         // The routes are bound before the start returns, so a request that arrives right after it
-        // is admitted, and the source counts as ready at once.
+        // is admitted, and the ingestor counts as ready at once.
         let bound = route
             .bindings()
             .iter()
@@ -501,7 +613,12 @@ pub(super) mod tests {
         assert!(describe.running);
         assert!(describe.ready);
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":7}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert!(outcome.is_accepted());
 
@@ -516,7 +633,12 @@ pub(super) mod tests {
         assert!(current.bindings().is_empty());
         assert!(route.bindings()[0].intake().is_none());
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":8}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":8}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert!(!outcome.is_accepted());
     }
@@ -555,36 +677,45 @@ pub(super) mod tests {
         // node could not promise.
         let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
         let refused = route
-            .dispatch(&runtime, br#"{"user_id":7}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert_eq!(
             refused,
-            EndpointDispatchOutcome {
+            EndpointDispatchOutcome::NoAck(EndpointAdmission {
                 accepted: 0,
                 rejected: 1,
                 retry_after: None,
-            }
+            })
         );
 
         filled.release().await;
         let accepted = route
-            .dispatch(&runtime, br#"{"user_id":7}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":7}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert_eq!(
             accepted,
-            EndpointDispatchOutcome {
+            EndpointDispatchOutcome::NoAck(EndpointAdmission {
                 accepted: 1,
                 rejected: 0,
                 retry_after: None,
-            }
+            })
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
-    /// A body its codec rejects as it drains after resume is reported and leaves the buffer, as any
-    /// retained body that fails after its 202 does.
+    /// A body its codec refuses as it drains after resume leaves the buffer as a decode rejection.
     #[nervix_primitives::test]
-    async fn a_retained_body_its_codec_rejects_is_reported_and_leaves_the_buffer() {
+    async fn a_retained_body_its_codec_refuses_leaves_the_buffer_as_a_decode_rejection() {
         let domain = domain("default");
         let ingestor = named::<IngestorName>("event_source");
         let runtime = runtime_with_endpoint_ingestor(&domain, &ingestor).await;
@@ -598,7 +729,12 @@ pub(super) mod tests {
 
         quiesce.engage(IngestorQuiesceCause::EntityHold);
         let outcome = route
-            .dispatch(&runtime, br#"{"user_id":"seven"}"#, &NoIngestHeaders)
+            .dispatch(
+                &runtime,
+                br#"{"user_id":"seven"}"#,
+                &NoIngestHeaders,
+                &CancellationToken::new(),
+            )
             .await;
         assert!(
             outcome.is_accepted(),
@@ -610,8 +746,14 @@ pub(super) mod tests {
         let RuntimeEvent::Error(message) =
             nervix_primitives::time::timeout(Duration::from_secs(10), errors.recv())
                 .await
-                .expect("the drain reports the body its codec rejected")
+                .expect("the drain reports the body its codec refused")
                 .expect("the node keeps its observers while it runs");
+        assert!(
+            message.starts_with(
+                "ingestor 'event_source' general error in domain 'default': decode rejection "
+            ),
+            "the drain reports a decode rejection: {message}"
+        );
         assert!(
             message.contains(
                 "codec 'event_json' failed to parse field 'user_id': expected Integer, found a \
@@ -624,7 +766,7 @@ pub(super) mod tests {
             IngestorQuiesceCounters::default(),
             "the rejected body leaves the buffer"
         );
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 
     /// A body `BUFFER` retained was already answered 202, so when the extension workers cannot
@@ -674,7 +816,12 @@ pub(super) mod tests {
         for user_id in 1..=3 {
             let body = format!(r#"{{"user_id":{user_id}}}"#);
             let outcome = route
-                .dispatch(&runtime, body.as_bytes(), &NoIngestHeaders)
+                .dispatch(
+                    &runtime,
+                    body.as_bytes(),
+                    &NoIngestHeaders,
+                    &CancellationToken::new(),
+                )
                 .await;
             assert!(
                 outcome.is_accepted(),
@@ -738,6 +885,6 @@ pub(super) mod tests {
         );
         assert_eq!(quiesce.counters().buffered_records, 0);
         assert_eq!(quiesce.counters().buffered_bytes, 0);
-        runtime.shutdown().await;
+        runtime.shutdown(runtime.domain_drain_timeout()).await;
     }
 }

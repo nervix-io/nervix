@@ -4,7 +4,7 @@ Feature: Web console visual client, vhost and endpoint creation
   Scenario Outline: A visual VHOST and HTTP endpoint serve a running ingestor
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA visual_payload (message STRING);
@@ -37,7 +37,7 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".prompt-row input" is filled with "SHOW CREATE ENDPOINT visual_ingest;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE ENDPOINT visual_ingest ON visual_edge PATH '/ingest' TYPE HTTP"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE HTTP ENDPOINT INGESTOR visual_source FROM visual_ingest MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -53,10 +53,10 @@ Feature: Web console visual client, vhost and endpoint creation
       | 3            |
 
   @visual_client_pool_create
-  Scenario: A pooled client preserves its explicit bounds and sends masked configuration values
-    Given a 1 node nervix cluster is started
+  Scenario Outline: A pooled client preserves its explicit bounds and sends masked configuration values
+    Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -65,9 +65,9 @@ Feature: Web console visual client, vhost and endpoint creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
     And selector ".create-name" is filled with "visual_redis"
-    And selector ".create-client-type [data-type='http']" is clicked
+    And selector ".create-client-type [data-client-type='http-client']" is clicked
     And selector ".create-client-config-add" is clicked
-    And selector ".create-client-type [data-type='redis']" is clicked
+    And selector ".create-client-type [data-client-type='redis-client']" is clicked
     Then selector ".create-client-config-entry" does not exist
     When selector ".create-submit" is clicked
     Then selector ".create-validation" contains "Pool minimum"
@@ -83,6 +83,7 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".create-client-config-entry:nth-of-type(2) .create-client-config-key" is filled with "password"
     And selector ".create-client-config-entry:nth-of-type(2) .create-client-config-value" is filled with "visual-secret"
     Then selector ".create-preview" contains "POOL SIZE MIN 1 MAX 4"
+    And selector ".create-preview" contains "CREATE REDIS CLIENT visual_redis"
     And selector ".create-preview" does not contain "visual-secret"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
@@ -90,17 +91,23 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".prompt-row input" is filled with "SHOW CREATE CLIENT visual_redis;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "POOL SIZE MIN 1 MAX 4"
+    And selector ".terminal" contains "CREATE REDIS CLIENT visual_redis"
     And selector ".terminal" contains "visual-secret"
 
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @visual_client_mount_create
-  Scenario: A client mount selects an explicit completed resource version
-    Given a 1 node nervix cluster is started
+  Scenario Outline: A client mount selects an explicit completed resource version
+    Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And node "node-1" has resource directory "client_mount" containing
       """
       {"ca.pem":"sample material"}
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE visual_client_bundle;
@@ -111,7 +118,7 @@ Feature: Web console visual client, vhost and endpoint creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
     And selector ".create-name" is filled with "visual_http"
-    And selector ".create-client-type [data-type='http']" is clicked
+    And selector ".create-client-type [data-client-type='http-client']" is clicked
     And selector ".create-client-mount-enabled" is clicked
     And selector ".create-client-resource .create-choice-search" is filled with "visual_client_bundle"
     Then selector ".create-client-resource [data-value='visual_client_bundle']" exists
@@ -122,19 +129,26 @@ Feature: Web console visual client, vhost and endpoint creation
     And selector ".create-client-config-key" is filled with "url"
     And selector ".create-client-config-value" is filled with "http://127.0.0.1:1"
     Then selector ".create-preview" contains "MOUNT visual_client_bundle VERSION 1"
+    And selector ".create-preview" contains "CREATE HTTP CLIENT visual_http"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE CLIENT visual_http;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "MOUNT visual_client_bundle VERSION 1"
+    And selector ".terminal" contains "CREATE HTTP CLIENT visual_http"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   @visual_vhost_tls_create
   Scenario Outline: A visual TLS VHOST installs its pinned certificate on every live node
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And node "node-1" has TLS resource directory "visual_tls" for hosts "tls-{{test_id}}.example.com"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE visual_tls_bundle;
@@ -166,7 +180,7 @@ Feature: Web console visual client, vhost and endpoint creation
   Scenario: WebSocket client and endpoint select an existing signaling protocol
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SIGNALING PROTOCOL visual_handshake FORMAT JSON ON CONNECT SEND JAQ '{hello: true}' WAIT JAQ '.ready' TIMEOUT 5s;
@@ -177,7 +191,7 @@ Feature: Web console visual client, vhost and endpoint creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
     And selector ".create-name" is filled with "visual_socket_client"
-    And selector ".create-client-type [data-type='websockets']" is clicked
+    And selector ".create-client-type [data-client-type='websockets-client']" is clicked
     And selector ".create-client-signaling .create-choice-search" is filled with "visual_handshake"
     Then selector ".create-client-signaling [data-value='visual_handshake']" exists
     When selector ".create-client-signaling [data-value='visual_handshake']" is clicked
@@ -211,7 +225,7 @@ Feature: Web console visual client, vhost and endpoint creation
   Scenario: An endpoint can select a VHOST staged earlier in its transaction
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -249,7 +263,7 @@ Feature: Web console visual client, vhost and endpoint creation
   Scenario: Selected endpoint references survive a leader reconnection
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE VHOST reconnect_edge reconnect-{{test_id}}.example.com;

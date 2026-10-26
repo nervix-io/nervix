@@ -1,4 +1,4 @@
-Feature: HTTP emitter inspection, errors and metrics
+Feature: HTTP REQUEST emitter inspection, errors and metrics
   DESCRIBE EMITTER reports why an HTTP request is still pending for as long as it stays pending,
   and message errors, runtime events and emitter status name the operation and the status of a
   failure without an evaluated target, a header value or a body. The sent counters count each
@@ -6,7 +6,7 @@ Feature: HTTP emitter inspection, errors and metrics
   count the codec body's record and never the request's method, target or headers.
 
   @http_emitter_inspection @retained_task_handles
-  Scenario Outline: HTTP emitters with and without a body report a pending failure safely and count each delivered record once
+  Scenario Outline: HTTP REQUEST emitters with and without a body report a pending failure safely and count each delivered record once
     Given HTTP receiver "encoded_api" is running
     And HTTP receiver "encoded_api" answers with
       """
@@ -25,11 +25,11 @@ Feature: HTTP emitter inspection, errors and metrics
     And HTTP receiver "empty_api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, token STRING SENSITIVE, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -54,14 +54,14 @@ Feature: HTTP emitter inspection, errors and metrics
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT encoded_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT encoded_client CONFIG {
         'endpoint' = '{{http_receiver.encoded_api}}', 'timeout_ms' = 60000
       };
-      CREATE CLIENT empty_client TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT empty_client CONFIG {
         'endpoint' = '{{http_receiver.empty_api}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER encoded FROM outgoing
-        TO HTTP encoded_client
+      CREATE HTTP REQUEST EMITTER encoded FROM outgoing
+        TO encoded_client
           METHOD 'POST'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms
@@ -78,8 +78,8 @@ Feature: HTTP emitter inspection, errors and metrics
               operation_index = error.operation_index,
               error_message = error.message
         ON GENERAL ERROR LOG;
-      CREATE EMITTER empty FROM outgoing
-        TO HTTP empty_client
+      CREATE HTTP REQUEST EMITTER empty FROM outgoing
+        TO empty_client
           METHOD 'POST'
           PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms
@@ -253,18 +253,18 @@ Feature: HTTP emitter inspection, errors and metrics
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "http_ignore_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -279,11 +279,11 @@ Feature: HTTP emitter inspection, errors and metrics
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 60000
       };
-      CREATE ATTACHED EMITTER published FROM outgoing
-        TO HTTP api METHOD 'POST' PATH concat('/events/', input.event_id)
+      CREATE ATTACHED HTTP REQUEST EMITTER published FROM outgoing
+        TO api METHOD 'POST' PATH concat('/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 100ms WITHOUT BODY
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG

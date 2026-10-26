@@ -62,7 +62,7 @@ pub(crate) struct SubscriptionContract {
 
 impl SubscriptionContract {
     pub(crate) fn request(&self) -> SubscribeRequest {
-        let statement = nervix_nspl::subscribe::create_subscription_query(
+        let statement = nervix_plexus::subscribe::create_subscription_query(
             self.create.name.as_str(),
             self.create.relay.as_str(),
             self.create.delivery_behavior,

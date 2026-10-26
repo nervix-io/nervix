@@ -1,7 +1,7 @@
 Feature: Schema type strictness
   Scenario Outline: Branching values must exactly match branch schema field types
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "branch SET compile failed: SET field 'tenant' has expression type Utf8, expected declared output type UInt32"
+    When these Plexus commands fail with "branch SET compile failed: SET field 'tenant' has expression type Utf8, expected declared output type UInt32"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( tenant STRING );
@@ -10,7 +10,7 @@ Feature: Schema type strictness
       CREATE SCHEMA tenant_branch ( tenant U32 );
       CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA tenant_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       CREATE KAFKA TOPIC INGESTOR kafka_notifications
         FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'strict_types' MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -30,14 +30,14 @@ Feature: Schema type strictness
 
   Scenario Outline: JSON codecs require explicit RFC3339 encoding for string datetime wire fields
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "json field 'created_at' type mismatch"
+    When these Plexus commands fail with "json field 'created_at' type mismatch"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA orders ( created_at DATETIME );
       CREATE WIRE JSON SCHEMA orders_wire MODE STRICT ( created_at string );
       CREATE CODEC orders_codec FROM WIRE JSON SCHEMA orders_wire TO SCHEMA orders;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE WIRE JSON SCHEMA orders_wire_encoded MODE STRICT ( created_at string );
       CREATE CODEC orders_codec_encoded
@@ -45,7 +45,7 @@ Feature: Schema type strictness
         TO SCHEMA orders
         ENCODE created_at AS RFC3339;
       """
-    When these NSPL commands fail with "json field 'created_at' type mismatch"
+    When these Plexus commands fail with "json field 'created_at' type mismatch"
       """
       CREATE WIRE JSON SCHEMA orders_wire_invalid MODE STRICT ( created_at number );
       CREATE CODEC orders_codec_invalid
@@ -61,7 +61,7 @@ Feature: Schema type strictness
 
   Scenario Outline: Route-local projections validate explicit output targets
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA inbound_event (
@@ -75,7 +75,7 @@ Feature: Schema type strictness
       CREATE RELAY unknown_set_events SCHEMA projected_event UNBRANCHED;
       CREATE RELAY valid_projected_events SCHEMA projected_event UNBRANCHED;
       """
-    When these NSPL commands fail with "SET targets unknown output field 'extra'"
+    When these Plexus commands fail with "SET targets unknown output field 'extra'"
       """
       CREATE DEDUPLICATOR unknown_set_projection
         FROM inbound_events
@@ -87,7 +87,7 @@ Feature: Schema type strictness
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE DEDUPLICATOR valid_projection
         FROM inbound_events
@@ -107,7 +107,7 @@ Feature: Schema type strictness
 
   Scenario Outline: NULL assignment requires a declared optional output field
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA nullable_inbound_event (
@@ -126,7 +126,7 @@ Feature: Schema type strictness
       CREATE RELAY nullable_projected_events SCHEMA nullable_projected_event UNBRANCHED;
       CREATE RELAY required_projected_events SCHEMA required_projected_event UNBRANCHED;
       """
-    When these NSPL commands fail with "SET field 'memo' may be null but the output field is required"
+    When these Plexus commands fail with "SET field 'memo' may be null but the output field is required"
       """
       CREATE DEDUPLICATOR null_required_projection
         FROM nullable_inbound_events
@@ -139,7 +139,7 @@ Feature: Schema type strictness
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE DEDUPLICATOR null_optional_projection
         FROM nullable_inbound_events

@@ -2,6 +2,7 @@ Feature: Admitted capture of stored deduplicator and window checkpoints
   A stopped domain and a stopped restore capture one stored checkpoint at a time, charge its
   retained view, and write bounded archive groups that preserve every key, row and aggregate.
 
+  @long_running
   Scenario Outline: Stored branch checkpoints above the bulk budget re-export exactly under admission on <cluster_size> nodes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -21,7 +22,7 @@ Feature: Admitted capture of stored deduplicator and window checkpoints
     When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "running.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup "running.nvxb" holds a deduplicator keyspace and a window of tenant "large" above 32 MiB beside 24 small branches of each
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """

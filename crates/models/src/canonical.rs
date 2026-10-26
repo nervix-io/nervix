@@ -1,4 +1,4 @@
-//! Canonical NSPL rendering for vocabulary models.
+//! Canonical Plexus rendering for vocabulary models.
 //!
 //! Layer: vocabulary.
 //! - **Owns.** Stable textual rendering of current semantic models.
@@ -24,53 +24,56 @@ use crate::{
     AlterSchemaOperation, AlterTransportIngestorOperation, AlterWireSchema,
     AlterWireSchemaOperation, AssignmentTarget, AssignmentTargetScope, AvroType, Backup,
     BackupCapture, BackupResources, BackupScope, BinaryOperator, BranchEviction, BranchSelection,
-    ClickHouseSink, ClickHouseTableSink, ClickHouseValueMapping, ClientConfigEntry,
-    ClientConsumerSink, ClientIngestMode, ClientProducerSource, ClientResourceMount, ClientSink,
-    CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName, CodecWireFormat,
-    CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
-    CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, DescribeBackup, DescribeTransaction, DomainPace,
-    DomainStartPoint, EmitSink, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode,
-    EndpointIngestMode, EndpointName, ExistingUserPolicy, Expression, FieldScope, Float64Literal,
-    FlushPolicy, GeneralErrorPolicy, HttpEndpointSource, HttpRequestIngestMode, HttpRequestSink,
-    HttpRequestSource, HttpSink, HttpSource, IcebergCatalog, IcebergSink, IcebergTableSink,
+    ClickHouseEmitter, ClickHouseTableEmitter, ClickHouseValueMapping, ClientConfigEntry,
+    ClientConsumerEmitter, ClientEmitter, ClientIngestMode, ClientProducerIngestor,
+    ClientResourceMount, CodecEncoding, CodecEncodingRule, CodecJaqTransformations, CodecName,
+    CodecWireFormat, CorrelationTimeoutAction, CreateBranch, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
+    CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer,
+    CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay,
+    CreateReorderer, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
+    CreateWasmProcessor, CreateWindowProcessor, CreateWireSchema, DescribeBackup,
+    DescribeTransaction, DomainPace, DomainStartPoint, EmitterBatchPolicy, EmitterBody,
+    EmitterEntity, EmitterPublishing, EndpointIngestMode, EndpointName, ExistingUserPolicy,
+    Expression, FieldScope, Float64Literal, FlushPolicy, GeneralErrorPolicy, HttpEmitter,
+    HttpEndpointIngestor, HttpIngestor, HttpRequestEmitter, HttpRequestIngestMode,
+    HttpRequestIngestor, IcebergCatalog, IcebergEmitter, IcebergTableEmitter,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping,
-    IngestQuiesceMode, IngestSource, IngestTimestampSource, IngestorInput, Inheritance,
-    InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, KafkaSink,
-    KafkaSource, KafkaTopicSink, KafkaTopicSource, Literal, MaterializedStateDependency,
+    IngestQuiesceMode, IngestTimestampSource, IngestorEntity, IngestorInput, Inheritance,
+    InputCollectPolicy, InspectionFormat, JsonType, KafkaEmitter, KafkaIngestMode, KafkaIngestor,
+    KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicIngestor, Literal, MaterializedStateDependency,
     MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
-    MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MqttIngestMode, MqttQos,
-    MqttSession, MqttSink, MqttSource, MqttTopicSink, MqttTopicSource, MySqlConflictAction,
-    MySqlSink, MySqlTableSink, NamePosition, NatsIngestMode, NatsSink, NatsSource, NatsSubjectSink,
-    NatsSubjectSource, OtelMappings, OtelMetricKind, OtelMetricsSink, OtelSink, OutputBranch,
-    ParseAsType, PlacementPolicy, PostgresConflictAction, PostgresSink, PostgresTableSink,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PrometheusIngestMode,
-    PrometheusQuerySource, PrometheusSource, PulsarSink, PulsarSource, PulsarTopicSink,
-    PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSink, RabbitMqQueueSource, RabbitMqSink,
-    RabbitMqSource, RangeOperator, RedisPubSubIngestMode, RedisPubSubSink, RedisPubSubSource,
-    RedisSink, RedisSource, RelayBranching, RelayName, Restore, RestoreLifecycle, RestoreMode,
-    RestoreScope, RestoreState, RetryPolicy, RouteConstruction, SchemaField, SentryEventSink,
-    SentrySink, SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, SqsQueueSink, SqsQueueSource, SqsSink, SqsSource, Statement,
-    SubscriptionLiteral, SyslogCollectorSink, SyslogIngestMode, SyslogListenerSource, SyslogSink,
-    SyslogSource, TransactionInspectionTarget, UnaryOperator, WebsocketsConnectionSource,
-    WebsocketsEndpointSource, WebsocketsIngestMode, WebsocketsSource, WindowBound,
-    WindowStateLimit, WireSchemaField, ZeroMqIngestMode, ZeroMqPullSource, ZeroMqPushSink,
-    ZeroMqSink, ZeroMqSource,
+    MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter, MqttEmitter, MqttIngestMode,
+    MqttIngestor, MqttQos, MqttSession, MqttTopicEmitter, MqttTopicIngestor, MySqlConflictAction,
+    MySqlEmitter, MySqlTableEmitter, NamePosition, NatsEmitter, NatsIngestMode, NatsIngestor,
+    NatsSubjectEmitter, NatsSubjectIngestor, OtelEmitter, OtelMetric, OtelMetricKind,
+    OtelMetricsEmitter, OutputBranch, ParseAsType, PayloadSizeLimit, PlacementPolicy,
+    PostgresConflictAction, PostgresEmitter, PostgresTableEmitter, ProcessorInputWhere,
+    ProcessorInputs, ProcessorOutputs, PrometheusIngestMode, PrometheusIngestor,
+    PrometheusQueryIngestor, PulsarEmitter, PulsarIngestor, PulsarTopicEmitter,
+    PulsarTopicIngestor, RabbitMqEmitter, RabbitMqIngestMode, RabbitMqIngestor,
+    RabbitMqQueueEmitter, RabbitMqQueueIngestor, RangeOperator, RedisEmitter, RedisIngestor,
+    RedisPubSubEmitter, RedisPubSubIngestMode, RedisPubSubIngestor, RelayBranching, RelayName,
+    Restore, RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, RetryPolicy,
+    RouteConstruction, SchemaField, SentryEmitter, SentryEventEmitter, SignalingProtocolName,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsIngestMode,
+    SqsIngestor, SqsQueueEmitter, SqsQueueIngestor, Statement, SubscriptionLiteral,
+    SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode, SyslogIngestor,
+    SyslogListenerIngestor, TransactionInspectionTarget, UnaryOperator,
+    WebsocketsConnectionIngestor, WebsocketsEndpointIngestor, WebsocketsIngestMode,
+    WebsocketsIngestor, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqEmitter,
+    ZeroMqIngestMode, ZeroMqIngestor, ZeroMqPullIngestor, ZeroMqPushEmitter,
 };
 
-/// The NSPL release canonical rendering writes.
+/// The Plexus release canonical rendering writes.
 ///
-/// NSPL is versioned with the product, so a text this crate renders is read back by the parser of
-/// the same release. An archive records it beside the NSPL it holds.
-pub const NSPL_LANGUAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Plexus is versioned with the product, so a text this crate renders is read back by the parser of
+/// the same release. An archive records it beside the Plexus it holds.
+pub const PLEXUS_LANGUAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Width of one canonical indentation level.
 const INDENT: usize = 2;
@@ -202,7 +205,7 @@ fn block_statement(header: impl Into<String>, items: Vec<String>) -> String {
     lines.join("\n")
 }
 
-/// Binding levels of the NSPL expression grammar, loosest first.
+/// Binding levels of the Plexus expression grammar, loosest first.
 ///
 /// These mirror the parser's precedence ladder exactly. Rendering consults them so that an
 /// expression carries only the parentheses its structure actually requires.
@@ -250,11 +253,11 @@ fn precedence(expression: &Expression) -> u8 {
 ///
 /// Callers pass the operator's own level for a left operand and one level tighter for a right
 /// operand, which is what makes the left-associative ladder round-trip.
-fn operand_to_nspl(
+fn operand_to_plexus(
     expression: &Expression,
     minimum: u8,
-) -> error_stack::Result<String, CanonicalNsplError> {
-    let rendered = expression_to_nspl(expression)?;
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    let rendered = expression_to_plexus(expression)?;
     if precedence(expression) < minimum {
         Ok(format!("({rendered})"))
     } else {
@@ -262,9 +265,9 @@ fn operand_to_nspl(
     }
 }
 
-pub fn expression_to_nspl(
+pub fn expression_to_plexus(
     expression: &Expression,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     match expression {
         Expression::Literal(Literal::I64(value)) => Ok(value.to_string()),
         Expression::Literal(Literal::F64(value)) => float_literal(*value),
@@ -303,7 +306,7 @@ pub fn expression_to_nspl(
                 UnaryOperator::Negate => "-",
                 UnaryOperator::Not => "NOT ",
             },
-            operand_to_nspl(expression, PRECEDENCE_CAST)?
+            operand_to_plexus(expression, PRECEDENCE_CAST)?
         )),
         Expression::Binary {
             operator,
@@ -311,7 +314,7 @@ pub fn expression_to_nspl(
             right,
         } => Ok(format!(
             "{} {} {}",
-            operand_to_nspl(left, binary_precedence(operator))?,
+            operand_to_plexus(left, binary_precedence(operator))?,
             match operator {
                 BinaryOperator::Add => "+",
                 BinaryOperator::Subtract => "-",
@@ -329,7 +332,7 @@ pub fn expression_to_nspl(
                 BinaryOperator::IsDistinctFrom => "IS DISTINCT FROM",
                 BinaryOperator::IsNotDistinctFrom => "IS NOT DISTINCT FROM",
             },
-            operand_to_nspl(right, binary_precedence(operator) + 1)?
+            operand_to_plexus(right, binary_precedence(operator) + 1)?
         )),
         // The operand is a left operand of the comparison level, which folds left, and each bound
         // is read one level tighter, so a bound holding `AND` or a comparison keeps its parentheses.
@@ -339,13 +342,13 @@ pub fn expression_to_nspl(
             set,
         } => Ok(format!(
             "{} {} ({})",
-            operand_to_nspl(operand, PRECEDENCE_COMPARISON)?,
+            operand_to_plexus(operand, PRECEDENCE_COMPARISON)?,
             match operator {
                 MembershipOperator::In => "IN",
                 MembershipOperator::NotIn => "NOT IN",
             },
             set.iter()
-                .map(expression_to_nspl)
+                .map(expression_to_plexus)
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         )),
@@ -356,23 +359,23 @@ pub fn expression_to_nspl(
             high,
         } => Ok(format!(
             "{} {} {} AND {}",
-            operand_to_nspl(operand, PRECEDENCE_COMPARISON)?,
+            operand_to_plexus(operand, PRECEDENCE_COMPARISON)?,
             match operator {
                 RangeOperator::Between => "BETWEEN",
                 RangeOperator::NotBetween => "NOT BETWEEN",
             },
-            operand_to_nspl(low, PRECEDENCE_ADDITIVE)?,
-            operand_to_nspl(high, PRECEDENCE_ADDITIVE)?
+            operand_to_plexus(low, PRECEDENCE_ADDITIVE)?,
+            operand_to_plexus(high, PRECEDENCE_ADDITIVE)?
         )),
         Expression::Cast { expression, target } => Ok(format!(
             "{} AS {}",
-            operand_to_nspl(expression, PRECEDENCE_CAST)?,
+            operand_to_plexus(expression, PRECEDENCE_CAST)?,
             parse_as_to_keyword(target)
         )),
         // The operand is the whole expression before the final `AS`, so it needs no parentheses.
         Expression::TryCast { expression, target } => Ok(format!(
             "TRY_CAST({} AS {})",
-            expression_to_nspl(expression)?,
+            expression_to_plexus(expression)?,
             parse_as_to_keyword(target)
         )),
         Expression::JsonValue {
@@ -381,7 +384,7 @@ pub fn expression_to_nspl(
             target,
         } => Ok(format!(
             "JSON_VALUE({}, {} AS {})",
-            expression_to_nspl(document)?,
+            expression_to_plexus(document)?,
             string_literal(&path.to_string()),
             parse_as_to_keyword(target)
         )),
@@ -391,13 +394,13 @@ pub fn expression_to_nspl(
             target,
         } => Ok(format!(
             "TRY_JSON_VALUE({}, {} AS {})",
-            expression_to_nspl(document)?,
+            expression_to_plexus(document)?,
             string_literal(&path.to_string()),
             parse_as_to_keyword(target)
         )),
         Expression::JsonExists { document, path } => Ok(format!(
             "JSON_EXISTS({}, {})",
-            expression_to_nspl(document)?,
+            expression_to_plexus(document)?,
             string_literal(&path.to_string())
         )),
         Expression::Call {
@@ -408,7 +411,7 @@ pub fn expression_to_nspl(
             NamePosition::Called.spell(function.as_str()),
             arguments
                 .iter()
-                .map(expression_to_nspl)
+                .map(expression_to_plexus)
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         )),
@@ -420,7 +423,7 @@ pub fn expression_to_nspl(
             NamePosition::Qualified.spell(function.as_str()),
             arguments
                 .iter()
-                .map(expression_to_nspl)
+                .map(expression_to_plexus)
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         )),
@@ -428,7 +431,7 @@ pub fn expression_to_nspl(
             "[{}]",
             items
                 .iter()
-                .map(expression_to_nspl)
+                .map(expression_to_plexus)
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         )),
@@ -438,9 +441,9 @@ pub fn expression_to_nspl(
             else_result,
         } => Ok(format!(
             "IF {} THEN {} ELSE {} END",
-            expression_to_nspl(condition)?,
-            expression_to_nspl(then_result)?,
-            expression_to_nspl(else_result)?
+            expression_to_plexus(condition)?,
+            expression_to_plexus(then_result)?,
+            expression_to_plexus(else_result)?
         )),
         Expression::Case {
             operand,
@@ -450,17 +453,17 @@ pub fn expression_to_nspl(
             let mut rendered = "CASE".to_string();
             if let Some(operand) = operand {
                 rendered.push(' ');
-                rendered.push_str(&expression_to_nspl(operand)?);
+                rendered.push_str(&expression_to_plexus(operand)?);
             }
             for branch in branches {
                 rendered.push_str(" WHEN ");
-                rendered.push_str(&expression_to_nspl(&branch.when)?);
+                rendered.push_str(&expression_to_plexus(&branch.when)?);
                 rendered.push_str(" THEN ");
-                rendered.push_str(&expression_to_nspl(&branch.result)?);
+                rendered.push_str(&expression_to_plexus(&branch.result)?);
             }
             if let Some(else_result) = else_result {
                 rendered.push_str(" ELSE ");
-                rendered.push_str(&expression_to_nspl(else_result)?);
+                rendered.push_str(&expression_to_plexus(else_result)?);
             }
             rendered.push_str(" END");
             Ok(rendered)
@@ -468,9 +471,9 @@ pub fn expression_to_nspl(
     }
 }
 
-fn route_construction_to_nspl(
+fn route_construction_to_plexus(
     construction: &RouteConstruction,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     Ok(route_construction_clauses(construction)?
         .into_iter()
         .map(|clause| match clause {
@@ -484,7 +487,7 @@ fn route_construction_to_nspl(
 
 /// The field an assignment writes, as `SET` and `DEFAULT` spell it: the bare field, or its scope
 /// and the field.
-fn assignment_target_to_nspl(target: &AssignmentTarget) -> String {
+fn assignment_target_to_plexus(target: &AssignmentTarget) -> String {
     let field = target.field.as_str();
     let scope = match target.scope {
         AssignmentTargetScope::Bare => None,
@@ -501,7 +504,7 @@ fn assignment_target_to_nspl(target: &AssignmentTarget) -> String {
 /// The clauses of a route's construction, in the order they must be written.
 fn route_construction_clauses(
     construction: &RouteConstruction,
-) -> error_stack::Result<Vec<Clause>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<Clause>, CanonicalPlexusError> {
     let mut clauses: Vec<Clause> = Vec::new();
     if let Some(inherit) = &construction.inherit {
         let clause = match inherit {
@@ -542,17 +545,17 @@ fn route_construction_clauses(
                 .map(|assignment| {
                     Ok(format!(
                         "{} = {}",
-                        assignment_target_to_nspl(&assignment.target),
-                        expression_to_nspl(&assignment.value)?
+                        assignment_target_to_plexus(&assignment.target),
+                        expression_to_plexus(&assignment.value)?
                     ))
                 })
-                .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?,
+                .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?,
         ));
     }
     if let Some(where_clause) = &construction.where_clause {
         clauses.push(Clause::line(format!(
             "WHERE {}",
-            expression_to_nspl(where_clause)?
+            expression_to_plexus(where_clause)?
         )));
     }
     if !construction.invocations.is_empty() {
@@ -567,11 +570,11 @@ fn route_construction_clauses(
                     invocation
                         .arguments
                         .iter()
-                        .map(expression_to_nspl)
+                        .map(expression_to_plexus)
                         .collect::<Result<Vec<_>, _>>()?
                         .join(", ")
                 )))
-                .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+                .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
                 .join(", ")
         )));
     }
@@ -580,26 +583,20 @@ fn route_construction_clauses(
 
 fn value_mapping_items(
     values: &[ClickHouseValueMapping],
-) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     values
         .iter()
         .map(|mapping| {
             Ok(format!(
                 "{} = {}",
                 string_literal(&mapping.column),
-                expression_to_nspl(&mapping.expression)?
+                expression_to_plexus(&mapping.expression)?
             ))
         })
         .collect()
 }
 
-fn value_mappings_to_nspl(
-    values: &[ClickHouseValueMapping],
-) -> error_stack::Result<String, CanonicalNsplError> {
-    Ok(value_mapping_items(values)?.join(", "))
-}
-
-fn branch_selection_to_nspl(branching: &BranchSelection) -> String {
+fn branch_selection_to_plexus(branching: &BranchSelection) -> String {
     match branching {
         BranchSelection::BranchedBy { branch } => {
             format!("BRANCHED BY {}", branch.as_str())
@@ -608,9 +605,9 @@ fn branch_selection_to_nspl(branching: &BranchSelection) -> String {
     }
 }
 
-fn output_branch_to_nspl(
+fn output_branch_to_plexus(
     branching: &OutputBranch,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     match branching {
         OutputBranch::BranchedBy {
             branch,
@@ -623,7 +620,7 @@ fn output_branch_to_nspl(
                     ..RouteConstruction::default()
                 };
                 rendered.push(' ');
-                rendered.push_str(&route_construction_to_nspl(&construction)?);
+                rendered.push_str(&route_construction_to_plexus(&construction)?);
             }
             Ok(rendered)
         }
@@ -631,14 +628,14 @@ fn output_branch_to_nspl(
     }
 }
 
-/// Why a Model has no canonical NSPL rendering.
+/// Why a Model has no canonical Plexus rendering.
 ///
-/// Each variant is a value NSPL has no spelling for. It carries that typed value or names the Model
+/// Each variant is a value Plexus has no spelling for. It carries that typed value or names the Model
 /// holding it, so a caller can locate the refusal without reading its message.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum CanonicalNsplError {
-    /// An `F64` literal that is NaN or infinite. NSPL spells a float only as a finite decimal.
-    #[error("cannot represent non-finite float in NSPL: {}", .value.value())]
+pub enum CanonicalPlexusError {
+    /// An `F64` literal that is NaN or infinite. Plexus spells a float only as a finite decimal.
+    #[error("cannot represent non-finite float in Plexus: {}", .value.value())]
     UnrepresentableFloat { value: Float64Literal },
     /// A `SYSLOG` codec that declares encoding rules. Its record shape is fixed, so it has no
     /// fields a rule could encode.
@@ -650,7 +647,7 @@ pub enum CanonicalNsplError {
 }
 
 impl AlterPlacement {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let operations = self
             .operations
             .iter()
@@ -687,15 +684,15 @@ fn model_name_list(names: &[ModelName]) -> String {
 }
 
 impl Statement {
-    /// Renders this statement as canonical NSPL.
+    /// Renders this statement as canonical Plexus.
     ///
-    /// Unlike [`Model::to_canonical_nspl`], this covers the whole executable language -- the
+    /// Unlike [`Model::to_canonical_plexus`], this covers the whole executable language -- the
     /// creation modifiers, the domain lifecycle, administration, and the read-only queries -- so a
     /// parsed script can be rendered back statement for statement.
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         match self {
             Self::Create(create) => {
-                let rendered = create.body.to_canonical_nspl()?;
+                let rendered = create.body.to_canonical_plexus()?;
                 if !create.if_not_exists {
                     return Ok(rendered);
                 }
@@ -793,7 +790,7 @@ impl Statement {
                         let mut rendered = Vec::with_capacity(fields.len());
                         for field in fields {
                             let value =
-                                expression_to_nspl(&Expression::Literal(field.value.clone()))?;
+                                expression_to_plexus(&Expression::Literal(field.value.clone()))?;
                             rendered.push(format!("{} = {value}", field.name.as_str()));
                         }
                         format!("BRANCH VALUES {{ {} }}", rendered.join(", "))
@@ -810,8 +807,8 @@ impl Statement {
                 upload.identifier.as_str(),
                 string_literal(&upload.source_path)
             )),
-            Self::Backup(backup) => Ok(backup.to_canonical_nspl()),
-            Self::Restore(restore) => Ok(restore.to_canonical_nspl()),
+            Self::Backup(backup) => Ok(backup.to_canonical_plexus()),
+            Self::Restore(restore) => Ok(restore.to_canonical_plexus()),
             Self::StartDomain(start) => Ok(match &start.start {
                 DomainStartPoint::Resume => "START;".to_string(),
                 DomainStartPoint::Now { time_rate } => {
@@ -826,19 +823,19 @@ impl Statement {
                 ),
             }),
             Self::StopDomain(_) => Ok("STOP;".to_string()),
-            Self::AlterSchema(alter) => alter.to_canonical_nspl(),
-            Self::AlterWireJsonSchema(alter) => alter_json_wire_schema_to_canonical_nspl(alter),
-            Self::AlterWireCborSchema(alter) => alter_cbor_wire_schema_to_canonical_nspl(alter),
-            Self::AlterWireAvroSchema(alter) => alter_avro_wire_schema_to_canonical_nspl(alter),
-            Self::AlterRelay(alter) => alter.to_canonical_nspl(),
-            Self::AlterJunction(alter) => alter.to_canonical_nspl(),
-            Self::AlterDeduplicator(alter) => alter.to_canonical_nspl(),
-            Self::AlterReorderer(alter) => alter.to_canonical_nspl(),
-            Self::AlterEmitter(alter) => alter.to_canonical_nspl(),
-            Self::AlterIngestor(alter) => alter.to_canonical_nspl(),
-            Self::AlterReingestor(alter) => alter.to_canonical_nspl(),
-            Self::AlterGenerator(alter) => alter.to_canonical_nspl(),
-            Self::AlterPlacement(alter) => alter.to_canonical_nspl(),
+            Self::AlterSchema(alter) => alter.to_canonical_plexus(),
+            Self::AlterWireJsonSchema(alter) => alter_json_wire_schema_to_canonical_plexus(alter),
+            Self::AlterWireCborSchema(alter) => alter_cbor_wire_schema_to_canonical_plexus(alter),
+            Self::AlterWireAvroSchema(alter) => alter_avro_wire_schema_to_canonical_plexus(alter),
+            Self::AlterRelay(alter) => alter.to_canonical_plexus(),
+            Self::AlterJunction(alter) => alter.to_canonical_plexus(),
+            Self::AlterDeduplicator(alter) => alter.to_canonical_plexus(),
+            Self::AlterReorderer(alter) => alter.to_canonical_plexus(),
+            Self::AlterEmitter(alter) => alter.to_canonical_plexus(),
+            Self::AlterIngestor(alter) => alter.to_canonical_plexus(),
+            Self::AlterReingestor(alter) => alter.to_canonical_plexus(),
+            Self::AlterGenerator(alter) => alter.to_canonical_plexus(),
+            Self::AlterPlacement(alter) => alter.to_canonical_plexus(),
             Self::Drop(drop) => Ok(format!(
                 "DROP {} {};",
                 drop.kind.keyword_phrase(),
@@ -848,10 +845,12 @@ impl Statement {
             Self::CordonNode(node) => Ok(format!("CORDON NODE {};", node.node_id)),
             Self::UncordonNode(node) => Ok(format!("UNCORDON NODE {};", node.node_id)),
             Self::DrainNode(node) => Ok(format!("DRAIN NODE {};", node.node_id)),
-            Self::Relocate(relocation) => Ok(format!("RELOCATE {};", relocation.to_nspl_clauses())),
+            Self::Relocate(relocation) => {
+                Ok(format!("RELOCATE {};", relocation.to_plexus_clauses()))
+            }
             Self::DescribeRelocation(relocation) => Ok(format!(
                 "DESCRIBE RELOCATION {};",
-                relocation.to_nspl_clauses()
+                relocation.to_plexus_clauses()
             )),
             Self::DescribeRelay(describe) => {
                 let bindings = if describe.bindings.is_empty() {
@@ -865,7 +864,7 @@ impl Statement {
                             .map(|binding| format!(
                                 "{} = {}",
                                 binding.field.as_str(),
-                                subscription_literal_to_nspl(&binding.value)
+                                subscription_literal_to_plexus(&binding.value)
                             ))
                             .collect::<Vec<_>>()
                             .join(", ")
@@ -933,7 +932,7 @@ impl Statement {
             Self::LookupQuery(query) => Ok(format!(
                 "LOOKUP {} KEY {};",
                 query.name.as_str(),
-                subscription_literal_to_nspl(&query.key)
+                subscription_literal_to_plexus(&query.key)
             )),
             Self::ShowCreate(show) => Ok(format!(
                 "SHOW CREATE {} {};",
@@ -948,8 +947,9 @@ impl Statement {
                 show.relay.as_str()
             )),
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
+            Self::DescribeCluster(_) => Ok("DESCRIBE CLUSTER;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
-            Self::DescribeTransaction(describe) => Ok(describe.to_canonical_nspl()),
+            Self::DescribeTransaction(describe) => Ok(describe.to_canonical_plexus()),
         }
     }
 }
@@ -957,7 +957,7 @@ impl Statement {
 impl Backup {
     /// Renders the statement with the clauses it needs, omitting the default of including resource
     /// bytes.
-    pub fn to_canonical_nspl(&self) -> String {
+    pub fn to_canonical_plexus(&self) -> String {
         let scope = match &self.scope {
             BackupScope::Cluster => "CLUSTER".to_string(),
             BackupScope::Domain(Some(domain)) => format!("DOMAIN {}", domain.as_str()),
@@ -985,7 +985,7 @@ impl Backup {
 impl Restore {
     /// Renders the statement with the clauses it needs, omitting the default `ON EXISTING USER
     /// FAIL`.
-    pub fn to_canonical_nspl(&self) -> String {
+    pub fn to_canonical_plexus(&self) -> String {
         let source = string_literal(&self.source);
         let resume = match self.lifecycle {
             RestoreLifecycle::Stopped => "",
@@ -1024,7 +1024,7 @@ impl Restore {
 
 impl DescribeBackup {
     /// Renders the statement, omitting the default `FORMAT TEXT`.
-    pub fn to_canonical_nspl(&self) -> String {
+    pub fn to_canonical_plexus(&self) -> String {
         let mut statement = format!("DESCRIBE BACKUP {}", string_literal(&self.source));
         if self.format != InspectionFormat::default() {
             statement.push_str(&format!(" FORMAT {}", self.format.as_ref()));
@@ -1036,7 +1036,7 @@ impl DescribeBackup {
 
 impl DescribeTransaction {
     /// Renders the statement with each clause it needs, omitting the default `FORMAT TEXT`.
-    pub fn to_canonical_nspl(&self) -> String {
+    pub fn to_canonical_plexus(&self) -> String {
         let mut statement = "DESCRIBE TRANSACTION".to_string();
         if let TransactionInspectionTarget::Transaction { transaction_id } = &self.request.target {
             statement.push(' ');
@@ -1062,7 +1062,7 @@ fn placement_policy_suffix(policy: PlacementPolicy) -> String {
     }
 }
 
-fn subscription_literal_to_nspl(literal: &SubscriptionLiteral) -> String {
+fn subscription_literal_to_plexus(literal: &SubscriptionLiteral) -> String {
     match literal {
         SubscriptionLiteral::String(value) => string_literal(value),
         SubscriptionLiteral::Number(value) => value.clone(),
@@ -1070,80 +1070,80 @@ fn subscription_literal_to_nspl(literal: &SubscriptionLiteral) -> String {
     }
 }
 
-/// Renders `models` as one canonical NSPL document: each model's `CREATE` statement in the order
+/// Renders `models` as one canonical Plexus document: each model's `CREATE` statement in the order
 /// given, separated by a blank line and ending with a newline.
 ///
 /// A parser reads the document back statement by statement, so the order is the order the models
 /// have to be created in; the caller decides it.
-pub fn canonical_nspl_document<'model, Version: Display + 'model>(
+pub fn canonical_plexus_document<'model, Version: Display + 'model>(
     models: impl IntoIterator<Item = &'model Model<Version>>,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     let mut document = String::new();
     for model in models {
         if !document.is_empty() {
             document.push('\n');
         }
-        document.push_str(&model.to_canonical_nspl()?);
+        document.push_str(&model.to_canonical_plexus()?);
         document.push('\n');
     }
     Ok(document)
 }
 
 impl<Version: Display> Model<Version> {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         match self {
-            Self::Schema(schema) => schema.to_canonical_nspl(),
-            Self::WireJsonSchema(schema) => wire_schema_to_nspl("JSON", schema),
-            Self::WireCborSchema(schema) => wire_schema_to_nspl("CBOR", schema),
-            Self::WireAvroSchema(schema) => wire_schema_to_nspl("AVRO", schema),
-            Self::Codec(codec) => codec.to_canonical_nspl(),
-            Self::ClientKafka(client) => client.to_canonical_nspl(),
-            Self::ClientPulsar(client) => client.to_canonical_nspl(),
-            Self::ClientHttp(client) => client.to_canonical_nspl(),
-            Self::ClientSentry(client) => client.to_canonical_nspl(),
-            Self::ClientOtel(client) => client.to_canonical_nspl(),
-            Self::ClientPrometheus(client) => client.to_canonical_nspl(),
-            Self::ClientMqtt(client) => client.to_canonical_nspl(),
-            Self::ClientNats(client) => client.to_canonical_nspl(),
-            Self::ClientRabbitMq(client) => client.to_canonical_nspl(),
-            Self::ClientRedis(client) => client.to_canonical_nspl(),
-            Self::ClientZeroMq(client) => client.to_canonical_nspl(),
-            Self::ClientSqs(client) => client.to_canonical_nspl(),
-            Self::ClientWebsockets(client) => client.to_canonical_nspl(),
-            Self::ClientSyslog(client) => client.to_canonical_nspl(),
-            Self::ClientClickHouse(client) => client.to_canonical_nspl(),
-            Self::ClientPostgres(client) => client.to_canonical_nspl(),
-            Self::ClientMySql(client) => client.to_canonical_nspl(),
-            Self::ClientMongoDb(client) => client.to_canonical_nspl(),
-            Self::ClientS3(client) => client.to_canonical_nspl(),
-            Self::ClientGcs(client) => client.to_canonical_nspl(),
-            Self::ClientAzureBlob(client) => client.to_canonical_nspl(),
-            Self::ClientIcebergRest(client) => client.to_canonical_nspl(),
-            Self::Vhost(vhost) => vhost.to_canonical_nspl(),
-            Self::Branch(branch) => branch.to_canonical_nspl(),
-            Self::Endpoint(endpoint) => endpoint.to_canonical_nspl(),
-            Self::SignalingProtocol(protocol) => protocol.to_canonical_nspl(),
-            Self::Generator(generator) => generator.to_canonical_nspl(),
-            Self::Inferencer(inference) => inference.to_canonical_nspl(),
-            Self::WasmProcessor(processor) => processor.to_canonical_nspl(),
-            Self::Ingestor(ingestor) => ingestor.to_canonical_nspl(),
-            Self::Reingestor(reingestor) => reingestor.to_canonical_nspl(),
-            Self::Relay(relay) => relay.to_canonical_nspl(),
-            Self::Lookup(lookup) => lookup.to_canonical_nspl(),
-            Self::Junction(junction) => junction.to_canonical_nspl(),
-            Self::Deduplicator(deduplicator) => deduplicator.to_canonical_nspl(),
-            Self::Correlator(correlator) => correlator.to_canonical_nspl(),
-            Self::Reorderer(reorderer) => reorderer.to_canonical_nspl(),
-            Self::WindowProcessor(window_processor) => window_processor.to_canonical_nspl(),
-            Self::Emitter(emitter) => emitter.to_canonical_nspl(),
-            Self::Placement(placement) => placement.to_canonical_nspl(),
-            Self::Udf(udf) => udf.to_canonical_nspl(),
+            Self::Schema(schema) => schema.to_canonical_plexus(),
+            Self::WireJsonSchema(schema) => wire_schema_to_plexus("JSON", schema),
+            Self::WireCborSchema(schema) => wire_schema_to_plexus("CBOR", schema),
+            Self::WireAvroSchema(schema) => wire_schema_to_plexus("AVRO", schema),
+            Self::Codec(codec) => codec.to_canonical_plexus(),
+            Self::ClientKafka(client) => client.to_canonical_plexus(),
+            Self::ClientPulsar(client) => client.to_canonical_plexus(),
+            Self::ClientHttp(client) => client.to_canonical_plexus(),
+            Self::ClientSentry(client) => client.to_canonical_plexus(),
+            Self::ClientOtel(client) => client.to_canonical_plexus(),
+            Self::ClientPrometheus(client) => client.to_canonical_plexus(),
+            Self::ClientMqtt(client) => client.to_canonical_plexus(),
+            Self::ClientNats(client) => client.to_canonical_plexus(),
+            Self::ClientRabbitMq(client) => client.to_canonical_plexus(),
+            Self::ClientRedis(client) => client.to_canonical_plexus(),
+            Self::ClientZeroMq(client) => client.to_canonical_plexus(),
+            Self::ClientSqs(client) => client.to_canonical_plexus(),
+            Self::ClientWebsockets(client) => client.to_canonical_plexus(),
+            Self::ClientSyslog(client) => client.to_canonical_plexus(),
+            Self::ClientClickHouse(client) => client.to_canonical_plexus(),
+            Self::ClientPostgres(client) => client.to_canonical_plexus(),
+            Self::ClientMySql(client) => client.to_canonical_plexus(),
+            Self::ClientMongoDb(client) => client.to_canonical_plexus(),
+            Self::ClientS3(client) => client.to_canonical_plexus(),
+            Self::ClientGcs(client) => client.to_canonical_plexus(),
+            Self::ClientAzureBlob(client) => client.to_canonical_plexus(),
+            Self::ClientIcebergRest(client) => client.to_canonical_plexus(),
+            Self::Vhost(vhost) => vhost.to_canonical_plexus(),
+            Self::Branch(branch) => branch.to_canonical_plexus(),
+            Self::Endpoint(endpoint) => endpoint.to_canonical_plexus(),
+            Self::SignalingProtocol(protocol) => protocol.to_canonical_plexus(),
+            Self::Generator(generator) => generator.to_canonical_plexus(),
+            Self::Inferencer(inference) => inference.to_canonical_plexus(),
+            Self::WasmProcessor(processor) => processor.to_canonical_plexus(),
+            Self::Ingestor(ingestor) => ingestor.to_canonical_plexus(),
+            Self::Reingestor(reingestor) => reingestor.to_canonical_plexus(),
+            Self::Relay(relay) => relay.to_canonical_plexus(),
+            Self::Lookup(lookup) => lookup.to_canonical_plexus(),
+            Self::Junction(junction) => junction.to_canonical_plexus(),
+            Self::Deduplicator(deduplicator) => deduplicator.to_canonical_plexus(),
+            Self::Correlator(correlator) => correlator.to_canonical_plexus(),
+            Self::Reorderer(reorderer) => reorderer.to_canonical_plexus(),
+            Self::WindowProcessor(window_processor) => window_processor.to_canonical_plexus(),
+            Self::Emitter(emitter) => emitter.to_canonical_plexus(),
+            Self::Placement(placement) => placement.to_canonical_plexus(),
+            Self::Udf(udf) => udf.to_canonical_plexus(),
         }
     }
 }
 
 impl CreatePlacement {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut rendered = format!(
             "CREATE PLACEMENT {} FROM {} TO {} {}",
             self.name.as_str(),
@@ -1168,7 +1168,7 @@ impl CreatePlacement {
 }
 
 impl CreateUdf {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let arguments = self
             .arguments
             .iter()
@@ -1204,12 +1204,12 @@ impl CreateUdf {
 }
 
 impl CreateSchema {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let fields = self
             .fields
             .iter()
-            .map(schema_field_to_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?;
+            .map(schema_field_to_plexus)
+            .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?;
 
         Ok(block_statement(
             format!("CREATE SCHEMA {}", self.name.as_str()),
@@ -1219,12 +1219,12 @@ impl CreateSchema {
 }
 
 impl AlterSchema {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let operations = self
             .operations
             .iter()
-            .map(alter_schema_operation_to_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+            .map(alter_schema_operation_to_plexus)
+            .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
             .join(", ");
         Ok(format!(
             "ALTER SCHEMA {} {operations};",
@@ -1234,7 +1234,7 @@ impl AlterSchema {
 }
 
 impl AlterRelay {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let operations = self
             .operations
             .iter()
@@ -1263,12 +1263,12 @@ impl AlterRelay {
 }
 
 impl AlterJunction {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let operations = self
             .operations
             .iter()
-            .map(alter_processor_operation_to_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+            .map(alter_processor_operation_to_plexus)
+            .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
             .join(", ");
         Ok(format!(
             "ALTER JUNCTION {} {operations};",
@@ -1278,12 +1278,12 @@ impl AlterJunction {
 }
 
 impl AlterDeduplicator {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let operations = self
             .operations
             .iter()
-            .map(alter_deduplicator_operation_to_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+            .map(alter_deduplicator_operation_to_plexus)
+            .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
             .join(", ");
         Ok(format!(
             "ALTER DEDUPLICATOR {} {operations};",
@@ -1293,12 +1293,12 @@ impl AlterDeduplicator {
 }
 
 impl AlterReorderer {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let operations = self
             .operations
             .iter()
-            .map(alter_reorderer_operation_to_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+            .map(alter_reorderer_operation_to_plexus)
+            .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
             .join(", ");
         Ok(format!(
             "ALTER REORDERER {} {operations};",
@@ -1308,12 +1308,12 @@ impl AlterReorderer {
 }
 
 impl AlterReingestor {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let operations = self
             .operations
             .iter()
-            .map(alter_processor_operation_to_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+            .map(alter_processor_operation_to_plexus)
+            .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
             .join(", ");
         Ok(format!(
             "ALTER REINGESTOR {} {operations};",
@@ -1323,12 +1323,12 @@ impl AlterReingestor {
 }
 
 impl AlterGenerator {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let operations = self
             .operations
             .iter()
-            .map(alter_generator_operation_to_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+            .map(alter_generator_operation_to_plexus)
+            .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
             .join(", ");
         Ok(format!(
             "ALTER GENERATOR {} {operations};",
@@ -1338,23 +1338,24 @@ impl AlterGenerator {
 }
 
 impl AlterEmitter {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let operations = self
             .operations
             .iter()
-            .map(alter_emitter_operation_to_nspl)
-            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+            .map(alter_emitter_operation_to_plexus)
+            .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
             .join(", ");
         Ok(format!(
-            "ALTER EMITTER {} {operations};",
+            "ALTER {} EMITTER {} {operations};",
+            self.kind.phrase(),
             self.emitter.as_str()
         ))
     }
 }
 
 impl AlterIngestor {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-        let operations = self.alteration.operations_to_nspl()?.join(", ");
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let operations = self.alteration.operations_to_plexus()?.join(", ");
         Ok(format!(
             "ALTER {} INGESTOR {} {operations};",
             self.kind().phrase(),
@@ -1363,66 +1364,57 @@ impl AlterIngestor {
     }
 }
 
-pub fn alter_json_wire_schema_to_canonical_nspl(
+pub fn alter_json_wire_schema_to_canonical_plexus(
     alter: &AlterWireSchema<JsonType>,
-) -> error_stack::Result<String, CanonicalNsplError> {
-    alter_wire_schema_to_nspl("JSON", alter)
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    alter_wire_schema_to_plexus("JSON", alter)
 }
 
-pub fn alter_cbor_wire_schema_to_canonical_nspl(
+pub fn alter_cbor_wire_schema_to_canonical_plexus(
     alter: &AlterWireSchema<JsonType>,
-) -> error_stack::Result<String, CanonicalNsplError> {
-    alter_wire_schema_to_nspl("CBOR", alter)
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    alter_wire_schema_to_plexus("CBOR", alter)
 }
 
-pub fn alter_avro_wire_schema_to_canonical_nspl(
+pub fn alter_avro_wire_schema_to_canonical_plexus(
     alter: &AlterWireSchema<AvroType>,
-) -> error_stack::Result<String, CanonicalNsplError> {
-    alter_wire_schema_to_nspl("AVRO", alter)
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    alter_wire_schema_to_plexus("AVRO", alter)
 }
 
-/// The clauses between `CREATE CLIENT <name>` and its `CONFIG` block.
+/// Pool clauses after a connector-headed client name, before its mount and configuration.
 ///
-/// This is the whole of what a pooled client renders differently: it carries a `POOL SIZE` clause
-/// between the type and the mount, because that is the order the grammar accepts.
-macro_rules! client_head_clauses {
-    ($client:expr, $connector:expr, unpooled) => {
+/// A pool-capable client always declares both bounds in the order its grammar accepts.
+macro_rules! client_pool_clauses {
+    ($client:expr, unpooled) => {
+        Vec::new()
+    };
+    ($client:expr, pooled) => {
         vec![Clause::line(format!(
-            "TYPE {}{}",
-            $connector.keyword(),
-            client_mount_clause($client.mount.as_ref()),
+            "POOL SIZE MIN {} MAX {}",
+            $client.pool.minimum(),
+            $client.pool.maximum(),
         ))]
     };
-    ($client:expr, $connector:expr, pooled) => {{
-        let mut clauses = vec![
-            Clause::line(format!("TYPE {}", $connector.keyword())),
-            Clause::line(format!(
-                "POOL SIZE MIN {} MAX {}",
-                $client.pool.minimum(),
-                $client.pool.maximum(),
-            )),
-        ];
-        if let Some(mount) = $client.mount.as_ref() {
-            clauses.push(Clause::line(format!(
-                "MOUNT {} VERSION {}",
-                mount.resource.as_str(),
-                mount.version
-            )));
-        }
-        clauses
-    }};
 }
 
-macro_rules! impl_standard_client_canonical_nspl {
+macro_rules! impl_standard_client_canonical {
     ($($Client:ident => $pooling:ident;)+) => {
         $(
             impl<Version: Display> $Client<Version> {
-                pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-                    let mut clauses = client_head_clauses!(self, Self::CONNECTOR, $pooling);
+                pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+                    let mut clauses = client_pool_clauses!(self, $pooling);
+                    if let Some(mount) = self.mount.as_ref() {
+                        clauses.push(Clause::line(format!(
+                            "MOUNT {} VERSION {}",
+                            mount.resource.as_str(),
+                            mount.version,
+                        )));
+                    }
                     clauses.push(Clause::braced("CONFIG", config_entry_items(&self.config)?));
 
                     Ok(clause_statement(
-                        format!("CREATE CLIENT {}", self.name.as_str()),
+                        format!("CREATE {} CLIENT {}", Self::CONNECTOR.keyword(), self.name.as_str()),
                         clauses,
                     ))
                 }
@@ -1431,7 +1423,7 @@ macro_rules! impl_standard_client_canonical_nspl {
     };
 }
 
-impl_standard_client_canonical_nspl! {
+impl_standard_client_canonical! {
     CreateClientKafka => unpooled;
     CreateClientPulsar => unpooled;
     CreateClientHttp => unpooled;
@@ -1455,13 +1447,13 @@ impl_standard_client_canonical_nspl! {
 }
 
 impl<Version: Display> CreateClientS3<Version> {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let config = config_entry_items(&self.config)?.join(", ");
 
         Ok(format!(
-            "CREATE CLIENT {} TYPE {}{} CONFIG {{{}}};",
-            self.name.as_str(),
+            "CREATE {} CLIENT {}{} CONFIG {{{}}};",
             Self::CONNECTOR.keyword(),
+            self.name.as_str(),
             client_mount_clause(self.mount.as_ref()),
             config
         ))
@@ -1469,18 +1461,29 @@ impl<Version: Display> CreateClientS3<Version> {
 }
 
 impl<Version: Display> CreateClientWebsockets<Version> {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let mut clauses = Vec::new();
+        if let Some(protocol) = self.signaling_protocol.as_ref() {
+            clauses.push(Clause::line(format!(
+                "WITH SIGNALING PROTOCOL {}",
+                protocol.as_str(),
+            )));
+        }
+        if let Some(mount) = self.mount.as_ref() {
+            clauses.push(Clause::line(format!(
+                "MOUNT {} VERSION {}",
+                mount.resource.as_str(),
+                mount.version,
+            )));
+        }
+        clauses.push(Clause::braced("CONFIG", config_entry_items(&self.config)?));
         Ok(clause_statement(
-            format!("CREATE CLIENT {}", self.name.as_str()),
-            vec![
-                Clause::line(format!(
-                    "TYPE {}{}{}",
-                    Self::CONNECTOR.keyword(),
-                    signaling_protocol_clause(self.signaling_protocol.as_ref()),
-                    client_mount_clause(self.mount.as_ref()),
-                )),
-                Clause::braced("CONFIG", config_entry_items(&self.config)?),
-            ],
+            format!(
+                "CREATE {} CLIENT {}",
+                Self::CONNECTOR.keyword(),
+                self.name.as_str()
+            ),
+            clauses,
         ))
     }
 }
@@ -1504,7 +1507,7 @@ fn signaling_protocol_clause(signaling_protocol: Option<&SignalingProtocolName>)
 }
 
 impl<Version: Display> CreateVhost<Version> {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let tls = match &self.tls {
             Some(tls) => format!(
                 " WITH TLS {} VERSION {}",
@@ -1523,7 +1526,7 @@ impl<Version: Display> CreateVhost<Version> {
 }
 
 impl CreateEndpoint {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         Ok(format!(
             "CREATE ENDPOINT {} ON {} PATH {} TYPE {}{};",
             self.name.as_str(),
@@ -1536,7 +1539,7 @@ impl CreateEndpoint {
 }
 
 impl<Version: Display> CreateSignalingProtocol<Version> {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = String::new();
         if self.on_connect.accept_data {
             clauses.push_str(" ACCEPT DATA");
@@ -1545,9 +1548,9 @@ impl<Version: Display> CreateSignalingProtocol<Version> {
             match step {
                 SignalingStep::Send(programs) => {
                     clauses.push_str(" SEND JAQ ");
-                    clauses.push_str(&jaq_program_list_to_nspl(programs));
+                    clauses.push_str(&jaq_program_list_to_plexus(programs));
                 }
-                SignalingStep::Wait(wait) => clauses.push_str(&wait.to_canonical_nspl()?),
+                SignalingStep::Wait(wait) => clauses.push_str(&wait.to_canonical_plexus()?),
             }
         }
         let protocol_fail = if self.on_connect.fail_matchers.is_empty() {
@@ -1555,14 +1558,14 @@ impl<Version: Display> CreateSignalingProtocol<Version> {
         } else {
             format!(
                 " FAIL JAQ {}",
-                jaq_program_list_to_nspl(&self.on_connect.fail_matchers)
+                jaq_program_list_to_plexus(&self.on_connect.fail_matchers)
             )
         };
 
         Ok(format!(
             "CREATE SIGNALING PROTOCOL {} FORMAT {}{} ON CONNECT{} TIMEOUT {};",
             self.name.as_str(),
-            self.format.to_canonical_nspl()?,
+            self.format.to_canonical_plexus()?,
             protocol_fail,
             clauses,
             self.on_connect.timeout
@@ -1571,7 +1574,7 @@ impl<Version: Display> CreateSignalingProtocol<Version> {
 }
 
 impl<Version: Display> SignalingWireFormat<Version> {
-    fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let Self::Protobuf(config) = self else {
             return Ok(self.as_ref().to_string());
         };
@@ -1588,11 +1591,11 @@ impl<Version: Display> SignalingWireFormat<Version> {
 }
 
 impl SignalingWaitStep {
-    fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-        let mut rendered = format!(" WAIT JAQ {}", jaq_program_list_to_nspl(&self.matchers));
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let mut rendered = format!(" WAIT JAQ {}", jaq_program_list_to_plexus(&self.matchers));
         if !self.fail_matchers.is_empty() {
             rendered.push_str(" FAIL JAQ ");
-            rendered.push_str(&jaq_program_list_to_nspl(&self.fail_matchers));
+            rendered.push_str(&jaq_program_list_to_plexus(&self.fail_matchers));
         }
         if let Some(capture) = self.capture.as_deref() {
             rendered.push_str(" CAPTURE ");
@@ -1605,7 +1608,7 @@ impl SignalingWaitStep {
     }
 }
 
-fn jaq_program_list_to_nspl(programs: &[String]) -> String {
+fn jaq_program_list_to_plexus(programs: &[String]) -> String {
     programs
         .iter()
         .map(|program| string_literal(program))
@@ -1614,7 +1617,7 @@ fn jaq_program_list_to_nspl(programs: &[String]) -> String {
 }
 
 impl<Version: Display> CreateCodec<Version> {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = Vec::new();
         let transformations = match &self.wire_format {
             CodecWireFormat::Json { wire_schema } => {
@@ -1640,7 +1643,7 @@ impl<Version: Display> CreateCodec<Version> {
             }
             CodecWireFormat::Syslog => {
                 if !self.encoding_rules.is_empty() {
-                    return Err(Report::new(CanonicalNsplError::SyslogEncodingRules {
+                    return Err(Report::new(CanonicalPlexusError::SyslogEncodingRules {
                         codec: self.name.clone(),
                     }));
                 }
@@ -1652,7 +1655,7 @@ impl<Version: Display> CreateCodec<Version> {
                 transformations,
             } => {
                 clauses.push(Clause::line(format!("FROM {}", format.as_ref())));
-                codec_jaq_transformations_to_nspl(&self.name, transformations)?
+                codec_jaq_transformations_to_plexus(&self.name, transformations)?
             }
             CodecWireFormat::Protobuf(config) => {
                 // The configuration map is a block of its own; the messages follow it on one line.
@@ -1673,7 +1676,7 @@ impl<Version: Display> CreateCodec<Version> {
                     "MESSAGE {}{batch_message}",
                     string_literal(&config.message)
                 )));
-                codec_jaq_transformations_to_nspl(&self.name, &config.transformations)?
+                codec_jaq_transformations_to_plexus(&self.name, &config.transformations)?
             }
         };
         let encoding_rules = if self.encoding_rules.is_empty() {
@@ -1683,7 +1686,7 @@ impl<Version: Display> CreateCodec<Version> {
                 " ENCODE {}",
                 self.encoding_rules
                     .iter()
-                    .map(codec_encoding_rule_to_nspl)
+                    .map(codec_encoding_rule_to_plexus)
                     .collect::<Vec<_>>()
                     .join(", ")
             )
@@ -1706,22 +1709,24 @@ impl<Version: Display> CreateCodec<Version> {
 /// Renders configuration entries as the items of a `CONFIG` block, in declaration order.
 fn config_entry_items(
     entries: &[ClientConfigEntry],
-) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     entries
         .iter()
-        .map(ClientConfigEntry::to_canonical_nspl)
+        .map(ClientConfigEntry::to_canonical_plexus)
         .collect()
 }
 
 /// Renders the JAQ programs a codec runs; `codec` names the codec a refusal reports.
-fn codec_jaq_transformations_to_nspl(
+fn codec_jaq_transformations_to_plexus(
     codec: &CodecName,
     transformations: &CodecJaqTransformations,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     if !transformations.has_any() {
-        return Err(Report::new(CanonicalNsplError::MissingJaqTransformation {
-            codec: codec.clone(),
-        }));
+        return Err(Report::new(
+            CanonicalPlexusError::MissingJaqTransformation {
+                codec: codec.clone(),
+            },
+        ));
     }
     let mut rendered = String::from(" WITH JAQ TRANSFORMATIONS");
     if let Some(program) = transformations.on_ingestion.as_deref() {
@@ -1739,22 +1744,22 @@ fn codec_jaq_transformations_to_nspl(
     Ok(rendered)
 }
 
-fn codec_encoding_rule_to_nspl(rule: &CodecEncodingRule) -> String {
+fn codec_encoding_rule_to_plexus(rule: &CodecEncodingRule) -> String {
     format!(
         "{} AS {}",
         rule.field.as_str(),
-        codec_encoding_to_nspl(rule.encoding)
+        codec_encoding_to_plexus(rule.encoding)
     )
 }
 
-fn codec_encoding_to_nspl(encoding: CodecEncoding) -> &'static str {
+fn codec_encoding_to_plexus(encoding: CodecEncoding) -> &'static str {
     match encoding {
         CodecEncoding::Rfc3339 => "RFC3339",
     }
 }
 
 impl CreateBranch {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut rendered = format!(
             "CREATE BRANCH {} SCHEMA {} TTL {}",
             self.name.as_str(),
@@ -1774,7 +1779,7 @@ impl CreateBranch {
 }
 
 impl CreateIngestor {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let timestamp = match &self.timestamp_source {
             Some(IngestTimestampSource::Now) => " TIMESTAMP NOW".to_string(),
             Some(IngestTimestampSource::At(field)) => format!(" TIMESTAMP AT {}", field.as_str()),
@@ -1782,7 +1787,7 @@ impl CreateIngestor {
         };
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
-            ingestor_input_body_to_nspl(&self.input)
+            ingestor_input_body_to_plexus(&self.input)
         ))];
         if let Some(codec) = self.input.codec() {
             clauses.push(Clause::line(format!("DECODE USING {}", codec.as_str())));
@@ -1792,7 +1797,7 @@ impl CreateIngestor {
         }
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.extend(processor_outputs_clauses(&self.output_routes)?);
-        clauses.push(Clause::line(general_error_policy_to_nspl(
+        clauses.push(Clause::line(general_error_policy_to_plexus(
             &self.general_error_policy,
         )));
 
@@ -1808,14 +1813,14 @@ impl CreateIngestor {
 }
 
 impl CreateGenerator {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![
             Clause::line(format!(
                 "USING MATERIALIZED STATE {}",
                 self.materialized_relay.as_str()
             )),
             Clause::line(format!("EACH {}", duration_literal(self.each.as_nanos()))),
-            Clause::line(branch_selection_to_nspl(&self.branched_by)),
+            Clause::line(branch_selection_to_plexus(&self.branched_by)),
         ];
         clauses.extend(processor_outputs_clauses(&self.output_routes)?);
 
@@ -1827,7 +1832,7 @@ impl CreateGenerator {
 }
 
 impl CreateRelay {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut rendered = format!(
             "CREATE RELAY {} SCHEMA {}",
             self.name.as_str(),
@@ -1852,7 +1857,7 @@ impl CreateRelay {
 }
 
 impl<Version: Display> CreateLookup<Version> {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         Ok(format!(
             "CREATE HASH MAP {} KEY {} FROM RESOURCE {} VERSION {} PATH {} DECODE USING {};",
             self.name.as_str(),
@@ -1866,7 +1871,7 @@ impl<Version: Display> CreateLookup<Version> {
 }
 
 impl FlushPolicy {
-    pub fn to_canonical_nspl(&self) -> String {
+    pub fn to_canonical_plexus(&self) -> String {
         match self {
             Self::Immediate => "FLUSH IMMEDIATE".to_string(),
             Self::Each {
@@ -1877,11 +1882,11 @@ impl FlushPolicy {
     }
 }
 
-fn commit_policy_to_nspl(policy: &str, max_size: &str) -> String {
+fn commit_policy_to_plexus(policy: &str, max_size: &str) -> String {
     format!("COMMIT EACH {policy} MAX SIZE {max_size}")
 }
 
-fn collect_policy_to_nspl(policy: &InputCollectPolicy) -> String {
+fn collect_policy_to_plexus(policy: &InputCollectPolicy) -> String {
     let max_batch_size = match &policy.max_batch_size {
         Some(size) => format!(" MAX BATCH SIZE {size}"),
         None => String::new(),
@@ -1889,9 +1894,9 @@ fn collect_policy_to_nspl(policy: &InputCollectPolicy) -> String {
     format!("COLLECT FOR {}{max_batch_size}", policy.collect_for)
 }
 
-fn message_error_policy_to_nspl(
+fn message_error_policy_to_plexus(
     policy: &MessageErrorPolicy,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     Ok(match policy {
         MessageErrorPolicy::Ignore => "ON MESSAGE ERROR IGNORE".to_string(),
         MessageErrorPolicy::Log => "ON MESSAGE ERROR LOG".to_string(),
@@ -1901,11 +1906,11 @@ fn message_error_policy_to_nspl(
                 .map(|assignment| {
                     Ok(format!(
                         "{} = {}",
-                        assignment_target_to_nspl(&assignment.target),
-                        expression_to_nspl(&assignment.value)?
+                        assignment_target_to_plexus(&assignment.target),
+                        expression_to_plexus(&assignment.value)?
                     ))
                 })
-                .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+                .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
                 .join(", ");
             format!(
                 "ON MESSAGE ERROR SEND TO {} SET {}",
@@ -1916,9 +1921,9 @@ fn message_error_policy_to_nspl(
     })
 }
 
-fn materialized_state_policy_to_nspl(
+fn materialized_state_policy_to_plexus(
     policy: &MaterializedStatePolicy,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     match policy {
         MaterializedStatePolicy::RequiredSkip => Ok("REQUIRED SKIP".to_string()),
         MaterializedStatePolicy::RequiredWait => Ok("REQUIRED WAIT".to_string()),
@@ -1929,17 +1934,17 @@ fn materialized_state_policy_to_nspl(
                 .map(|assignment| {
                     Ok(format!(
                         "{} = {}",
-                        assignment_target_to_nspl(&assignment.target),
-                        expression_to_nspl(&assignment.value)?
+                        assignment_target_to_plexus(&assignment.target),
+                        expression_to_plexus(&assignment.value)?
                     ))
                 })
-                .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+                .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
                 .join(", ")
         )),
     }
 }
 
-fn general_error_policy_to_nspl(policy: &GeneralErrorPolicy) -> &'static str {
+fn general_error_policy_to_plexus(policy: &GeneralErrorPolicy) -> &'static str {
     match policy {
         GeneralErrorPolicy::Ignore => "ON GENERAL ERROR IGNORE",
         GeneralErrorPolicy::Log => "ON GENERAL ERROR LOG",
@@ -1947,10 +1952,10 @@ fn general_error_policy_to_nspl(policy: &GeneralErrorPolicy) -> &'static str {
 }
 
 impl CreateJunction {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
-            processor_inputs_to_nspl(&self.from)?
+            processor_inputs_to_plexus(&self.from)?
         ))];
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.extend(processor_tail_clauses(
@@ -1971,17 +1976,17 @@ impl CreateJunction {
 }
 
 impl CreateDeduplicator {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
-            processor_inputs_to_nspl(&self.from)?
+            processor_inputs_to_plexus(&self.from)?
         ))];
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "DEDUPLICATE ON {}",
             self.deduplicate_on
                 .iter()
-                .map(expression_to_nspl)
+                .map(expression_to_plexus)
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         )));
@@ -2004,20 +2009,20 @@ impl CreateDeduplicator {
 }
 
 impl CreateCorrelator {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![
-            Clause::line(prefixed_processor_inputs_to_nspl("LEFT", &self.left)?),
-            Clause::line(prefixed_processor_inputs_to_nspl("RIGHT", &self.right)?),
+            Clause::line(prefixed_processor_inputs_to_plexus("LEFT", &self.left)?),
+            Clause::line(prefixed_processor_inputs_to_plexus("RIGHT", &self.right)?),
             Clause::line(format!(
                 "CORRELATE WHERE {}",
-                expression_to_nspl(&self.correlate_where)?
+                expression_to_plexus(&self.correlate_where)?
             )),
             Clause::line(format!("MATCH {}", self.match_policy.as_ref())),
             Clause::line(format!("MAX TIME {}", self.max_time)),
             Clause::line(format!(
                 "ON CORRELATION TIMEOUT {}, {}",
-                correlation_timeout_action_to_nspl(&self.timeout_policy.left),
-                correlation_timeout_action_to_nspl(&self.timeout_policy.right)
+                correlation_timeout_action_to_plexus(&self.timeout_policy.left),
+                correlation_timeout_action_to_plexus(&self.timeout_policy.right)
             )),
         ];
         clauses.extend(processor_tail_clauses(
@@ -2037,7 +2042,7 @@ impl CreateCorrelator {
     }
 }
 
-fn correlation_timeout_action_to_nspl(action: &CorrelationTimeoutAction) -> String {
+fn correlation_timeout_action_to_plexus(action: &CorrelationTimeoutAction) -> String {
     match action {
         CorrelationTimeoutAction::Drop => "DROP".to_string(),
         CorrelationTimeoutAction::SendTo { relay } => format!("SEND TO {}", relay.as_str()),
@@ -2045,17 +2050,17 @@ fn correlation_timeout_action_to_nspl(action: &CorrelationTimeoutAction) -> Stri
 }
 
 impl CreateReorderer {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
-            processor_inputs_to_nspl(&self.from)?
+            processor_inputs_to_plexus(&self.from)?
         ))];
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "BY {}",
             self.order_by
                 .iter()
-                .map(expression_to_nspl)
+                .map(expression_to_plexus)
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         )));
@@ -2078,19 +2083,19 @@ impl CreateReorderer {
 }
 
 impl CreateWindowProcessor {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
-            processor_inputs_to_nspl(&self.from)?
+            processor_inputs_to_plexus(&self.from)?
         ))];
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
             "WIDTH {}",
-            window_bound_to_nspl(&self.width)
+            window_bound_to_plexus(&self.width)
         )));
         clauses.push(Clause::line(format!(
             "STEP {}",
-            window_bound_to_nspl(&self.step)
+            window_bound_to_plexus(&self.step)
         )));
         if let WindowStateLimit::MaxBytes(bytes) = self.state_limit {
             clauses.push(Clause::line(format!("MAX STATE SIZE {}B", bytes.get())));
@@ -2113,54 +2118,35 @@ impl CreateWindowProcessor {
 }
 
 impl CreateEmitter {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
-        let flush_policy = format!(" {}", self.flush_policy.to_canonical_nspl());
-        let commit_policy = match self.sink.commit_policy() {
-            Some((policy, max_size)) => format!(" {}", commit_policy_to_nspl(policy, max_size)),
-            None => String::new(),
-        };
-        // The codec and the commit cadence are written with the sink they belong to: whether either
-        // is legal is a property of the sink, so they nest under it rather than precede it.
-        let mut sink_clauses = Vec::new();
-        if !commit_policy.is_empty() {
-            sink_clauses.push(Clause::line(commit_policy.trim_start().to_string()));
-        }
-        sink_clauses.push(Clause::line(format!(
-            "MODE {}",
-            self.publishing_mode.to_canonical_nspl()
-        )));
-        match &self.body {
-            EmitterBody::Codec { codec } => {
-                sink_clauses.push(Clause::line(format!("ENCODE USING {}", codec.as_str())));
-            }
-            EmitterBody::WithoutBody => sink_clauses.push(Clause::line("WITHOUT BODY".to_string())),
-            EmitterBody::Values | EmitterBody::Client => {}
-        }
-
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
-            processor_inputs_to_nspl(&self.from)?
+            processor_inputs_to_plexus(&self.from)?
         ))];
         clauses.extend(materialized_state_clauses(&self.materialized_state)?);
-        let (sink_head, mut own_clauses) = emit_sink_clauses(&self.sink)?;
-        own_clauses.append(&mut sink_clauses);
-        clauses.push(Clause::group(format!("TO {sink_head}"), own_clauses));
+        let (reference, body) = emitter_destination_parts(&self.connector, &self.body, None)?;
+        let to = if reference.is_empty() {
+            "TO".to_string()
+        } else {
+            format!("TO {reference}")
+        };
+        clauses.push(Clause::group(to, body));
         clauses.extend(route_construction_clauses(&self.construction)?);
         if let Some(batch) = &self.batch {
-            clauses.push(Clause::line(emitter_batch_policy_to_nspl(batch)));
+            clauses.push(Clause::line(emitter_batch_policy_to_plexus(batch)));
         }
-        clauses.push(Clause::line(flush_policy.trim_start().to_string()));
-        clauses.push(Clause::line(message_error_policy_to_nspl(
+        clauses.push(Clause::line(self.flush_policy.to_canonical_plexus()));
+        clauses.push(Clause::line(message_error_policy_to_plexus(
             &self.error_policies.message,
         )?));
-        clauses.push(Clause::line(general_error_policy_to_nspl(
+        clauses.push(Clause::line(general_error_policy_to_plexus(
             &self.error_policies.general,
         )));
-
         Ok(clause_statement(
             format!(
-                "CREATE {} EMITTER {}",
+                "CREATE {} {} EMITTER {}",
                 self.mode.as_ref(),
+                self.connector.kind().phrase(),
                 self.name.as_str()
             ),
             clauses,
@@ -2169,11 +2155,11 @@ impl CreateEmitter {
 }
 
 /// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, with the size in its canonical unit.
-fn emitter_batch_policy_to_nspl(policy: &EmitterBatchPolicy) -> String {
+fn emitter_batch_policy_to_plexus(policy: &EmitterBatchPolicy) -> String {
     format!("BATCH {policy}")
 }
 
-fn window_bound_to_nspl(bound: &WindowBound) -> String {
+fn window_bound_to_plexus(bound: &WindowBound) -> String {
     let mut parts = Vec::new();
     if let Some(messages) = bound.messages {
         parts.push(format!("{messages} MESSAGES"));
@@ -2185,10 +2171,10 @@ fn window_bound_to_nspl(bound: &WindowBound) -> String {
 }
 
 impl CreateReingestor {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
-            processor_inputs_to_nspl(&self.from)?
+            processor_inputs_to_plexus(&self.from)?
         ))];
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.extend(materialized_state_clauses(&self.materialized_state)?);
@@ -2206,10 +2192,10 @@ impl CreateReingestor {
 }
 
 impl<Version: Display> CreateInferencer<Version> {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
-            processor_inputs_to_nspl(&self.from)?
+            processor_inputs_to_plexus(&self.from)?
         ))];
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
@@ -2244,10 +2230,10 @@ impl<Version: Display> CreateInferencer<Version> {
 }
 
 impl<Version: Display> CreateWasmProcessor<Version> {
-    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    pub fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
-            processor_inputs_to_nspl(&self.from)?
+            processor_inputs_to_plexus(&self.from)?
         ))];
         clauses.extend(filter_where_clause(&self.filter_where)?);
         clauses.push(Clause::line(format!(
@@ -2271,7 +2257,7 @@ impl<Version: Display> CreateWasmProcessor<Version> {
             self.rejected_state_policy.as_ref()
         )));
         clauses.push(Clause::line(
-            general_error_policy_to_nspl(&self.global_error_policy).replace("GENERAL", "GLOBAL"),
+            general_error_policy_to_plexus(&self.global_error_policy).replace("GENERAL", "GLOBAL"),
         ));
 
         Ok(clause_statement(
@@ -2287,7 +2273,7 @@ impl<Version: Display> CreateWasmProcessor<Version> {
 
 fn inference_mapping_items(
     mappings: &[InferencerTensorMapping],
-) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     mappings
         .iter()
         .map(|mapping| {
@@ -2307,7 +2293,7 @@ fn inference_mapping_items(
                     })
                     .collect::<Vec<_>>()
                     .join(", "),
-                expression_to_nspl(&mapping.expression)?
+                expression_to_plexus(&mapping.expression)?
             ))
         })
         .collect()
@@ -2315,7 +2301,7 @@ fn inference_mapping_items(
 
 fn inference_output_schema_items(
     declarations: &[InferencerTensorDeclaration],
-) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     declarations
         .iter()
         .map(|declaration| {
@@ -2340,57 +2326,57 @@ fn inference_output_schema_items(
         .collect()
 }
 
-fn from_relay_to_nspl(
+fn from_relay_to_plexus(
     relay: &RelayName,
     from_where: &[ProcessorInputWhere],
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     let where_suffix = from_where
         .iter()
         .find(|item| item.relay == *relay)
         .map(|item| {
-            expression_to_nspl(&item.where_clause).map(|condition| format!(" WHERE {condition}"))
+            expression_to_plexus(&item.where_clause).map(|condition| format!(" WHERE {condition}"))
         })
         .transpose()?
         .unwrap_or_default();
     Ok(format!("{}{where_suffix}", relay.as_str()))
 }
 
-fn processor_inputs_to_nspl(
+fn processor_inputs_to_plexus(
     inputs: &ProcessorInputs,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     let relays = inputs
         .from
         .iter()
-        .map(|relay| from_relay_to_nspl(relay, &inputs.r#where))
+        .map(|relay| from_relay_to_plexus(relay, &inputs.r#where))
         .collect::<Result<Vec<_>, _>>()
         .map(|items| items.join(", "))?;
     let collect = match &inputs.collect_policy {
-        Some(policy) => format!(" {}", collect_policy_to_nspl(policy)),
+        Some(policy) => format!(" {}", collect_policy_to_plexus(policy)),
         None => String::new(),
     };
     Ok(format!("{relays}{collect}"))
 }
 
-fn prefixed_processor_inputs_to_nspl(
+fn prefixed_processor_inputs_to_plexus(
     prefix: &str,
     inputs: &ProcessorInputs,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     Ok(format!(
         "{prefix} FROM {}",
-        processor_inputs_to_nspl(inputs)?
+        processor_inputs_to_plexus(inputs)?
     ))
 }
 
 /// The optional `FILTER WHERE` clause of a processor.
 fn filter_where_clause(
     filter_where: &Option<Expression>,
-) -> error_stack::Result<Option<Clause>, CanonicalNsplError> {
+) -> error_stack::Result<Option<Clause>, CanonicalPlexusError> {
     filter_where
         .as_ref()
         .map(|condition| {
             Ok(Clause::line(format!(
                 "FILTER WHERE {}",
-                expression_to_nspl(condition)?
+                expression_to_plexus(condition)?
             )))
         })
         .transpose()
@@ -2399,11 +2385,11 @@ fn filter_where_clause(
 /// One clause per materialized-state dependency, in declaration order.
 fn materialized_state_clauses(
     dependencies: &[MaterializedStateDependency],
-) -> error_stack::Result<Vec<Clause>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<Clause>, CanonicalPlexusError> {
     dependencies
         .iter()
         .map(|dependency| {
-            let policy = materialized_state_policy_to_nspl(&dependency.policy)?;
+            let policy = materialized_state_policy_to_plexus(&dependency.policy)?;
             Ok(Clause::line(format!(
                 "USING MATERIALIZED STATE {} {policy}",
                 dependency.relay.as_str()
@@ -2417,8 +2403,8 @@ fn processor_tail_clauses(
     branched_by: &BranchSelection,
     materialized_state: &[MaterializedStateDependency],
     outputs: &ProcessorOutputs,
-) -> error_stack::Result<Vec<Clause>, CanonicalNsplError> {
-    let mut clauses = vec![Clause::line(branch_selection_to_nspl(branched_by))];
+) -> error_stack::Result<Vec<Clause>, CanonicalPlexusError> {
+    let mut clauses = vec![Clause::line(branch_selection_to_plexus(branched_by))];
     clauses.extend(materialized_state_clauses(materialized_state)?);
     clauses.extend(processor_outputs_clauses(outputs)?);
     Ok(clauses)
@@ -2427,23 +2413,23 @@ fn processor_tail_clauses(
 /// The routes of a processor, each as a `TO <relay>` group.
 fn processor_outputs_clauses(
     outputs: &ProcessorOutputs,
-) -> error_stack::Result<Vec<Clause>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<Clause>, CanonicalPlexusError> {
     outputs.routes.iter().map(processor_output_clause).collect()
 }
 
 /// One route: the relay it targets, then the clauses that construct and emit its messages.
 fn processor_output_clause(
     output: &crate::ProcessorOutput,
-) -> error_stack::Result<Clause, CanonicalNsplError> {
+) -> error_stack::Result<Clause, CanonicalPlexusError> {
     let mut nested = route_construction_clauses(&output.construction)?;
 
     if let Some(branch) = &output.branch {
-        nested.push(Clause::line(output_branch_to_nspl(branch)?));
+        nested.push(Clause::line(output_branch_to_plexus(branch)?));
     }
     if let Some(policy) = &output.flush_policy {
-        nested.push(Clause::line(policy.to_canonical_nspl()));
+        nested.push(Clause::line(policy.to_canonical_plexus()));
     }
-    nested.push(Clause::line(message_error_policy_to_nspl(
+    nested.push(Clause::line(message_error_policy_to_plexus(
         &output.message_error_policy,
     )?));
 
@@ -2453,21 +2439,21 @@ fn processor_output_clause(
     ))
 }
 
-fn processor_output_to_nspl(
+fn processor_output_to_plexus(
     output: &crate::ProcessorOutput,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     let flush = match &output.flush_policy {
-        Some(policy) => format!(" {}", policy.to_canonical_nspl()),
+        Some(policy) => format!(" {}", policy.to_canonical_plexus()),
         None => String::new(),
     };
-    let construction = route_construction_to_nspl(&output.construction)?;
+    let construction = route_construction_to_plexus(&output.construction)?;
     let construction = if construction.is_empty() {
         String::new()
     } else {
         format!(" {construction}")
     };
     let branch = match &output.branch {
-        Some(branch) => format!(" {}", output_branch_to_nspl(branch)?),
+        Some(branch) => format!(" {}", output_branch_to_plexus(branch)?),
         None => String::new(),
     };
     Ok(format!(
@@ -2476,11 +2462,13 @@ fn processor_output_to_nspl(
         construction,
         branch,
         flush,
-        message_error_policy_to_nspl(&output.message_error_policy)?
+        message_error_policy_to_plexus(&output.message_error_policy)?
     ))
 }
 
-fn schema_field_to_nspl(field: &SchemaField) -> error_stack::Result<String, CanonicalNsplError> {
+fn schema_field_to_plexus(
+    field: &SchemaField,
+) -> error_stack::Result<String, CanonicalPlexusError> {
     Ok(format!(
         "{} {}{}{}",
         field.name.as_str(),
@@ -2490,18 +2478,18 @@ fn schema_field_to_nspl(field: &SchemaField) -> error_stack::Result<String, Cano
     ))
 }
 
-fn alter_deduplicator_operation_to_nspl(
+fn alter_deduplicator_operation_to_plexus(
     operation: &AlterDeduplicatorOperation,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
         AlterDeduplicatorOperation::Processor(operation) => {
-            alter_processor_operation_to_nspl(operation)
+            alter_processor_operation_to_plexus(operation)
         }
         AlterDeduplicatorOperation::SetDeduplicateOn { expressions } => Ok(format!(
             "SET DEDUPLICATE ON {}",
             expressions
                 .iter()
-                .map(expression_to_nspl)
+                .map(expression_to_plexus)
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         )),
@@ -2511,18 +2499,18 @@ fn alter_deduplicator_operation_to_nspl(
     }
 }
 
-fn alter_reorderer_operation_to_nspl(
+fn alter_reorderer_operation_to_plexus(
     operation: &AlterReordererOperation,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
         AlterReordererOperation::Processor(operation) => {
-            alter_processor_operation_to_nspl(operation)
+            alter_processor_operation_to_plexus(operation)
         }
         AlterReordererOperation::SetOrderBy { expressions } => Ok(format!(
             "SET BY {}",
             expressions
                 .iter()
-                .map(expression_to_nspl)
+                .map(expression_to_plexus)
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         )),
@@ -2530,9 +2518,9 @@ fn alter_reorderer_operation_to_nspl(
     }
 }
 
-fn alter_generator_operation_to_nspl(
+fn alter_generator_operation_to_plexus(
     operation: &AlterGeneratorOperation,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
         AlterGeneratorOperation::SetMaterializedState { relay } => {
             Ok(format!("SET MATERIALIZED STATE {}", relay.as_str()))
@@ -2541,31 +2529,31 @@ fn alter_generator_operation_to_nspl(
             Ok(format!("SET EACH {}", duration_literal(each.as_nanos())))
         }
         AlterGeneratorOperation::SetBranching { branching } => {
-            Ok(format!("SET {}", branch_selection_to_nspl(branching)))
+            Ok(format!("SET {}", branch_selection_to_plexus(branching)))
         }
         AlterGeneratorOperation::AddRoute { route } => {
-            Ok(format!("ADD ROUTE {}", processor_output_to_nspl(route)?))
+            Ok(format!("ADD ROUTE {}", processor_output_to_plexus(route)?))
         }
         AlterGeneratorOperation::DropRoute { relay } => {
             Ok(format!("DROP ROUTE TO {}", relay.as_str()))
         }
         AlterGeneratorOperation::ReplaceRoute { route } => Ok(format!(
             "REPLACE ROUTE {}",
-            processor_output_to_nspl(route)?
+            processor_output_to_plexus(route)?
         )),
     }
 }
 
-fn alter_processor_operation_to_nspl(
+fn alter_processor_operation_to_plexus(
     operation: &AlterProcessorOperation,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
         AlterProcessorOperation::AddFrom {
             relay,
             where_clause,
         } => {
             let where_suffix = match where_clause {
-                Some(expression) => format!(" WHERE {}", expression_to_nspl(expression)?),
+                Some(expression) => format!(" WHERE {}", expression_to_plexus(expression)?),
                 None => String::new(),
             };
             Ok(format!("ADD FROM {}{where_suffix}", relay.as_str()))
@@ -2577,28 +2565,28 @@ fn alter_processor_operation_to_nspl(
         } => Ok(format!(
             "ALTER FROM {} SET WHERE {}",
             relay.as_str(),
-            expression_to_nspl(where_clause)?
+            expression_to_plexus(where_clause)?
         )),
         AlterProcessorOperation::AlterFromDropWhere { relay } => {
             Ok(format!("ALTER FROM {} DROP WHERE", relay.as_str()))
         }
         AlterProcessorOperation::SetCollect { policy } => {
-            Ok(format!("SET {}", collect_policy_to_nspl(policy)))
+            Ok(format!("SET {}", collect_policy_to_plexus(policy)))
         }
         AlterProcessorOperation::DropCollect => Ok("DROP COLLECT".to_string()),
         AlterProcessorOperation::SetFilterWhere { where_clause } => Ok(format!(
             "SET FILTER WHERE {}",
-            expression_to_nspl(where_clause)?
+            expression_to_plexus(where_clause)?
         )),
         AlterProcessorOperation::DropFilterWhere => Ok("DROP FILTER WHERE".to_string()),
         AlterProcessorOperation::SetMode { mode } => Ok(format!("SET {}", mode.as_ref())),
         AlterProcessorOperation::SetBranching { branching } => {
-            Ok(format!("SET {}", branch_selection_to_nspl(branching)))
+            Ok(format!("SET {}", branch_selection_to_plexus(branching)))
         }
         AlterProcessorOperation::AddMaterializedState { dependency } => Ok(format!(
             "ADD MATERIALIZED STATE {} {}",
             dependency.relay.as_str(),
-            materialized_state_policy_to_nspl(&dependency.policy)?
+            materialized_state_policy_to_plexus(&dependency.policy)?
         )),
         AlterProcessorOperation::DropMaterializedState { relay } => {
             Ok(format!("DROP MATERIALIZED STATE {}", relay.as_str()))
@@ -2606,31 +2594,31 @@ fn alter_processor_operation_to_nspl(
         AlterProcessorOperation::AlterMaterializedState { relay, policy } => Ok(format!(
             "ALTER MATERIALIZED STATE {} SET {}",
             relay.as_str(),
-            materialized_state_policy_to_nspl(policy)?
+            materialized_state_policy_to_plexus(policy)?
         )),
         AlterProcessorOperation::AddRoute { route } => {
-            Ok(format!("ADD ROUTE {}", processor_output_to_nspl(route)?))
+            Ok(format!("ADD ROUTE {}", processor_output_to_plexus(route)?))
         }
         AlterProcessorOperation::DropRoute { relay } => {
             Ok(format!("DROP ROUTE TO {}", relay.as_str()))
         }
         AlterProcessorOperation::ReplaceRoute { route } => Ok(format!(
             "REPLACE ROUTE {}",
-            processor_output_to_nspl(route)?
+            processor_output_to_plexus(route)?
         )),
     }
 }
 
-fn alter_emitter_operation_to_nspl(
+fn alter_emitter_operation_to_plexus(
     operation: &AlterEmitterOperation,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
         AlterEmitterOperation::AddFrom {
             relay,
             where_clause,
         } => {
             let where_clause = match where_clause {
-                Some(where_clause) => format!(" WHERE {}", expression_to_nspl(where_clause)?),
+                Some(where_clause) => format!(" WHERE {}", expression_to_plexus(where_clause)?),
                 None => String::new(),
             };
             Ok(format!("ADD FROM {}{where_clause}", relay.as_str()))
@@ -2642,30 +2630,20 @@ fn alter_emitter_operation_to_nspl(
         } => Ok(format!(
             "ALTER FROM {} SET WHERE {}",
             relay.as_str(),
-            expression_to_nspl(where_clause)?
+            expression_to_plexus(where_clause)?
         )),
         AlterEmitterOperation::AlterFromDropWhere { relay } => {
             Ok(format!("ALTER FROM {} DROP WHERE", relay.as_str()))
         }
-        AlterEmitterOperation::SetSink {
-            sink,
-            publishing_mode,
+        AlterEmitterOperation::SetTo {
+            destination,
             body,
+            construction,
         } => {
-            let commit_policy = match sink.commit_policy() {
-                Some((policy, max_size)) => format!(" {}", commit_policy_to_nspl(policy, max_size)),
-                None => String::new(),
-            };
-            let body_clause = match body {
-                Some(EmitterBody::Codec { codec }) => format!(" ENCODE USING {}", codec.as_str()),
-                Some(EmitterBody::WithoutBody) => " WITHOUT BODY".to_string(),
-                Some(EmitterBody::Values | EmitterBody::Client) | None => String::new(),
-            };
-            Ok(format!(
-                "SET TO {}{commit_policy} MODE {}{body_clause}",
-                emit_sink_to_nspl(sink)?,
-                publishing_mode.to_canonical_nspl()
-            ))
+            let (reference, clauses) =
+                emitter_destination_parts(destination, body, construction.as_ref())?;
+            let text = clause_statement(format!("SET TO {reference}"), clauses);
+            Ok(text.trim_end_matches(';').to_string())
         }
         AlterEmitterOperation::SetClient { client } => {
             Ok(format!("SET CLIENT {}", client.as_str()))
@@ -2675,56 +2653,57 @@ fn alter_emitter_operation_to_nspl(
         }
         AlterEmitterOperation::DropEncode => Ok("DROP ENCODE".to_string()),
         AlterEmitterOperation::SetCollect { policy } => {
-            Ok(format!("SET {}", collect_policy_to_nspl(policy)))
+            Ok(format!("SET {}", collect_policy_to_plexus(policy)))
         }
         AlterEmitterOperation::DropCollect => Ok("DROP COLLECT".to_string()),
         AlterEmitterOperation::SetAttachment { mode } => Ok(format!("SET {}", mode.as_ref())),
-        AlterEmitterOperation::SetPublishingMode { mode } => {
-            Ok(format!("SET MODE {}", mode.to_canonical_nspl()))
-        }
+        AlterEmitterOperation::SetPublishingMode { mode } => Ok(format!(
+            "SET MODE {}",
+            mode.publishing().to_canonical_plexus()
+        )),
         AlterEmitterOperation::SetBatch { policy } => {
-            Ok(format!("SET {}", emitter_batch_policy_to_nspl(policy)))
+            Ok(format!("SET {}", emitter_batch_policy_to_plexus(policy)))
         }
         AlterEmitterOperation::DropBatch => Ok("DROP BATCH".to_string()),
         AlterEmitterOperation::SetFlush { flush_policy } => {
-            Ok(format!("SET {}", flush_policy.to_canonical_nspl()))
+            Ok(format!("SET {}", flush_policy.to_canonical_plexus()))
         }
         AlterEmitterOperation::SetCommit {
             commit_each,
             max_commit_size,
         } => Ok(format!(
             "SET {}",
-            commit_policy_to_nspl(commit_each, max_commit_size)
+            commit_policy_to_plexus(commit_each, max_commit_size)
         )),
     }
 }
 
 /// The body an ingestor's statement writes after `FROM` for one entity's source, without the
 /// connector its head already names.
-pub(crate) trait IngestorBodyNspl {
-    fn body_to_nspl(&self) -> String;
+pub(crate) trait IngestorBodyPlexus {
+    fn body_to_plexus(&self) -> String;
 }
 
-/// The canonical NSPL of every operation of an alteration, in order.
-pub(crate) fn alter_ingestor_operations_to_nspl<Source: IngestorBodyNspl>(
+/// The canonical Plexus of every operation of an alteration, in order.
+pub(crate) fn alter_ingestor_operations_to_plexus<Source: IngestorBodyPlexus>(
     operations: &[AlterIngestorOperation<Source>],
-) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     let mut rendered = Vec::with_capacity(operations.len());
     for operation in operations {
-        rendered.push(alter_ingestor_operation_to_nspl(operation)?);
+        rendered.push(alter_ingestor_operation_to_plexus(operation)?);
     }
     Ok(rendered)
 }
 
-/// The canonical NSPL of every operation of an alteration of a transport's ingestor, in order.
-pub(crate) fn alter_transport_ingestor_operations_to_nspl<Source: IngestorBodyNspl>(
+/// The canonical Plexus of every operation of an alteration of a transport's ingestor, in order.
+pub(crate) fn alter_transport_ingestor_operations_to_plexus<Source: IngestorBodyPlexus>(
     operations: &[AlterTransportIngestorOperation<Source>],
-) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<String>, CanonicalPlexusError> {
     let mut rendered = Vec::with_capacity(operations.len());
     for operation in operations {
         let operation = match operation {
             AlterTransportIngestorOperation::Ingestor(operation) => {
-                alter_ingestor_operation_to_nspl(operation)?
+                alter_ingestor_operation_to_plexus(operation)?
             }
             AlterTransportIngestorOperation::SetDecodeUsing { codec } => {
                 format!("SET DECODE USING {}", codec.as_str())
@@ -2735,15 +2714,15 @@ pub(crate) fn alter_transport_ingestor_operations_to_nspl<Source: IngestorBodyNs
     Ok(rendered)
 }
 
-fn alter_ingestor_operation_to_nspl<Source: IngestorBodyNspl>(
+fn alter_ingestor_operation_to_plexus<Source: IngestorBodyPlexus>(
     operation: &AlterIngestorOperation<Source>,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
         AlterIngestorOperation::SetSource { source } => {
-            Ok(format!("SET FROM {}", source.body_to_nspl()))
+            Ok(format!("SET FROM {}", source.body_to_plexus()))
         }
         AlterIngestorOperation::SetQuiesce { quiesce } => {
-            Ok(format!("SET QUIESCE {}", ingest_quiesce_to_nspl(quiesce)))
+            Ok(format!("SET QUIESCE {}", ingest_quiesce_to_plexus(quiesce)))
         }
         AlterIngestorOperation::SetTimestamp { source } => Ok(match source {
             IngestTimestampSource::Now => "SET TIMESTAMP NOW".to_string(),
@@ -2754,18 +2733,18 @@ fn alter_ingestor_operation_to_nspl<Source: IngestorBodyNspl>(
         AlterIngestorOperation::DropTimestamp => Ok("DROP TIMESTAMP".to_string()),
         AlterIngestorOperation::SetFilterWhere { where_clause } => Ok(format!(
             "SET FILTER WHERE {}",
-            expression_to_nspl(where_clause)?
+            expression_to_plexus(where_clause)?
         )),
         AlterIngestorOperation::DropFilterWhere => Ok("DROP FILTER WHERE".to_string()),
         AlterIngestorOperation::AddRoute { route } => {
-            Ok(format!("ADD ROUTE {}", processor_output_to_nspl(route)?))
+            Ok(format!("ADD ROUTE {}", processor_output_to_plexus(route)?))
         }
         AlterIngestorOperation::DropRoute { relay } => {
             Ok(format!("DROP ROUTE TO {}", relay.as_str()))
         }
         AlterIngestorOperation::ReplaceRoute { route } => Ok(format!(
             "REPLACE ROUTE {}",
-            processor_output_to_nspl(route)?
+            processor_output_to_plexus(route)?
         )),
         AlterIngestorOperation::SetGeneralError { policy } => Ok(format!(
             "SET GENERAL ERROR {}",
@@ -2777,12 +2756,12 @@ fn alter_ingestor_operation_to_nspl<Source: IngestorBodyNspl>(
     }
 }
 
-fn alter_schema_operation_to_nspl(
+fn alter_schema_operation_to_plexus(
     operation: &AlterSchemaOperation,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     match operation {
         AlterSchemaOperation::AddField { field } => {
-            Ok(format!("ADD FIELD {}", schema_field_to_nspl(field)?))
+            Ok(format!("ADD FIELD {}", schema_field_to_plexus(field)?))
         }
         AlterSchemaOperation::DropField { field } => Ok(format!("DROP FIELD {}", field.as_str())),
         AlterSchemaOperation::RenameField { field, to } => Ok(format!(
@@ -2812,18 +2791,18 @@ fn sensitive_suffix(sensitive: bool) -> &'static str {
     if sensitive { " SENSITIVE" } else { "" }
 }
 
-fn wire_schema_to_nspl<T>(
+fn wire_schema_to_plexus<T>(
     format_kw: &str,
     schema: &CreateWireSchema<T>,
-) -> error_stack::Result<String, CanonicalNsplError>
+) -> error_stack::Result<String, CanonicalPlexusError>
 where
-    T: NativeTypeToNspl,
+    T: NativeTypeToPlexus,
 {
     let fields = schema
         .fields
         .iter()
-        .map(wire_schema_field_to_nspl::<T>)
-        .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?;
+        .map(wire_schema_field_to_plexus::<T>)
+        .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?;
 
     Ok(block_statement(
         format!(
@@ -2835,18 +2814,18 @@ where
     ))
 }
 
-fn alter_wire_schema_to_nspl<T>(
+fn alter_wire_schema_to_plexus<T>(
     format_kw: &str,
     alter: &AlterWireSchema<T>,
-) -> error_stack::Result<String, CanonicalNsplError>
+) -> error_stack::Result<String, CanonicalPlexusError>
 where
-    T: NativeTypeToNspl,
+    T: NativeTypeToPlexus,
 {
     let operations = alter
         .operations
         .iter()
-        .map(alter_wire_schema_operation_to_nspl::<T>)
-        .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
+        .map(alter_wire_schema_operation_to_plexus::<T>)
+        .collect::<error_stack::Result<Vec<_>, CanonicalPlexusError>>()?
         .join(", ");
     Ok(format!(
         "ALTER WIRE {format_kw} SCHEMA {} {operations};",
@@ -2854,16 +2833,16 @@ where
     ))
 }
 
-fn alter_wire_schema_operation_to_nspl<T>(
+fn alter_wire_schema_operation_to_plexus<T>(
     operation: &AlterWireSchemaOperation<T>,
-) -> error_stack::Result<String, CanonicalNsplError>
+) -> error_stack::Result<String, CanonicalPlexusError>
 where
-    T: NativeTypeToNspl,
+    T: NativeTypeToPlexus,
 {
     match operation {
         AlterWireSchemaOperation::SetMode { mode } => Ok(format!("MODE {}", mode.as_ref())),
         AlterWireSchemaOperation::AddField { field } => {
-            Ok(format!("ADD FIELD {}", wire_schema_field_to_nspl(field)?))
+            Ok(format!("ADD FIELD {}", wire_schema_field_to_plexus(field)?))
         }
         AlterWireSchemaOperation::DropField { field } => {
             Ok(format!("DROP FIELD {}", field.as_str()))
@@ -2876,7 +2855,7 @@ where
         AlterWireSchemaOperation::SetFieldType { field, ty } => Ok(format!(
             "ALTER FIELD {} SET TYPE {}",
             field.as_str(),
-            ty.to_nspl_keyword()
+            ty.to_plexus_keyword()
         )),
         AlterWireSchemaOperation::SetFieldOptional { field, optional } => Ok(format!(
             "ALTER FIELD {} {} OPTIONAL",
@@ -2886,16 +2865,16 @@ where
     }
 }
 
-fn wire_schema_field_to_nspl<T>(
+fn wire_schema_field_to_plexus<T>(
     field: &WireSchemaField<T>,
-) -> error_stack::Result<String, CanonicalNsplError>
+) -> error_stack::Result<String, CanonicalPlexusError>
 where
-    T: NativeTypeToNspl,
+    T: NativeTypeToPlexus,
 {
     Ok(format!(
         "{} {}{}",
         field.name.as_str(),
-        field.ty.to_nspl_keyword(),
+        field.ty.to_plexus_keyword(),
         optional_suffix(field.optional)
     ))
 }
@@ -2905,14 +2884,14 @@ fn optional_suffix(optional: bool) -> &'static str {
 }
 
 impl ClientConfigEntry {
-    fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
+    fn to_canonical_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
         let key = string_literal(&self.key);
         let value = string_literal(&self.value);
         Ok(format!("{key} = {value}"))
     }
 }
 
-pub fn ingest_quiesce_to_nspl(quiesce: &crate::IngestQuiesceMode) -> String {
+pub fn ingest_quiesce_to_plexus(quiesce: &crate::IngestQuiesceMode) -> String {
     match quiesce {
         crate::IngestQuiesceMode::Suspend => "SUSPEND".to_string(),
         crate::IngestQuiesceMode::Buffer { max_size, overflow } => format!(
@@ -2935,7 +2914,7 @@ pub fn ingest_quiesce_to_nspl(quiesce: &crate::IngestQuiesceMode) -> String {
 
 impl ClientIngestMode {
     /// The mode clause of a client source, after its `MODE` keyword.
-    pub fn to_canonical_nspl(&self) -> String {
+    pub fn to_canonical_plexus(&self) -> String {
         let Self {
             window,
             ack_timeout,
@@ -2943,14 +2922,14 @@ impl ClientIngestMode {
         } = self;
         format!(
             "ACK {} ACK TIMEOUT {ack_timeout} RETRY POLICY {}",
-            ack_window_to_nspl(window),
-            retry_policy_to_nspl(retry_policy)
+            ack_window_to_plexus(window),
+            retry_policy_to_plexus(retry_policy)
         )
     }
 }
 
 /// `INSTANCES <n>` where a source writes it, which it leaves out at its default of one.
-fn optional_instances_to_nspl(instances: NonZeroU64) -> String {
+fn optional_instances_to_plexus(instances: NonZeroU64) -> String {
     if instances > NonZeroU64::MIN {
         format!(" INSTANCES {instances}")
     } else {
@@ -2958,19 +2937,27 @@ fn optional_instances_to_nspl(instances: NonZeroU64) -> String {
     }
 }
 
-impl IngestorBodyNspl for ClientProducerSource {
+/// ` MAX BODY SIZE <bytes>` as the statement wrote it, or nothing where it wrote no bound.
+fn optional_max_body_size_to_plexus(max_body_size: Option<PayloadSizeLimit>) -> String {
+    match max_body_size {
+        Some(limit) => format!(" MAX BODY SIZE {limit}"),
+        None => String::new(),
+    }
+}
+
+impl IngestorBodyPlexus for ClientProducerIngestor {
     /// Its quiesce mode is always `SUSPEND`, which the grammar requires it to state.
-    fn body_to_nspl(&self) -> String {
+    fn body_to_plexus(&self) -> String {
         format!(
             "SCHEMA {} MODE {} ON QUIESCE SUSPEND",
             self.schema.as_str(),
-            self.mode.to_canonical_nspl()
+            self.mode.to_canonical_plexus()
         )
     }
 }
 
-impl IngestorBodyNspl for HttpRequestSource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for HttpRequestIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             every,
@@ -2985,41 +2972,44 @@ impl IngestorBodyNspl for HttpRequestSource {
             client.as_str(),
             duration_literal(every.as_nanos()),
             mode,
-            ingest_quiesce_to_nspl(quiesce)
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for HttpEndpointSource {
-    fn body_to_nspl(&self) -> String {
-        endpoint_intake_to_nspl(&self.endpoint, &self.mode, &self.quiesce)
+impl IngestorBodyPlexus for HttpEndpointIngestor {
+    fn body_to_plexus(&self) -> String {
+        endpoint_intake_to_plexus(&self.endpoint, &self.mode, &self.quiesce)
     }
 }
 
-impl IngestorBodyNspl for WebsocketsEndpointSource {
-    fn body_to_nspl(&self) -> String {
-        endpoint_intake_to_nspl(&self.endpoint, &self.mode, &self.quiesce)
+impl IngestorBodyPlexus for WebsocketsEndpointIngestor {
+    fn body_to_plexus(&self) -> String {
+        endpoint_intake_to_plexus(&self.endpoint, &self.mode, &self.quiesce)
     }
 }
 
-fn endpoint_intake_to_nspl(
+fn endpoint_intake_to_plexus(
     endpoint: &EndpointName,
     mode: &EndpointIngestMode,
     quiesce: &IngestQuiesceMode,
 ) -> String {
     let mode = match mode {
-        EndpointIngestMode::NoAck => NO_ACK,
+        EndpointIngestMode::NoAck => NO_ACK.to_owned(),
+        EndpointIngestMode::Ack { max, timeout } => {
+            format!("ACK MAX {max} ACK TIMEOUT {timeout}")
+        }
     };
     format!(
         "{} MODE {} ON QUIESCE {}",
         endpoint.as_str(),
         mode,
-        ingest_quiesce_to_nspl(quiesce)
+        ingest_quiesce_to_plexus(quiesce)
     )
 }
 
-impl IngestorBodyNspl for KafkaTopicSource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for KafkaTopicIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             topic,
@@ -3032,16 +3022,16 @@ impl IngestorBodyNspl for KafkaTopicSource {
             "{} TOPIC {} OFFSET BY {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             string_literal(topic.as_str()),
-            kafka_offset_mode_to_nspl(offset_mode),
-            optional_instances_to_nspl(*instances),
-            kafka_mode_to_nspl(mode),
-            ingest_quiesce_to_nspl(quiesce)
+            kafka_offset_mode_to_plexus(offset_mode),
+            optional_instances_to_plexus(*instances),
+            kafka_mode_to_plexus(mode),
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for PulsarTopicSource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for PulsarTopicIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             topic,
@@ -3051,19 +3041,20 @@ impl IngestorBodyNspl for PulsarTopicSource {
             quiesce,
         } = self;
         format!(
-            "{} TOPIC {} SUBSCRIPTION {}{} MODE {} ON QUIESCE {}",
+            "{} TOPIC {} SUBSCRIPTION {} {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             string_literal(topic.as_str()),
-            string_literal(subscription.as_str()),
-            optional_instances_to_nspl(*instances),
-            kafka_mode_to_nspl(mode),
-            ingest_quiesce_to_nspl(quiesce)
+            string_literal(subscription.name.as_str()),
+            subscription.ownership.keywords(),
+            optional_instances_to_plexus(*instances),
+            kafka_mode_to_plexus(mode),
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for MqttTopicSource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for MqttTopicIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             topic,
@@ -3075,15 +3066,15 @@ impl IngestorBodyNspl for MqttTopicSource {
             "{} TOPIC {}{} {} ON QUIESCE {}",
             client.as_str(),
             string_literal(topic.as_str()),
-            optional_instances_to_nspl(*instances),
-            mqtt_mode_to_nspl(mode),
-            ingest_quiesce_to_nspl(quiesce)
+            optional_instances_to_plexus(*instances),
+            mqtt_mode_to_plexus(mode),
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for NatsSubjectSource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for NatsSubjectIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             subject,
@@ -3102,13 +3093,13 @@ impl IngestorBodyNspl for NatsSubjectSource {
             string_literal(queue_group.as_str()),
             instances,
             mode,
-            ingest_quiesce_to_nspl(quiesce)
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for RabbitMqQueueSource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for RabbitMqQueueIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             queue,
@@ -3116,23 +3107,39 @@ impl IngestorBodyNspl for RabbitMqQueueSource {
             mode,
             quiesce,
         } = self;
-        let RabbitMqIngestMode::AckSequential {
-            timeout,
-            retry_policy,
-        } = mode;
+        let mode = mode.to_canonical_plexus();
         format!(
             "{} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             string_literal(queue.as_str()),
-            optional_instances_to_nspl(*instances),
-            ack_sequential_to_nspl(timeout, retry_policy),
-            ingest_quiesce_to_nspl(quiesce)
+            optional_instances_to_plexus(*instances),
+            mode,
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for RedisPubSubSource {
-    fn body_to_nspl(&self) -> String {
+impl RabbitMqIngestMode {
+    /// The complete, canonical Plexus body after `MODE` for this consumer policy.
+    pub fn to_canonical_plexus(&self) -> String {
+        match self {
+            RabbitMqIngestMode::NoAck => NO_ACK.to_string(),
+            RabbitMqIngestMode::AckSequential {
+                timeout,
+                retry_policy,
+            } => ack_sequential_to_plexus(timeout, retry_policy),
+            RabbitMqIngestMode::AckParallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry_policy,
+            } => ack_parallel_to_plexus((*max).into(), batch_timeout, timeout, retry_policy),
+        }
+    }
+}
+
+impl IngestorBodyPlexus for RedisPubSubIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             channel,
@@ -3147,16 +3154,17 @@ impl IngestorBodyNspl for RedisPubSubSource {
             client.as_str(),
             string_literal(channel.as_str()),
             mode,
-            ingest_quiesce_to_nspl(quiesce)
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for PrometheusQuerySource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for PrometheusQueryIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             query,
+            max_body_size,
             every,
             mode,
             quiesce,
@@ -3165,18 +3173,19 @@ impl IngestorBodyNspl for PrometheusQuerySource {
             PrometheusIngestMode::NoAck => NO_ACK,
         };
         format!(
-            "{} QUERY {} EVERY {} MODE {} ON QUIESCE {}",
+            "{} QUERY {}{} EVERY {} MODE {} ON QUIESCE {}",
             client.as_str(),
             string_literal(query),
+            optional_max_body_size_to_plexus(*max_body_size),
             duration_literal(every.as_nanos()),
             mode,
-            ingest_quiesce_to_nspl(quiesce)
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for ZeroMqPullSource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for ZeroMqPullIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             mode,
@@ -3189,13 +3198,13 @@ impl IngestorBodyNspl for ZeroMqPullSource {
             "{} MODE {} ON QUIESCE {}",
             client.as_str(),
             mode,
-            ingest_quiesce_to_nspl(quiesce)
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for SqsQueueSource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for SqsQueueIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             queue,
@@ -3211,34 +3220,51 @@ impl IngestorBodyNspl for SqsQueueSource {
             "{} QUEUE {}{} MODE {} ON QUIESCE {}",
             client.as_str(),
             string_literal(queue.as_str()),
-            optional_instances_to_nspl(*instances),
-            ack_sequential_to_nspl(timeout, retry_policy),
-            ingest_quiesce_to_nspl(quiesce)
+            optional_instances_to_plexus(*instances),
+            ack_sequential_to_plexus(timeout, retry_policy),
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for WebsocketsConnectionSource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for WebsocketsConnectionIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
+            headers,
             mode,
             quiesce,
         } = self;
         let mode = match mode {
             WebsocketsIngestMode::NoAck => NO_ACK,
         };
+        let upgrade = if headers.is_empty() {
+            String::new()
+        } else {
+            let fields: Vec<_> = headers
+                .iter()
+                .map(|header| {
+                    format!(
+                        "{} = {}",
+                        string_literal(&header.name),
+                        string_literal(&header.value)
+                    )
+                })
+                .collect();
+            format!(" HEADERS {{ {} }}", fields.join(", "))
+        };
         format!(
-            "{} MODE {} ON QUIESCE {}",
+            "{}{} MODE {} ON QUIESCE {}",
             client.as_str(),
+            upgrade,
             mode,
-            ingest_quiesce_to_nspl(quiesce)
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
-impl IngestorBodyNspl for SyslogListenerSource {
-    fn body_to_nspl(&self) -> String {
+impl IngestorBodyPlexus for SyslogListenerIngestor {
+    fn body_to_plexus(&self) -> String {
         let Self {
             client,
             mode,
@@ -3251,50 +3277,65 @@ impl IngestorBodyNspl for SyslogListenerSource {
             "{} MODE {} ON QUIESCE {}",
             client.as_str(),
             mode,
-            ingest_quiesce_to_nspl(quiesce)
+            ingest_quiesce_to_plexus(quiesce)
         )
     }
 }
 
 /// The body of a transport source, as its entity's own statement writes it after `FROM`.
-fn ingest_source_body_to_nspl(source: &IngestSource) -> String {
+fn ingest_source_body_to_plexus(source: &IngestorEntity) -> String {
     match source {
-        IngestSource::Http(HttpSource::Request(source)) => source.body_to_nspl(),
-        IngestSource::Http(HttpSource::Endpoint(source)) => source.body_to_nspl(),
-        IngestSource::Kafka(KafkaSource::Topic(source)) => source.body_to_nspl(),
-        IngestSource::Pulsar(PulsarSource::Topic(source)) => source.body_to_nspl(),
-        IngestSource::Mqtt(MqttSource::Topic(source)) => source.body_to_nspl(),
-        IngestSource::Nats(NatsSource::Subject(source)) => source.body_to_nspl(),
-        IngestSource::RabbitMq(RabbitMqSource::Queue(source)) => source.body_to_nspl(),
-        IngestSource::Redis(RedisSource::PubSub(source)) => source.body_to_nspl(),
-        IngestSource::Prometheus(PrometheusSource::Query(source)) => source.body_to_nspl(),
-        IngestSource::ZeroMq(ZeroMqSource::Pull(source)) => source.body_to_nspl(),
-        IngestSource::Sqs(SqsSource::Queue(source)) => source.body_to_nspl(),
-        IngestSource::Websockets(WebsocketsSource::Connection(source)) => source.body_to_nspl(),
-        IngestSource::Websockets(WebsocketsSource::Endpoint(source)) => source.body_to_nspl(),
-        IngestSource::Syslog(SyslogSource::Listener(source)) => source.body_to_nspl(),
+        IngestorEntity::Http(HttpIngestor::Request(source)) => source.body_to_plexus(),
+        IngestorEntity::Http(HttpIngestor::Endpoint(source)) => source.body_to_plexus(),
+        IngestorEntity::Kafka(KafkaIngestor::Topic(source)) => source.body_to_plexus(),
+        IngestorEntity::Pulsar(PulsarIngestor::Topic(source)) => source.body_to_plexus(),
+        IngestorEntity::Mqtt(MqttIngestor::Topic(source)) => source.body_to_plexus(),
+        IngestorEntity::Nats(NatsIngestor::Subject(source)) => source.body_to_plexus(),
+        IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(source)) => source.body_to_plexus(),
+        IngestorEntity::Redis(RedisIngestor::PubSub(source)) => source.body_to_plexus(),
+        IngestorEntity::Prometheus(PrometheusIngestor::Query(source)) => source.body_to_plexus(),
+        IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(source)) => source.body_to_plexus(),
+        IngestorEntity::Sqs(SqsIngestor::Queue(source)) => source.body_to_plexus(),
+        IngestorEntity::Websockets(WebsocketsIngestor::Connection(source)) => {
+            source.body_to_plexus()
+        }
+        IngestorEntity::Websockets(WebsocketsIngestor::Endpoint(source)) => source.body_to_plexus(),
+        IngestorEntity::Syslog(SyslogIngestor::Listener(source)) => source.body_to_plexus(),
     }
 }
 
 /// The body an ingestor's input writes after `FROM`, without its codec.
-pub fn ingestor_input_body_to_nspl(input: &IngestorInput) -> String {
+pub fn ingestor_input_body_to_plexus(input: &IngestorInput) -> String {
     match input {
-        IngestorInput::Transport(input) => ingest_source_body_to_nspl(&input.source),
-        IngestorInput::Client(source) => source.body_to_nspl(),
+        IngestorInput::Transport(input) => ingest_source_body_to_plexus(&input.source),
+        IngestorInput::Client(source) => source.body_to_plexus(),
     }
 }
 
 /// The `NO ACK` delivery mode, one composed phrase.
 const NO_ACK: &str = "NO ACK";
 
-fn ack_sequential_to_nspl(timeout: &str, retry_policy: &RetryPolicy) -> String {
+fn ack_sequential_to_plexus(timeout: &str, retry_policy: &RetryPolicy) -> String {
     format!(
         "ACK SEQUENTIAL ACK TIMEOUT {timeout} RETRY POLICY {}",
-        retry_policy_to_nspl(retry_policy)
+        retry_policy_to_plexus(retry_policy)
     )
 }
 
-fn kafka_offset_mode_to_nspl(offset_mode: &KafkaOffsetMode) -> String {
+fn ack_parallel_to_plexus(
+    max: std::num::NonZeroU64,
+    batch_timeout: &str,
+    timeout: &str,
+    retry_policy: &RetryPolicy,
+) -> String {
+    format!(
+        "ACK PARALLEL MAX {max} BATCH TIMEOUT {batch_timeout} ACK TIMEOUT {timeout} RETRY POLICY \
+         {}",
+        retry_policy_to_plexus(retry_policy)
+    )
+}
+
+fn kafka_offset_mode_to_plexus(offset_mode: &KafkaOffsetMode) -> String {
     match offset_mode {
         KafkaOffsetMode::ConsumerGroup(group) => {
             format!("CONSUMER GROUP {}", string_literal(group.as_str()))
@@ -3303,37 +3344,33 @@ fn kafka_offset_mode_to_nspl(offset_mode: &KafkaOffsetMode) -> String {
     }
 }
 
-fn kafka_mode_to_nspl(mode: &KafkaIngestMode) -> String {
+fn kafka_mode_to_plexus(mode: &KafkaIngestMode) -> String {
     match mode {
         KafkaIngestMode::AckParallel {
             max,
             batch_timeout,
             timeout,
             retry_policy,
-        } => format!(
-            "ACK PARALLEL MAX {max} BATCH TIMEOUT {batch_timeout} ACK TIMEOUT {timeout} RETRY \
-             POLICY {}",
-            retry_policy_to_nspl(retry_policy)
-        ),
+        } => ack_parallel_to_plexus(*max, batch_timeout, timeout, retry_policy),
         KafkaIngestMode::AckSequential {
             timeout,
             retry_policy,
-        } => ack_sequential_to_nspl(timeout, retry_policy),
+        } => ack_sequential_to_plexus(timeout, retry_policy),
         KafkaIngestMode::NoAck => NO_ACK.to_string(),
     }
 }
 
-fn mqtt_mode_to_nspl(mode: &MqttIngestMode) -> String {
+fn mqtt_mode_to_plexus(mode: &MqttIngestMode) -> String {
     match mode {
         MqttIngestMode::NoAck { session, qos } => {
-            format!("{}MODE {NO_ACK}", mqtt_delivery_to_nspl(*session, *qos))
+            format!("{}MODE {NO_ACK}", mqtt_delivery_to_plexus(*session, *qos))
         }
         MqttIngestMode::AckSequential {
             timeout,
             retry_policy,
         } => format!(
             "SESSION PERSISTENT QOS 1 MODE {}",
-            ack_sequential_to_nspl(timeout, retry_policy)
+            ack_sequential_to_plexus(timeout, retry_policy)
         ),
         MqttIngestMode::AckParallel {
             max,
@@ -3343,12 +3380,12 @@ fn mqtt_mode_to_nspl(mode: &MqttIngestMode) -> String {
         } => format!(
             "SESSION PERSISTENT QOS 1 MODE ACK PARALLEL MAX {max} BATCH TIMEOUT {batch_timeout} \
              ACK TIMEOUT {timeout} RETRY POLICY {}",
-            retry_policy_to_nspl(retry_policy)
+            retry_policy_to_plexus(retry_policy)
         ),
     }
 }
 
-fn mqtt_delivery_to_nspl(session: MqttSession, qos: MqttQos) -> String {
+fn mqtt_delivery_to_plexus(session: MqttSession, qos: MqttQos) -> String {
     if session == MqttSession::Clean && qos == MqttQos::AtMostOnce {
         String::new()
     } else {
@@ -3356,184 +3393,358 @@ fn mqtt_delivery_to_nspl(session: MqttSession, qos: MqttQos) -> String {
     }
 }
 
-fn retry_policy_to_nspl(policy: &RetryPolicy) -> String {
+fn retry_policy_to_plexus(policy: &RetryPolicy) -> String {
     format!("BACKOFF {} MAX {}", policy.backoff, policy.max_backoff)
 }
 
-fn ack_window_to_nspl(window: &AckWindow) -> String {
+fn ack_window_to_plexus(window: &AckWindow) -> String {
     match window {
         AckWindow::Sequential => "SEQUENTIAL".to_string(),
         AckWindow::Parallel { max } => format!("PARALLEL MAX {max}"),
     }
 }
 
-impl EmitterPublishingMode {
-    pub fn to_canonical_nspl(&self) -> String {
-        let retry = |policy: &RetryPolicy| format!("RETRY POLICY {}", retry_policy_to_nspl(policy));
+impl EmitterPublishing<'_> {
+    pub fn to_canonical_plexus(&self) -> String {
+        let retry =
+            |policy: &RetryPolicy| format!("RETRY POLICY {}", retry_policy_to_plexus(policy));
         let confirmed =
             |prefix: &str, window: &AckWindow, ack_timeout: &str, policy: &RetryPolicy| {
                 format!(
                     "{prefix} {} ACK TIMEOUT {ack_timeout} {}",
-                    ack_window_to_nspl(window),
+                    ack_window_to_plexus(window),
                     retry(policy)
                 )
             };
         match self {
-            EmitterPublishingMode::ClientAck {
+            EmitterPublishing::ClientAck {
                 window,
                 ack_timeout,
                 retry_policy,
             } => confirmed("ACK", window, ack_timeout, retry_policy),
-            EmitterPublishingMode::NoAck { retry_policy } => {
-                format!("NO_ACK {}", retry(retry_policy))
+            EmitterPublishing::NoAck { retry_policy } => {
+                format!("NO ACK {}", retry(retry_policy))
             }
-            EmitterPublishingMode::BrokerAck {
+            EmitterPublishing::BrokerAck {
                 window,
                 ack_timeout,
                 retry_policy,
             } => confirmed("ACK", window, ack_timeout, retry_policy),
-            EmitterPublishingMode::MqttQos0 { retry_policy } => {
+            EmitterPublishing::MqttQos0 { retry_policy } => {
                 format!("QOS 0 {}", retry(retry_policy))
             }
-            EmitterPublishingMode::MqttQos1 {
+            EmitterPublishing::MqttQos1 {
                 window,
                 ack_timeout,
                 retry_policy,
             } => confirmed("QOS 1 ACK", window, ack_timeout, retry_policy),
-            EmitterPublishingMode::MqttQos2 {
+            EmitterPublishing::MqttQos2 {
                 window,
                 ack_timeout,
                 retry_policy,
             } => confirmed("QOS 2 ACK", window, ack_timeout, retry_policy),
-            EmitterPublishingMode::NatsJetStream {
+            EmitterPublishing::NatsJetStream {
                 window,
                 ack_timeout,
                 retry_policy,
             } => confirmed("JETSTREAM ACK", window, ack_timeout, retry_policy),
-            EmitterPublishingMode::SqsSingle { retry_policy } => {
+            EmitterPublishing::SqsSingle { retry_policy } => {
                 format!("SINGLE {}", retry(retry_policy))
             }
-            EmitterPublishingMode::SqsBatch { retry_policy } => {
+            EmitterPublishing::SqsBatch { retry_policy } => {
                 format!("BATCH {}", retry(retry_policy))
             }
-            EmitterPublishingMode::RequestAck { retry_policy } => {
+            EmitterPublishing::RequestAck { retry_policy } => {
                 format!("ACK {}", retry(retry_policy))
             }
         }
     }
 }
 
-/// Splits a sink into the text that names it and the clauses that configure it.
-///
-/// Only sinks carrying a `VALUES` map have clauses of their own; the rest name themselves fully on
-/// one line. Splitting here is what keeps a wide column mapping from becoming one enormous line.
-fn emit_sink_clauses(
-    sink: &EmitSink,
-) -> error_stack::Result<(String, Vec<Clause>), CanonicalNsplError> {
-    /// A sink that carries a `VALUES` map, split into the text naming it, that map, and the
-    /// clauses written after the map.
-    struct MappedSink<'sink> {
-        head: String,
-        values: &'sink [ClickHouseValueMapping],
-        trailing: Vec<Clause>,
+/// The entity's reference and options, followed by its typed MODE and complete payload.
+fn emitter_destination_parts(
+    destination: &EmitterEntity,
+    body: &EmitterBody,
+    construction: Option<&RouteConstruction>,
+) -> error_stack::Result<(String, Vec<Clause>), CanonicalPlexusError> {
+    let reference = emitter_reference_to_plexus(destination)?;
+    let mut clauses = vec![Clause::line(format!(
+        "MODE {}",
+        destination.publishing().to_canonical_plexus()
+    ))];
+    match body {
+        EmitterBody::Codec { codec } => {
+            clauses.push(Clause::line(format!("ENCODE USING {}", codec.as_str())))
+        }
+        EmitterBody::WithoutBody => clauses.push(Clause::line("WITHOUT BODY".to_string())),
+        EmitterBody::Client => {}
+        EmitterBody::Values => {
+            let mappings = destination.value_mappings();
+            clauses.push(Clause::braced(
+                "VALUES",
+                value_mapping_items(mappings.values)?,
+            ));
+            if !mappings.attributes.is_empty() {
+                clauses.push(Clause::braced(
+                    "ATTRIBUTES",
+                    value_mapping_items(mappings.attributes)?,
+                ));
+            }
+            if !mappings.resource.is_empty() {
+                clauses.push(Clause::braced(
+                    "RESOURCE",
+                    value_mapping_items(mappings.resource)?,
+                ));
+            }
+            match destination {
+                EmitterEntity::Otel(destination) => {
+                    if let Some(scope) = &destination.mappings().scope {
+                        let version = match &scope.version {
+                            Some(version) => format!(" VERSION {}", string_literal(version)),
+                            None => String::new(),
+                        };
+                        clauses.push(Clause::line(format!(
+                            "SCOPE {}{version}",
+                            string_literal(&scope.name)
+                        )));
+                    }
+                }
+                EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+                    conflict_action,
+                    ..
+                })) => clauses.extend(conflict_clauses(postgres_conflict_action_to_plexus(
+                    conflict_action,
+                ))),
+                EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
+                    conflict_action,
+                    ..
+                })) => clauses.extend(conflict_clauses(mysql_conflict_action_to_plexus(
+                    conflict_action,
+                ))),
+                EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
+                    conflict_action,
+                    ..
+                })) => clauses.extend(conflict_clauses(mongodb_conflict_action_to_plexus(
+                    conflict_action,
+                ))),
+                _ => {}
+            }
+        }
     }
-
-    let MappedSink {
-        head,
-        values,
-        mut trailing,
-    } = match sink {
-        EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
-            client,
-            table,
-            values,
-            ..
-        })) => MappedSink {
-            head: format!(
-                "CLICKHOUSE {} INSERT TO TABLE {}",
-                client.as_str(),
-                table.as_str()
-            ),
-            values,
-            trailing: Vec::new(),
-        },
-        EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
-            client,
-            table,
-            values,
-            conflict_action,
-            ..
-        })) => MappedSink {
-            head: format!(
-                "POSTGRES {} INSERT TO TABLE {}",
-                client.as_str(),
-                table.as_str()
-            ),
-            values,
-            trailing: conflict_clauses(postgres_conflict_action_to_nspl(conflict_action)),
-        },
-        EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
-            client,
-            table,
-            values,
-            conflict_action,
-            ..
-        })) => MappedSink {
-            head: format!(
-                "MYSQL {} INSERT TO TABLE {}",
-                client.as_str(),
-                table.as_str()
-            ),
-            values,
-            trailing: conflict_clauses(mysql_conflict_action_to_nspl(conflict_action)),
-        },
-        EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
-            client,
-            collection,
-            values,
-            conflict_action,
-            ..
-        })) => MappedSink {
-            head: format!(
-                "MONGODB {} INSERT TO COLLECTION {}",
-                client.as_str(),
-                collection.as_str()
-            ),
-            values,
-            trailing: conflict_clauses(mongodb_conflict_action_to_nspl(conflict_action)),
-        },
-        EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
-            backend,
-            client,
-            table,
-            values,
-            location,
-            catalog,
-            ..
-        })) => MappedSink {
-            head: format!(
-                "ICEBERG ON {} {} TABLE {}",
-                backend.as_ref(),
-                client.as_str(),
-                table.as_str()
-            ),
-            values,
-            trailing: vec![
-                Clause::line(format!("LOCATION {}", string_literal(location))),
-                Clause::line(match catalog {
-                    IcebergCatalog::Rest { client } => format!("CATALOG {}", client.as_str()),
-                }),
-            ],
-        },
-        other => return Ok((emit_sink_to_nspl(other)?, Vec::new())),
-    };
-
-    let mut clauses = vec![Clause::braced("VALUES", value_mapping_items(values)?)];
-    clauses.append(&mut trailing);
-    Ok((head, clauses))
+    if let Some(construction) = construction {
+        clauses.extend(route_construction_clauses(construction)?);
+    }
+    Ok((reference, clauses))
 }
 
-/// The `ON CONFLICT` clause the row-insert sinks share, absent when the sink declares none.
+impl EmitterEntity {
+    /// The declared connector/entity with its reference, external locator and entity options.
+    pub fn destination_to_plexus(&self) -> error_stack::Result<String, CanonicalPlexusError> {
+        let conflict = match self {
+            EmitterEntity::Postgres(PostgresEmitter::Table(destination)) => {
+                postgres_conflict_action_to_plexus(&destination.conflict_action)
+            }
+            EmitterEntity::MySql(MySqlEmitter::Table(destination)) => {
+                mysql_conflict_action_to_plexus(&destination.conflict_action)
+            }
+            EmitterEntity::MongoDb(MongoDbEmitter::Collection(destination)) => {
+                mongodb_conflict_action_to_plexus(&destination.conflict_action)
+            }
+            _ => String::new(),
+        };
+        Ok(format!(
+            "{} {}{conflict}",
+            self.kind().phrase(),
+            emitter_reference_to_plexus(self)?
+        ))
+    }
+}
+
+fn emitter_reference_to_plexus(
+    destination: &EmitterEntity,
+) -> error_stack::Result<String, CanonicalPlexusError> {
+    Ok(match destination {
+        EmitterEntity::Client(ClientEmitter::Consumer(ClientConsumerEmitter {
+            schema, ..
+        })) => {
+            format!("SCHEMA {}", schema.as_str())
+        }
+        EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
+            client,
+            method,
+            path,
+            ..
+        })) => format!(
+            "{} METHOD {} PATH {}",
+            client.as_str(),
+            expression_to_plexus(method)?,
+            expression_to_plexus(path)?
+        ),
+        EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter { client, topic, .. })) => {
+            format!(
+                "{} TOPIC {}",
+                client.as_str(),
+                string_literal(topic.as_str())
+            )
+        }
+        EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
+            client, topic, ..
+        })) => format!(
+            "{} TOPIC {}",
+            client.as_str(),
+            string_literal(topic.as_str())
+        ),
+        EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
+            client,
+            queue,
+            ..
+        })) => {
+            format!(
+                "{} QUEUE {}",
+                client.as_str(),
+                string_literal(queue.as_str())
+            )
+        }
+        EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
+            client, channel, ..
+        })) => format!(
+            "{} CHANNEL {}",
+            client.as_str(),
+            string_literal(channel.as_str())
+        ),
+        EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter { client, topic, .. })) => format!(
+            "{} TOPIC {}",
+            client.as_str(),
+            string_literal(topic.as_str())
+        ),
+        EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
+            client, subject, ..
+        })) => format!(
+            "{} SUBJECT {}",
+            client.as_str(),
+            string_literal(subject.as_str())
+        ),
+        EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter { client, .. })) => {
+            client.as_str().to_string()
+        }
+        EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+            client,
+            queue,
+            fifo_group,
+            ..
+        })) => {
+            let group = match fifo_group {
+                Some(SqsFifoGroup::FromBranch) => " FIFO GROUP FROM BRANCH".to_string(),
+                Some(SqsFifoGroup::Expression(expression)) => {
+                    format!(" FIFO GROUP {}", expression_to_plexus(expression)?)
+                }
+                None => String::new(),
+            };
+            format!(
+                "{} QUEUE {}{group}",
+                client.as_str(),
+                string_literal(queue.as_str())
+            )
+        }
+        EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter { client, .. })) => {
+            client.as_str().to_string()
+        }
+        EmitterEntity::Syslog(SyslogEmitter::Collector(SyslogCollectorEmitter {
+            client, ..
+        })) => client.as_str().to_string(),
+        EmitterEntity::Otel(destination) => {
+            let metric = match destination {
+                OtelEmitter::Metrics(OtelMetricsEmitter { metric, .. }) => {
+                    format!(" {}", otel_metric_reference(metric))
+                }
+                OtelEmitter::Logs(_) | OtelEmitter::Traces(_) => String::new(),
+            };
+            format!("{}{metric}", destination.client().as_str())
+        }
+        EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
+            client,
+            table,
+            ..
+        })) => format!(
+            "{} TABLE {}",
+            client.as_str(),
+            string_literal(table.as_str())
+        ),
+        EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+            client,
+            table,
+            ..
+        })) => {
+            format!(
+                "{} TABLE {}",
+                client.as_str(),
+                string_literal(table.as_str())
+            )
+        }
+        EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter { client, table, .. })) => {
+            format!(
+                "{} TABLE {}",
+                client.as_str(),
+                string_literal(table.as_str())
+            )
+        }
+        EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
+            client,
+            collection,
+            ..
+        })) => format!(
+            "{} COLLECTION {}",
+            client.as_str(),
+            string_literal(collection.as_str())
+        ),
+        EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
+            client,
+            table,
+            location,
+            catalog,
+            commit_each,
+            max_commit_size,
+            ..
+        })) => {
+            let IcebergCatalog::Rest {
+                client: catalog_client,
+            } = catalog;
+            format!(
+                "{} TABLE {} LOCATION {} CATALOG {} {}",
+                client.as_str(),
+                string_literal(table.as_str()),
+                string_literal(location),
+                catalog_client.as_str(),
+                commit_policy_to_plexus(commit_each, max_commit_size)
+            )
+        }
+    })
+}
+
+fn otel_metric_reference(metric: &OtelMetric) -> String {
+    let description = match &metric.description {
+        Some(description) => format!(" DESCRIPTION {}", string_literal(description)),
+        None => String::new(),
+    };
+    let kind = match &metric.kind {
+        OtelMetricKind::Gauge => "GAUGE".to_string(),
+        OtelMetricKind::Sum {
+            monotonic,
+            temporality,
+        } => {
+            let monotonic = if *monotonic { " MONOTONIC" } else { "" };
+            format!("SUM{monotonic} {}", temporality.as_ref())
+        }
+        OtelMetricKind::Histogram { temporality } => format!("HISTOGRAM {}", temporality.as_ref()),
+    };
+    format!(
+        "METRIC {} UNIT {}{description} {kind}",
+        string_literal(&metric.name),
+        string_literal(&metric.unit)
+    )
+}
+
+/// The `ON CONFLICT` clause the row-insert emitters share, absent when the emitter declares none.
 fn conflict_clauses(conflict_action: String) -> Vec<Clause> {
     let mut clauses = Vec::new();
     if !conflict_action.trim().is_empty() {
@@ -3542,254 +3753,21 @@ fn conflict_clauses(conflict_action: String) -> Vec<Clause> {
     clauses
 }
 
-fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
-    match sink {
-        EmitSink::Client(ClientSink::Consumer(ClientConsumerSink { schema })) => {
-            Ok(format!("CLIENT SCHEMA {}", schema.as_str()))
-        }
-        EmitSink::Http(HttpSink::Request(HttpRequestSink {
-            client,
-            method,
-            path,
-        })) => Ok(format!(
-            "HTTP {} METHOD {} PATH {}",
-            client.as_str(),
-            expression_to_nspl(method)?,
-            expression_to_nspl(path)?
-        )),
-        EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink { client, topic })) => Ok(format!(
-            "KAFKA {} TOPIC {}",
-            client.as_str(),
-            topic.as_str()
-        )),
-        EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink { client, topic })) => Ok(format!(
-            "PULSAR {} TOPIC {}",
-            client.as_str(),
-            topic.as_str()
-        )),
-        EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink { client, queue })) => Ok(
-            format!("RABBITMQ {} QUEUE {}", client.as_str(), queue.as_str()),
-        ),
-        EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink { client, channel })) => Ok(format!(
-            "REDIS PUBSUB {} CHANNEL {}",
-            client.as_str(),
-            channel.as_str()
-        )),
-        EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink { client, topic })) => {
-            Ok(format!("MQTT {} TOPIC {}", client.as_str(), topic.as_str()))
-        }
-        EmitSink::Nats(NatsSink::Subject(NatsSubjectSink { client, subject })) => Ok(format!(
-            "NATS {} SUBJECT {}",
-            client.as_str(),
-            subject.as_str()
-        )),
-        EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink { client })) => {
-            Ok(format!("ZEROMQ {}", client.as_str()))
-        }
-        EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
-            client,
-            queue,
-            fifo_group,
-        })) => {
-            // A queue is written bare, whatever its length: the grammar reads it as words and
-            // whole numbers joined by hyphens, with an optional `.fifo` suffix, and has no quoted
-            // form a longer or unusual name could fall back to.
-            let fifo_group = match fifo_group {
-                Some(SqsFifoGroup::FromBranch) => " FIFO GROUP FROM BRANCH".to_string(),
-                Some(SqsFifoGroup::Expression(expression)) => {
-                    format!(" FIFO GROUP {}", expression_to_nspl(expression)?)
-                }
-                None => String::new(),
-            };
-            Ok(format!(
-                "SQS {} QUEUE {}{}",
-                client.as_str(),
-                queue,
-                fifo_group
-            ))
-        }
-        EmitSink::Sentry(SentrySink::Event(SentryEventSink { client })) => {
-            Ok(format!("SENTRY {}", client.as_str()))
-        }
-        EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink { client })) => {
-            Ok(format!("SYSLOG {}", client.as_str()))
-        }
-        EmitSink::Otel(sink) => {
-            let OtelMappings {
-                values,
-                attributes,
-                resource,
-                scope,
-            } = sink.mappings();
-            let signal = match sink {
-                OtelSink::Logs(_) => "LOGS".to_string(),
-                OtelSink::Traces(_) => "TRACES".to_string(),
-                OtelSink::Metrics(OtelMetricsSink { metric, .. }) => {
-                    let description = match &metric.description {
-                        Some(description) => {
-                            format!(" DESCRIPTION {}", string_literal(description))
-                        }
-                        None => String::new(),
-                    };
-                    let kind = match &metric.kind {
-                        OtelMetricKind::Gauge => "GAUGE".to_string(),
-                        OtelMetricKind::Sum {
-                            monotonic,
-                            temporality,
-                        } => format!(
-                            "SUM{} {}",
-                            if *monotonic { " MONOTONIC" } else { "" },
-                            temporality.as_ref()
-                        ),
-                        OtelMetricKind::Histogram { temporality } => {
-                            format!("HISTOGRAM {}", temporality.as_ref())
-                        }
-                    };
-                    format!(
-                        "METRIC {} UNIT {}{} {}",
-                        string_literal(&metric.name),
-                        string_literal(&metric.unit),
-                        description,
-                        kind
-                    )
-                }
-            };
-            let attributes = if attributes.is_empty() {
-                String::new()
-            } else {
-                format!(" ATTRIBUTES {{{}}}", value_mappings_to_nspl(attributes)?)
-            };
-            let resource = if resource.is_empty() {
-                String::new()
-            } else {
-                format!(" RESOURCE {{{}}}", value_mappings_to_nspl(resource)?)
-            };
-            let scope = match scope {
-                Some(scope) => {
-                    let version = match &scope.version {
-                        Some(version) => format!(" VERSION {}", string_literal(version)),
-                        None => String::new(),
-                    };
-                    format!(" SCOPE {}{version}", string_literal(&scope.name))
-                }
-                None => String::new(),
-            };
-            Ok(format!(
-                "OTEL {} {} VALUES {{{}}}{}{}{}",
-                sink.client().as_str(),
-                signal,
-                value_mappings_to_nspl(values)?,
-                attributes,
-                resource,
-                scope
-            ))
-        }
-        EmitSink::ClickHouse(ClickHouseSink::Table(ClickHouseTableSink {
-            client,
-            table,
-            values,
-            ..
-        })) => {
-            let mappings = value_mappings_to_nspl(values)?;
-            Ok(format!(
-                "CLICKHOUSE {} INSERT TO TABLE {} VALUES {{{}}}",
-                client.as_str(),
-                table.as_str(),
-                mappings,
-            ))
-        }
-        EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
-            client,
-            table,
-            values,
-            conflict_action,
-            ..
-        })) => {
-            let mappings = value_mappings_to_nspl(values)?;
-            let conflict_action = postgres_conflict_action_to_nspl(conflict_action);
-            Ok(format!(
-                "POSTGRES {} INSERT TO TABLE {} VALUES {{{}}}{}",
-                client.as_str(),
-                table.as_str(),
-                mappings,
-                conflict_action,
-            ))
-        }
-        EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
-            client,
-            table,
-            values,
-            conflict_action,
-            ..
-        })) => {
-            let mappings = value_mappings_to_nspl(values)?;
-            let conflict_action = mysql_conflict_action_to_nspl(conflict_action);
-            Ok(format!(
-                "MYSQL {} INSERT TO TABLE {} VALUES {{{}}}{}",
-                client.as_str(),
-                table.as_str(),
-                mappings,
-                conflict_action,
-            ))
-        }
-        EmitSink::MongoDb(MongoDbSink::Collection(MongoDbCollectionSink {
-            client,
-            collection,
-            values,
-            conflict_action,
-            ..
-        })) => {
-            let mappings = value_mappings_to_nspl(values)?;
-            let conflict_action = mongodb_conflict_action_to_nspl(conflict_action);
-            Ok(format!(
-                "MONGODB {} INSERT TO COLLECTION {} VALUES {{{}}}{}",
-                client.as_str(),
-                collection.as_str(),
-                mappings,
-                conflict_action,
-            ))
-        }
-        EmitSink::Iceberg(IcebergSink::Table(IcebergTableSink {
-            backend,
-            client,
-            table,
-            values,
-            location,
-            catalog,
-            ..
-        })) => {
-            let mappings = value_mappings_to_nspl(values)?;
-            let catalog = match catalog {
-                IcebergCatalog::Rest { client } => format!("CATALOG {}", client.as_str()),
-            };
-            Ok(format!(
-                "ICEBERG ON {} {} TABLE {} VALUES {{{}}} LOCATION {} {}",
-                backend.as_ref(),
-                client.as_str(),
-                table.as_str(),
-                mappings,
-                string_literal(location),
-                catalog
-            ))
-        }
-    }
-}
-
-fn postgres_conflict_action_to_nspl(action: &PostgresConflictAction) -> String {
+fn postgres_conflict_action_to_plexus(action: &PostgresConflictAction) -> String {
     match action {
         PostgresConflictAction::None => String::new(),
         PostgresConflictAction::DoNothing { target } => {
-            let target = conflict_target_to_nspl(target);
+            let target = conflict_target_to_plexus(target);
             format!(" ON CONFLICT{target} DO NOTHING")
         }
         PostgresConflictAction::DoUpdate { target } => {
-            let target = conflict_target_to_nspl(target);
+            let target = conflict_target_to_plexus(target);
             format!(" ON CONFLICT{target} DO UPDATE")
         }
     }
 }
 
-fn mysql_conflict_action_to_nspl(action: &MySqlConflictAction) -> String {
+fn mysql_conflict_action_to_plexus(action: &MySqlConflictAction) -> String {
     match action {
         MySqlConflictAction::None => String::new(),
         MySqlConflictAction::DoNothing => " ON CONFLICT DO NOTHING".to_string(),
@@ -3797,21 +3775,21 @@ fn mysql_conflict_action_to_nspl(action: &MySqlConflictAction) -> String {
     }
 }
 
-fn mongodb_conflict_action_to_nspl(action: &MongoDbConflictAction) -> String {
+fn mongodb_conflict_action_to_plexus(action: &MongoDbConflictAction) -> String {
     match action {
         MongoDbConflictAction::None => String::new(),
         MongoDbConflictAction::DoNothing { target } => {
-            let target = conflict_target_to_nspl(target);
+            let target = conflict_target_to_plexus(target);
             format!(" ON CONFLICT{target} DO NOTHING")
         }
         MongoDbConflictAction::DoUpdate { target } => {
-            let target = conflict_target_to_nspl(target);
+            let target = conflict_target_to_plexus(target);
             format!(" ON CONFLICT{target} DO UPDATE")
         }
     }
 }
 
-fn conflict_target_to_nspl(target: &[String]) -> String {
+fn conflict_target_to_plexus(target: &[String]) -> String {
     if target.is_empty() {
         String::new()
     } else {
@@ -3864,11 +3842,11 @@ fn parse_as_to_keyword(parse_as: &ParseAsType) -> String {
 /// Renders an `F64` literal so that it lexes back as a float.
 ///
 /// `f64`'s `Display` drops a zero fraction, so `80.0` would otherwise render as `80` and reparse as
-/// an `I64`. NSPL decides float-versus-integer purely on the presence of a decimal point.
-fn float_literal(literal: Float64Literal) -> error_stack::Result<String, CanonicalNsplError> {
+/// an `I64`. Plexus decides float-versus-integer purely on the presence of a decimal point.
+fn float_literal(literal: Float64Literal) -> error_stack::Result<String, CanonicalPlexusError> {
     let value = literal.value();
     if !value.is_finite() {
-        return Err(Report::new(CanonicalNsplError::UnrepresentableFloat {
+        return Err(Report::new(CanonicalPlexusError::UnrepresentableFloat {
             value: literal,
         }));
     }
@@ -3882,7 +3860,7 @@ fn float_literal(literal: Float64Literal) -> error_stack::Result<String, Canonic
 }
 
 /// Renders a duration as one whole number of the largest unit that divides it
-/// exactly, the only form an NSPL duration literal reads.
+/// exactly, the only form a Plexus duration literal reads.
 ///
 /// A duration's `Display` spells every component, as in `1s 500ms`, which a duration literal cannot
 /// hold, so `1500ms` would otherwise render as text that no longer parses. Zero is written in seconds.
@@ -3910,7 +3888,7 @@ fn duration_literal(nanos: impl Into<u128>) -> String {
 
 /// Renders a stored byte count using the largest binary prefix that divides it exactly.
 ///
-/// Byte sizes elsewhere in NSPL keep the author's spelling, but WASM memory limits are stored as a
+/// Byte sizes elsewhere in Plexus keep the author's spelling, but WASM memory limits are stored as a
 /// count, so `64MiB` would otherwise come back as `67108864B`. Only exact multiples take a prefix,
 /// which keeps the rendering total, deterministic, and lossless.
 fn byte_size_literal(bytes: NonZeroU64) -> String {
@@ -3934,7 +3912,7 @@ fn byte_size_literal(bytes: NonZeroU64) -> String {
 /// Wraps `value` in a dollar-quoted delimiter that first occurs where the closing delimiter
 /// starts.
 ///
-/// NSPL dollar-quoting is verbatim: the body needs no escaping, so this represents any string,
+/// Plexus dollar-quoting is verbatim: the body needs no escaping, so this represents any string,
 /// including one spanning several lines or mixing quote styles. A lexer ends the body at the first
 /// delimiter it reads, so the tag escalates until neither the body nor the body running into the
 /// closing delimiter completes one early: a body ending in `$s` would otherwise close on the `$s$`
@@ -3952,11 +3930,11 @@ fn dollar_quote(value: &str, tag: &str) -> String {
     format!("{delimiter}{value}{delimiter}")
 }
 
-/// Renders `value` as an NSPL string literal.
+/// Renders `value` as a Plexus string literal.
 ///
 /// Single quotes are preferred, double quotes carry an embedded apostrophe, and anything the quoted
 /// forms cannot express verbatim -- a newline, or both quote styles at once -- falls back to
-/// dollar-quoting. Every string is therefore representable, and NSPL reads a string literal
+/// dollar-quoting. Every string is therefore representable, and Plexus reads a string literal
 /// verbatim wherever it appears, so the result reads back as exactly `value`.
 pub fn string_literal(value: &str) -> String {
     let has_single = value.contains('\'');
@@ -3972,15 +3950,15 @@ pub fn string_literal(value: &str) -> String {
     }
 }
 
-trait NativeTypeToNspl {
-    fn to_nspl_keyword(&self) -> String;
+trait NativeTypeToPlexus {
+    fn to_plexus_keyword(&self) -> String;
 }
 
-impl<T> NativeTypeToNspl for T
+impl<T> NativeTypeToPlexus for T
 where
     T: AsRef<str>,
 {
-    fn to_nspl_keyword(&self) -> String {
+    fn to_plexus_keyword(&self) -> String {
         self.as_ref().to_ascii_uppercase()
     }
 }
@@ -3994,7 +3972,7 @@ mod tests {
 
     use crate::{
         AckMode, AckWindow, AvroType, BinaryOperator, BranchSelection, ClientIngestMode,
-        ClientPoolBounds, ClientProducerSource, ClientResourceMount, CodecEncoding,
+        ClientPoolBounds, ClientProducerIngestor, ClientResourceMount, CodecEncoding,
         CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
         CodecWireFormat, CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
         CreateClientHttp, CreateClientKafka, CreateClientMqtt, CreateClientNats,
@@ -4003,27 +3981,29 @@ mod tests {
         CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator, CreateEmitter,
         CreateEndpoint, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor,
         CreateRelay, CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost,
-        CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterBody, EmitterPublishingMode,
-        EndpointIngestMode, EndpointType, ErrorPolicies, Expression, FieldScope, FlushPolicy,
-        GeneralErrorPolicy, HttpConfigEntry, HttpEndpointSource, HttpRequestIngestMode,
-        HttpRequestSource, IngestSource, JsonType, KafkaConfigEntry, KafkaIngestMode,
-        KafkaOffsetMode, KafkaSink, KafkaTopicSink, KafkaTopicSource, Literal, MessageErrorPolicy,
-        Model, MongoDbCollectionSink, MongoDbConflictAction, MongoDbSink, MongoDbValueMapping,
-        MqttIngestMode, MqttQos, MqttSession, MqttSink, MqttTopicSink, MqttTopicSource,
-        MySqlConflictAction, MySqlSink, MySqlTableSink, MySqlValueMapping, NatsIngestMode,
-        NatsSink, NatsSubjectSink, NatsSubjectSource, OutputBranch, ParseAsType, PlacementPolicy,
-        PostgresConflictAction, PostgresSink, PostgresTableSink, PostgresValueMapping,
-        ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry,
-        PrometheusIngestMode, PrometheusQuerySource, PulsarSink, PulsarTopicSink,
-        PulsarTopicSource, RabbitMqIngestMode, RabbitMqQueueSink, RabbitMqQueueSource,
-        RabbitMqSink, RedisPubSubIngestMode, RedisPubSubSink, RedisPubSubSource, RedisSink,
+        CreateWindowProcessor, CreateWireSchema, EmitterBody, EmitterEntity, EndpointIngestMode,
+        EndpointType, ErrorPolicies, Expression, FieldScope, FlushPolicy, GeneralErrorPolicy,
+        HttpConfigEntry, HttpEndpointIngestor, HttpRequestIngestMode, HttpRequestIngestor,
+        IngestorEntity, JsonType, KafkaConfigEntry, KafkaEmitter, KafkaIngestMode, KafkaOffsetMode,
+        KafkaTopicEmitter, KafkaTopicIngestor, Literal, MessageErrorPolicy, Model,
+        MongoDbCollectionEmitter, MongoDbConflictAction, MongoDbEmitter, MongoDbValueMapping,
+        MqttEmitter, MqttIngestMode, MqttQos, MqttSession, MqttTopicEmitter, MqttTopicIngestor,
+        MySqlConflictAction, MySqlEmitter, MySqlTableEmitter, MySqlValueMapping, NatsEmitter,
+        NatsIngestMode, NatsSubjectEmitter, NatsSubjectIngestor, OutputBranch, ParseAsType,
+        PlacementPolicy, PostgresConflictAction, PostgresEmitter, PostgresTableEmitter,
+        PostgresValueMapping, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+        PrometheusConfigEntry, PrometheusIngestMode, PrometheusQueryIngestor, PulsarEmitter,
+        PulsarSubscription, PulsarSubscriptionOwnership, PulsarTopicEmitter, PulsarTopicIngestor,
+        RabbitMqEmitter, RabbitMqIngestMode, RabbitMqQueueEmitter, RabbitMqQueueIngestor,
+        RedisEmitter, RedisPubSubEmitter, RedisPubSubIngestMode, RedisPubSubIngestor,
         RelayBranching, RetryPolicy, RouteConstruction, SchemaField, SentryConfigEntry,
-        SentryEventSink, SentrySink, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
-        SignalingWireFormat, SqsIngestMode, SqsQueueSink, SqsQueueSource, SqsSink,
-        SyslogCollectorSink, SyslogIngestMode, SyslogListenerSource, SyslogSink, UdfArgument,
-        UdfLanguage, UdfReturn, WebsocketsConnectionSource, WebsocketsEndpointSource,
-        WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
-        ZeroMqPullSource, ZeroMqPushSink, ZeroMqSink, expression_to_nspl,
+        SentryEmitter, SentryEventEmitter, SignalingProtobufConfig, SignalingStep,
+        SignalingWaitStep, SignalingWireFormat, SqsEmitter, SqsIngestMode, SqsQueueEmitter,
+        SqsQueueIngestor, SyslogCollectorEmitter, SyslogEmitter, SyslogIngestMode,
+        SyslogListenerIngestor, UdfArgument, UdfLanguage, UdfReturn, WebsocketsConnectionIngestor,
+        WebsocketsEndpointIngestor, WebsocketsIngestMode, WindowBound, WindowStateLimit,
+        WireSchemaField, ZeroMqEmitter, ZeroMqIngestMode, ZeroMqPullIngestor, ZeroMqPushEmitter,
+        expression_to_plexus,
     };
 
     fn named<N>(raw: &str) -> N
@@ -4034,13 +4014,6 @@ mod tests {
         N::try_from(raw).expect("valid name")
     }
 
-    fn retry_policy() -> RetryPolicy {
-        RetryPolicy {
-            backoff: "250ms".to_string(),
-            max_backoff: "30s".to_string(),
-        }
-    }
-
     fn batch_policy(max_messages: u32, max_size: &str) -> crate::EmitterBatchPolicy {
         crate::EmitterBatchPolicy {
             max_messages: crate::BatchMessageLimit::try_from(max_messages)
@@ -4048,12 +4021,6 @@ mod tests {
             max_size: max_size
                 .parse()
                 .assured("the fixture size is a whole number of bytes"),
-        }
-    }
-
-    fn request_ack_mode() -> EmitterPublishingMode {
-        EmitterPublishingMode::RequestAck {
-            retry_policy: retry_policy(),
         }
     }
 
@@ -4159,9 +4126,9 @@ mod tests {
             ],
         });
 
-        let nspl = schema.to_canonical_nspl().expect("must render");
+        let plexus = schema.to_canonical_plexus().expect("must render");
         assert_eq!(
-            nspl,
+            plexus,
             "CREATE WIRE AVRO SCHEMA latency MODE STRICT (\n  p99 DOUBLE,\n  created_at STRING\n);"
         );
     }
@@ -4186,9 +4153,9 @@ mod tests {
             ],
         };
 
-        let nspl = schema.to_canonical_nspl().expect("must render");
+        let plexus = schema.to_canonical_plexus().expect("must render");
         assert_eq!(
-            nspl,
+            plexus,
             "CREATE SCHEMA latency (\n  p99 F64,\n  created_at DATETIME\n);"
         );
     }
@@ -4212,7 +4179,7 @@ mod tests {
         };
 
         assert_eq!(
-            schema.to_canonical_nspl().expect("must render"),
+            schema.to_canonical_plexus().expect("must render"),
             "CREATE SCHEMA tensors (\n  matrix ARRAY<F32, 2, 3>\n);"
         );
     }
@@ -4228,10 +4195,10 @@ mod tests {
             ],
         };
 
-        let nspl = model.to_canonical_nspl().expect("must render");
+        let plexus = model.to_canonical_plexus().expect("must render");
         assert_eq!(
-            nspl,
-            "CREATE CLIENT kafka_main\n  TYPE KAFKA\n  CONFIG {\n    'bootstrap.servers' = \
+            plexus,
+            "CREATE KAFKA CLIENT kafka_main\n  CONFIG {\n    'bootstrap.servers' = \
              'host1:9092',\n    'enable.auto.commit' = 'true'\n  };"
         );
     }
@@ -4248,19 +4215,19 @@ mod tests {
         };
 
         assert_eq!(
-            model.to_canonical_nspl().expect("must render"),
-            "CREATE CLIENT k\n  TYPE KAFKA\n  CONFIG {\n    'quoted' = $s$both ' and \"$s$\n  };"
+            model.to_canonical_plexus().expect("must render"),
+            "CREATE KAFKA CLIENT k\n  CONFIG {\n    'quoted' = $s$both ' and \"$s$\n  };"
         );
     }
 
     #[test]
     fn canonical_error_display_includes_original_value() {
-        let err = super::CanonicalNsplError::UnrepresentableFloat {
+        let err = super::CanonicalPlexusError::UnrepresentableFloat {
             value: crate::Float64Literal::new(f64::INFINITY),
         };
         assert_eq!(
             err.to_string(),
-            "cannot represent non-finite float in NSPL: inf"
+            "cannot represent non-finite float in Plexus: inf"
         );
     }
 
@@ -4284,7 +4251,7 @@ mod tests {
         });
 
         assert_eq!(
-            schema.to_canonical_nspl().expect("must render"),
+            schema.to_canonical_plexus().expect("must render"),
             "CREATE WIRE JSON SCHEMA payload MODE STRICT (\n  items ARRAY,\n  active BOOLEAN\n);"
         );
     }
@@ -4302,7 +4269,7 @@ mod tests {
         });
 
         assert_eq!(
-            schema.to_canonical_nspl().expect("must render"),
+            schema.to_canonical_plexus().expect("must render"),
             "CREATE WIRE CBOR SCHEMA payload MODE LOOSE (\n  active BOOLEAN\n);"
         );
     }
@@ -4329,11 +4296,11 @@ mod tests {
         });
 
         assert_eq!(
-            internal.to_canonical_nspl().expect("must render"),
+            internal.to_canonical_plexus().expect("must render"),
             "CREATE SCHEMA latency (\n  p99 F64 OPTIONAL\n);"
         );
         assert_eq!(
-            wire.to_canonical_nspl().expect("must render"),
+            wire.to_canonical_plexus().expect("must render"),
             "CREATE WIRE JSON SCHEMA payload MODE STRICT (\n  active BOOLEAN OPTIONAL\n);"
         );
     }
@@ -4350,9 +4317,9 @@ mod tests {
                         value: "https://example.com".to_string(),
                     }],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT http_main\n  TYPE HTTP\n  CONFIG {\n    'base_url' = 'https://example.com'\n  };",
+                "CREATE HTTP CLIENT http_main\n  CONFIG {\n    'base_url' = 'https://example.com'\n  };",
             ),
             (
                 CreateClientSentry::<u64> {
@@ -4363,9 +4330,9 @@ mod tests {
                         value: "https://key@sentry.example/42".to_string(),
                     }],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT sentry_main\n  TYPE SENTRY\n  CONFIG {\n    'dsn' = 'https://key@sentry.example/42'\n  };",
+                "CREATE SENTRY CLIENT sentry_main\n  CONFIG {\n    'dsn' = 'https://key@sentry.example/42'\n  };",
             ),
             (
                 CreateClientMqtt::<u64> {
@@ -4373,9 +4340,9 @@ mod tests {
                     mount: None,
                     config: vec![config_entry("host", "mqtt.internal")],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT mqtt_main\n  TYPE MQTT\n  CONFIG {\n    'host' = 'mqtt.internal'\n  };",
+                "CREATE MQTT CLIENT mqtt_main\n  CONFIG {\n    'host' = 'mqtt.internal'\n  };",
             ),
             (
                 CreateClientNats::<u64> {
@@ -4383,9 +4350,9 @@ mod tests {
                     mount: None,
                     config: vec![config_entry("servers", "nats://localhost:4222")],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT nats_main\n  TYPE NATS\n  CONFIG {\n    'servers' = 'nats://localhost:4222'\n  };",
+                "CREATE NATS CLIENT nats_main\n  CONFIG {\n    'servers' = 'nats://localhost:4222'\n  };",
             ),
             (
                 CreateClientPrometheus::<u64> {
@@ -4396,9 +4363,9 @@ mod tests {
                         value: "http://prometheus:9090".to_string(),
                     }],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT prom_main\n  TYPE PROMETHEUS\n  CONFIG {\n    'url' = 'http://prometheus:9090'\n  };",
+                "CREATE PROMETHEUS CLIENT prom_main\n  CONFIG {\n    'url' = 'http://prometheus:9090'\n  };",
             ),
             (
                 CreateClientRabbitMq::<u64> {
@@ -4406,9 +4373,9 @@ mod tests {
                     mount: None,
                     config: vec![config_entry("uri", "amqp://guest:guest@localhost:5672")],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT rmq_main\n  TYPE RABBITMQ\n  CONFIG {\n    'uri' = 'amqp://guest:guest@localhost:5672'\n  };",
+                "CREATE RABBITMQ CLIENT rmq_main\n  CONFIG {\n    'uri' = 'amqp://guest:guest@localhost:5672'\n  };",
             ),
             (
                 CreateClientRedis::<u64> {
@@ -4417,9 +4384,9 @@ mod tests {
                     mount: None,
                     config: vec![config_entry("url", "redis://localhost:6379")],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT redis_main\n  TYPE REDIS\n  POOL SIZE MIN 1 MAX 4\n  CONFIG {\n    'url' = 'redis://localhost:6379'\n  };",
+                "CREATE REDIS CLIENT redis_main\n  POOL SIZE MIN 1 MAX 4\n  CONFIG {\n    'url' = 'redis://localhost:6379'\n  };",
             ),
             (
                 CreateClientPostgres::<u64> {
@@ -4437,9 +4404,9 @@ mod tests {
                         config_entry("tls_ca_file", "{{ dev_tls }}/ca.pem"),
                     ],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT postgres_tls\n  TYPE POSTGRES\n  POOL SIZE MIN 0 MAX 1\n  MOUNT dev_tls VERSION 3\n  CONFIG {\n    'addr' = 'postgresql://db.example.com/nervix?sslmode=verify-full',\n    'tls_ca_file' = '{{ dev_tls }}/ca.pem'\n  };",
+                "CREATE POSTGRES CLIENT postgres_tls\n  POOL SIZE MIN 0 MAX 1\n  MOUNT dev_tls VERSION 3\n  CONFIG {\n    'addr' = 'postgresql://db.example.com/nervix?sslmode=verify-full',\n    'tls_ca_file' = '{{ dev_tls }}/ca.pem'\n  };",
             ),
             (
                 CreateClientZeroMq::<u64> {
@@ -4447,9 +4414,9 @@ mod tests {
                     mount: None,
                     config: vec![config_entry("bind", "tcp://*:5555")],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT zmq_main\n  TYPE ZEROMQ\n  CONFIG {\n    'bind' = 'tcp://*:5555'\n  };",
+                "CREATE ZEROMQ CLIENT zmq_main\n  CONFIG {\n    'bind' = 'tcp://*:5555'\n  };",
             ),
             (
                 CreateClientSyslog::<u64> {
@@ -4464,9 +4431,9 @@ mod tests {
                         config_entry("tls_ca_file", "{{ syslog_tls }}/ca.pem"),
                     ],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT syslog_main\n  TYPE SYSLOG MOUNT syslog_tls VERSION 2\n  CONFIG {\n    'protocol' = 'tls',\n    'addr' = 'logs.example.com:6514',\n    'tls_ca_file' = '{{ syslog_tls }}/ca.pem'\n  };",
+                "CREATE SYSLOG CLIENT syslog_main\n  MOUNT syslog_tls VERSION 2\n  CONFIG {\n    'protocol' = 'tls',\n    'addr' = 'logs.example.com:6514',\n    'tls_ca_file' = '{{ syslog_tls }}/ca.pem'\n  };",
             ),
             (
                 CreateClientSqs::<u64> {
@@ -4474,9 +4441,9 @@ mod tests {
                     mount: None,
                     config: vec![config_entry("region", "us-east-1")],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT sqs_main\n  TYPE SQS\n  CONFIG {\n    'region' = 'us-east-1'\n  };",
+                "CREATE SQS CLIENT sqs_main\n  CONFIG {\n    'region' = 'us-east-1'\n  };",
             ),
             (
                 CreateClientWebsockets::<u64> {
@@ -4485,9 +4452,9 @@ mod tests {
                     signaling_protocol: None,
                     config: vec![config_entry("url", "wss://example.com/socket")],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT ws_main\n  TYPE WEBSOCKETS\n  CONFIG {\n    'url' = 'wss://example.com/socket'\n  };",
+                "CREATE WEBSOCKETS CLIENT ws_main\n  CONFIG {\n    'url' = 'wss://example.com/socket'\n  };",
             ),
             (
                 CreateClientWebsockets::<u64> {
@@ -4496,9 +4463,9 @@ mod tests {
                     signaling_protocol: Some(named("binance_ws")),
                     config: vec![config_entry("url", "wss://example.com/socket")],
                 }
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
-                "CREATE CLIENT ws_main\n  TYPE WEBSOCKETS WITH SIGNALING PROTOCOL binance_ws\n  CONFIG {\n    'url' = 'wss://example.com/socket'\n  };",
+                "CREATE WEBSOCKETS CLIENT ws_main\n  WITH SIGNALING PROTOCOL binance_ws\n  CONFIG {\n    'url' = 'wss://example.com/socket'\n  };",
             ),
         ];
 
@@ -4515,7 +4482,7 @@ mod tests {
             tls: None,
         };
         assert_eq!(
-            vhost.to_canonical_nspl().expect("must render"),
+            vhost.to_canonical_plexus().expect("must render"),
             "CREATE VHOST public example.com, api.example.com;"
         );
 
@@ -4528,7 +4495,7 @@ mod tests {
             }),
         };
         assert_eq!(
-            tls_vhost.to_canonical_nspl().expect("must render"),
+            tls_vhost.to_canonical_plexus().expect("must render"),
             "CREATE VHOST secure secure.example.com WITH TLS certs VERSION 7;"
         );
 
@@ -4540,7 +4507,7 @@ mod tests {
             signaling_protocol: None,
         };
         assert_eq!(
-            endpoint.to_canonical_nspl().expect("must render"),
+            endpoint.to_canonical_plexus().expect("must render"),
             "CREATE ENDPOINT orders_http ON public PATH '/orders' TYPE HTTP;"
         );
         let websocket_endpoint = CreateEndpoint {
@@ -4551,7 +4518,9 @@ mod tests {
             signaling_protocol: Some(named("binance_ws")),
         };
         assert_eq!(
-            websocket_endpoint.to_canonical_nspl().expect("must render"),
+            websocket_endpoint
+                .to_canonical_plexus()
+                .expect("must render"),
             "CREATE ENDPOINT orders_ws ON public PATH '/ws' TYPE WEBSOCKETS WITH SIGNALING \
              PROTOCOL binance_ws;"
         );
@@ -4572,7 +4541,9 @@ mod tests {
             },
         };
         assert_eq!(
-            signaling_protocol.to_canonical_nspl().expect("must render"),
+            signaling_protocol
+                .to_canonical_plexus()
+                .expect("must render"),
             r#"CREATE SIGNALING PROTOCOL binance_ws FORMAT JSON ON CONNECT SEND JAQ '{method: "SUBSCRIBE", id: 1}' WAIT JAQ '.id == 1 and .result == null' TIMEOUT 5s;"#
         );
 
@@ -4607,7 +4578,7 @@ mod tests {
         };
         assert_eq!(
             protobuf_signaling_protocol
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
             "CREATE SIGNALING PROTOCOL orders_ws FORMAT PROTOBUF USING RESOURCE proto_bundle \
              VERSION 2 CONFIG {'file' = 'signaling.proto'} SEND MESSAGE 'nervix.test.Subscribe' \
@@ -4625,7 +4596,7 @@ mod tests {
             encoding_rules: Vec::new(),
         };
         assert_eq!(
-            codec.to_canonical_nspl().expect("must render"),
+            codec.to_canonical_plexus().expect("must render"),
             "CREATE CODEC orders_codec\n  FROM WIRE JSON SCHEMA orders_wire\n  TO SCHEMA orders;"
         );
 
@@ -4636,7 +4607,7 @@ mod tests {
             encoding_rules: Vec::new(),
         };
         assert_eq!(
-            syslog_codec.to_canonical_nspl().expect("must render"),
+            syslog_codec.to_canonical_plexus().expect("must render"),
             "CREATE CODEC syslog_codec\n  FROM SYSLOG\n  TO SCHEMA syslog_event;"
         );
 
@@ -4653,7 +4624,7 @@ mod tests {
         };
         assert_eq!(
             codec_with_encoding
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
             "CREATE CODEC orders_codec\n  FROM WIRE JSON SCHEMA orders_wire\n  TO SCHEMA orders\n  ENCODE created_at AS RFC3339;"
         );
@@ -4672,7 +4643,7 @@ mod tests {
             encoding_rules: Vec::new(),
         };
         assert_eq!(
-            codec_with_jaq.to_canonical_nspl().expect("must render"),
+            codec_with_jaq.to_canonical_plexus().expect("must render"),
             "CREATE CODEC orders_codec\n  FROM JSON\n  TO SCHEMA orders\n  WITH JAQ \
              TRANSFORMATIONS ON INGESTION '.payload' ON EMITTING '{payload: .}';"
         );
@@ -4691,7 +4662,7 @@ mod tests {
             encoding_rules: Vec::new(),
         };
         assert_eq!(
-            ingestion_codec.to_canonical_nspl().expect("must render"),
+            ingestion_codec.to_canonical_plexus().expect("must render"),
             "CREATE CODEC orders_ingestion\n  FROM JSON\n  TO SCHEMA orders\n  WITH JAQ \
              TRANSFORMATIONS ON INGESTION '.payload';"
         );
@@ -4710,7 +4681,7 @@ mod tests {
             encoding_rules: Vec::new(),
         };
         assert_eq!(
-            cbor_codec.to_canonical_nspl().expect("must render"),
+            cbor_codec.to_canonical_plexus().expect("must render"),
             "CREATE CODEC orders_cbor\n  FROM CBOR\n  TO SCHEMA orders\n  WITH JAQ \
              TRANSFORMATIONS ON INGESTION '.' ON EMITTING '.';"
         );
@@ -4736,7 +4707,7 @@ mod tests {
             encoding_rules: Vec::new(),
         };
         assert_eq!(
-            protobuf_codec.to_canonical_nspl().expect("must render"),
+            protobuf_codec.to_canonical_plexus().expect("must render"),
             "CREATE CODEC orders_proto\n  FROM PROTOBUF USING RESOURCE proto_bundle VERSION 3\n  \
              CONFIG {\n    'file' = 'order.proto'\n  }\n  MESSAGE 'nervix.test.Order'\n  TO \
              SCHEMA orders\n  WITH JAQ TRANSFORMATIONS ON INGESTION '.payload' ON EMITTING \
@@ -4762,7 +4733,7 @@ mod tests {
         };
         assert_eq!(
             batching_protobuf_codec
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect("must render"),
             "CREATE CODEC orders_proto\n  FROM PROTOBUF USING RESOURCE proto_bundle VERSION 3\n  \
              CONFIG {}\n  MESSAGE 'nervix.test.Order' BATCH MESSAGE 'nervix.test.OrderBatch'\n  \
@@ -4778,7 +4749,7 @@ mod tests {
             materialized_state: None,
         };
         assert_eq!(
-            relay.to_canonical_nspl().expect("must render"),
+            relay.to_canonical_plexus().expect("must render"),
             "CREATE RELAY orders_stream SCHEMA orders BRANCHED BY by_orders CAPACITY 1;"
         );
 
@@ -4790,7 +4761,7 @@ mod tests {
             materialized_state: None,
         };
         assert_eq!(
-            relay.to_canonical_nspl().expect("must render"),
+            relay.to_canonical_plexus().expect("must render"),
             "CREATE RELAY orders_stream SCHEMA orders UNBRANCHED CAPACITY 1;"
         );
 
@@ -4805,7 +4776,7 @@ mod tests {
             materialized_state: Vec::new(),
         };
         assert_eq!(
-            junction.to_canonical_nspl().expect("must render"),
+            junction.to_canonical_plexus().expect("must render"),
             "CREATE ATTACHED JUNCTION orders_junction\n  FROM orders_a, orders_b COLLECT FOR 25ms \
              MAX BATCH SIZE 2MiB\n  BRANCHED BY by_tenant_branch\n  TO orders_all\n    FLUSH EACH \
              100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
@@ -4823,7 +4794,7 @@ mod tests {
             materialized_state: Vec::new(),
         };
         assert_eq!(
-            deduplicator.to_canonical_nspl().expect("must render"),
+            deduplicator.to_canonical_plexus().expect("must render"),
             "CREATE DETACHED DEDUPLICATOR orders_dedup\n  FROM orders_in\n  DEDUPLICATE ON \
              input.transaction_id\n  MAX TIME 10m\n  BRANCHED BY by_tenant_branch\n  TO \
              orders_out\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
@@ -4861,7 +4832,7 @@ mod tests {
             materialized_state: Vec::new(),
         };
         assert_eq!(
-            correlator.to_canonical_nspl().expect("must render"),
+            correlator.to_canonical_plexus().expect("must render"),
             "CREATE ATTACHED CORRELATOR orders_correlator\n  LEFT FROM orders_left, \
              orders_left_archive COLLECT FOR 10ms\n  RIGHT FROM orders_right COLLECT FOR 20ms MAX \
              BATCH SIZE 1MiB\n  CORRELATE WHERE left.id = right.id\n  MATCH EARLIEST\n  MAX TIME \
@@ -4908,7 +4879,7 @@ mod tests {
             materialized_state: Vec::new(),
         };
         assert_eq!(
-            window_processor.to_canonical_nspl().expect("must render"),
+            window_processor.to_canonical_plexus().expect("must render"),
             "CREATE ATTACHED WINDOW PROCESSOR latency_window\n  FROM orders_in\n  WIDTH 100 \
              MESSAGES 10s DURATION\n  STEP 10 MESSAGES 1s DURATION\n  BRANCHED BY \
              by_tenant_branch\n  TO orders_p99\n    SET latency_p99 = \
@@ -4925,7 +4896,7 @@ mod tests {
             materialized_state: Vec::new(),
         };
         assert_eq!(
-            reingestor.to_canonical_nspl().expect("must render"),
+            reingestor.to_canonical_plexus().expect("must render"),
             "CREATE ATTACHED REINGESTOR orders_repartition\n  FROM orders_in\n  TO orders_out\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG;"
         );
 
@@ -4956,7 +4927,7 @@ mod tests {
             materialized_state: Vec::new(),
         };
         assert_eq!(
-            route_reingestor.to_canonical_nspl().expect("must render"),
+            route_reingestor.to_canonical_plexus().expect("must render"),
             "CREATE DETACHED REINGESTOR orders_splitter\n  FROM orders_in\n  FILTER WHERE \
              active\n  TO orders_errors\n    WHERE level = 'error'\n    UNBRANCHED\n    FLUSH \
              EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE ERROR LOG\n  TO orders_warn\n    SET \
@@ -4967,92 +4938,141 @@ mod tests {
     }
 
     #[test]
-    fn renders_emitters_for_all_sink_variants() {
-        let sinks = [
+    fn renders_emitters_for_all_emitter_variants() {
+        let emitters = [
             (
-                EmitSink::Kafka(KafkaSink::Topic(KafkaTopicSink {
+                EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
+                    mode: crate::KafkaTopicPublishingMode::NoAck {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("kafka_main"),
                     topic: named("orders"),
                 })),
-                "KAFKA kafka_main TOPIC orders",
+                "kafka_main TOPIC 'orders'",
             ),
             (
-                EmitSink::Pulsar(PulsarSink::Topic(PulsarTopicSink {
+                EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
+                    mode: crate::PulsarTopicPublishingMode::NoAck {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("pulsar_main"),
                     topic: named("orders"),
                 })),
-                "PULSAR pulsar_main TOPIC orders",
+                "pulsar_main TOPIC 'orders'",
             ),
             (
-                EmitSink::RabbitMq(RabbitMqSink::Queue(RabbitMqQueueSink {
+                EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
+                    mode: crate::RabbitMqQueuePublishingMode::NoAck {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("rmq_main"),
                     queue: named("orders_q"),
                 })),
-                "RABBITMQ rmq_main QUEUE orders_q",
+                "rmq_main QUEUE 'orders_q'",
             ),
             (
-                EmitSink::Redis(RedisSink::PubSub(RedisPubSubSink {
+                EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
+                    mode: crate::RedisPubSubPublishingMode::NoAck {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("redis_main"),
                     channel: named("orders_ch"),
                 })),
-                "REDIS PUBSUB redis_main CHANNEL orders_ch",
+                "redis_main CHANNEL 'orders_ch'",
             ),
             (
-                EmitSink::Mqtt(MqttSink::Topic(MqttTopicSink {
+                EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
+                    mode: crate::MqttTopicPublishingMode::Qos0 {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("mqtt_main"),
                     topic: named("orders_topic"),
                 })),
-                "MQTT mqtt_main TOPIC orders_topic",
+                "mqtt_main TOPIC 'orders_topic'",
             ),
             (
-                EmitSink::Nats(NatsSink::Subject(NatsSubjectSink {
+                EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
+                    mode: crate::NatsSubjectPublishingMode::NoAck {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("nats_main"),
                     subject: named("orders_subject"),
                 })),
-                "NATS nats_main SUBJECT orders_subject",
+                "nats_main SUBJECT 'orders_subject'",
             ),
             (
-                EmitSink::ZeroMq(ZeroMqSink::Push(ZeroMqPushSink {
+                EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
+                    mode: crate::ZeroMqPushPublishingMode::NoAck {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("zmq_main"),
                 })),
-                "ZEROMQ zmq_main",
+                "zmq_main",
             ),
             (
-                EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+                EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+                    mode: crate::SqsQueuePublishingMode::Single {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("sqs_main"),
-                    queue: "orders_queue".to_string(),
+                    queue: crate::SqsQueueName::parse("orders_queue").expect("valid queue"),
                     fifo_group: None,
                 })),
-                "SQS sqs_main QUEUE orders_queue",
+                "sqs_main QUEUE 'orders_queue'",
             ),
             (
-                EmitSink::Sentry(SentrySink::Event(SentryEventSink {
+                EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
+                    mode: crate::SentryEventPublishingMode::Ack {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("sentry_main"),
                 })),
-                "SENTRY sentry_main",
+                "sentry_main",
             ),
             (
-                EmitSink::Syslog(SyslogSink::Collector(SyslogCollectorSink {
+                EmitterEntity::Syslog(SyslogEmitter::Collector(SyslogCollectorEmitter {
+                    mode: crate::SyslogCollectorPublishingMode::NoAck {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("syslog_main"),
                 })),
-                "SYSLOG syslog_main",
+                "syslog_main",
             ),
         ];
 
-        for (sink, rendered_sink) in sinks {
-            let publishing_mode = match &sink {
-                EmitSink::Mqtt(_) => EmitterPublishingMode::MqttQos0 {
-                    retry_policy: retry_policy(),
-                },
-                EmitSink::Sqs(_) => EmitterPublishingMode::SqsSingle {
-                    retry_policy: retry_policy(),
-                },
-                EmitSink::Sentry(_) => request_ack_mode(),
-                _ => EmitterPublishingMode::NoAck {
-                    retry_policy: retry_policy(),
-                },
-            };
-            let rendered_mode = publishing_mode.to_canonical_nspl();
+        for (connector, rendered_emitter) in emitters {
+            let rendered_mode = connector.publishing().to_canonical_plexus();
+            let rendered_kind = connector.kind().phrase();
             let emitter = CreateEmitter {
                 name: named("emit_orders"),
                 from: ProcessorInputs::single(named("orders_stream"))
@@ -5060,13 +5080,12 @@ mod tests {
                 body: EmitterBody::Codec {
                     codec: named("orders_codec"),
                 },
-                sink: Box::new(sink),
+                connector: Box::new(connector),
                 batch: None,
                 flush_policy: FlushPolicy::Each {
                     interval: "100ms".to_string(),
                     max_batch_size: "1MiB".to_string(),
                 },
-                publishing_mode,
                 mode: AckMode::Attached,
                 error_policies: ErrorPolicies::handled_by_log(),
 
@@ -5074,12 +5093,12 @@ mod tests {
                 materialized_state: Vec::new(),
             };
             assert_eq!(
-                emitter.to_canonical_nspl().expect("must render"),
+                emitter.to_canonical_plexus().expect("must render"),
                 format!(
-                    "CREATE ATTACHED EMITTER emit_orders\n  FROM orders_stream COLLECT FOR 50ms \
-                     MAX BATCH SIZE 4MiB\n  TO {rendered_sink}\n    MODE {rendered_mode}\n    \
-                     ENCODE USING orders_codec\n  FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n  ON \
-                     MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
+                    "CREATE ATTACHED {rendered_kind} EMITTER emit_orders\n  FROM orders_stream \
+                     COLLECT FOR 50ms MAX BATCH SIZE 4MiB\n  TO {rendered_emitter}\n    MODE \
+                     {rendered_mode}\n    ENCODE USING orders_codec\n  FLUSH EACH 100ms MAX BATCH \
+                     SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
                 )
             );
 
@@ -5088,13 +5107,13 @@ mod tests {
                 ..emitter
             };
             assert_eq!(
-                batching.to_canonical_nspl().expect("must render"),
+                batching.to_canonical_plexus().expect("must render"),
                 format!(
-                    "CREATE ATTACHED EMITTER emit_orders\n  FROM orders_stream COLLECT FOR 50ms \
-                     MAX BATCH SIZE 4MiB\n  TO {rendered_sink}\n    MODE {rendered_mode}\n    \
-                     ENCODE USING orders_codec\n  BATCH MAX MESSAGES 500 MAX SIZE 1MiB\n  FLUSH \
-                     EACH 100ms MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR \
-                     LOG;"
+                    "CREATE ATTACHED {rendered_kind} EMITTER emit_orders\n  FROM orders_stream \
+                     COLLECT FOR 50ms MAX BATCH SIZE 4MiB\n  TO {rendered_emitter}\n    MODE \
+                     {rendered_mode}\n    ENCODE USING orders_codec\n  BATCH MAX MESSAGES 500 MAX \
+                     SIZE 1MiB\n  FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  \
+                     ON GENERAL ERROR LOG;"
                 )
             );
         }
@@ -5114,32 +5133,43 @@ mod tests {
             ],
         };
         assert_eq!(
-            alter.to_canonical_nspl().expect("must render"),
+            alter.to_canonical_plexus().expect("must render"),
             "ALTER JUNCTION route_events ADD FROM incoming, ADD FROM incoming WHERE input.active;"
         );
 
         let sqs = |fifo_group| {
-            EmitSink::Sqs(SqsSink::Queue(SqsQueueSink {
+            EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+                mode: crate::SqsQueuePublishingMode::Single {
+                    retry_policy: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
                 client: named("sqs_main"),
-                queue: "orders_queue".to_string(),
+                queue: crate::SqsQueueName::parse("orders_queue").expect("valid queue"),
                 fifo_group,
             }))
         };
         assert_eq!(
-            super::emit_sink_to_nspl(&sqs(Some(crate::SqsFifoGroup::FromBranch)))
+            super::emitter_reference_to_plexus(&sqs(Some(crate::SqsFifoGroup::FromBranch)))
                 .expect("must render"),
-            "SQS sqs_main QUEUE orders_queue FIFO GROUP FROM BRANCH"
+            "sqs_main QUEUE 'orders_queue' FIFO GROUP FROM BRANCH"
         );
         assert_eq!(
-            super::emit_sink_to_nspl(&sqs(Some(crate::SqsFifoGroup::Expression(scoped_field(
-                FieldScope::Input,
-                "tenant"
-            )))))
+            super::emitter_reference_to_plexus(&sqs(Some(crate::SqsFifoGroup::Expression(
+                scoped_field(FieldScope::Input, "tenant")
+            ))))
             .expect("must render"),
-            "SQS sqs_main QUEUE orders_queue FIFO GROUP input.tenant"
+            "sqs_main QUEUE 'orders_queue' FIFO GROUP input.tenant"
         );
 
-        let otel = EmitSink::from(crate::OtelMetricsSink {
+        let otel = EmitterEntity::from(crate::OtelMetricsEmitter {
+            mode: crate::OtelMetricsPublishingMode::Ack {
+                retry_policy: crate::RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
             client: named("otel_main"),
             metric: crate::OtelMetric {
                 name: "queue.depth".to_string(),
@@ -5161,9 +5191,8 @@ mod tests {
             },
         });
         assert_eq!(
-            super::emit_sink_to_nspl(&otel).expect("must render"),
-            "OTEL otel_main METRIC 'queue.depth' UNIT '1' GAUGE VALUES {'value' = input.depth} \
-             SCOPE 'nervix'"
+            super::emitter_reference_to_plexus(&otel).expect("must render"),
+            "otel_main METRIC 'queue.depth' UNIT '1' GAUGE"
         );
 
         let default_policy = crate::MaterializedStatePolicy::Default(vec![crate::Assignment {
@@ -5171,7 +5200,7 @@ mod tests {
             value: Expression::Literal(Literal::String("basic".to_string())),
         }]);
         assert_eq!(
-            super::materialized_state_policy_to_nspl(&default_policy).expect("must render"),
+            super::materialized_state_policy_to_plexus(&default_policy).expect("must render"),
             "DEFAULT { tier = 'basic' }"
         );
 
@@ -5182,7 +5211,7 @@ mod tests {
             }],
         };
         assert_eq!(
-            crate::alter_cbor_wire_schema_to_canonical_nspl(&cbor).expect("must render"),
+            crate::alter_cbor_wire_schema_to_canonical_plexus(&cbor).expect("must render"),
             "ALTER WIRE CBOR SCHEMA orders_wire DROP FIELD note;"
         );
     }
@@ -5193,29 +5222,39 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            sink: Box::new(EmitSink::Postgres(PostgresSink::Table(PostgresTableSink {
-                client: named("postgres_main"),
-                table: named("notification_rows"),
-                values: vec![
-                    PostgresValueMapping {
-                        column: "postgres_user_id".to_string(),
-                        expression: scoped_field(FieldScope::Input, "user_id"),
+            connector: Box::new(EmitterEntity::Postgres(PostgresEmitter::Table(
+                PostgresTableEmitter {
+                    mode: crate::PostgresTablePublishingMode::Ack {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
                     },
-                    PostgresValueMapping {
-                        column: "postgres_action".to_string(),
-                        expression: call("lower", vec![scoped_field(FieldScope::Input, "action")]),
+                    client: named("postgres_main"),
+                    table: named("notification_rows"),
+                    values: vec![
+                        PostgresValueMapping {
+                            column: "postgres_user_id".to_string(),
+                            expression: scoped_field(FieldScope::Input, "user_id"),
+                        },
+                        PostgresValueMapping {
+                            column: "postgres_action".to_string(),
+                            expression: call(
+                                "lower",
+                                vec![scoped_field(FieldScope::Input, "action")],
+                            ),
+                        },
+                    ],
+                    conflict_action: PostgresConflictAction::DoUpdate {
+                        target: vec!["postgres_user_id".to_string()],
                     },
-                ],
-                conflict_action: PostgresConflictAction::DoUpdate {
-                    target: vec!["postgres_user_id".to_string()],
                 },
-            }))),
+            ))),
             batch: Some(batch_policy(500, "8MiB")),
             flush_policy: FlushPolicy::Each {
                 interval: "10s".to_string(),
                 max_batch_size: "1MiB".to_string(),
             },
-            publishing_mode: request_ack_mode(),
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
@@ -5224,8 +5263,13 @@ mod tests {
         };
 
         assert_eq!(
-            emitter.to_canonical_nspl().expect("must render"),
-            "CREATE ATTACHED EMITTER emit_notifications\n  FROM notifications\n  TO POSTGRES postgres_main INSERT TO TABLE notification_rows\n    VALUES {\n      'postgres_user_id' = input.user_id,\n      'postgres_action' = lower(input.action)\n    }\n    ON CONFLICT ('postgres_user_id') DO UPDATE\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s\n  BATCH MAX MESSAGES 500 MAX SIZE 8MiB\n  FLUSH EACH 10s MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
+            emitter.to_canonical_plexus().expect("must render"),
+            "CREATE ATTACHED POSTGRES TABLE EMITTER emit_notifications\n  FROM notifications\n  \
+             TO postgres_main TABLE 'notification_rows'\n    MODE ACK RETRY POLICY BACKOFF 250ms \
+             MAX 30s\n    VALUES {\n      'postgres_user_id' = input.user_id,\n      \
+             'postgres_action' = lower(input.action)\n    }\n    ON CONFLICT ('postgres_user_id') \
+             DO UPDATE\n  BATCH MAX MESSAGES 500 MAX SIZE 8MiB\n  FLUSH EACH 10s MAX BATCH SIZE \
+             1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
         );
     }
 
@@ -5235,27 +5279,37 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            sink: Box::new(EmitSink::MySql(MySqlSink::Table(MySqlTableSink {
-                client: named("mysql_main"),
-                table: named("notification_rows"),
-                values: vec![
-                    MySqlValueMapping {
-                        column: "mysql_user_id".to_string(),
-                        expression: scoped_field(FieldScope::Input, "user_id"),
+            connector: Box::new(EmitterEntity::MySql(MySqlEmitter::Table(
+                MySqlTableEmitter {
+                    mode: crate::MySqlTablePublishingMode::Ack {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
                     },
-                    MySqlValueMapping {
-                        column: "mysql_action".to_string(),
-                        expression: call("lower", vec![scoped_field(FieldScope::Input, "action")]),
-                    },
-                ],
-                conflict_action: MySqlConflictAction::DoNothing,
-            }))),
+                    client: named("mysql_main"),
+                    table: named("notification_rows"),
+                    values: vec![
+                        MySqlValueMapping {
+                            column: "mysql_user_id".to_string(),
+                            expression: scoped_field(FieldScope::Input, "user_id"),
+                        },
+                        MySqlValueMapping {
+                            column: "mysql_action".to_string(),
+                            expression: call(
+                                "lower",
+                                vec![scoped_field(FieldScope::Input, "action")],
+                            ),
+                        },
+                    ],
+                    conflict_action: MySqlConflictAction::DoNothing,
+                },
+            ))),
             batch: Some(batch_policy(500, "8MiB")),
             flush_policy: FlushPolicy::Each {
                 interval: "10s".to_string(),
                 max_batch_size: "1MiB".to_string(),
             },
-            publishing_mode: request_ack_mode(),
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
@@ -5264,13 +5318,13 @@ mod tests {
         };
 
         assert_eq!(
-            emitter.to_canonical_nspl().expect("must render"),
-            "CREATE ATTACHED EMITTER emit_notifications\n  FROM notifications\n  TO MYSQL \
-             mysql_main INSERT TO TABLE notification_rows\n    VALUES {\n      'mysql_user_id' = \
-             input.user_id,\n      'mysql_action' = lower(input.action)\n    }\n    ON CONFLICT \
-             DO NOTHING\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s\n  BATCH MAX MESSAGES \
-             500 MAX SIZE 8MiB\n  FLUSH EACH 10s MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  \
-             ON GENERAL ERROR LOG;"
+            emitter.to_canonical_plexus().expect("must render"),
+            "CREATE ATTACHED MYSQL TABLE EMITTER emit_notifications\n  FROM notifications\n  TO \
+             mysql_main TABLE 'notification_rows'\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX \
+             30s\n    VALUES {\n      'mysql_user_id' = input.user_id,\n      'mysql_action' = \
+             lower(input.action)\n    }\n    ON CONFLICT DO NOTHING\n  BATCH MAX MESSAGES 500 MAX \
+             SIZE 8MiB\n  FLUSH EACH 10s MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON \
+             GENERAL ERROR LOG;"
         );
     }
 
@@ -5280,8 +5334,14 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            sink: Box::new(EmitSink::MongoDb(MongoDbSink::Collection(
-                MongoDbCollectionSink {
+            connector: Box::new(EmitterEntity::MongoDb(MongoDbEmitter::Collection(
+                MongoDbCollectionEmitter {
+                    mode: crate::MongoDbCollectionPublishingMode::Ack {
+                        retry_policy: crate::RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
                     client: named("mongodb_main"),
                     collection: named("notification_rows"),
                     values: vec![
@@ -5307,7 +5367,6 @@ mod tests {
                 interval: "10s".to_string(),
                 max_batch_size: "1MiB".to_string(),
             },
-            publishing_mode: request_ack_mode(),
             mode: AckMode::Attached,
             error_policies: ErrorPolicies::handled_by_log(),
 
@@ -5316,13 +5375,13 @@ mod tests {
         };
 
         assert_eq!(
-            emitter.to_canonical_nspl().expect("must render"),
-            "CREATE ATTACHED EMITTER emit_notifications\n  FROM notifications\n  TO MONGODB \
-             mongodb_main INSERT TO COLLECTION notification_rows\n    VALUES {\n      \
-             'mongodb_user_id' = input.user_id,\n      'mongodb_action' = lower(input.action)\n    \
-             }\n    ON CONFLICT ('mongodb_user_id') DO UPDATE\n    MODE ACK RETRY POLICY BACKOFF \
-             250ms MAX 30s\n  BATCH MAX MESSAGES 500 MAX SIZE 8MiB\n  FLUSH EACH 10s MAX BATCH \
-             SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
+            emitter.to_canonical_plexus().expect("must render"),
+            "CREATE ATTACHED MONGODB COLLECTION EMITTER emit_notifications\n  FROM \
+             notifications\n  TO mongodb_main COLLECTION 'notification_rows'\n    MODE ACK RETRY \
+             POLICY BACKOFF 250ms MAX 30s\n    VALUES {\n      'mongodb_user_id' = \
+             input.user_id,\n      'mongodb_action' = lower(input.action)\n    }\n    ON CONFLICT \
+             ('mongodb_user_id') DO UPDATE\n  BATCH MAX MESSAGES 500 MAX SIZE 8MiB\n  FLUSH EACH \
+             10s MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
         );
     }
 
@@ -5339,7 +5398,7 @@ mod tests {
     }
 
     /// A transport input decoded by `orders_codec`.
-    fn decoded(source: impl Into<IngestSource>) -> crate::IngestorInput {
+    fn decoded(source: impl Into<IngestorEntity>) -> crate::IngestorInput {
         crate::IngestorInput::Transport(crate::TransportIngestorInput {
             source: source.into(),
             codec: named("orders_codec"),
@@ -5362,7 +5421,7 @@ mod tests {
             (
                 orders_ingestor(
                     "http_ingestor",
-                    decoded(HttpRequestSource {
+                    decoded(HttpRequestIngestor {
                         client: named("http_main"),
                         every: every("30s"),
                         mode: HttpRequestIngestMode::NoAck,
@@ -5375,7 +5434,7 @@ mod tests {
             (
                 orders_ingestor(
                     "endpoint_ingestor",
-                    decoded(HttpEndpointSource {
+                    decoded(HttpEndpointIngestor {
                         endpoint: named("orders_endpoint"),
                         mode: EndpointIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Reject {
@@ -5389,7 +5448,7 @@ mod tests {
             (
                 orders_ingestor(
                     "kafka_ingestor",
-                    decoded(KafkaTopicSource {
+                    decoded(KafkaTopicIngestor {
                         client: named("kafka_main"),
                         topic: named("Orders.Topic"),
                         offset_mode: KafkaOffsetMode::ConsumerGroup(named("Orders Group")),
@@ -5411,23 +5470,26 @@ mod tests {
             (
                 orders_ingestor(
                     "pulsar_ingestor",
-                    decoded(PulsarTopicSource {
+                    decoded(PulsarTopicIngestor {
                         client: named("pulsar_main"),
                         topic: named("persistent://public/default/Orders"),
-                        subscription: named("Readers"),
+                        subscription: PulsarSubscription {
+                            name: named("Readers"),
+                            ownership: PulsarSubscriptionOwnership::Provisioned,
+                        },
                         instances: nonzero!(1u64),
                         mode: KafkaIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
                     }),
                 ),
                 "CREATE PULSAR TOPIC INGESTOR pulsar_ingestor\n  FROM pulsar_main TOPIC \
-                 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' MODE NO ACK ON \
-                 QUIESCE SUSPEND",
+                 'persistent://public/default/Orders' SUBSCRIPTION 'Readers' PROVISIONED MODE NO \
+                 ACK ON QUIESCE SUSPEND",
             ),
             (
                 orders_ingestor(
                     "mqtt_ingestor",
-                    decoded(MqttTopicSource {
+                    decoded(MqttTopicIngestor {
                         client: named("mqtt_main"),
                         topic: named("devices/+/Orders"),
                         instances: nonzero!(2u64),
@@ -5444,7 +5506,7 @@ mod tests {
             (
                 orders_ingestor(
                     "mqtt_session_ingestor",
-                    decoded(MqttTopicSource {
+                    decoded(MqttTopicIngestor {
                         client: named("mqtt_main"),
                         topic: named("devices/#"),
                         instances: nonzero!(1u64),
@@ -5461,7 +5523,7 @@ mod tests {
             (
                 orders_ingestor(
                     "nats_ingestor",
-                    decoded(NatsSubjectSource {
+                    decoded(NatsSubjectIngestor {
                         client: named("nats_main"),
                         subject: named("orders.*.created"),
                         queue_group: named("Orders-Workers"),
@@ -5477,7 +5539,7 @@ mod tests {
             (
                 orders_ingestor(
                     "rabbit_ingestor",
-                    decoded(RabbitMqQueueSource {
+                    decoded(RabbitMqQueueIngestor {
                         client: named("rmq_main"),
                         queue: named("Orders Queue"),
                         instances: nonzero!(1u64),
@@ -5495,7 +5557,7 @@ mod tests {
             (
                 orders_ingestor(
                     "redis_ingestor",
-                    decoded(RedisPubSubSource {
+                    decoded(RedisPubSubIngestor {
                         client: named("redis_main"),
                         channel: named("orders:*"),
                         mode: RedisPubSubIngestMode::NoAck,
@@ -5508,9 +5570,10 @@ mod tests {
             (
                 orders_ingestor(
                     "prom_ingestor",
-                    decoded(PrometheusQuerySource {
+                    decoded(PrometheusQueryIngestor {
                         client: named("prom_main"),
                         query: "rate(orders_total[5m])".to_string(),
+                        max_body_size: None,
                         every: every("15s"),
                         mode: PrometheusIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
@@ -5521,8 +5584,27 @@ mod tests {
             ),
             (
                 orders_ingestor(
+                    "bounded_prom_ingestor",
+                    decoded(PrometheusQueryIngestor {
+                        client: named("prom_main"),
+                        query: "up".to_string(),
+                        max_body_size: Some(
+                            "4MB"
+                                .parse()
+                                .assured("the fixture size is a whole number of megabytes"),
+                        ),
+                        every: every("15s"),
+                        mode: PrometheusIngestMode::NoAck,
+                        quiesce: crate::IngestQuiesceMode::Suspend,
+                    }),
+                ),
+                "CREATE PROMETHEUS QUERY INGESTOR bounded_prom_ingestor\n  FROM prom_main QUERY \
+                 'up' MAX BODY SIZE 4MB EVERY 15s MODE NO ACK ON QUIESCE SUSPEND",
+            ),
+            (
+                orders_ingestor(
                     "zmq_ingestor",
-                    decoded(ZeroMqPullSource {
+                    decoded(ZeroMqPullIngestor {
                         client: named("zmq_main"),
                         mode: ZeroMqIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Suspend,
@@ -5534,7 +5616,7 @@ mod tests {
             (
                 orders_ingestor(
                     "sqs_ingestor",
-                    decoded(SqsQueueSource {
+                    decoded(SqsQueueIngestor {
                         client: named("sqs_main"),
                         queue: named("Orders.fifo"),
                         instances: nonzero!(4u64),
@@ -5552,8 +5634,9 @@ mod tests {
             (
                 orders_ingestor(
                     "ws_ingestor",
-                    decoded(WebsocketsConnectionSource {
+                    decoded(WebsocketsConnectionIngestor {
                         client: named("ws_main"),
+                        headers: Vec::new(),
                         mode: WebsocketsIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
                     }),
@@ -5564,7 +5647,7 @@ mod tests {
             (
                 orders_ingestor(
                     "ws_endpoint_ingestor",
-                    decoded(WebsocketsEndpointSource {
+                    decoded(WebsocketsEndpointIngestor {
                         endpoint: named("orders_socket"),
                         mode: EndpointIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::EndpointBuffer {
@@ -5578,7 +5661,7 @@ mod tests {
             (
                 orders_ingestor(
                     "syslog_ingestor",
-                    decoded(SyslogListenerSource {
+                    decoded(SyslogListenerIngestor {
                         client: named("syslog_main"),
                         mode: SyslogIngestMode::NoAck,
                         quiesce: crate::IngestQuiesceMode::Drop,
@@ -5591,7 +5674,7 @@ mod tests {
 
         for (ingestor, head) in expectations {
             assert_eq!(
-                ingestor.to_canonical_nspl().expect("must render"),
+                ingestor.to_canonical_plexus().expect("must render"),
                 format!("{head}{tail}")
             );
         }
@@ -5601,7 +5684,7 @@ mod tests {
     fn renders_a_client_producer_ingestor_without_a_codec() {
         let ingestor = orders_ingestor(
             "orders_in",
-            crate::IngestorInput::Client(ClientProducerSource {
+            crate::IngestorInput::Client(ClientProducerIngestor {
                 schema: named("order"),
                 mode: ClientIngestMode {
                     window: AckWindow::Parallel {
@@ -5616,7 +5699,7 @@ mod tests {
             }),
         );
         assert_eq!(
-            ingestor.to_canonical_nspl().expect("must render"),
+            ingestor.to_canonical_plexus().expect("must render"),
             "CREATE CLIENT PRODUCER INGESTOR orders_in\n  FROM SCHEMA order MODE ACK PARALLEL MAX \
              64 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 5s ON QUIESCE SUSPEND\n  TO \
              orders\n    UNBRANCHED\n    FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n    ON MESSAGE \
@@ -5633,8 +5716,8 @@ mod tests {
         });
 
         assert_eq!(
-            model.to_canonical_nspl().expect("must render"),
-            "CREATE CLIENT kafka_main\n  TYPE KAFKA\n  CONFIG {\n    'bootstrap.servers' = \
+            model.to_canonical_plexus().expect("must render"),
+            "CREATE KAFKA CLIENT kafka_main\n  CONFIG {\n    'bootstrap.servers' = \
              'localhost:9092'\n  };"
         );
     }
@@ -5651,7 +5734,7 @@ mod tests {
         .expect("placement must be valid");
 
         assert_eq!(
-            placement.to_canonical_nspl().expect("must render"),
+            placement.to_canonical_plexus().expect("must render"),
             "CREATE PLACEMENT latency_path FROM ingest, enrich TO score REQUIRE COLOCATION RANK 1;"
         );
     }
@@ -5668,7 +5751,7 @@ mod tests {
         .expect("placement must be valid");
 
         assert_eq!(
-            placement.to_canonical_nspl().expect("must render"),
+            placement.to_canonical_plexus().expect("must render"),
             "CREATE PLACEMENT ordinary FROM ingest TO emit NEUTRAL;"
         );
     }
@@ -5740,7 +5823,7 @@ mod tests {
             code.clone(),
         );
 
-        let rendered = udf.to_canonical_nspl().expect("must render");
+        let rendered = udf.to_canonical_plexus().expect("must render");
 
         assert!(rendered.contains("CODE $roto_1$"));
         assert!(rendered.contains(&code));
@@ -5753,15 +5836,15 @@ mod tests {
     #[test]
     fn renders_float_literals_with_a_fractional_part() {
         assert_eq!(
-            expression_to_nspl(&float_value(80.0)).expect("must render"),
+            expression_to_plexus(&float_value(80.0)).expect("must render"),
             "80.0"
         );
         assert_eq!(
-            expression_to_nspl(&float_value(0.0)).expect("must render"),
+            expression_to_plexus(&float_value(0.0)).expect("must render"),
             "0.0"
         );
         assert_eq!(
-            expression_to_nspl(&float_value(15.0)).expect("must render"),
+            expression_to_plexus(&float_value(15.0)).expect("must render"),
             "15.0"
         );
     }
@@ -5769,24 +5852,24 @@ mod tests {
     #[test]
     fn renders_float_literals_that_already_read_as_floats_unchanged() {
         assert_eq!(
-            expression_to_nspl(&float_value(111.32)).expect("must render"),
+            expression_to_plexus(&float_value(111.32)).expect("must render"),
             "111.32"
         );
         assert_eq!(
-            expression_to_nspl(&float_value(0.017453292519943295)).expect("must render"),
+            expression_to_plexus(&float_value(0.017453292519943295)).expect("must render"),
             "0.017453292519943295"
         );
-        let huge = expression_to_nspl(&float_value(1e300)).expect("must render");
+        let huge = expression_to_plexus(&float_value(1e300)).expect("must render");
         assert!(huge.ends_with(".0"), "{huge} must lex back as a float");
     }
 
     #[test]
     fn refuses_to_render_non_finite_floats() {
         for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-            let error = expression_to_nspl(&float_value(value)).expect_err("must not render");
+            let error = expression_to_plexus(&float_value(value)).expect_err("must not render");
             assert_eq!(
                 error.current_context(),
-                &super::CanonicalNsplError::UnrepresentableFloat {
+                &super::CanonicalPlexusError::UnrepresentableFloat {
                     value: crate::Float64Literal::new(value),
                 }
             );
@@ -5814,18 +5897,18 @@ mod tests {
         ));
 
         let error = statement
-            .to_canonical_nspl()
-            .expect_err("an infinite literal has no NSPL spelling");
+            .to_canonical_plexus()
+            .expect_err("an infinite literal has no Plexus spelling");
 
         assert_eq!(
             error.current_context(),
-            &super::CanonicalNsplError::UnrepresentableFloat {
+            &super::CanonicalPlexusError::UnrepresentableFloat {
                 value: crate::Float64Literal::new(f64::NEG_INFINITY),
             }
         );
         assert_eq!(
             error.to_string(),
-            "cannot represent non-finite float in NSPL: -inf"
+            "cannot represent non-finite float in Plexus: -inf"
         );
     }
 
@@ -5841,11 +5924,11 @@ mod tests {
             }],
         };
         let error = syslog
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .expect_err("a SYSLOG codec has no fields to encode");
         assert_eq!(
             error.current_context(),
-            &super::CanonicalNsplError::SyslogEncodingRules {
+            &super::CanonicalPlexusError::SyslogEncodingRules {
                 codec: named("syslog_codec"),
             }
         );
@@ -5879,11 +5962,11 @@ mod tests {
         };
         for (codec, name) in [(jaq, "jaq_codec"), (protobuf, "proto_codec")] {
             let error = codec
-                .to_canonical_nspl()
+                .to_canonical_plexus()
                 .expect_err("a JAQ-transformed codec needs a program");
             assert_eq!(
                 error.current_context(),
-                &super::CanonicalNsplError::MissingJaqTransformation { codec: named(name) }
+                &super::CanonicalPlexusError::MissingJaqTransformation { codec: named(name) }
             );
             assert_eq!(
                 error.to_string(),
@@ -5903,7 +5986,7 @@ mod tests {
             }),
         };
         assert_eq!(
-            expression_to_nspl(&Expression::JsonValue {
+            expression_to_plexus(&Expression::JsonValue {
                 document: document(),
                 path: path(r#"$["plain"][0]"#),
                 target: ParseAsType::I64,
@@ -5912,7 +5995,7 @@ mod tests {
             "JSON_VALUE(input.doc, '$.plain[0]' AS I64)"
         );
         assert_eq!(
-            expression_to_nspl(&Expression::TryJsonValue {
+            expression_to_plexus(&Expression::TryJsonValue {
                 document: document(),
                 path: path(r#"$["odd key"]"#),
                 target: vector,
@@ -5921,7 +6004,7 @@ mod tests {
             r#"TRY_JSON_VALUE(input.doc, '$["odd key"]' AS VEC<ARRAY<F32, 2>>)"#
         );
         assert_eq!(
-            expression_to_nspl(&Expression::JsonExists {
+            expression_to_plexus(&Expression::JsonExists {
                 document: document(),
                 path: path(r#"$["it's \"quoted\""]"#),
             })
@@ -5942,7 +6025,7 @@ mod tests {
             target: ParseAsType::String,
         };
         assert_eq!(
-            expression_to_nspl(&converted_sum).expect("must render"),
+            expression_to_plexus(&converted_sum).expect("must render"),
             "TRY_CAST(input.low + input.high AS STRING)"
         );
 
@@ -5954,7 +6037,7 @@ mod tests {
             target: ParseAsType::String,
         };
         assert_eq!(
-            expression_to_nspl(&reparsed).expect("must render"),
+            expression_to_plexus(&reparsed).expect("must render"),
             "TRY_CAST(input.raw AS I64 AS STRING)"
         );
 
@@ -5966,7 +6049,7 @@ mod tests {
             target: ParseAsType::U8,
         };
         assert_eq!(
-            expression_to_nspl(&narrowed).expect("must render"),
+            expression_to_plexus(&narrowed).expect("must render"),
             "TRY_CAST(input.raw AS I64) AS U8"
         );
     }

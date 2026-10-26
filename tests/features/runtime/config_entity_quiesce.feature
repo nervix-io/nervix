@@ -3,12 +3,12 @@ Feature: Config entity quiesce classification
     Given schema change drain timeout is configured as "20s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA config_event ( seq I64 );
       CREATE WIRE JSON SCHEMA config_event_wire MODE STRICT ( seq integer );
@@ -18,8 +18,7 @@ Feature: Config entity quiesce classification
         TO SCHEMA config_event;
       CREATE RELAY config_events SCHEMA config_event UNBRANCHED;
 
-      CREATE CLIENT config_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT config_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -38,9 +37,9 @@ Feature: Config entity quiesce classification
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER config_out
+      CREATE ZEROMQ PUSH EMITTER config_out
         FROM config_events
-        TO ZEROMQ config_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING config_event_codec
+        TO config_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING config_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -63,7 +62,7 @@ Feature: Config entity quiesce classification
       """
       {"seq":2}
       """
-    And these NSPL commands begin executing in the background
+    And these Plexus commands begin executing in the background
       """
       BEGIN;
       DROP CODEC config_event_codec;
@@ -78,7 +77,7 @@ Feature: Config entity quiesce classification
       """
       "seq":2
       """
-    And the background NSPL execution succeeds
+    And the background Plexus execution succeeds
     When http payload is posted to node "node-1" with host "http-{{test_id}}-config.example.com" path "/config-quiesce"
       """
       {"seq":3}
@@ -95,21 +94,20 @@ Feature: Config entity quiesce classification
       """
       {"seq":2}
       """
-    And these NSPL commands begin executing in the background
+    And these Plexus commands begin executing in the background
       """
       BEGIN;
       DROP EMITTER config_out;
       DROP CLIENT config_sink;
-      CREATE CLIENT config_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT config_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false',
           'send_timeout' = '5s'
         };
-      CREATE EMITTER config_out
+      CREATE ZEROMQ PUSH EMITTER config_out
         FROM config_events
-        TO ZEROMQ config_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING config_event_codec
+        TO config_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING config_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -122,7 +120,7 @@ Feature: Config entity quiesce classification
       """
       "seq":2
       """
-    And the background NSPL execution succeeds
+    And the background Plexus execution succeeds
     When http payload is posted to node "node-1" with host "http-{{test_id}}-config.example.com" path "/config-quiesce"
       """
       {"seq":3}

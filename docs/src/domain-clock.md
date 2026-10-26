@@ -1,12 +1,14 @@
 # Domain Clock
 
+*Plexus, the Nervix graph definition language.*
+
 The domain clock is the time boundary between Nervix's control plane and data plane. The control
 plane commits what time means for a domain; every data-plane node installs that definition and
 uses a capability bound to the exact domain lifecycle generation. Expression engines, processors,
 and connectors receive time from that capability instead of choosing a clock themselves.
 
 This chapter describes the internal architecture. See [Domains And Time](./domains-and-time.md)
-for the NSPL surface and operator-facing behavior.
+for the Plexus surface and operator-facing behavior.
 Explicit transactional `START` and `STOP` establish or revoke generations at ordered step
 boundaries; [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) owns how
 those lifecycle steps affect later planned scopes and the retained impact report.
@@ -347,8 +349,14 @@ installation therefore publishes nothing to an attached client.
 The observer reads a tick only while the installation is paced and of that tick's generation. It
 adds the serving node's own logical reading, taken as the tick frame is built: one snapshot of the
 installed generation, read through the same watermarked read that execution uses. The observer
-retains the progress watch's sender while the attachment lives, so removing the domain closes
-neither wait before the lifecycle publishes missing and wakes delivery to send the end frame.
+samples accepted progress before taking that reading. A process pause between the samples can
+therefore pair an earlier tick with a much later serving reading, and transport delay can deliver
+both samples later still. Their difference is not a bound on projection error or tick freshness;
+accepted progress does not bound the independently projected readable time.
+
+The observer retains the progress watch's sender while the attachment lives, so removing the
+domain closes neither wait before the lifecycle publishes missing and wakes delivery to send the
+end frame.
 
 ### Attachments And Their Delivery
 
@@ -527,7 +535,7 @@ or advancing the logical frontier. A reported checkpoint revision and reset gene
 durability and lifetime identity, not domain time; neither may establish or alter the clock used
 by a later guest callback.
 
-An NSPL reset uses this same clock contract. Repeating its durable command reference resumes the
+A Plexus reset uses this same clock contract. Repeating its durable command reference resumes the
 same guest-state lifetime replacement without changing the domain clock mapping.
 
 Generated records use the snapshot assigned to their generating operation. Buffered emitter
@@ -593,6 +601,21 @@ connector-owned source timestamp, so a paced domain requires its client ingestor
 timestamp. The batch's `ACK TIMEOUT` and its producer's retry backoff are physical monotonic bounds;
 neither waits on nor stretches domain logical time.
 
+## Duration Windows
+
+A duration window retains rows by their preserved event timestamps. Its next completion deadline
+is the first retained timestamp plus `WIDTH`, and its branch task waits for that deadline on the
+domain clock. Completion emits the rows currently retained and advances by `STEP`. A later batch
+with the same event timestamp enters the state that remains after that advance; an equal timestamp
+does not reopen an emitted window.
+
+When an input batch starts an empty window bounded only by duration, its admitted rows with equal
+timestamps do not reach `WIDTH` during admission. The branch processes them before its next clock check,
+which can emit the group together even when the batch arrived after that deadline. The output
+retains the earliest source watermark and uses the emission's domain time for its high watermark.
+`TIMESTAMP NOW` assigns the ingestion snapshot to every decoded row of a batch, while
+`TIMESTAMP AT` preserves each row's explicit event time.
+
 ## Logical And Physical Deadlines
 
 A logical deadline carries its domain, lifecycle generation, and target logical timestamp. Waiting
@@ -623,8 +646,8 @@ misses multiple occurrences, the cadence returns the newest due instant once and
 to the first future boundary. Consumers that need both meanings keep the scheduled due instant
 separate from the fresh execution snapshot taken when work actually runs.
 
-[Connector Crates And The Connector Contract](./connector-contract.md#source-boundary) defines
-the paced source's host and connector responsibilities; this chapter owns the cadence's time
+[Connector Crates And The Connector Contract](./connector-contract.md#ingestor-boundary) defines
+the paced ingestor's host and connector responsibilities; this chapter owns the cadence's time
 mapping and missed-occurrence behavior.
 
 The architecture keeps four time classes distinct:
@@ -658,7 +681,15 @@ contract, which the runtime and every connector crate share, so a connector stam
 through the same owner the runtime uses. Repository validation checks these ownership boundaries
 across the workspace, so a new runtime or connector path must choose its time class explicitly.
 
-Physical monotonic time is measured with the timers and instants of the primitive boundary,
+Materialized relay branch activity uses the bound domain clock, independently of the row event
+watermarks used by `LAST BY TIMESTAMP`. Its activity tracker is not persisted: a restored relay
+initializes every restored branch at its activation-time clock snapshot and measures the complete
+TTL from that coordinate. Restoring or restarting the relay preserves the rows' event watermarks
+without turning those timestamps into activity or expiry. The physical scan only releases a
+branch once its domain-clock TTL has elapsed.
+
+Physical monotonic time is measured with the timers and instants of the
+[primitive boundary](./execution-primitives.md),
 `nervix_primitives::time`, which selects them for the build's execution mode and grants no clock
 permission: it reads no actual UTC, arms no physical deadline on a caller's behalf, and a logical
 deadline armed on its timer stays logical, as described above. Its timers follow the clock of the

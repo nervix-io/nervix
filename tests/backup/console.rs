@@ -1,12 +1,13 @@
 //! Steps that drive the web console's backup and restore controls: the archives a browser saves
 //! from a console backup, the archives a console restore reads from a file input, and the pause
-//! that holds a download before its archive streams.
+//! that holds a download before its archive streams on whichever node serves it.
 //!
 //! Layer: test harness.
 //! - **Owns.** Saving the archive a console download hands the browser into the scenario's archive
-//!   directory, handing a scenario archive to a file input, reloading the console while it
-//!   downloads, writing and reading the pending backup record in the tab's session storage, and
-//!   checking what the console reports against an archive's own size and digest.
+//!   directory, waiting for that download from before the steps that start it, handing a scenario
+//!   archive to a file input, reloading the console while it downloads, writing and reading the
+//!   pending backup record in the tab's session storage, and checking what the console reports
+//!   against an archive's own size and digest.
 //! - **Depends on.** The scenario's browser page, its archive directory, and the server's fault
 //!   injection for backup downloads.
 //! - **Must not know.** How the console verifies, assembles or streams an archive.
@@ -130,6 +131,28 @@ async fn when_selector_is_pressed_and_download_is_saved(
         .await
         .expect("selector must accept the key press");
     save_console_download(browser_page(world), waiter, &archive).await;
+}
+
+/// A download a scenario waits for from before the action that starts it, and the scenario archive
+/// it is saved as, for a scenario that acts in between.
+pub(crate) struct ExpectedConsoleDownload {
+    waiter: EventWaiter<Download>,
+    archive: PathBuf,
+}
+
+#[given(expr = "the web console's next download is expected as backup archive {string}")]
+async fn given_console_download_is_expected(world: &mut ScenarioWorld, file: String) {
+    let archive = archive_path(world, &file);
+    let waiter = expect_console_download(world).await;
+    world.expected_console_download = Some(ExpectedConsoleDownload { waiter, archive });
+}
+
+#[then("the web console's expected download is saved")]
+async fn then_expected_console_download_is_saved(world: &mut ScenarioWorld) {
+    let Some(expected) = world.expected_console_download.take() else {
+        panic!("no step expected a web console download");
+    };
+    save_console_download(browser_page(world), expected.waiter, &expected.archive).await;
 }
 
 #[when(
@@ -257,31 +280,47 @@ async fn then_archive_has_the_size_and_digest_the_console_shows(
     then_selector_contains_text(world, selector, digest).await;
 }
 
-#[given(expr = "backup archive downloads on node {string} pause before the archive streams")]
-async fn given_backup_download_pause(world: &mut ScenarioWorld, node_id: String) {
-    let node_id = expand_placeholders(world, &node_id);
-    world
-        .fault_injection
-        .pause_backup_download_on(crate::common::cluster::node_name(&node_id));
-}
-
-#[then(expr = "the backup archive download pause on node {string} is reached")]
-async fn then_backup_download_pause_is_reached(world: &mut ScenarioWorld, node_id: String) {
-    let node_id = expand_placeholders(world, &node_id);
-    let node_name = crate::common::cluster::node_name(&node_id);
-    let fault_injection = world.fault_injection.clone();
-    nervix_primitives::select! {
-        () = fault_injection.wait_for_backup_download_pause(&node_name) => {},
-        () = nervix_primitives::time::sleep(CONSOLE_DOWNLOAD_TIMEOUT) => {
-            panic!("the backup archive download pause on node '{node_id}' was not reached");
-        }
+#[given("backup archive downloads on every node pause before the archive streams")]
+async fn given_backup_downloads_pause_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .pause_backup_download_on(crate::common::cluster::node_name(&node_id));
     }
 }
 
-#[when(expr = "the backup archive download pause on node {string} is released")]
-async fn when_backup_download_pause_is_released(world: &mut ScenarioWorld, node_id: String) {
-    let node_id = expand_placeholders(world, &node_id);
-    world
-        .fault_injection
-        .release_backup_download_pause(&crate::common::cluster::node_name(&node_id));
+/// Waits for the download pause of the node that serves the console's download: the leader that
+/// completed the backup. A leadership move while the backup runs makes the new leader run it again
+/// and serve the archive it assembles, so no earlier step can name that node. Only a node that
+/// retains an archive under the backup's reference reaches its pause.
+#[then("the backup archive download pause on the node that serves the download is reached")]
+async fn then_serving_node_backup_download_pause_is_reached(world: &mut ScenarioWorld) {
+    let mut pauses = Vec::new();
+    for node_id in world.cluster().node_ids() {
+        let fault_injection = world.fault_injection.clone();
+        pauses.push(Box::pin(async move {
+            fault_injection
+                .wait_for_backup_download_pause(&crate::common::cluster::node_name(&node_id))
+                .await;
+            node_id
+        }));
+    }
+    let reached = nervix_primitives::time::timeout(
+        CONSOLE_DOWNLOAD_TIMEOUT,
+        futures_util::future::select_all(pauses),
+    )
+    .await;
+    let Ok((node_id, _, _)) = reached else {
+        panic!("no node reached its backup archive download pause");
+    };
+    println!("the backup archive download pause was reached on node '{node_id}'");
+}
+
+#[when("the backup archive download pause is released on every node")]
+async fn when_backup_download_pause_is_released_on_every_node(world: &mut ScenarioWorld) {
+    for node_id in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .release_backup_download_pause(&crate::common::cluster::node_name(&node_id));
+    }
 }

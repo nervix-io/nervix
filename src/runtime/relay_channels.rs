@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Single-winner binding, routing generations and exact channel retirement.
 //! - **Depends on.** Primitive publication, subscription identities and ordered relay slots.
-//! - **Must not know.** Payloads, transport admission, graph planning or NSPL.
+//! - **Must not know.** Payloads, transport admission, graph planning or Plexus.
 
 #![cfg_attr(
     nervix_lint,
@@ -132,16 +132,44 @@ impl RelayChannels {
         }
     }
 
+    /// End the current routing generation without publishing a successor. A forced schedule swap
+    /// does this after closing dispatch gates, so a retained or first-use channel cannot keep
+    /// waiting for the preceding destination or open another delivery toward it during the swap.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a committed forced move retires its preceding routes"
+        )
+    )]
+    pub(super) fn fence_routing(&self) {
+        self.routing.load().cancel();
+    }
+
     /// Lifecycle writers are serialized by schedule application and its dispatch fence. Cancelling
     /// the parent also fences a first-use candidate created concurrently from this generation.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "schedule publication installs the successor routing generation"
+        )
+    )]
     pub(super) fn replace_owner(&self) {
         if self.closed.is_cancelled() {
             return;
         }
-        self.routing.load().cancel();
+        self.fence_routing();
         self.routing.store(StdArc::new(CancellationToken::new()));
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "schedule publication replaces remote consumer routes"
+        )
+    )]
     pub(super) fn replace_destinations(&self) {
         self.replace_owner();
     }

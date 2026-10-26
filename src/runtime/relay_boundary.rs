@@ -6,7 +6,7 @@
 //!   retention, owner tasks, and materialized relay state.
 //! - **Depends on.** Validated execution graphs, compiled schemas, execution admission, and the
 //!   interconnect dispatcher.
-//! - **Must not know.** NSPL text, transactions, consensus operations, or connector internals.
+//! - **Must not know.** Plexus text, transactions, consensus operations, or connector internals.
 
 #![cfg_attr(
     nervix_lint,
@@ -32,9 +32,19 @@ use channels::{RelayBranchChannels, RelayChannels};
 mod shuttle_tests;
 
 pub(super) const RELAY_BUFFER_DIRECTION_CONCRETE: &str = "concrete";
+/// A channel that carried no batch this long, counted from its opening or its last batch, opens a
+/// fresh incarnation for its next batch. It stays below the receiver's watermark retention, so a
+/// channel its sender resumes still finds its watermark there, and a receiver's sweep of watermarks
+/// unreconciled for the whole retention raises its retired-channel floor over a live channel's next
+/// batch only when that batch is delayed for longer than the difference.
 const RELAY_CHANNEL_IDLE_ROTATION: Duration = Duration::from_secs(300);
+const _: () = assert!(
+    RELAY_CHANNEL_IDLE_ROTATION.as_nanos()
+        < nervix_interconnect::RELAY_CHANNEL_RETENTION.as_nanos(),
+    "an idle relay channel rotates before its receiver's watermark retention ends"
+);
 
-/// A count NSPL configures, narrowed to the width this node addresses memory with.
+/// A count Plexus configures, narrowed to the width this node addresses memory with.
 ///
 /// Both halves of the narrowing hold before it runs: the Models keep these counts non-zero, and
 /// the supported targets address memory at least as wide as the `u64` they are written as.
@@ -126,16 +136,28 @@ pub(super) struct RelayOutboundSlot {
     )
 )]
 struct RelayOutboundSequence {
+    /// A version 7 UUID. Every one this process creates sorts after the ones it created before,
+    /// because uuid orders them through one process-wide context, and a receiver relies on that
+    /// order to refuse a channel it forgot.
     channel_incarnation: [u8; 16],
     next_sequence: u64,
-    last_delivery_at: Option<Instant>,
+    /// When the incarnation opened or last carried a batch. Idleness counts from the opening too,
+    /// so a channel that opened and carried nothing never sends its first batch under an
+    /// incarnation older than the idle rotation.
+    last_active_at: Instant,
 }
 
 impl RelayOutboundSequence {
-    fn reopen(&mut self) {
-        self.channel_incarnation = uuid::Uuid::now_v7().into_bytes();
-        self.next_sequence = 0;
-        self.last_delivery_at = None;
+    fn opened_at(now: Instant) -> Self {
+        Self {
+            channel_incarnation: uuid::Uuid::now_v7().into_bytes(),
+            next_sequence: 0,
+            last_active_at: now,
+        }
+    }
+
+    fn reopen(&mut self, now: Instant) {
+        *self = Self::opened_at(now);
     }
 }
 
@@ -148,11 +170,9 @@ impl RelayOutboundSlot {
     fn with_cancellation(cancellation: CancellationToken) -> Self {
         Self {
             gate: Mutex::new(()),
-            sequence: nervix_primitives::sync::blocking::Mutex::new(RelayOutboundSequence {
-                channel_incarnation: uuid::Uuid::now_v7().into_bytes(),
-                next_sequence: 0,
-                last_delivery_at: None,
-            }),
+            sequence: nervix_primitives::sync::blocking::Mutex::new(
+                RelayOutboundSequence::opened_at(Instant::now()),
+            ),
             cancellation,
         }
     }
@@ -194,7 +214,8 @@ impl RelayOutboundSlot {
         )
     )]
     pub(super) fn reopen_delivery_channel(&self) {
-        self.sequence.lock().reopen();
+        let mut channel = self.sequence.lock();
+        channel.reopen(Instant::now());
     }
 
     pub(super) fn next_delivery(&self) -> RelayDelivery {
@@ -213,19 +234,17 @@ impl RelayOutboundSlot {
     )]
     fn next_delivery_at(&self, now: Instant) -> RelayDelivery {
         let mut channel = self.sequence.lock();
-        if let Some(last_delivery_at) = channel.last_delivery_at
-            && now
-                .checked_duration_since(last_delivery_at)
-                .assured("a relay channel's monotonic delivery time does not move backwards")
-                >= RELAY_CHANNEL_IDLE_ROTATION
+        // Activity recorded after `now` was read, such as a reopening, leaves no idle time.
+        if let Some(idle) = now.checked_duration_since(channel.last_active_at)
+            && idle >= RELAY_CHANNEL_IDLE_ROTATION
         {
-            channel.reopen();
+            channel.reopen(now);
         }
         let sequence = channel.next_sequence;
         channel.next_sequence = sequence
             .checked_add(1)
             .assured("a process cannot deliver u64::MAX batches before a channel rotates");
-        channel.last_delivery_at = Some(now);
+        channel.last_active_at = channel.last_active_at.max(now);
         RelayDelivery {
             channel_incarnation: channel.channel_incarnation,
             sequence,
@@ -1153,12 +1172,42 @@ impl RelayBoundaryServices {
         self.fanout.subscription_receiver()
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "schedule publication replaces the relay's owner route"
+        )
+    )]
     pub(super) fn replace_owner_node(&self, owner_node: Option<ClusterNodeName>) {
         if self.owner_node.load().as_deref() == owner_node.as_ref() {
             return;
         }
         self.channels.replace_owner();
         self.owner_node.store(owner_node.map(StdArc::new));
+    }
+
+    /// A committed forced move cannot drain through its fenced former owner. Retire only a
+    /// changed route's preceding channels while its dispatch gate is closed; normal publication
+    /// creates the successor generation after the swap has installed its consumers.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "forced schedule installation fences changed routes"
+        )
+    )]
+    pub(super) fn fence_routing_change(
+        &self,
+        owner_node: Option<&ClusterNodeName>,
+        consumers: &[RemoteRuntimeConsumer],
+    ) {
+        if self.owner_node.load().as_deref() == owner_node
+            && self.remote_runtime_consumers.load().as_slice() == consumers
+        {
+            return;
+        }
+        self.channels.fence_routing();
     }
 
     pub(super) fn dispatch_is_fenced(&self) -> bool {
@@ -1295,26 +1344,54 @@ impl RelayBoundaryServices {
             }
             return Err(Box::new(batch.clone()));
         };
-        let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                for ack in batch.acks.iter() {
-                    ack.no_ack(format!("{error:#}"));
-                }
-                return Err(Box::new(batch.clone()));
-            }
-        };
+        // The delivery's records are stored before its body is encoded, so a delivery that waits
+        // for room to store them holds no encoded body meanwhile.
+        let deadline = RemoteDispatcher::delivery_deadline();
         let forwarded = batch
             .acks
             .iter()
             .map(RemoteDispatcher::forwarded_ack)
             .collect();
-        let mut remote_acks = match dispatcher.register_pending_acks(&owner_node, forwarded) {
-            Ok(registrations) => registrations,
+        let storage = dispatcher
+            .store_pending_acks(
+                &owner_node,
+                forwarded,
+                deadline,
+                ingress_slot.cancellation().cancelled(),
+            )
+            .await;
+        let mut remote_acks = match storage {
+            Ok(RemoteAckStorage::Stored(registrations)) => registrations,
+            Ok(RemoteAckStorage::Cancelled) => {
+                for ack in &batch.acks {
+                    ack.no_ack("relay channel was retired");
+                }
+                return Err(Box::new(batch.clone()));
+            }
             Err(error) => {
+                warn!(
+                    domain = domain.as_str(),
+                    relay = relay.as_str(),
+                    scope = %BranchScope::from(&batch.key),
+                    target_node = %owner_node,
+                    error = %format_args!("{error:#}"),
+                    "failed to store the acknowledgements of a relay batch for its owner"
+                );
                 let reason = format!("{error:#}");
                 for ack in &batch.acks {
                     ack.no_ack(reason.clone());
+                }
+                return Err(Box::new(batch.clone()));
+            }
+        };
+        let batch_ipc = match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                for registration in remote_acks.registrations().iter().flatten() {
+                    dispatcher.clear_pending_ack(registration);
+                }
+                for ack in batch.acks.iter() {
+                    ack.no_ack(format!("{error:#}"));
                 }
                 return Err(Box::new(batch.clone()));
             }
@@ -1335,6 +1412,8 @@ impl RelayBoundaryServices {
                     admission: None,
                 },
                 &ingress_slot,
+                deadline,
+                GrantCapacityRefusals::Hold,
             )
             .await;
         if let Err(error) = admission_result {
@@ -1458,6 +1537,41 @@ impl RelayBoundaryServices {
                 }
                 return Err(Box::new(batch.clone()));
             };
+            let remote_batch = match consumer.mode {
+                AckMode::Attached => batch.attached(),
+                AckMode::Detached => batch.detached(),
+            };
+            // The records are stored before the body is encoded, so the first destination that
+            // waits for room to store them holds no encoded body meanwhile.
+            let deadline = RemoteDispatcher::delivery_deadline();
+            let mut registration_owner = if consumer.mode == AckMode::Attached {
+                let storage = dispatcher
+                    .store_pending_acks(
+                        &consumer.node_id,
+                        remote_batch.acks.to_vec(),
+                        deadline,
+                        outbound_slot.cancellation().cancelled(),
+                    )
+                    .await;
+                match storage {
+                    Ok(RemoteAckStorage::Stored(owner)) => Some(owner),
+                    Ok(RemoteAckStorage::Cancelled) => {
+                        for ack in batch.acks.iter() {
+                            ack.no_ack("relay channel lifetime ended");
+                        }
+                        return Err(Box::new(batch.clone()));
+                    }
+                    Err(error) => {
+                        let reason = format!("{error:#}");
+                        for ack in &remote_batch.acks {
+                            ack.no_ack(reason.clone());
+                        }
+                        return Err(Box::new(batch.clone()));
+                    }
+                }
+            } else {
+                None
+            };
             let batch_ipc = match encoded_body.clone() {
                 Some(bytes) => bytes,
                 None => match batch.batch.encode_arrow_ipc(dispatcher.executor()).await {
@@ -1466,6 +1580,11 @@ impl RelayBoundaryServices {
                         bytes
                     }
                     Err(error) => {
+                        if let Some(owner) = &registration_owner {
+                            for registration in owner.registrations().iter().flatten() {
+                                dispatcher.clear_pending_ack(registration);
+                            }
+                        }
                         if remote_runtime_consumers
                             .iter()
                             .any(|consumer| consumer.mode == AckMode::Attached)
@@ -1482,26 +1601,6 @@ impl RelayBoundaryServices {
                         return Ok(());
                     }
                 },
-            };
-            let remote_batch = match consumer.mode {
-                AckMode::Attached => batch.attached(),
-                AckMode::Detached => batch.detached(),
-            };
-            let mut registration_owner = if consumer.mode == AckMode::Attached {
-                match dispatcher
-                    .register_pending_acks(&consumer.node_id, remote_batch.acks.to_vec())
-                {
-                    Ok(owner) => Some(owner),
-                    Err(error) => {
-                        let reason = format!("{error:#}");
-                        for ack in &remote_batch.acks {
-                            ack.no_ack(reason.clone());
-                        }
-                        return Err(Box::new(batch.clone()));
-                    }
-                }
-            } else {
-                None
             };
             let remote_acks = match &registration_owner {
                 Some(owner) => owner.registrations().to_vec(),
@@ -1520,6 +1619,8 @@ impl RelayBoundaryServices {
                         acks: remote_acks.clone(),
                     }),
                     &outbound_slot,
+                    deadline,
+                    GrantCapacityRefusals::Hold,
                 )
                 .await;
 
@@ -1577,6 +1678,13 @@ impl RelayBoundaryServices {
         debug_assert!(previous > 0, "relay runtime consumer count underflow");
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "schedule publication replaces the relay's consumer routes"
+        )
+    )]
     pub(super) fn replace_remote_runtime_consumers(&self, consumers: Vec<RemoteRuntimeConsumer>) {
         if *self.remote_runtime_consumers.load().as_ref() == consumers {
             return;
@@ -1711,28 +1819,6 @@ impl RelayBoundaryBuilder {
 }
 
 impl Runtime {
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "retained relay handles route each admitted record and keep channel ordering \
-                      and fences"
-        )
-    )]
-    pub(in crate::runtime) fn invalidate_branch_relay_generation(
-        &self,
-        domain: &DomainName,
-        key: &Option<BranchKey>,
-    ) {
-        let Some(routing) = self.domain_routing(domain) else {
-            return;
-        };
-        let routing = routing.load();
-        for services in routing.relay_services.values() {
-            services.remove_branch_slots(key);
-        }
-    }
-
     /// Whether this node owns the relay `services` serve. A relay whose schedule names no owner is
     /// owned wherever it runs.
     #[cfg_attr(
@@ -1796,7 +1882,7 @@ impl Runtime {
             None => branches.global_metrics.clone(),
         };
         for (evicted_key, _) in admission.evicted {
-            self.invalidate_branch_relay_generation(domain, &Some(evicted_key));
+            services.remove_branch_slots(&Some(evicted_key));
         }
         metrics.observe_batch(
             batch.message_count(),
@@ -1976,7 +2062,7 @@ impl Runtime {
                             now,
                             branch_ttl.verified("this select branch only arms while a branch TTL is configured"),
                         ) {
-                            runtime.invalidate_branch_relay_generation(&domain, &Some(expired_key));
+                            services.remove_branch_slots(&Some(expired_key));
                         }
                         next_expiration_scan = Instant::now() + expiration_scan_interval;
                     }
@@ -2044,7 +2130,6 @@ impl Runtime {
                 "the registry validated this input, and a non-empty input list builds an \
                  interaction",
             );
-            let mut branch_instances = BranchInstanceRegistry::<Option<BranchKey>, ()>::new();
             let relay_model_name = ModelName::from(&relay);
             let ownership_entity =
                 DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay_model_name);
@@ -2061,11 +2146,19 @@ impl Runtime {
                     return;
                 }
             };
-            let mut restored_branches = state.read().restored_branch_watermarks();
-            restored_branches.sort_by_key(|(_, last_ingestion)| *last_ingestion);
-            for (key, last_ingestion) in restored_branches {
-                branch_instances.insert_changed(key, last_ingestion, ());
-            }
+            let activated_at = match clock.snapshot() {
+                Ok(snapshot) => snapshot.now(),
+                Err(error) => {
+                    runtime.events().report_error(format!(
+                        "materialized relay '{}' in domain '{}' could not read its activation \
+                         time: {error:#}",
+                        relay.as_str(),
+                        domain.as_str(),
+                    ));
+                    return;
+                }
+            };
+            let mut branch_instances = state.read().restored_branch_instances(activated_at);
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             'state_task: loop {
                 nervix_primitives::task::consume_budget().await;
@@ -2086,7 +2179,6 @@ impl Runtime {
                     };
                     for (key, _) in branch_instances.expire(now, branch_ttl) {
                         nervix_primitives::task::consume_budget().await;
-                        runtime.invalidate_branch_relay_generation(&domain, &key);
                         if let Err(error) = runtime.delete_materialized_stream_key(&mut state, &key)
                         {
                             warn!(
@@ -2192,7 +2284,6 @@ impl Runtime {
                     for (evicted_key, _) in branch_instances.evict_lru_to_capacity(branch_capacity)
                     {
                         nervix_primitives::task::consume_budget().await;
-                        runtime.invalidate_branch_relay_generation(&domain, &evicted_key);
                         if let Err(error) =
                             runtime.delete_materialized_stream_key(&mut state, &evicted_key)
                         {

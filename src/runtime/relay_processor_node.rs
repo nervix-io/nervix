@@ -602,7 +602,7 @@ impl RelayProcessorNode {
                         ProcessorOutputDispatchContext {
                             branch,
                             node_kind: self.kind,
-                            source_kind: self.kind,
+                            entity_kind: self.kind,
                             processor: &self.processor,
                             error_policies: &self.error_policies,
                             materialized_state: ProcessorMaterializedState::Admitted(
@@ -1420,7 +1420,7 @@ impl RelayProcessorNode {
                 ProcessorOutputDispatchContext {
                     branch,
                     node_kind: self.kind,
-                    source_kind: self.kind,
+                    entity_kind: self.kind,
                     processor: &self.processor,
                     error_policies: &self.error_policies,
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
@@ -1791,7 +1791,7 @@ impl RelayProcessorNode {
                 ProcessorOutputDispatchContext {
                     branch,
                     node_kind,
-                    source_kind: node_kind,
+                    entity_kind: node_kind,
                     processor,
                     error_policies,
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
@@ -1985,6 +1985,7 @@ impl RelayProcessorNode {
         &mut self,
         branch: &mut BranchRuntime,
         execution_now: Timestamp,
+        purpose: ProcessorCheckpointPurpose,
     ) -> OwnershipHandoffResult<()> {
         match &mut self.operation {
             RelayProcessorOperationNode::Deduplicator { keyspace, .. } => {
@@ -2010,14 +2011,19 @@ impl RelayProcessorNode {
                 let Some(live) = instance.as_mut() else {
                     return Ok(());
                 };
-                checkpoint_wasm_guest_state(
-                    &branch.runtime,
-                    &self.processor,
-                    replicated_state,
-                    live,
-                    execution_now,
-                )
-                .await
+                match purpose {
+                    ProcessorCheckpointPurpose::BackupCut => Ok(()),
+                    ProcessorCheckpointPurpose::OwnershipHandoff => {
+                        checkpoint_wasm_guest_state(
+                            &branch.runtime,
+                            &self.processor,
+                            replicated_state,
+                            live,
+                            execution_now,
+                        )
+                        .await
+                    }
+                }
             }
             _ => Ok(()),
         }

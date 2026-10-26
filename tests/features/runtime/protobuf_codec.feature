@@ -8,11 +8,11 @@ Feature: Protobuf codec
         "notification.proto": "syntax = \"proto3\";\npackage nervix.test;\n\nmessage Notification {\n  uint32 user_id = 1;\n  string tenant = 2;\n  string payload = 3;\n}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE proto_bundle;
       UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
@@ -21,7 +21,7 @@ Feature: Protobuf codec
       """
       uploaded resource version 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -77,17 +77,17 @@ Feature: Protobuf codec
         "reading.proto": "syntax = \"proto3\";\npackage nervix.test;\n\nmessage Reading {\n  int64 sensor = 1;\n  double level = 2;\n  repeated double levels = 3;\n}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "readings_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE proto_bundle;
       UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading ( sensor I64, level F64, levels <levels_type> );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( sensor integer, level number, levels array );
@@ -114,12 +114,12 @@ Feature: Protobuf codec
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE EMITTER emitted_readings FROM readings
-        TO KAFKA kafka_main TOPIC readings_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER emitted_readings FROM readings
+        TO kafka_main TOPIC 'readings_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING transforming_reading_codec
         INHERIT ALL

@@ -764,6 +764,22 @@ impl ExecutionContext {
 
 /// Executes a predicate without exposing constructed columns or invocations.
 ///
+/// The execution entry point accepts the compiled predicate capability:
+///
+/// ```
+/// use nervix_execution::Executor;
+/// use nervix_vm::{CompiledPredicate, ExecutionContext, TypedBatch, execute_predicate_in_context};
+///
+/// async fn execute(
+///     executor: &Executor,
+///     predicate: &CompiledPredicate,
+///     batch: &TypedBatch,
+///     context: &ExecutionContext,
+/// ) {
+///     let _ = execute_predicate_in_context(executor, predicate, batch, context).await;
+/// }
+/// ```
+///
 /// A construction-capable program cannot be passed through this entry point:
 ///
 /// ```compile_fail
@@ -9845,7 +9861,7 @@ mod tests {
             "SET bytes = octet_length(input.text), capture = regexp_extract(input.text, \
              input.pattern, input.group)",
         )
-        .verified("the string calls have valid NSPL syntax");
+        .verified("the string calls have valid Plexus syntax");
         let schema = schema(vec![
             Field::new("text", DataType::Utf8, true),
             Field::new("pattern", DataType::Utf8, true),
@@ -9924,7 +9940,7 @@ mod tests {
              input.pattern), any_match = contains_any(input.text, vec(input.needle, 'missing')), \
              normalized = normalize_nfc(input.decomposed)",
         )
-        .verified("the string calls have valid NSPL syntax");
+        .verified("the string calls have valid Plexus syntax");
         let fields = vec![
             Field::new("text", DataType::Utf8, true),
             Field::new("delimiter", DataType::Utf8, true),

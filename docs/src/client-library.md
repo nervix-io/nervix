@@ -1,5 +1,7 @@
 #  Rust Client Library
 
+*Plexus, the Nervix graph definition language.*
+
 The workspace includes `nervix-client-core`, a native Rust client library built on the same session
 gRPC API used by `nervix-cli`. It is the reference implementation of the [Client Implementation
 Manual](./client-implementation-manual.md), and [Client Session
@@ -111,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .dropping()
         .with_batch_sample_rate("0.1")
         .with_where_clause(
-            nervix_nspl::parse_expression("input.tenant = \"acme\"")?
+            nervix_plexus::parse_expression("input.tenant = \"acme\"")?
         );
     client.subscribe(&request).await?;
 
@@ -167,14 +169,14 @@ users, and each domain's revision, section count and bytes. A download that stil
 `ClientError::BackupDownload` with the backup's execution reference, above the typed
 `BackupDownloadError` that says why. Running the same `ExecutionHandle` again returns the recorded outcome and
 downloads the archive again, and `Client::download_backup(reference, summary, destination)`
-downloads a summary's archive directly. A download that receives the whole archive releases it on
-the server, and a later download of it is refused.
+downloads a summary's archive directly. A download releases the archive on the server once the
+server has queued its last frame, and a later download of it is refused.
 
 For recovery from another process, `Client::prepare_backup_with_reference(backup, reference)`
 creates a handle for `execute_prepared` with that durable reference. Select the original domain
 and retain the scope, resources and capture options; the destination file may change. The server
 enforces the semantic binding and retry validity. Each explicit wait attempt is bounded again by
-`backup_wait_timeout`, and does not renew archive retention. `TIMEOUT` in NSPL remains a separate
+`backup_wait_timeout`, and does not renew archive retention. `TIMEOUT` in Plexus remains a separate
 budget for each running domain's cut, so a cluster capture may validly exceed that duration.
 
 `execute` refuses `DESCRIBE BACKUP`, which `nervix-cli` serves from a local file without a server;

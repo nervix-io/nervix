@@ -1,12 +1,12 @@
-//! ZeroMQ source runtime composition.
+//! ZeroMQ ingestor runtime composition.
 //!
 //! Layer: data plane.
 //!
 //! - **Owns.** Composing the ZeroMQ connector plan with host-owned intake, whose quiesce either
 //!   leaves the socket unread or buffers and drops what it keeps reading.
-//! - **Depends on.** The connector source contract, the ZeroMQ connector, and pre-resolved
+//! - **Depends on.** The connector ingestor contract, the ZeroMQ connector, and pre-resolved
 //!   runtime execution handles.
-//! - **Must not know.** The ZeroMQ driver, socket lifecycle, NSPL parsing, registry validation,
+//! - **Must not know.** The ZeroMQ driver, socket lifecycle, Plexus parsing, registry validation,
 //!   or placement computation.
 
 #![cfg_attr(
@@ -14,22 +14,33 @@
     nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
 )]
 
-use nervix_connector_zeromq::{ZeroMqSource, ZeroMqSourcePlan};
+use error_stack::ResultExt as _;
+use nervix_connector::IngestorConnector as _;
+use nervix_connector_zeromq::{ZeroMqPullIngestor, ZeroMqPullIngestorPlan};
 
 use super::{
     super::*,
     IngestorStartError,
-    source::{BrokerSourceStart, SourceStart},
+    connector::{BrokerIngestorStart, IngestorStart},
 };
 
-impl ZeroMqIngestorStartPlan {
+const _: () = assert!(matches!(
+    ZeroMqPullIngestor::KIND,
+    nervix_models::IngestorEntityKind::ZeroMq(nervix_models::ZeroMqIngestorEntity::Pull)
+));
+
+impl ZeroMqPullIngestorStartPlan {
     pub(super) async fn compose(
         self,
+        runtime: &Runtime,
         ingestor: &IngestorSpec,
-    ) -> error_stack::Result<SourceStart, IngestorStartError> {
-        let ZeroMqIngestorStartPlan { client, mode } = self;
-        BrokerSourceStart {
-            connector: ZeroMqSourcePlan::new(client.config),
+    ) -> error_stack::Result<IngestorStart, IngestorStartError> {
+        let ZeroMqPullIngestorStartPlan { client, mode } = self;
+        let resolved = runtime
+            .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
+            .change_context_lazy(|| ingestor.initialize_failure())?;
+        BrokerIngestorStart {
+            connector: ZeroMqPullIngestorPlan::new(resolved.entries),
             instances: NonZeroU64::MIN,
             acknowledgement: mode.acknowledgement(),
             buffered_intake: true,
@@ -37,10 +48,9 @@ impl ZeroMqIngestorStartPlan {
             // Unread messages stay in the socket's kernel buffers while the loop waits, and then
             // the pushing peers' sends wait: nothing is dropped and memory stays bounded.
             unacknowledged_admission: QueueAdmission::WaitForPlace,
-            client_mounts: Vec::new(),
-            connector_label: "zeromq",
+            client_mounts: resolved.mounts.into_iter().collect(),
         }
-        .open::<ZeroMqSource>(ingestor)
+        .open::<ZeroMqPullIngestor>(ingestor)
         .await
     }
 }

@@ -1,4 +1,4 @@
-//! Public semantic models for NSPL statements.
+//! Public semantic models for Plexus statements.
 //!
 //! Layer: vocabulary.
 //!
@@ -105,6 +105,7 @@ pub enum Statement {
     ShowClusterStatus(ShowClusterStatus),
     ShowTransactions(ShowTransactions),
     DescribeTransaction(DescribeTransaction),
+    DescribeCluster(DescribeCluster),
 }
 
 impl Statement {
@@ -180,6 +181,7 @@ impl Statement {
             | Self::ShowClusterStatus(_)
             | Self::ShowTransactions(_)
             | Self::DescribeTransaction(_)
+            | Self::DescribeCluster(_)
             | Self::ResetWasmState(_) => false,
         }
     }
@@ -329,7 +331,7 @@ impl ModelKind {
             .assured("the strum property is declared on every variant of this enum")
     }
 
-    /// The NSPL keyword phrase that names this kind in `DROP` and `SHOW CREATE`.
+    /// The Plexus keyword phrase that names this kind in `DROP` and `SHOW CREATE`.
     pub fn keyword_phrase(self) -> &'static str {
         self.get_str("keyword")
             .assured("the strum property is declared on every variant of this enum")
@@ -369,6 +371,22 @@ pub struct ShowCreate {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct ShowClusterStatus;
+
+/// Describes every live node of the cluster: the prerequisites it brings, and how its timings
+/// differ from the leader's.
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub struct DescribeCluster;
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -675,8 +693,8 @@ impl RelocationMember {
         Self { kind, name }
     }
 
-    /// The `<kind> <name>` spelling used in canonical NSPL and in diagnostics.
-    pub fn to_nspl(&self) -> String {
+    /// The `<kind> <name>` spelling used in canonical Plexus and in diagnostics.
+    pub fn to_plexus(&self) -> String {
         format!("{} {}", self.kind.keyword_phrase(), self.name.as_str())
     }
 }
@@ -704,7 +722,7 @@ impl RelocationSelection {
         }
     }
 
-    fn to_nspl(&self) -> String {
+    fn to_plexus(&self) -> String {
         match self {
             Self::List(members) => format_relocation_members(members),
             Self::Corridor { from, to } => format!(
@@ -741,7 +759,7 @@ pub enum RelocationPreferenceStrategy {
 }
 
 impl RelocationPreferenceStrategy {
-    /// The composed NSPL keyword phrase that spells this strategy.
+    /// The composed Plexus keyword phrase that spells this strategy.
     pub fn keyword_phrase(self) -> &'static str {
         self.get_str("keyword")
             .assured("the strum property is declared on every variant of this enum")
@@ -776,17 +794,17 @@ pub struct Relocation {
 impl Relocation {
     /// Renders the clauses shared by both statements, with the default strategy before any
     /// `FOR` override and members in written order.
-    pub fn to_nspl_clauses(&self) -> String {
+    pub fn to_plexus_clauses(&self) -> String {
         let mut rendered = format!(
             "{} ONTO NODE {} {}",
-            self.selection.to_nspl(),
+            self.selection.to_plexus(),
             self.destination,
             self.strategy.keyword_phrase()
         );
         for override_clause in &self.overrides {
             rendered.push_str(&format!(
                 " FOR {} {}",
-                override_clause.member.to_nspl(),
+                override_clause.member.to_plexus(),
                 override_clause.strategy.keyword_phrase()
             ));
         }
@@ -797,7 +815,7 @@ impl Relocation {
 fn format_relocation_members(members: &[RelocationMember]) -> String {
     members
         .iter()
-        .map(RelocationMember::to_nspl)
+        .map(RelocationMember::to_plexus)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1977,7 +1995,7 @@ impl CreateIngestor {
                 requested: alter.ingestor.clone(),
             }));
         }
-        let stored = self.input.source_kind();
+        let stored = self.input.entity_kind();
         let requested = alter.alteration.kind();
         if stored != requested {
             return Err(Report::new(AlterIngestorError::KindMismatch {
@@ -1998,7 +2016,7 @@ impl CreateIngestor {
         operations: &[AlterTransportIngestorOperation<Source>],
     ) -> error_stack::Result<(), AlterIngestorError>
     where
-        Source: crate::connector::AlteredIngestorSource,
+        Source: crate::connector::AlteredIngestorEntity,
     {
         for operation in operations {
             match operation {
@@ -2023,7 +2041,7 @@ impl CreateIngestor {
         operations: &[AlterIngestorOperation<Source>],
     ) -> error_stack::Result<(), AlterIngestorError>
     where
-        Source: crate::connector::AlteredIngestorSource,
+        Source: crate::connector::AlteredIngestorEntity,
     {
         for operation in operations {
             self.apply_operation(operation)?;
@@ -2036,7 +2054,7 @@ impl CreateIngestor {
         operation: &AlterIngestorOperation<Source>,
     ) -> error_stack::Result<(), AlterIngestorError>
     where
-        Source: crate::connector::AlteredIngestorSource,
+        Source: crate::connector::AlteredIngestorEntity,
     {
         match operation {
             AlterIngestorOperation::SetSource { source } => {
@@ -2114,7 +2132,7 @@ pub struct AlterIngestor {
 
 impl AlterIngestor {
     /// The connector and entity the statement's head names.
-    pub const fn kind(&self) -> crate::IngestSourceKind {
+    pub const fn kind(&self) -> crate::IngestorEntityKind {
         self.alteration.kind()
     }
 }
@@ -2166,8 +2184,8 @@ pub enum AlterIngestorError {
     },
     #[error("the stored ingestor reads {stored}, so ALTER {requested} INGESTOR cannot alter it")]
     KindMismatch {
-        stored: crate::IngestSourceKind,
-        requested: crate::IngestSourceKind,
+        stored: crate::IngestorEntityKind,
+        requested: crate::IngestorEntityKind,
     },
     #[error("route target `{relay}` is not configured")]
     RouteTargetNotFound { relay: RelayName },
@@ -2177,7 +2195,7 @@ pub enum AlterIngestorError {
     CannotDropLastRoute,
     #[error("{kind} ingestors do not support ON QUIESCE {mode}")]
     UnsupportedQuiesceMode {
-        kind: crate::IngestSourceKind,
+        kind: crate::IngestorEntityKind,
         mode: &'static str,
     },
 }

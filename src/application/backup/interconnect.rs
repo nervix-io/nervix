@@ -27,7 +27,7 @@ use nervix_interconnect::{
     HandlerRegistrationError, RemoteOperationFailure, RemoteOperationSubject,
     StatePlacementEnvelope, StreamHandlerError, StreamingResponse, Transport,
 };
-use nervix_models::{DomainName, DomainStatus, RestoreStateAuthority};
+use nervix_models::{DomainName, DomainStatus, NodeRef, RestoreStateAuthority};
 use nervix_primitives::{
     sync::{Arc, Mutex as AsyncMutex, watch},
     time::Instant,
@@ -257,11 +257,14 @@ impl SessionServiceImpl {
         })
     }
 
+    /// Captures this node's share of a cut: the state of `primaries`, the entities the cut's
+    /// schedule names this node the primary of.
     pub(super) async fn capture_local_state(
         &self,
         domain: &DomainName,
         quiesced: bool,
         status: DomainStatus,
+        primaries: ahash::HashSet<NodeRef>,
     ) -> Result<CapturedDomainState, RemoteOperationFailure> {
         let runtime = self.inner.runtime.clone();
         if quiesced {
@@ -281,7 +284,13 @@ impl SessionServiceImpl {
                 nervix_execution::StorageClass::Filesystem,
                 reservation,
                 move |_charge, cancellation| {
-                    runtime.capture_backup_state(&domain_owned, quiesced, status, cancellation)
+                    runtime.capture_backup_state(
+                        &domain_owned,
+                        quiesced,
+                        status,
+                        &primaries,
+                        cancellation,
+                    )
                 },
             )
             .await
@@ -324,8 +333,14 @@ impl SessionServiceImpl {
             .ok_or_else(|| failed(&request.domain, "domain is unavailable"))?
             .status
             .clone();
+        // Only a placement's scheduled primary archives it, so a replica's copy is never read: its
+        // admission or storage refusal could only fail the cut.
+        let mut primaries = ahash::HashSet::default();
+        if let Some(schedule) = capture.schedule.domain(&request.domain) {
+            primaries.extend(schedule.primary_entities_on(self.inner.consensus.local_node_id()));
+        }
         let state = self
-            .capture_local_state(&request.domain, request.quiesced, status)
+            .capture_local_state(&request.domain, request.quiesced, status, primaries)
             .await?;
         let mut staged = self
             .stage_guest_state_sections(
@@ -777,7 +792,7 @@ mod tests {
             assert_eq!(section_kind(section_content(kind)), Some(kind));
         }
         assert_eq!(
-            section_kind(SectionContent::Nspl),
+            section_kind(SectionContent::Plexus),
             None,
             "configuration never travels as captured runtime state"
         );

@@ -3,11 +3,11 @@ Feature: Syslog support
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (
         facility U8,
@@ -22,14 +22,12 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_ingest_addr}}'
         };
-      CREATE CLIENT syslog_forwarder
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_forwarder
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_emit_addr}}'
@@ -44,10 +42,10 @@ Feature: Syslog support
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER syslog_forward
+      CREATE SYSLOG COLLECTOR EMITTER syslog_forward
         FROM syslog_events
-        TO SYSLOG syslog_forwarder
-          MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+        TO syslog_forwarder
+          MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING syslog_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -56,7 +54,7 @@ Feature: Syslog support
       CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
       START;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       SHOW CREATE CODEC syslog_codec;
       """
@@ -78,7 +76,7 @@ Feature: Syslog support
       from: syslog_events
       codec: syslog_codec
       body: codec
-      sink: SYSLOG client=syslog_forwarder
+      to: SYSLOG COLLECTOR syslog_forwarder
       """
     When Syslog UDP message is published to "{{syslog_ingest_addr}}"
       """
@@ -112,11 +110,11 @@ Feature: Syslog support
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And Syslog UDP emission endpoint "{{syslog_emit_addr}}" is observed
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_event (
         facility U8,
@@ -125,14 +123,12 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_ingest_addr}}'
         };
-      CREATE CLIENT syslog_forwarder
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_forwarder
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_emit_addr}}'
@@ -147,10 +143,10 @@ Feature: Syslog support
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER syslog_forward
+      CREATE SYSLOG COLLECTOR EMITTER syslog_forward
         FROM syslog_events
-        TO SYSLOG syslog_forwarder
-          MODE NO_ACK RETRY POLICY BACKOFF 50ms MAX 1s
+        TO syslog_forwarder
+          MODE NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING syslog_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -178,19 +174,18 @@ Feature: Syslog support
   Scenario Outline: Invalid Syslog transport configuration names the connector failure at startup
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT invalid_syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT invalid_syslog_listener
         CONFIG {
           'protocol' = 'udp',
           'addr' = '{{syslog_ingest_addr}}',
@@ -207,7 +202,7 @@ Feature: Syslog support
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "failed to initialize ingestor 'invalid_syslog_intake' in domain '{{domain}}': invalid Syslog client config key 'framing': UDP does not use stream framing"
+    When these Plexus commands fail with "failed to initialize ingestor 'invalid_syslog_intake' in domain '{{domain}}': invalid Syslog client config key 'framing': UDP does not use stream framing"
       """
       START;
       """
@@ -220,28 +215,27 @@ Feature: Syslog support
   Scenario Outline: Syslog TLS intake uses RFC 5425 framing and mounted mutual TLS identity
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has TLS resource directory "syslog_tls_dir" for hosts "127.0.0.1"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE syslog_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE syslog_tls VERSION "{{syslog_tls_dir}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1
         CONFIG {
           'protocol' = 'tls',
@@ -284,11 +278,11 @@ Feature: Syslog support
   Scenario Outline: Syslog TCP intake accepts mixed RFC 6587 framing and exposes peer metadata
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
@@ -299,8 +293,7 @@ Feature: Syslog support
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA received_syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'tcp',
           'addr' = '{{syslog_ingest_addr}}',
@@ -347,22 +340,135 @@ Feature: Syslog support
       | 1            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Syslog TCP intake reassembles a <framing> frame split across two reads
+  @syslog_suspend_handoff @deloxide_stress
+  Scenario Outline: A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes via <node_id>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA syslog_message (message STRING);
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE CODEC syslog_alternate_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED CAPACITY 4;
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
+        'protocol' = 'tcp',
+        'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Given ingestor "syslog_intake" pauses inside dispatch
+    And the entity gate for domain "{{domain}}" pauses after engagement
+    When a Syslog TCP sender publishes 80 numbered frames to node "<node_id>" at "{{syslog_ingest_addr}}"
+    Then ingestor "syslog_intake" reaches the dispatch pause
+    When these Plexus commands begin executing in the background
+      """
+      ALTER SYSLOG LISTENER INGESTOR syslog_intake SET DECODE USING syslog_alternate_codec;
+      """
+    Then within "10s" node "<node_id>" eventually reports describe ingestor "syslog_intake" as "status: quiesced"
+    When ingestor "syslog_intake" leaves the dispatch pause
+    Then the entity gate pause for domain "{{domain}}" is reached
+    And within "10s" node "<node_id>" eventually reports describe ingestor "syslog_intake" as "ready: false"
+    # End the alteration before it replaces the source, so the held source resumes.
+    Given the next pending entity drain in domain "{{domain}}" is forced to time out
+    When the entity gate pause for domain "{{domain}}" is released
+    Then the background Plexus execution fails with "timed out draining domain"
+    And within "30s" the relay subscription receives 80 numbered Syslog frames once
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count | node_id |
+      | 1            | 0             | node-1  |
+      | 3            | 1             | node-1  |
+      | 3            | 1             | node-2  |
+      | 3            | 1             | node-3  |
+
+  @syslog_listener_rebind @deloxide_stress
+  Scenario Outline: A Syslog accept error keeps an established TCP connection on <cluster_size> nodes via <node_id>
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA syslog_message (message STRING);
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
+        'protocol' = 'tcp',
+        'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    When a live Syslog TCP sender connects to node "<node_id>" at "{{syslog_ingest_addr}}"
+    And the live Syslog TCP sender writes message "before-error"
+    Then within "10s" the relay subscription receives a payload
+      """
+      "message":"before-error"
+      """
+    When the Syslog listener on node "<node_id>" at "{{syslog_ingest_addr}}" fails its next accept through the fault hook
+    Then the Syslog listener accept fault fires
+    When the live Syslog TCP sender writes message "after-error"
+    Then within "10s" the relay subscription receives a payload
+      """
+      "message":"after-error"
+      """
+    When a fresh Syslog TCP sender writes message "after-rebind" to node "<node_id>" at "{{syslog_ingest_addr}}"
+    Then within "10s" the relay subscription receives a payload
+      """
+      "message":"after-rebind"
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count | node_id |
+      | 1            | 0             | node-1  |
+      | 3            | 1             | node-1  |
+      | 3            | 1             | node-2  |
+      | 3            | 1             | node-3  |
+
+  Scenario Outline: Syslog TCP intake reassembles a <framing> frame split across two reads
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         CONFIG {
           'protocol' = 'tcp',
           'addr' = '{{syslog_ingest_addr}}'
@@ -410,28 +516,27 @@ Feature: Syslog support
   Scenario Outline: Syslog TLS intake reassembles an octet-counted frame split across two reads
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has TLS resource directory "syslog_tls_dir" for hosts "127.0.0.1"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE syslog_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE syslog_tls VERSION "{{syslog_tls_dir}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA syslog_message (
         message STRING
       );
       CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
       CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
-      CREATE CLIENT syslog_listener
-        TYPE SYSLOG
+      CREATE SYSLOG CLIENT syslog_listener
         MOUNT syslog_tls VERSION 1
         CONFIG {
           'protocol' = 'tls',
@@ -477,3 +582,235 @@ Feature: Syslog support
       | cluster_size | replica_count | split                  |
       | 1            | 0             | inside its octet count |
       | 3            | 1             | inside its payload     |
+
+  Scenario Outline: A Syslog TLS listener closes a client that stalls its handshake within connect_timeout_ms
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And node "node-1" has TLS resource directory "syslog_tls_dir" for hosts "127.0.0.1"
+    When these Plexus commands are executed
+      """
+      CREATE RESOURCE syslog_tls;
+      """
+    And these Plexus commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE syslog_tls VERSION "{{syslog_tls_dir}}";
+      """
+    And these Plexus commands are executed
+      """
+      CREATE SCHEMA syslog_message (
+        message STRING
+      );
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
+      CREATE SYSLOG CLIENT syslog_listener
+        MOUNT syslog_tls VERSION 1
+        CONFIG {
+          'protocol' = 'tls',
+          'addr' = '{{syslog_ingest_addr}}',
+          'tls_cert_file' = '{{ syslog_tls }}/tls.crt',
+          'tls_key_file' = '{{ syslog_tls }}/tls.key',
+          'tls_ca_file' = '{{ syslog_tls }}/ca.crt',
+          'connect_timeout_ms' = '1000'
+        };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then within "5s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
+      """
+      status: running
+      """
+    When a Syslog client that sends nothing connects to "{{syslog_ingest_addr}}"
+    And Syslog TLS message is published to "{{syslog_ingest_addr}}" using identity and CA from resource directory "syslog_tls_dir"
+      """
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-3 secure 789 ID49 - beside a stalled handshake
+      """
+    Then the relay subscription receives a payload
+      """
+      "message":"beside a stalled handshake"
+      """
+    And the Syslog client that sends nothing is disconnected no sooner than "1s" after it connected
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: A Syslog TCP listener closes a connection idle beyond idle_timeout_ms
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA syslog_message (
+        message STRING
+      );
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
+      CREATE SYSLOG CLIENT syslog_listener
+        CONFIG {
+          'protocol' = 'tcp',
+          'addr' = '{{syslog_ingest_addr}}',
+          'idle_timeout_ms' = '1000'
+        };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then within "5s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
+      """
+      status: running
+      """
+    When a Syslog client that sends nothing connects to "{{syslog_ingest_addr}}"
+    And Syslog TCP messages are published with mixed framing to "{{syslog_ingest_addr}}"
+      """
+      {{syslog_pri}}Oct 11 22:14:15 edge-2 worker: beside an idle connection
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-2 worker 456 ID48 - after it
+      """
+    Then the relay subscription receives a payload
+      """
+      "message":"beside an idle connection"
+      """
+    And the Syslog client that sends nothing is disconnected no sooner than "1s" after it connected
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: A Syslog UDP datagram larger than max_message_size is dropped and counted
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA syslog_message (
+        message STRING
+      );
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED;
+      CREATE SYSLOG CLIENT syslog_listener
+        CONFIG {
+          'protocol' = 'udp',
+          'addr' = '{{syslog_ingest_addr}}',
+          'max_message_size' = '512'
+        };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then within "10s" node "node-1" eventually reports describe ingestor "syslog_intake" as "status: running"
+    When a Syslog UDP datagram of 1024 bytes is published to "{{syslog_ingest_addr}}"
+    And Syslog UDP message is published to "{{syslog_ingest_addr}}"
+      """
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 - after an oversize datagram
+      """
+    Then the relay subscription receives a payload
+      """
+      "message":"after an oversize datagram"
+      """
+    And within "10s" node "node-1" eventually reports describe ingestor "syslog_intake" as "nervix_ingestor_oversized_payloads_total: 1"
+    And node "node-1" observability metric "nervix_ingestor_oversized_payloads_total" with labels eventually equals 1
+      """
+      domain="{{domain}}"
+      ingestor="syslog_intake"
+      physical_node_id="node-1"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  # The harness draws the ingest port when the scenario starts, and every node binds it only once
+  # the listener starts after START. A socket that took the port in between fails every bind the
+  # listener retries, so the address moves to a fresh port when a statement first names it.
+  @node_bound_port_taken
+  Scenario Outline: A Syslog UDP listener binds a fresh port when another socket took the port the scenario drew for it
+    Given a <cluster_size> node nervix cluster is started
+    And another socket binds UDP on the port the scenario drew for its syslog ingest address
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA syslog_event (
+        facility U8,
+        severity U8,
+        message STRING
+      );
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
+      CREATE SYSLOG CLIENT syslog_listener
+        CONFIG {
+          'protocol' = 'udp',
+          'addr' = '{{syslog_ingest_addr}}'
+        };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
+      """
+      ready: true
+      """
+    When Syslog UDP message is published to "{{syslog_ingest_addr}}"
+      """
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 - moved listener
+      """
+    Then the relay subscription receives a payload
+      """
+      "message":"moved listener"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -3,10 +3,14 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** One isolated server process: its ports, database directory, interconnect
-//!   credentials, command-line options, captured log, the signals delivered to it, the clients a
-//!   scenario holds open against it, and the status it exits with.
-//! - **Depends on.** The executable Cargo builds beside this test target, the shared test port
-//!   reservations, the test interconnect certificate authority, and the session client.
+//!   credentials, command-line options, captured log, the startup of each launch, the relaunch on
+//!   fresh ports of a launch another socket kept from binding a drawn port, and the description of
+//!   a startup that fails, the sockets a scenario has hold its ports, the signals delivered to it,
+//!   the clients a scenario holds open against it, and the status it exits with.
+//! - **Depends on.** The executable Cargo builds beside this test target and the read of it before
+//!   each launch, the shared test port reservations, the test interconnect certificate authority,
+//!   the session client, the readiness history, the observation of a running process, the report a
+//!   process writes when its startup fails, and the node-startup classification and launch limit.
 //! - **Must not know.** Server internals. Everything it observes crosses the process boundary: the
 //!   gRPC API, HTTP/2 frames, the files the process writes, the log the process writes, and how
 //!   the process exits.
@@ -17,8 +21,9 @@
 //! instead.
 
 use std::{
+    fmt,
     fs::OpenOptions,
-    io,
+    future, io,
     net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
     os::unix::process::ExitStatusExt as _,
@@ -35,7 +40,7 @@ use nervix_client_wire::{
 use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
 use nervix_primitives::{
-    net::TcpStream,
+    net::{TcpListener, TcpStream},
     sync::{CancellationToken, watch},
     task::AbortOnDropHandle,
     time::{sleep, timeout},
@@ -54,9 +59,13 @@ use super::{
         TestSession, open_raw_session, publish_http_uri_with_headers, run_command_via_client,
         test_basic_authorization,
     },
-    node_liveness::{LastReadinessOutcome, ReadinessProbeOutcome},
+    node_liveness::{ReadinessHistory, ReadinessProbeOutcome},
+    node_startup::{NODE_START_ATTEMPTS, StartupPorts},
     phase_deadline::PhaseDeadline,
-    port_pool::{next_port, release_test_ports},
+    port_pool::{next_port, next_ports, release_test_ports},
+    process_observation::ProcessObservation,
+    process_report::reported_context,
+    server_executable::{PreparedExecutable, ServerExecutable},
     status_request::{
         STATUS_REQUEST_TIMEOUT, STATUS_REQUESTS_PER_STARTUP, StatusEndpoint, StatusTransport,
     },
@@ -66,6 +75,8 @@ use super::{
 /// single-node cluster, so one identity serves every process.
 const CLUSTER_ID: &str = "cucumber";
 const NODE_ID: &str = "node-1";
+/// How long one launch has, from its start until the process accepts commands. Reading the
+/// executable, spawning the process and waiting for its readiness all share it.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const _: () = assert!(
     match STATUS_REQUEST_TIMEOUT.checked_mul(STATUS_REQUESTS_PER_STARTUP) {
@@ -104,11 +115,21 @@ pub(crate) enum ServerProcessLaunch {
 }
 
 impl ServerProcessLaunch {
-    fn command(&self) -> Command {
-        let default_executable = Path::new(env!("CARGO_BIN_EXE_nervix-server"));
+    /// The server executable the launch runs. A launch that lowers the open-file limit starts a
+    /// shell that replaces itself with the default executable, so that is the one it runs.
+    fn executable_path(&self) -> PathBuf {
         match self {
-            Self::Direct => Command::new(default_executable),
-            Self::Executable(executable) => Command::new(executable),
+            Self::Direct | Self::OpenFileLimit(_) => {
+                PathBuf::from(env!("CARGO_BIN_EXE_nervix-server"))
+            }
+            Self::Executable(executable) => executable.clone(),
+        }
+    }
+
+    fn command(&self) -> Command {
+        let executable = self.executable_path();
+        match self {
+            Self::Direct | Self::Executable(_) => Command::new(executable),
             Self::OpenFileLimit(limit) => {
                 let mut command = Command::new("bash");
                 command
@@ -118,7 +139,7 @@ impl ServerProcessLaunch {
                     .arg(r#"ulimit -Sn "$1" && ulimit -Hn "$1" && shift && exec "$@""#)
                     .arg("bash")
                     .arg(limit.to_string())
-                    .arg(default_executable);
+                    .arg(executable);
                 command
             }
         }
@@ -229,6 +250,11 @@ struct ServerProcessPorts {
     observability: u16,
     web_console: u16,
     interconnect: u16,
+    /// The ports a relaunch moved the process off. They stay reserved until the fixture is
+    /// dropped, with the ports it binds then: a peer or a client may still dial an address the
+    /// process published before a restart, and dropping the fixture ends the scenario that pointed
+    /// them at it.
+    given_up: Vec<u16>,
 }
 
 impl ServerProcessPorts {
@@ -240,6 +266,7 @@ impl ServerProcessPorts {
             observability: next_port()?,
             web_console: next_port()?,
             interconnect: next_port()?,
+            given_up: Vec::new(),
         })
     }
 
@@ -253,11 +280,112 @@ impl ServerProcessPorts {
             self.interconnect,
         ]
     }
+
+    /// The listeners `selection` names.
+    fn selected(&mut self, selection: StartupPorts) -> Vec<&mut u16> {
+        match selection {
+            StartupPorts::All => vec![
+                &mut self.grpc,
+                &mut self.http,
+                &mut self.https,
+                &mut self.observability,
+                &mut self.web_console,
+                &mut self.interconnect,
+            ],
+            StartupPorts::Grpc => vec![&mut self.grpc],
+            StartupPorts::Http => vec![&mut self.http],
+            StartupPorts::Https => vec![&mut self.https],
+            StartupPorts::Observability => vec![&mut self.observability],
+            StartupPorts::WebConsole => vec![&mut self.web_console],
+            StartupPorts::Interconnect => vec![&mut self.interconnect],
+        }
+    }
+
+    /// The ports the listeners `selection` names bind.
+    fn ports(&mut self, selection: StartupPorts) -> Vec<u16> {
+        self.selected(selection)
+            .into_iter()
+            .map(|port| *port)
+            .collect()
+    }
+
+    /// Moves the listeners `selection` names to freshly drawn ports, keeping the ports they leave
+    /// reserved until the fixture is dropped.
+    fn move_to_fresh(&mut self, selection: StartupPorts) -> io::Result<()> {
+        let listeners = self.selected(selection);
+        let replacements = next_ports(listeners.len())?;
+        let mut given_up = Vec::with_capacity(listeners.len());
+        for (listener, replacement) in listeners.into_iter().zip(replacements) {
+            given_up.push(*listener);
+            *listener = replacement;
+        }
+        self.given_up.extend(given_up);
+        Ok(())
+    }
 }
 
 impl Drop for ServerProcessPorts {
     fn drop(&mut self) {
         release_test_ports(&self.all());
+        release_test_ports(&self.given_up);
+    }
+}
+
+/// Ports another socket holds so the process cannot bind them, the way an unrelated socket on a
+/// busy runner can take a port the harness drew before the process binds it. A scenario holds them
+/// to cause that on purpose.
+struct HeldPorts {
+    selection: StartupPorts,
+    ports: Vec<u16>,
+    /// One task per port, each owning a listener on it that closes every connection it accepts, so
+    /// a readiness probe that dials a held port fails at once instead of waiting out its request
+    /// deadline. Dropping a task closes its listener.
+    _holders: Vec<AbortOnDropHandle<()>>,
+}
+
+impl fmt::Debug for HeldPorts {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HeldPorts")
+            .field("selection", &self.selection)
+            .field("ports", &self.ports)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HeldPorts {
+    /// Holds `ports`, which the listeners `selection` names bind, until the result is dropped.
+    async fn hold(selection: StartupPorts, ports: Vec<u16>) -> io::Result<Self> {
+        let mut holders = Vec::with_capacity(ports.len());
+        for port in &ports {
+            nervix_primitives::task::consume_budget().await;
+            // A Unix listener sets SO_REUSEADDR, so it takes a port whose connections a killed
+            // process left in TIME_WAIT, and it listens, which refuses the port to a process
+            // binding it whatever options that process binds with.
+            let listener =
+                TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, *port))).await?;
+            let holder = nervix_primitives::task::spawn(close_every_connection(listener));
+            holders.push(AbortOnDropHandle::new(holder));
+        }
+        Ok(Self {
+            selection,
+            ports,
+            _holders: holders,
+        })
+    }
+}
+
+/// Accepts every connection `listener` receives and closes it at once.
+async fn close_every_connection(listener: TcpListener) {
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let Ok((connection, _)) = listener.accept().await else {
+            // A listener that can no longer accept still holds its port, which is all a hold
+            // needs; a probe that dials it then waits out its request deadline instead.
+            future::pending::<()>().await;
+            return;
+        };
+        drop(connection);
     }
 }
 
@@ -342,6 +470,122 @@ impl ServerProcessConfiguration {
         }
         command.spawn()
     }
+
+    /// Starts one launch: reads the executable the launch runs, in file order, and then spawns the
+    /// process. `deadline` is the startup's, which started before its first launch read the
+    /// executable, so reading the executable, spawning the process and waiting until it accepts
+    /// commands all share it, across every launch of the startup.
+    async fn launch(&self, root: &Path, deadline: PhaseDeadline) -> io::Result<Launched> {
+        let executable = ServerExecutable::new(self.launch.executable_path());
+        let prepared = executable.prepare(deadline).await.map_err(|error| {
+            io::Error::other(format!("nervix-server could not be launched: {error:#}"))
+        })?;
+        let child = self.spawn(root)?;
+        Ok(Launched {
+            child,
+            executable: prepared,
+        })
+    }
+}
+
+/// The startup of a server process: its first launch and every launch it relaunched.
+#[derive(Debug)]
+struct LaunchStartup {
+    /// The deadline the startup must accept commands by. It started before the first launch read
+    /// the executable, and every relaunch shares it.
+    deadline: PhaseDeadline,
+    /// What reading the executable before the current launch did.
+    executable: PreparedExecutable,
+    /// Which launch of the startup is current, counted from one.
+    launch: u32,
+    /// The launches of this startup that ended because another socket held a port they were to
+    /// bind, in the order they ran.
+    lost_binds: Vec<LostBindLaunch>,
+}
+
+impl LaunchStartup {
+    /// The startup a first launch begins.
+    fn first(deadline: PhaseDeadline, executable: PreparedExecutable) -> Self {
+        Self {
+            deadline,
+            executable,
+            launch: 1,
+            lost_binds: Vec::new(),
+        }
+    }
+}
+
+/// A process one launch spawned, and what reading its executable before the spawn did.
+struct Launched {
+    child: Child,
+    executable: PreparedExecutable,
+}
+
+/// How a launch whose process exited before it accepted commands ended.
+struct LaunchEnding {
+    status: ExitStatus,
+    /// The readiness probes of the launch until its process exited.
+    readiness: ReadinessHistory,
+    retry: LaunchRetry,
+}
+
+/// Whether launching the process again could change how a launch ended.
+enum LaunchRetry {
+    /// The process's report names a listener another process bound first, which a launch on
+    /// fresh ports for that listener can change.
+    LostBind {
+        /// The report's outermost context.
+        reported: String,
+        /// The listeners the next launch moves to fresh ports.
+        ports: StartupPorts,
+    },
+    /// The process decided its ending from its configuration, its stored state or its own code,
+    /// or wrote no report that says otherwise, so the next launch repeats it.
+    Terminal,
+}
+
+impl LaunchRetry {
+    /// How the report `log` holds classifies the launch that wrote it.
+    fn reported_in(log: &str) -> Self {
+        let Some(reported) = reported_context(log) else {
+            return Self::Terminal;
+        };
+        match StartupPorts::lost_in_report(&reported) {
+            Some(ports) => Self::LostBind { reported, ports },
+            None => Self::Terminal,
+        }
+    }
+}
+
+/// A launch that exited because another socket held a port it was to bind, and the listeners the
+/// next launch of the same startup moved to fresh ports.
+#[derive(Debug)]
+struct LostBindLaunch {
+    /// Which launch of the startup it was, counted from one.
+    launch: u32,
+    /// How much of the startup's deadline had passed when the harness saw the process exit.
+    elapsed: Duration,
+    status: ExitStatus,
+    /// The outermost context of the report the process wrote as it exited.
+    reported: String,
+    /// The listeners the next launch moved to fresh ports.
+    moved: StartupPorts,
+}
+
+impl fmt::Display for LostBindLaunch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "launch {}/{NODE_START_ATTEMPTS} [transient] exited {:?} into its {} deadline with \
+             {}: {}; the next launch moves its {} listener to a fresh port",
+            self.launch,
+            self.elapsed,
+            humantime::format_duration(STARTUP_TIMEOUT),
+            describe_exit(self.status),
+            self.reported,
+            self.moved
+        )
+    }
 }
 
 /// A started `nervix-server` process and everything it was given.
@@ -351,32 +595,67 @@ impl ServerProcessConfiguration {
 pub(crate) struct ServerProcess {
     child: Child,
     exit_status: Option<ExitStatus>,
+    /// The ports another socket holds so the process cannot bind them, when a scenario had any
+    /// held.
+    held: Option<HeldPorts>,
     configuration: ServerProcessConfiguration,
+    /// The current startup: its first launch and every launch it relaunched.
+    startup: LaunchStartup,
     /// Byte offset where the current process launch began in the shared append-only log.
     log_start: u64,
     root: TempDir,
 }
 
 impl ServerProcess {
-    pub(crate) fn start(
+    pub(crate) async fn start(
         launch: ServerProcessLaunch,
         options: &[ServerProcessOption],
+    ) -> io::Result<Self> {
+        Self::start_with_held_ports(launch, options, None).await
+    }
+
+    /// Starts a process whose listeners `held` names another socket holds from the moment the
+    /// harness draws their ports, before the process can bind them.
+    pub(crate) async fn start_holding(
+        launch: ServerProcessLaunch,
+        options: &[ServerProcessOption],
+        held: StartupPorts,
+    ) -> io::Result<Self> {
+        Self::start_with_held_ports(launch, options, Some(held)).await
+    }
+
+    async fn start_with_held_ports(
+        launch: ServerProcessLaunch,
+        options: &[ServerProcessOption],
+        held: Option<StartupPorts>,
     ) -> io::Result<Self> {
         let root = tempfile::Builder::new()
             .prefix("nervix-server-process-")
             .tempdir()?;
         let certificate_authority = InterconnectTestCa::new(&root)?;
-        Self::start_cluster_member(root, &certificate_authority, NODE_ID, None, launch, options)
+        Self::start_cluster_member(
+            root,
+            &certificate_authority,
+            NODE_ID,
+            None,
+            launch,
+            options,
+            held,
+        )
+        .await
     }
 
     /// Starts one independently persisted member under a shared cluster certificate authority.
-    pub(crate) fn start_cluster_member(
+    /// Another socket holds the ports of the listeners `held` names, when it names any, from the
+    /// moment they are drawn.
+    pub(crate) async fn start_cluster_member(
         root: TempDir,
         certificate_authority: &InterconnectTestCa,
         node_id: &str,
         bootstrap_host: Option<&str>,
         launch: ServerProcessLaunch,
         options: &[ServerProcessOption],
+        held: Option<StartupPorts>,
     ) -> io::Result<Self> {
         let (certificate, private_key) = certificate_authority.issue_node_with_identity(
             CLUSTER_ID,
@@ -386,10 +665,18 @@ impl ServerProcess {
         )?;
         let temp_dir = root.path().join("temp");
         std::fs::create_dir_all(&temp_dir)?;
+        let mut ports = ServerProcessPorts::allocate()?;
+        let held = match held {
+            Some(selection) => {
+                let held_ports = ports.ports(selection);
+                Some(HeldPorts::hold(selection, held_ports).await?)
+            }
+            None => None,
+        };
         let configuration = ServerProcessConfiguration {
             launch,
             options: options.to_vec(),
-            ports: ServerProcessPorts::allocate()?,
+            ports,
             node_id: node_id.to_string(),
             bootstrap_host: bootstrap_host.map(str::to_string),
             certificate_authority: certificate_authority.path.clone(),
@@ -397,69 +684,289 @@ impl ServerProcess {
             private_key,
             temp_dir,
         };
-        let child = configuration.spawn(root.path())?;
+        let deadline = PhaseDeadline::after(STARTUP_TIMEOUT);
+        let launched = configuration.launch(root.path(), deadline).await?;
 
         Ok(Self {
-            child,
+            child: launched.child,
             exit_status: None,
+            held,
             configuration,
+            startup: LaunchStartup::first(deadline, launched.executable),
             log_start: 0,
             root,
         })
     }
 
-    /// Reopens this process's existing database on the same isolated ports.
+    /// Has another socket hold the ports of the listeners `selection` names until the fixture is
+    /// dropped, so the next launch cannot bind them. The process must have exited, because a
+    /// running process holds its own ports.
+    pub(crate) async fn hold_ports(&mut self, selection: StartupPorts) -> io::Result<()> {
+        if self.observe_exit()?.is_none() {
+            return Err(io::Error::other(
+                "cannot hold the ports of a nervix-server that is still running",
+            ));
+        }
+        if self.held.is_some() {
+            return Err(io::Error::other(
+                "another socket already holds ports of this nervix-server",
+            ));
+        }
+        let ports = self.configuration.ports.ports(selection);
+        self.held = Some(HeldPorts::hold(selection, ports).await?);
+        Ok(())
+    }
+
+    /// Checks that the current startup ended exactly one launch because another socket held the
+    /// ports of the listeners `selection` names, that it moved exactly those listeners, and that
+    /// the process now binds other ports for them.
+    pub(crate) fn verify_one_relaunch_off_held_ports(
+        &mut self,
+        selection: StartupPorts,
+    ) -> io::Result<()> {
+        let Some(held) = &self.held else {
+            return Err(io::Error::other(
+                "no other socket holds a port of this nervix-server",
+            ));
+        };
+        if held.selection != selection {
+            return Err(io::Error::other(format!(
+                "another socket holds the {} ports of this nervix-server, not its {selection} \
+                 ports",
+                held.selection
+            )));
+        }
+        let [relaunched] = self.startup.lost_binds.as_slice() else {
+            return Err(io::Error::other(format!(
+                "the startup ended {} launches because another socket held a port, not one: {:?}",
+                self.startup.lost_binds.len(),
+                self.startup.lost_binds
+            )));
+        };
+        if relaunched.moved != selection {
+            return Err(io::Error::other(format!(
+                "the startup moved its {} listeners, not its {selection} listeners: {relaunched}",
+                relaunched.moved
+            )));
+        }
+        let current = self.configuration.ports.ports(selection);
+        // A selection names at most the six listeners a process binds, so both lists are that
+        // short.
+        for port in &current {
+            if held.ports.contains(port) {
+                return Err(io::Error::other(format!(
+                    "the {selection} listeners still bind held port {port}: they bind {current:?} \
+                     and another socket holds {:?}",
+                    held.ports
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reopens this process's existing database on the same isolated ports, unless another socket
+    /// takes one of them first and a relaunch moves that listener to a fresh port.
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
-        self.restart_without_waiting()?;
+        self.restart_without_waiting().await?;
         self.wait_until_ready().await
     }
 
     /// Starts the next process before checking readiness. A whole cluster must bring up its
     /// persisted voters together because one voter alone cannot form the old quorum.
-    pub(crate) fn restart_without_waiting(&mut self) -> io::Result<()> {
+    pub(crate) async fn restart_without_waiting(&mut self) -> io::Result<()> {
         if self.observe_exit()?.is_none() {
             return Err(io::Error::other(
                 "cannot restart nervix-server before its preceding process exits",
             ));
         }
         self.log_start = std::fs::metadata(self.root.path().join("server.log"))?.len();
-        self.child = self.configuration.spawn(self.root.path())?;
+        let deadline = PhaseDeadline::after(STARTUP_TIMEOUT);
+        let launched = self
+            .configuration
+            .launch(self.root.path(), deadline)
+            .await?;
+        self.child = launched.child;
+        self.startup = LaunchStartup::first(deadline, launched.executable);
         self.exit_status = None;
         Ok(())
     }
 
     /// Waits until the server answers an authenticated command, which also proves that its
-    /// configured default user exists. Every readiness probe receives only the time left before
-    /// the startup deadline, so a server that never answers ends the wait at that deadline.
+    /// configured default user exists. The wait ends at the startup deadline, which started
+    /// before the first launch read its executable, and every readiness probe receives only the
+    /// time left before it, so a server that never answers ends the wait there.
+    ///
+    /// A launch whose process exits because another socket held a port it was to bind is launched
+    /// again on fresh ports for that listener, within the same deadline and at most
+    /// [`NODE_START_ATTEMPTS`] launches in all. Every other exit ends the startup at once.
+    ///
+    /// A failure describes the whole startup: how reading the executable went, every kind of
+    /// answer the probes got and when, every launch it relaunched, and, when the deadline passed,
+    /// what the still-running process and its host were doing at that moment, before anything
+    /// kills the process.
     pub(crate) async fn wait_until_ready(&mut self) -> io::Result<()> {
-        let deadline = PhaseDeadline::after(STARTUP_TIMEOUT);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let Some(ending) = self.wait_for_launch().await? else {
+                self.report_ready();
+                return Ok(());
+            };
+            let LaunchEnding {
+                status,
+                readiness,
+                retry,
+            } = ending;
+            let LaunchRetry::LostBind { reported, ports } = retry else {
+                return Err(self.exited_during_startup(status, &readiness));
+            };
+            if self.startup.launch >= NODE_START_ATTEMPTS || self.startup.deadline.has_passed() {
+                return Err(self.exited_during_startup(status, &readiness));
+            }
+            let lost = LostBindLaunch {
+                launch: self.startup.launch,
+                elapsed: self.startup.deadline.elapsed(),
+                status,
+                reported,
+                moved: ports,
+            };
+            self.relaunch_on_fresh_ports(lost).await?;
+        }
+    }
+
+    /// Waits until the current launch accepts commands, returning nothing, or until its process
+    /// exits, returning how the launch ended. A deadline that passes first fails the wait with
+    /// what the still-running process and its host were doing.
+    async fn wait_for_launch(&mut self) -> io::Result<Option<LaunchEnding>> {
+        let deadline = self.startup.deadline;
+        // A relaunch can move the gRPC listener, so each launch is probed where it listens.
         let endpoint = self.status_endpoint();
-        let mut last_readiness = LastReadinessOutcome::NoCompletedProbe;
+        let mut readiness = ReadinessHistory::new();
         loop {
             nervix_primitives::task::consume_budget().await;
             if let Some(status) = self.observe_exit()? {
-                return Err(io::Error::other(format!(
-                    "nervix-server exited during startup with {}; last readiness outcome: \
-                     {last_readiness}\n{}",
-                    describe_exit(status),
-                    self.log_tail()
-                )));
+                let retry = LaunchRetry::reported_in(&self.log()?);
+                return Ok(Some(LaunchEnding {
+                    status,
+                    readiness,
+                    retry,
+                }));
             }
             if deadline.has_passed() {
+                let observation = ProcessObservation::of(self.process_id()?).await;
                 return Err(io::Error::other(format!(
                     "nervix-server did not accept commands within {}; last readiness outcome: \
-                     {last_readiness}\n{}",
+                     {}\nbefore the process was spawned, the launch {}\nreadiness probes since \
+                     the launch began: {readiness}\n{observation}\n{}{}",
                     humantime::format_duration(STARTUP_TIMEOUT),
+                    readiness.last(),
+                    self.startup.executable,
+                    self.relaunched_launches(),
                     self.log_tail()
                 )));
             }
             let outcome = ReadinessProbeOutcome::probe(&endpoint, deadline).await;
             if outcome.is_ready() {
-                return Ok(());
+                return Ok(None);
             }
-            last_readiness = LastReadinessOutcome::Observed(outcome);
+            readiness.record(deadline.elapsed(), outcome);
             deadline.pause(POLL_INTERVAL).await;
         }
+    }
+
+    /// Moves the listeners a lost bind names to freshly drawn ports and launches the process
+    /// again, within the startup's deadline. The process that lost the bind has exited, so it
+    /// holds nothing a new launch could meet.
+    async fn relaunch_on_fresh_ports(&mut self, lost: LostBindLaunch) -> io::Result<()> {
+        if let Err(error) = self.configuration.ports.move_to_fresh(lost.moved) {
+            return Err(io::Error::other(format!(
+                "fresh ports for the next launch of nervix-server could not be drawn after \
+                 {lost}: {error}\n{}{}",
+                self.relaunched_launches(),
+                self.log_tail()
+            )));
+        }
+        eprintln!(
+            "server process '{}' startup {lost}; {:?} of its {} deadline left",
+            self.configuration.node_id,
+            self.startup.deadline.remaining(),
+            humantime::format_duration(STARTUP_TIMEOUT)
+        );
+        let next_launch = self.startup.launch.checked_add(1).assured(
+            "a startup relaunches only while its launch is below the attempt limit, far below \
+             u32::MAX",
+        );
+        self.startup.lost_binds.push(lost);
+        self.log_start = std::fs::metadata(self.root.path().join("server.log"))?.len();
+        let launched = self
+            .configuration
+            .launch(self.root.path(), self.startup.deadline)
+            .await;
+        let launched = match launched {
+            Ok(launched) => launched,
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "{error}\n{}",
+                    self.relaunched_launches()
+                )));
+            }
+        };
+        self.child = launched.child;
+        self.exit_status = None;
+        self.startup.executable = launched.executable;
+        self.startup.launch = next_launch;
+        Ok(())
+    }
+
+    /// Reports a startup that became ready after a relaunch, so a run's relaunches can be read
+    /// from its output together with how each startup ended.
+    fn report_ready(&self) {
+        if self.startup.lost_binds.is_empty() {
+            return;
+        }
+        eprintln!(
+            "server process '{}' startup: ready on launch {}/{NODE_START_ATTEMPTS} after {:?}; \
+             {:?} of its {} deadline left",
+            self.configuration.node_id,
+            self.startup.launch,
+            self.startup.deadline.elapsed(),
+            self.startup.deadline.remaining(),
+            humantime::format_duration(STARTUP_TIMEOUT)
+        );
+    }
+
+    /// The failure of a startup whose current launch exited, describing the whole startup.
+    fn exited_during_startup(&self, status: ExitStatus, readiness: &ReadinessHistory) -> io::Error {
+        io::Error::other(format!(
+            "nervix-server exited during startup with {}; last readiness outcome: {}\nbefore the \
+             process was spawned, the launch {}\nreadiness probes since the launch began: \
+             {readiness}\n{}{}",
+            describe_exit(status),
+            readiness.last(),
+            self.startup.executable,
+            self.relaunched_launches(),
+            self.log_tail()
+        ))
+    }
+
+    /// The launches the current startup relaunched, as one line ending in a newline, or nothing
+    /// when it relaunched none.
+    fn relaunched_launches(&self) -> String {
+        if self.startup.lost_binds.is_empty() {
+            return String::new();
+        }
+        let mut described = String::from(
+            "launches this startup relaunched after another socket held a port they were to bind: ",
+        );
+        let mut separated = false;
+        for lost in &self.startup.lost_binds {
+            if separated {
+                described.push_str("; ");
+            }
+            described.push_str(&lost.to_string());
+            separated = true;
+        }
+        described.push('\n');
+        described
     }
 
     pub(crate) fn status_endpoint(&self) -> StatusEndpoint {
@@ -470,7 +977,7 @@ impl ServerProcess {
         )
     }
 
-    /// Runs NSPL through an authenticated session whose active domain is `domain`.
+    /// Runs Plexus through an authenticated session whose active domain is `domain`.
     pub(crate) async fn run_commands(&self, domain: &str, commands: &str) -> io::Result<String> {
         run_command_via_client(&self.grpc_uri(), domain, commands).await
     }
@@ -609,6 +1116,11 @@ impl ServerProcess {
         self.exit_status.is_some()
     }
 
+    /// How many processes the current startup launched: its first launch and every relaunch.
+    pub(crate) fn launches(&self) -> u32 {
+        self.startup.launch
+    }
+
     fn observe_exit(&mut self) -> io::Result<Option<ExitStatus>> {
         if let Some(status) = self.exit_status {
             return Ok(Some(status));
@@ -616,6 +1128,13 @@ impl ServerProcess {
         let status = self.child.try_wait()?;
         self.exit_status = status;
         Ok(status)
+    }
+
+    /// Everything every launch of this fixture has written to standard output and standard error.
+    #[cfg(feature = "deloxide")]
+    pub(crate) fn whole_log(&self) -> io::Result<String> {
+        let bytes = std::fs::read(self.root.path().join("server.log"))?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     /// Everything the current process launch has written to standard output and standard error.

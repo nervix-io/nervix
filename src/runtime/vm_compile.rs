@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Binding planned expression programs to runtime schemas, state and UDFs.
 //! - **Depends on.** Typed execution plans, the expression VM and runtime infrastructure.
-//! - **Must not know.** NSPL text, parser state or control-plane transactions.
+//! - **Must not know.** Plexus text, parser state or control-plane transactions.
 //!
 //! Ingestor, reingestor, emitter and message-error programs arrive lowered by their decision-layer
 //! plans. Some processor compile functions still receive semantic Models directly instead of
@@ -1521,7 +1521,7 @@ pub(super) fn compile_reorderer_program(
 /// this node's schemas, state, lookups and UDFs.
 pub(super) fn bind_ingestor_filter_map_program(
     node: &ModelName,
-    metadata_scope: SourceMetadataScope,
+    metadata_scope: IngestorMetadataScope,
     allow_header_reads: bool,
     construction: &LoweredConstruction,
     schemas: RuntimeVmSchemaPair,
@@ -1965,7 +1965,7 @@ mod tests {
                 "ingestor",
                 bind_ingestor_filter_map_program(
                     &identifier,
-                    SourceMetadataScope::Headers,
+                    IngestorMetadataScope::Headers,
                     true,
                     &lowered,
                     schemas(),
@@ -1996,7 +1996,7 @@ mod tests {
 
     #[test]
     fn processor_key_expressions_reject_relay_qualified_fields() {
-        assert!(nervix_nspl::parse_expression("incoming_notifications.sequence").is_err());
+        assert!(nervix_plexus::parse_expression("incoming_notifications.sequence").is_err());
     }
 
     #[nervix_primitives::test]
@@ -2037,7 +2037,7 @@ mod tests {
         }));
         let program = bind_ingestor_route_for_test(
             &named::<ModelName>("logic_ingestor"),
-            SourceMetadataScope::Headers,
+            IngestorMetadataScope::Headers,
             true,
             &construction("INHERIT tenant SET normalized = lower(input.raw)"),
             RuntimeVmSchemaPair {

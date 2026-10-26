@@ -96,9 +96,9 @@ use thiserror::Error;
 #[error("failed to parse the statement batch")]
 pub struct QuerySplitError;
 
-/// Splits a batch into the exact NSPL source slices that should be submitted separately.
+/// Splits a batch into the exact Plexus source slices that should be submitted separately.
 pub fn split_query_statements(query: &str) -> error_stack::Result<Vec<&str>, QuerySplitError> {
-    let statements = nervix_nspl::client_statement::parse_client_statement_sources(query)
+    let statements = nervix_plexus::client_statement::parse_client_statement_sources(query)
         .change_context(QuerySplitError)?;
     Ok(statements
         .iter()

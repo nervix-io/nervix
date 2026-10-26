@@ -2,9 +2,11 @@
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** The planned handoff, the incarnations it is valid for, the capture, prepare,
-//!   confirm, activate and finish steps, and the forced recovery when a source node is gone.
-//! - **Depends on.** The interconnect to drive each step and the entity gate to hold the entity.
+//! - **Owns.** The planned handoff, the incarnations it is valid for, the nodes its hold fences,
+//!   the capture, prepare, confirm, activate and finish steps, and the forced recovery when a
+//!   source node is gone.
+//! - **Depends on.** The interconnect to drive each step, the entity gate to hold the entity, and
+//!   the revision barrier to wait for the hold's participants.
 //! - **Must not know.** Which schedule change asked for the move.
 
 #![cfg_attr(
@@ -43,15 +45,21 @@ use nervix_primitives::time::sleep;
 use tracing::{debug, info, warn};
 
 use super::{
+    completion::{
+        ApplicationRevisionParticipants, ApplicationRevisionPhase, wait_for_application_revision,
+    },
     domain_lifecycle::DomainAlterError,
-    entity_gate::{ClusterEntityGate, ENTITY_GATE_RELEASE_RETRY_INTERVAL},
+    entity_gate::{
+        ClusterEntityGate, ClusterEntityGateScope, ENTITY_GATE_RELEASE_RETRY_INTERVAL,
+        EntityGateParticipants,
+    },
     session_service::SessionServiceImpl,
     transaction::TransactionStepImpactRecorder,
 };
 use crate::{
     registry::{
         EntityGatePlan, ExecutionRevision, PlannedClusterRevision,
-        ownership_handoff_relays_for_schedule,
+        ownership_handoff_gate_participants, ownership_handoff_relays_for_schedule,
     },
     runtime::{OwnershipHandoffError, OwnershipHandoffResult, Runtime},
 };
@@ -73,6 +81,9 @@ pub(in crate::application) struct PlannedOwnershipHandoff {
     base_schedule_fingerprint: [u8; 32],
     target_schedule_fingerprint: [u8; 32],
     node_incarnations: BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
+    /// The nodes on which the base or the target schedule runs part of the moved unit's boundary,
+    /// live or not when the hold was planned.
+    participants: BTreeSet<ClusterNodeName>,
     preparations: ClusterOwnershipHandoffPreparations,
     gate: ClusterEntityGate,
     pub(in crate::application) moves: Vec<PlannedOwnershipMove>,
@@ -945,6 +956,8 @@ impl SessionServiceImpl {
                 computed_relays.as_slice()
             }
         };
+        let participants =
+            ownership_handoff_gate_participants(current, planned, affected_entities, relays);
         let former_owners = moves
             .iter()
             .map(|moved| moved.former_owner.clone())
@@ -982,10 +995,13 @@ impl SessionServiceImpl {
         let gate = nervix_primitives::time::timeout_at(
             preparation_deadline,
             self.engage_cluster_entity_gates(
-                domain,
-                relays,
-                affected_entities,
-                EntityGatePurpose::OwnershipHandoff,
+                ClusterEntityGateScope {
+                    domain,
+                    relays,
+                    affected_entities,
+                    purpose: EntityGatePurpose::OwnershipHandoff,
+                    participants: EntityGateParticipants::AvailableAmong(&participants),
+                },
                 activation_deadline,
                 impact.clone(),
             ),
@@ -1169,6 +1185,7 @@ impl SessionServiceImpl {
             base_schedule_fingerprint,
             target_schedule_fingerprint,
             node_incarnations,
+            participants,
             preparations,
             gate,
             moves,
@@ -1290,10 +1307,28 @@ impl SessionServiceImpl {
         response.map_err(|failure| OwnershipHandoffError::participant(failure.to_string()))
     }
 
+    /// Refuses to become a new placement destination once this process incarnation advertised that
+    /// it is terminating.
+    ///
+    /// A coordinator plans from its own gossip view, which can still show this incarnation as
+    /// eligible after it advertised, as when peers stop in the same moment. This incarnation's own
+    /// advertisement is authoritative, so a destination checks it before it validates the request.
+    async fn refuse_handoff_destination_while_terminating(&self) -> OwnershipHandoffResult<()> {
+        if !self.inner.cluster.local_incarnation_is_terminating().await {
+            return Ok(());
+        }
+        Err(Report::new(OwnershipHandoffError::DestinationTerminating {
+            node: self.inner.consensus.local_node_id().clone(),
+        }))
+    }
+
     async fn prepare_ownership_handoff_state(
         &self,
         request: RemotePrepareOwnershipHandoffStateRequest,
     ) -> OwnershipHandoffResult<()> {
+        if request.destination == *self.inner.consensus.local_node_id() {
+            self.refuse_handoff_destination_while_terminating().await?;
+        }
         self.verify_ownership_handoff_coordinator(&request.coordination)
             .await?;
         let current_incarnations = self.live_node_incarnations().await;
@@ -1742,6 +1777,9 @@ impl SessionServiceImpl {
                                 service.inner.consensus.local_node_id()
                             )));
                         }
+                        service
+                            .refuse_handoff_destination_while_terminating()
+                            .await?;
                         let current_incarnations = service.live_node_incarnations().await;
                         Self::verify_ownership_handoff_node_incarnation(
                             &current_incarnations,
@@ -2138,12 +2176,47 @@ impl SessionServiceImpl {
         Ok(())
     }
 
+    /// Waits until every live participant of `handoff`'s hold has prepared the committed runtime
+    /// revision, or a later one, within the handoff's activation deadline.
+    ///
+    /// The participants admit work into the moved unit, hold work it drains, or run it once it
+    /// activates, so each of them must route by the committed revision before its fence opens. A
+    /// node that runs none of the unit is not waited for: it completes the revision through its
+    /// own installation.
+    pub(in crate::application) async fn wait_for_ownership_handoff_participants(
+        &self,
+        handoff: &PlannedOwnershipHandoff,
+    ) -> Result<(), Report<crate::runtime::RuntimeError>> {
+        let revision = self.inner.consensus.current_runtime_revision().await;
+        wait_for_application_revision(
+            &self.inner.cluster,
+            &self.inner.consensus,
+            &self.inner.interconnect,
+            revision,
+            ApplicationRevisionPhase::RuntimePrepared,
+            ApplicationRevisionParticipants::LiveAmong(&handoff.participants),
+            handoff.activation_deadline,
+        )
+        .await
+        .map_err(|timeout| {
+            Report::new(crate::runtime::RuntimeError::RuntimeRevisionPreparation {
+                revision,
+                pending_nodes: timeout.pending_nodes,
+            })
+        })
+    }
+
     pub(in crate::application) async fn finish_planned_ownership_handoff(
         &self,
         domain: &DomainName,
         mut handoff: PlannedOwnershipHandoff,
         impact: Option<&TransactionStepImpactRecorder>,
     ) -> OwnershipHandoffResult<()> {
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_ownership_handoff_activation_if_armed(domain)
+            .await;
         let activation = self
             .activate_planned_ownership_handoff(domain, &handoff)
             .await;
@@ -2246,3 +2319,7 @@ impl SessionServiceImpl {
         handoff.gate.defer_release_to_lease_deadline();
     }
 }
+
+#[cfg(test)]
+#[path = "ownership_handoff_tests.rs"]
+mod tests;

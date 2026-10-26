@@ -1,5 +1,7 @@
 # Transaction Quiescence And Impact Inspection
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix plans the effect of a transaction before it changes the running graph. One typed impact
 report explains what each accepted operation contributes, what each atomic execution step requires,
 and what the transaction requires as a whole. The same report follows the transaction through
@@ -7,7 +9,7 @@ commit, application, failure, and retained inspection. A planned pause and a pau
 are separate facts.
 
 This chapter owns impact planning, scoped quiescence, actual engagement reporting, inspection, and
-retention. [Control Plane](./control-plane.md#replicated-nspl-transactions) owns the broader
+retention. [Control Plane](./control-plane.md#replicated-plexus-transactions) owns the broader
 transaction lifecycle and registry mutation rules; [Command Completion](./command-completion.md#transactions)
 owns when a command is usable and acknowledged. [Domain Clock](./domain-clock.md),
 [Cluster Interconnect](./interconnect.md), [Consensus Storage And Replication](./consensus-storage-and-replication.md),
@@ -61,10 +63,10 @@ stateDiagram-v2
     COMMITTING --> FAILED: first definitive failure / retain applied prefix
     OPEN --> REVERTED: REVERT or clean session close
     OPEN --> EXPIRED: unbound idle timeout
-    COMMITTED --> [*]: tombstone retention expires
-    FAILED --> [*]: tombstone retention expires
-    REVERTED --> [*]: tombstone retention expires
-    EXPIRED --> [*]: tombstone retention expires
+    COMMITTED --> [*]: aged and no applying command needs it
+    FAILED --> [*]: aged and no applying command needs it
+    REVERTED --> [*]: aged and no applying command needs it
+    EXPIRED --> [*]: aged and no applying command needs it
 ```
 
 ## Three Levels Of Impact
@@ -91,15 +93,17 @@ pre-engagement failure or higher after recorded recovery expansion.
 | `DOMAIN_PAUSE` | The owning domain | Stop domain intake and generators and drain all attached execution work before publication. |
 
 The pause requirement is a typed `NO_PAUSE`, `SUBGRAPH`, or `DOMAIN` value. The displayed level is
-derived from that value, so a domain level cannot carry an entity-only scope. An entity gate is
-installed on every live node for the affected relay and branch coverage. The planner includes
-downstream consumers and every member of an affected hard placement group. Engaging any entity
-gate also requests a force flush of the full current execution graph; **force-flushed work is not
-the set of paused entities**. A domain pause covers all execution nodes on both sides of the
-change. [Data Plane](./data-plane.md) explains the runtime work these gates protect;
-[Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) lists the model changes
-that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its external-source
-behavior under a hold; it is distinct from the step's quiesce level.
+derived from that value, so a domain level cannot carry an entity-only scope. A model change's
+entity gate is installed on every live node for the affected relay and branch coverage. An
+ownership-handoff gate is installed on the live nodes that run part of the moved unit's boundary,
+as [Control Plane](./control-plane.md#planned-ownership-handoffs-and-failover) defines them. The
+planner includes downstream consumers and every member of an affected hard placement group.
+Engaging any entity gate also requests a force flush of the full current execution graph;
+**force-flushed work is not the set of paused entities**. A domain pause covers all execution nodes
+on both sides of the change. [Data Plane](./data-plane.md) explains the runtime work these gates
+protect; [Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) lists the model
+changes that normally contribute each level. An ingestor's `ON QUIESCE` mode controls its
+external-source behavior under a hold; it is distinct from the step's quiesce level.
 
 A [client ingestor](./ingestors.md#client-ingestors) under a hold suspends admission: its producers
 are told admission is suspended, batches that were queued but not admitted are refused as
@@ -115,7 +119,7 @@ execution and every producer still attached.
 When a model alteration pauses an ingestor and gates a shared downstream relay, the coordinator
 first engages an ingestor-only admission hold on every node. It force-flushes the current graph
 and waits for those ingestors' route work and admitted ACK roots while the relay gates remain
-open. A partial branch batch can therefore reach its relay and acknowledging sink. The full
+open. A partial branch batch can therefore reach its relay and acknowledging emitter. The full
 subgraph hold is engaged before the intake hold is released, so admission never reopens between
 the two phases. Both phases share the alteration's physical deadline and retain separate exact
 coordination identities. Failure releases the attempted holds and keeps the committed contract;
@@ -123,6 +127,13 @@ dropping the coordinator leaves their existing owned release and lease cleanup r
 For a planned subgraph pause, transaction inspection records the intake-only scope separately
 from the full subgraph scope, with each scope's actual engagement, drain failure, and release
 outcomes. An already engaged domain pause covers its ingestors throughout these phases.
+
+Emitter publication policy belongs to the concrete destination Model. Impact comparison observes
+that policy separately from the destination definition, so changing only `MODE` retains the
+publishing-policy aspect and entity-pause scope. Comparing destination definitions ignores the
+client and policy while comparing the actual locator and entity options. A complete Plexus
+`SET TO` can change its payload selection and explicitly written construction as part of the same
+atomic alteration; its head and replacement must retain the stored connector/entity kind.
 
 A native client emitter keeps its prepared IPC bytes, source members and application ACK wait as
 emitter work. Force flush releases rows into that same wait; a read or network delivery does not
@@ -160,7 +171,7 @@ revision; it does not change the committed step's impact report.
 | Reset one concrete branch of a WASM processor, then change an unrelated deduplicator key across its declared branch. | These are separate `ENTITY_PAUSE` steps. The reset retains selected-key coverage while the model step covers every key of its own branch; the transaction summary unions their two subgraphs without broadening the reset to all branches. |
 | `STOP`, change a schema, `START`, then change that schema again. | Four boundaries: stop, a stopped-domain dynamic model step, start, and a running-domain model step requiring `DOMAIN_PAUSE`. The summary is domain-wide even though the earlier schema step needed no pause. |
 
-The qualification scenarios in `tests/features/runtime/nspl_transactions.feature` and the
+The qualification scenarios in `tests/features/runtime/plexus_transactions.feature` and the
 planner checks in `src/registry/transaction/tests.rs` exercise the first, second, and lifecycle
 patterns. The scoped topology and shared-gate checks also exercise branch and relation identity.
 
@@ -184,7 +195,7 @@ displayed graph.
 
 The topology includes shared admission gates, branch coverage, hard-group members, moved owners,
 and the source and destination of each move. Every affected node, edge, gate, and effect retains
-the operation numbers that contributed to it. This is why a change to an emitter sink, for
+the operation numbers that contributed to it. This is why a change to an emitter connector, for
 example, can show a changed emitter, upstream gate, force-flushed work, and replacement activation
 as different roles rather than as one ambiguous list of “affected nodes.”
 
@@ -258,8 +269,8 @@ Ownership-handoff engagement confirms the closed admission hold and requested fl
 coordinator observes each exact operation's pending drain before capture; a drained response
 publishes the participant's capture freeze. A drain timeout keeps the pending node and work counts
 and releases attempted holds before independent schedule units continue. Retrying a two-second
-engagement reply timeout waits on the same receiver-owned identity, adds no pause attempt and
-extends no lease. Preparation retains its original deadline, and cleanup releases every attempted
+engagement reply timeout, or a request whose interconnect stream broke, waits on the same
+receiver-owned identity, adds no pause attempt and extends no lease. Preparation retains its original deadline, and cleanup releases every attempted
 participant.
 
 The step changes from `UNATTEMPTED` to `APPLYING` when its authoritative effect transition is
@@ -273,6 +284,23 @@ durable completion boundary; [Errors And Diagnostics](./errors-and-diagnostics.m
 failure propagation and public diagnostic rendering.
 
 A new leader resumes a `COMMITTING` transaction from its recorded applying step and frozen plan.
+
+For a WASM reset step, typed loss of publication leadership leaves that same step applying in both
+its initial attempt and recovery. Its reset coordinator releases the attempt's entity gates, and
+the next attempt uses the retained reset reference and committed generation; a genuine reset
+failure still becomes the step's failed outcome.
+
+Before recording application completion, the coordinator resolves every engaged domain pause in
+that step's actual report under the transaction's mutation lease. A resume refusal leaves the step
+applying, including when its effect has a definitive failure to report. Recovery releases the pause
+before retaining the terminal result, so a completed transaction cannot strand its domain paused.
+A step whose earlier coordinator engaged the domain pause and stopped before publishing the step
+leaves that engagement only in the domain's status. The coordinator that runs the step again
+records the pause it adopts as a new `REQUESTED` and `CONFIRMED` attempt in the step's actual
+report before anything can end the step, drains it, and checks the frozen inputs against the
+domain as the pause left it. The adopted attempt is then released like any other engaged pause,
+before the step's outcome is retained, whether the step applies, fails or meets changed planning
+inputs.
 Completed effects are not repeated. If an owner timed out, inspection can show `UNCERTAIN` rather
 than falsely declaring that no gate engaged. Recovery may have to rebuild a whole domain after an
 entity swap cannot complete; the actual history then appends a `DOMAIN_PAUSE` attempt and recovery
@@ -297,8 +325,12 @@ The control plane persists report identity, operation summaries, step plans, app
 outcomes, and the topology needed to reconstruct before and after views. Header, operation, and
 step records are keyed; topology is content-addressed into bounded node and edge records shared
 across report revisions. A finished transaction retains its frozen report with its tombstone for
-the configured retention period, **15 minutes by default**, including after subsequent graph
-changes. Retention cleanup removes the transaction's report records and topology content no other
+at least the configured retention period, **15 minutes by default**, including after subsequent graph
+changes. An applying command request that targets the transaction, or an applying ordinary
+command named by its mutation owner, retains the tombstone, commit plan and report beyond that
+age. This includes an ordinary command's planning refresh attempts. Once no applying execution
+needs the transaction, its original terminal timestamp determines cleanup eligibility.
+Retention cleanup removes the transaction's report records and topology content no other
 retained report references. Once its tombstone is reclaimed, inspection by id returns unknown.
 
 Transaction positions and operation numbers, commit-plan step counts, accepted and applied
@@ -319,11 +351,11 @@ response memory and rendering time in proportion to the accepted operations and 
 The multi-mebibyte replay, restart, and response evidence is recorded in
 `tests/transaction-quiesce-qualification-ledger.md`.
 
-## Inspection Through NSPL And Clients
+## Inspection Through Plexus And Clients
 
 The public form is:
 
-```nspl,ignore
+```plexus,ignore
 DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <positive-number> ] [ FORMAT TEXT | JSON ];
 ```
 
@@ -354,7 +386,7 @@ older position, or a stale-commit refusal cannot replace that basis. Request cor
 prevents delayed or out-of-order responses from updating the wrong waiter. Reconnect and leader
 redirect recover the same admitted command by execution reference; a side-effect-free inspection
 can instead be read again. [Rust Client Library](./client-library.md#inspecting-a-transaction),
-[Command Line Client](./client-tools-cli.md), and [NSPL Overview](./nspl-overview.md) own usage;
+[Command Line Client](./client-tools-cli.md), and [Plexus Overview](./plexus-overview.md) own usage;
 [Client Session Protocol](./client-session-protocol.md) owns client reconnection, correlated
 response handling, and the exact recovery of transaction requests.
 
@@ -365,6 +397,10 @@ and after topology at stable positions, then offers **Before**, **Changes**, and
 parallel relations, shared gates, ownership moves, rebuilds, and state resets. A domain-wide pause
 gets an explicit domain outline; a force flush outside the pictured subgraph remains visible in
 the domain summary. An incomplete or stale preview is marked, and a refresh obtains a new basis.
+A complete report of the attached transaction is the commit basis for the position it names, even
+when it arrives before the outcome of the append that reached that position, as a report read on
+the session's concurrent lane can; the console commits against it once its status reaches that
+position. A report of a position the attached status has already passed supplies no basis.
 The console reads a report again only when the inspector opens or changes its target, when the
 attached transaction's position, state, or applied count changes, or when the operator refreshes;
 a delivered report never requests itself again.

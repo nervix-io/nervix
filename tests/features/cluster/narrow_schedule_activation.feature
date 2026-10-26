@@ -5,7 +5,7 @@ Feature: Narrow schedule activation on ownership change
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -13,12 +13,12 @@ Feature: Narrow schedule activation on ownership change
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         tenant STRING,
@@ -75,12 +75,12 @@ Feature: Narrow schedule activation on ownership change
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       CORDON NODE node-1;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE JUNCTION spare_route FROM spare_input
         BRANCHED BY by_tenant
@@ -89,16 +89,16 @@ Feature: Narrow schedule activation on ownership change
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -110,7 +110,7 @@ Feature: Narrow schedule activation on ownership change
       """
       - domain={{domain}} kind=junction name=spare_route owner=node-2
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION deduped_subscription TO deduped;
       """
@@ -149,7 +149,7 @@ Feature: Narrow schedule activation on ownership change
       """
     And the last relay subscription payload contains key fragment '{"tenant":"beta"}'
     And the relay subscription does not receive a payload within "2s"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DRAIN NODE node-2;
       SHOW CLUSTER STATUS;
@@ -162,7 +162,7 @@ Feature: Narrow schedule activation on ownership change
       """
       - domain={{domain}} kind=deduplicator name=dedup_txns owner=node-1
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION deduped_after_drain TO deduped;
       """
@@ -188,7 +188,7 @@ Feature: Narrow schedule activation on ownership change
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -196,12 +196,12 @@ Feature: Narrow schedule activation on ownership change
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         tenant STRING,
@@ -256,12 +256,12 @@ Feature: Narrow schedule activation on ownership change
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       CORDON NODE node-1;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE JUNCTION spare_route FROM spare_input
         BRANCHED BY by_gauge_tenant
@@ -270,16 +270,16 @@ Feature: Narrow schedule activation on ownership change
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START;
       """
-    And these NSPL commands are executed on node "node-1"
+    And these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION deduped_subscription TO deduped;
       """
@@ -305,7 +305,7 @@ Feature: Narrow schedule activation on ownership change
       branch="by_gauge_tenant"
       physical_node_id="node-1"
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DRAIN NODE node-2;
       SHOW CLUSTER STATUS;
@@ -325,7 +325,7 @@ Feature: Narrow schedule activation on ownership change
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -333,12 +333,12 @@ Feature: Narrow schedule activation on ownership change
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -415,12 +415,12 @@ Feature: Narrow schedule activation on ownership change
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       CORDON NODE node-1;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE JUNCTION spare_route FROM spare_input
         BRANCHED BY by_wait_tenant
@@ -429,16 +429,16 @@ Feature: Narrow schedule activation on ownership change
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -450,7 +450,7 @@ Feature: Narrow schedule activation on ownership change
       """
       - domain={{domain}} kind=junction name=spare_route owner=node-2
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION enriched_subscription TO enriched;
       """
@@ -471,7 +471,7 @@ Feature: Narrow schedule activation on ownership change
       {"tenant":"acme","user_id":10,"source":"input"}
       """
     Then the relay subscription does not receive a payload within "2s"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DRAIN NODE node-2;
       SHOW CLUSTER STATUS;
@@ -484,7 +484,7 @@ Feature: Narrow schedule activation on ownership change
       """
       - domain={{domain}} kind=junction name=enrich_events owner=node-1
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION enriched_after_drain TO enriched;
       """
@@ -505,7 +505,7 @@ Feature: Narrow schedule activation on ownership change
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -513,12 +513,12 @@ Feature: Narrow schedule activation on ownership change
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -578,12 +578,12 @@ Feature: Narrow schedule activation on ownership change
         SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency), total_latency = SUM(input.latency)
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-3;
       CORDON NODE node-1;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE JUNCTION spare_route FROM spare_input
         BRANCHED BY by_window_tenant
@@ -592,16 +592,16 @@ Feature: Narrow schedule activation on ownership change
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       UNCORDON NODE node-2;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -614,7 +614,7 @@ Feature: Narrow schedule activation on ownership change
       - domain={{domain}} kind=junction name=spare_route owner=node-3
       """
     And the last cluster status owner for scheduled "junction" "spare_route" is saved as placeholder "stopped_spare_owner"
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries;
       """
@@ -648,7 +648,7 @@ Feature: Narrow schedule activation on ownership change
     Given runtime replication is configured with replica count 0 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -656,12 +656,12 @@ Feature: Narrow schedule activation on ownership change
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         tenant STRING,
@@ -718,13 +718,13 @@ Feature: Narrow schedule activation on ownership change
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       CORDON NODE node-1;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE JUNCTION corridor_source FROM corridor_input
         BRANCHED BY by_group_tenant
@@ -733,14 +733,14 @@ Feature: Narrow schedule activation on ownership change
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-3;
       CORDON NODE node-2;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
-      CREATE JUNCTION corridor_sink FROM corridor_stage
+      CREATE JUNCTION corridor_emitter FROM corridor_stage
         BRANCHED BY by_group_tenant
         TO corridor_output
         INHERIT ALL
@@ -748,18 +748,18 @@ Feature: Narrow schedule activation on ownership change
         ON MESSAGE ERROR LOG;
 
       CREATE PLACEMENT keep_corridor_local
-        FROM corridor_source TO corridor_sink PREFER COLOCATION RANK 1;
+        FROM corridor_source TO corridor_emitter PREFER COLOCATION RANK 1;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       UNCORDON NODE node-2;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -773,9 +773,9 @@ Feature: Narrow schedule activation on ownership change
       """
     And the last command output contains
       """
-      - domain={{domain}} kind=junction name=corridor_sink owner=node-3
+      - domain={{domain}} kind=junction name=corridor_emitter owner=node-3
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION deduped_subscription TO deduped;
       """
@@ -795,7 +795,7 @@ Feature: Narrow schedule activation on ownership change
       """
       "transaction_id":"txn-1"
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER PLACEMENT keep_corridor_local SET POLICY REQUIRE COLOCATION;
       """
@@ -807,13 +807,13 @@ Feature: Narrow schedule activation on ownership change
       """
       planned relocations: 2
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "corridor_source" is saved as placeholder "consolidated_owner"
-    And within "10s" node "node-1" eventually reports scheduled "junction" "corridor_sink" owner equals placeholder "consolidated_owner"
-    When these NSPL commands are executed through the client on node "node-1"
+    And within "10s" node "node-1" eventually reports scheduled "junction" "corridor_emitter" owner equals placeholder "consolidated_owner"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -821,7 +821,7 @@ Feature: Narrow schedule activation on ownership change
       """
       - domain={{domain}} kind=deduplicator name=dedup_txns owner=node-1
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION deduped_after_group_move TO deduped;
       """
@@ -843,7 +843,7 @@ Feature: Narrow schedule activation on ownership change
     Given runtime replication is configured with replica count 1 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -851,11 +851,11 @@ Feature: Narrow schedule activation on ownership change
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-1;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -919,13 +919,13 @@ Feature: Narrow schedule activation on ownership change
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE JUNCTION enrich_events FROM incoming
         BRANCHED BY by_move_tenant
@@ -936,16 +936,16 @@ Feature: Narrow schedule activation on ownership change
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -954,7 +954,7 @@ Feature: Narrow schedule activation on ownership change
       - domain={{domain}} kind=junction name=enrich_events owner=node-1
       """
     And the last cluster status owner for scheduled "relay" "tenant_state" is saved as placeholder "relay_owner"
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION enriched_subscription TO enriched;
       """
@@ -975,12 +975,12 @@ Feature: Narrow schedule activation on ownership change
       {"tenant":"acme","user_id":10,"source":"input"}
       """
     Then the relay subscription does not receive a payload within "2s"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DRAIN NODE {{relay_owner}};
       """
     Then within "15s" node "node-1" eventually reports scheduled "relay" "tenant_state" owner different from placeholder "relay_owner"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -988,7 +988,7 @@ Feature: Narrow schedule activation on ownership change
       """
       - domain={{domain}} kind=junction name=enrich_events owner=node-1
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION enriched_after_move TO enriched;
       """
@@ -1004,3 +1004,75 @@ Feature: Narrow schedule activation on ownership change
       """
       {"source":"acme-state","tenant":"acme","user_id":10}
       """
+
+  @kept_ingestor_offsets @deloxide_stress
+  Scenario: A Kafka ingestor keeps committing its domain offsets after their replica is lost
+    Given Kafka is running
+    And runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And Kafka topic "offset_replica_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'offset_replica_{{test_id}}'
+          OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+            RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING metric_codec
+        TO raw_metrics
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And these Plexus commands are executed through the client on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "metric_source" is saved as placeholder "offset_owner"
+    And the first replica for scheduled "ingestor" "metric_source" in the last cluster status is saved as placeholder "offset_replica"
+    When these Plexus commands are executed on node "{{offset_owner}}"
+      """
+      CREATE SUBSCRIPTION raw_metrics_subscription TO raw_metrics;
+      """
+    And Kafka message is published to topic "offset_replica_{{test_id}}"
+      """
+      {"value":1,"tenant":"alpha"}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "value":1
+      """
+    When node "{{offset_replica}}" is stopped
+    Then node "{{offset_owner}}" eventually observes a stable leader
+    And within "30s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_source" replicas without placeholder "offset_replica"
+    And within "5s" node "{{offset_owner}}" eventually reports scheduled "ingestor" "metric_source" owner equals placeholder "offset_owner"
+    When Kafka message is published to topic "offset_replica_{{test_id}}"
+      """
+      {"value":2,"tenant":"alpha"}
+      """
+    And Kafka message is published to topic "offset_replica_{{test_id}}"
+      """
+      {"value":3,"tenant":"alpha"}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "value":2
+      "value":3
+      """
+    When the CLI backs up "domain {{domain}} --timeout 30s" from node "{{offset_owner}}" into "offsets.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    When the CLI describes backup archive "offsets.nvxb" as json through node "{{offset_owner}}"
+    Then the described backup records Kafka domain offset 3 for ingestor "metric_source"

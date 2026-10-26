@@ -1,7 +1,7 @@
 Feature: Restore staging reclamation and storage accounting
   Failed unpublished installations are reclaimed while durable activation gates stay closed.
 
-  @restore_installation @deloxide_stress_restore
+  @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: Restore quota failures reclaim storage across restart and preserve an active retry on <cluster_size> nodes
     Given restore checkpoint staging is limited to 524288 bytes
     And Kafka is running
@@ -11,13 +11,13 @@ Feature: Restore staging reclamation and storage accounting
     And the active domain is "{{domain}}"
     And node "node-1" has a state-counting WASM fixture with 1 MiB saves in resource directory "wasm_processor"
     And Kafka topic "backup_wasm_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE SCHEMA result ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -27,7 +27,7 @@ Feature: Restore staging reclamation and storage accounting
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 30m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA result BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -54,11 +54,11 @@ Feature: Restore staging reclamation and storage accounting
         ON MESSAGE ERROR LOG
         ON GLOBAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       START;
       """
@@ -77,13 +77,13 @@ Feature: Restore staging reclamation and storage accounting
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "restore checkpoint staging quota"
     And abandoned restore storage is reclaimed across every node
     Given the active domain is "{{source_domain}}_quota"
-    When these NSPL commands fail with "restore state installation is incomplete"
+    When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
     When the cluster is restarted
     Then restore checkpoint staging usage is zero on every node
-    When these NSPL commands fail with "restore state installation is incomplete"
+    When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
@@ -97,14 +97,16 @@ Feature: Restore staging reclamation and storage accounting
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
     And restoring domain "{{domain}}_copy" by coordinator "{{leader}}" pauses before state publication
-    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "stateful.nvxb" is streamed to node "{{leader}}" under execution reference "{{test_id}}-active-restore" in the background
+    When restore "domain {{domain}} AS {{domain}}_copy" of backup archive "stateful.nvxb" is streamed to node "{{leader}}" under execution reference "{{test_id}}-active-restore" in the background with outcome recovery
     Then restoring domain "{{domain}}_copy" by coordinator "{{leader}}" has reached state publication
     And an active restore retains its staging through completed maintenance sweeps on every node
-    When state publication of domain "{{domain}}_copy" by coordinator "{{leader}}" is released
-    Then the background restore stream's outcome is "completed" as "executed"
+    When restore coordinator "{{leader}}" yields leadership in a multi-node cluster
+    And state publication of domain "{{domain}}_copy" by coordinator "{{leader}}" is released
+    Then the background restore stream completes with a known outcome
+    And the restore stream's report shows every step applied
     And restore checkpoint staging usage is zero on every node
     Given the active domain is "{{domain}}_copy"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """

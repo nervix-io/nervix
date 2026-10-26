@@ -11,7 +11,7 @@ fail() {
 }
 
 # The run reads the checked-in baseline fixture and installs its backup form.
-baseline_graph="$(<"${chaos_dir}/fixtures/baseline.nspl")"
+baseline_graph="$(<"${chaos_dir}/fixtures/baseline.plexus")"
 backup_graph="$(backup_graph_fixture "${baseline_graph}")" \
     || fail 'the baseline fixture does not hold the one consumer-group offset clause the backup run replaces'
 

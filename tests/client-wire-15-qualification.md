@@ -17,7 +17,7 @@ for admission, applying, delivery, ownership, and resource installation.
 | Contract | Executable evidence |
 | --- | --- |
 | Follower, leader loss, exact command outcomes, and cancellation | `client_wire_failures.feature`: lost durable admission, missing committed command, exact `BEGIN` and append retries, batch retry across leader change and restart, bounded execution history; `session_protocol.feature`: cancellation before and after admission, typed gRPC/WebSocket failures, empty discovery, and reconnect. |
-| Transaction identity, takeover, expiry, and inspection | `nspl_transactions.feature`: 68 cases of exact transaction identity, competing sessions, queue and commit outcomes, replay, expiry, and typed inspection; `transaction_quiesce_qualification.feature`: a report over 2 MiB with 128 operations, leader transfer, commit, and exact report comparison after restart. |
+| Transaction identity, takeover, expiry, and inspection | `plexus_transactions.feature`: 68 cases of exact transaction identity, competing sessions, queue and commit outcomes, replay, expiry, and typed inspection; `transaction_quiesce_qualification.feature`: a report over 2 MiB with 128 operations, leader transfer, commit, and exact report comparison after restart. |
 | Domain-owner and plan-base fencing | `client_wire_failures.feature`: stalled commit does not block another domain or expiry, and a relocation planned before a schedule revision cannot overwrite the newer revision. The `@shutdown_qualification` relocation cases cover prepared ownership handoff, destination restart, cancellation, and leader reconciliation. `cordon_node.feature` checks scheduling eligibility. |
 | Shutdown eligibility | The terminating-node selection in `graceful_shutdown.feature` checks that placement excludes a terminating incarnation, admitted work remains eligible, and restart restores schedulability. |
 | All-voter crash and recovery | `Every killed process recovers retained commands and expires an overdue open transaction`: all three children receive `SIGKILL`; the cluster remains down past its 10-second transaction idle limit; all persisted voters restart, converge, and report `EXPIRED`; an uncommitted schema remains absent; retrying the pre-crash command identity returns its retained success without a duplicate schema effect. |
@@ -35,13 +35,13 @@ three added or extended scenarios. Counts are Cucumber's reported counts, includ
 | --- | --- |
 | `just test-scenarios --tags @client_wire15 --concurrency 1 --retry 0` | Pass: 3 scenarios, 71 steps. |
 | `just test-scenarios --input tests/features/runtime/client_wire_failures.feature --concurrency 1` | Pass: 27 scenarios, 371 steps. |
-| `just test-scenarios --input tests/features/runtime/nspl_transactions.feature --concurrency 2 --retry 0` | Pass: 68 scenarios, 870 steps. |
+| `just test-scenarios --input tests/features/runtime/plexus_transactions.feature --concurrency 2 --retry 0` | Pass: 68 scenarios, 870 steps. |
 | `just test-scenarios --input tests/features/runtime/session_protocol.feature --concurrency 1 --retry 0` | Pass: 14 scenarios, 177 steps. |
 | `just test-scenarios --input tests/features/runtime/session_subscription_lifecycle.feature --concurrency 1 --retry 0` | Pass: 10 scenarios, 160 steps. |
 | `just test-scenarios --input tests/features/runtime/transaction_quiesce_qualification.feature --concurrency 1 --retry 0` | Pass: 1 scenario, 34 steps. |
 | `just test-scenarios --input tests/features/web-console/connection_status.feature --concurrency 1 --retry 0` | Pass: 9 scenarios, 56 steps. |
 | `just test-scenarios --input tests/features/web-console/transaction_inspector.feature --concurrency 1 --retry 0` | Pass: 12 scenarios, 340 steps. |
-| `just test-scenarios --input tests/features/web-console/nspl_repl.feature --tags @client_wire13 --concurrency 1 --retry 0` | Pass: 8 scenarios, 117 steps. |
+| `just test-scenarios --input tests/features/web-console/plexus_repl.feature --tags @client_wire13 --concurrency 1 --retry 0` | Pass: 8 scenarios, 117 steps. |
 | `just test-scenarios --input tests/features/tools/cli_session.feature --concurrency 1 --retry 0` | Pass: 10 scenarios, 57 steps, including 270 sequential subscription rows. |
 | `just test-client-conformance '@client_conformance_toolchain' --concurrency 1 --retry 0` | Pass: 19 scenarios, 118 steps across the C ABI, C, C++, Python, Java, Ruby, Go, Node.js, and Bun probes. |
 | `just test-scenarios --input tests/features/cluster/resource_describe.feature --tags @resource_upload_idempotency --concurrency 1 --retry 0` | Pass: 3 scenarios, 51 steps. |

@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //! - **Owns.** Read-only descriptions and metrics derived from installed runtime state.
 //! - **Depends on.** Execution plans, branch-local state and runtime metric collectors.
-//! - **Must not know.** NSPL parsing, persistence mutations or external telemetry transport.
+//! - **Must not know.** Plexus parsing, persistence mutations or external telemetry transport.
 
 #![cfg_attr(
     nervix_lint,
@@ -84,6 +84,13 @@ pub(crate) struct IngestorDescribe {
     /// Pending acknowledgements and rejections this node's source hosts discarded after a
     /// reconnect, because the broker redelivers them.
     pub(crate) transport_redeliveries_total: u64,
+    /// Payloads this node's intake of the ingestor consumed because its codec refused them.
+    pub(crate) decode_rejections_total: u64,
+    /// The latest of those payloads' decode rejections on this node.
+    pub(crate) last_decode_rejection: Option<DecodeRejection>,
+    /// Payloads this node's source hosts of the ingestor dropped because they exceed their
+    /// client's message size bound.
+    pub(crate) oversized_payloads_total: u64,
     pub(crate) memory_backpressure_paused: bool,
     pub(crate) transient_error: Option<String>,
     pub(crate) reconnect_backoff: Option<String>,
@@ -200,15 +207,23 @@ impl BranchMetricsMark {
 }
 
 impl DataflowNodeTransientState {
-    fn from_failure<R>(
-        failure: Option<StdArc<task_status::TaskFailure<R>>>,
+    fn from_failures<R>(
+        failures: Option<nervix_primitives::sync::StdArc<task_status::TaskFailures<R>>>,
         retry_of: fn(&R) -> &RuntimeReconnectStatus,
     ) -> Self {
-        let Some(failure) = failure else {
+        let Some(failures) = failures else {
             return Self::default();
         };
+        let error = match failures.as_ref() {
+            task_status::TaskFailures::Task(failure)
+            | task_status::TaskFailures::Connector(failure) => failure.error.clone(),
+            task_status::TaskFailures::Both { task, connector } => {
+                format!("task: {}; connector: {}", task.error, connector.error)
+            }
+        };
+        let failure = failures.selected();
         let mut state = Self {
-            error: Some(failure.error.clone()),
+            error: Some(error),
             ..Self::default()
         };
         if let Some(retry) = failure.retry.as_ref() {
@@ -505,20 +520,20 @@ impl Runtime {
         let identifier = identifier.into();
         if kind.eq_ignore_ascii_case("INGESTOR") {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, identifier);
-            let failure = self
+            let failures = self
                 .inner
                 .ingestor_statuses
                 .get(&key)
-                .and_then(|status| status.snapshot());
-            DataflowNodeTransientState::from_failure(failure, |retry| retry)
+                .and_then(|status| status.connection.failures());
+            DataflowNodeTransientState::from_failures(failures, |retry| retry)
         } else if kind.eq_ignore_ascii_case("EMITTER") {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
-            let failure = self
+            let failures = self
                 .inner
                 .emitter_statuses
                 .get(&key)
-                .and_then(|status| status.snapshot());
-            DataflowNodeTransientState::from_failure(failure, |retry| &retry.reconnect)
+                .and_then(|status| status.failures());
+            DataflowNodeTransientState::from_failures(failures, |retry| &retry.reconnect)
         } else {
             DataflowNodeTransientState::default()
         }
@@ -581,6 +596,13 @@ impl Runtime {
         Ok(())
     }
 
+    /// The latest decode rejection the ingestor `key` names published on this node.
+    fn last_decode_rejection(&self, key: &DomainNodeRef) -> Option<DecodeRejection> {
+        let status = self.inner.ingestor_statuses.get(key)?;
+        let rejection = status.last_decode_rejection()?;
+        Some(DecodeRejection::clone(&rejection))
+    }
+
     pub(crate) fn describe_local_ingestor(
         &self,
         domain: &DomainName,
@@ -607,7 +629,26 @@ impl Runtime {
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
             )
             .get();
+        let decode_rejections_total = self
+            .inner
+            .metrics
+            .ingestor_decode_rejections(
+                domain,
+                ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            )
+            .get();
+        let oversized_payloads_total = self
+            .inner
+            .metrics
+            .ingestor_oversized_payloads(
+                domain,
+                ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            )
+            .get();
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let last_decode_rejection = self.last_decode_rejection(&key);
         if !self.inner.executions.contains_key(domain) || !self.inner.ingestors.contains_key(&key) {
             // An ingestor that did not start describes its own start report. One that recorded no
             // failure of its own is not running because its domain's execution failed to build,
@@ -626,6 +667,9 @@ impl Runtime {
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
                 transport_redeliveries_total,
+                decode_rejections_total,
+                last_decode_rejection: last_decode_rejection.clone(),
+                oversized_payloads_total,
                 memory_backpressure_paused,
                 transient_error,
                 reconnect_backoff: transient.reconnect_backoff.clone(),
@@ -641,6 +685,9 @@ impl Runtime {
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
                 transport_redeliveries_total,
+                decode_rejections_total,
+                last_decode_rejection: last_decode_rejection.clone(),
+                oversized_payloads_total,
                 memory_backpressure_paused,
                 transient_error: transient.error.clone(),
                 reconnect_backoff: transient.reconnect_backoff.clone(),
@@ -653,12 +700,14 @@ impl Runtime {
             execution.revision.entrypoints.ingestor(ingestor)
             && let IngestorInputPlan::Transport(TransportInputPlan {
                 source:
-                    SourceStartPlan::Kafka(KafkaIngestorStartPlan {
-                        topic,
-                        offsets: KafkaOffsetPlan::Domain(_),
-                        instances,
-                        ..
-                    }),
+                    IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(
+                        KafkaTopicIngestorStartPlan {
+                            topic,
+                            offsets: KafkaOffsetPlan::Domain(_),
+                            instances,
+                            ..
+                        },
+                    )),
                 ..
             }) = &plan.input
             && let Some(node) = execution.revision.nodes.get(&NodeRef::new(
@@ -681,6 +730,9 @@ impl Runtime {
             quiesce_state,
             quiesce_counters,
             transport_redeliveries_total,
+            decode_rejections_total,
+            last_decode_rejection,
+            oversized_payloads_total,
             memory_backpressure_paused,
             transient_error: transient.error.clone(),
             reconnect_backoff: transient.reconnect_backoff.clone(),

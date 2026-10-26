@@ -2,6 +2,14 @@
 
 ARG RUST_VERSION=1.99
 ARG KACHE_VERSION=1.2.1
+# The checksums of the pinned version's release archive for each build architecture.
+ARG KACHE_SHA256_AMD64=9b2b86d592c5ffb53400218f450fc6b02008bd132827ae6cd133ec8859c9b753
+ARG KACHE_SHA256_ARM64=fd80d47e78bdb478aac6c24239c0daeec7024913f5e69b457a1e84d87ff590db
+ARG TRUNK_VERSION=0.21.14
+ARG TRUNK_SHA256_AMD64=f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b
+ARG TRUNK_SHA256_ARM64=b1d8e60e454f7fc182d9a4d95d1506ffbae947d8ba90f8f6f02da93b60f980f9
+ARG CARGO_AUDITABLE_VERSION=0.7.7
+ARG CARGO_SONIC_VERSION=0.2.1
 ARG DEBIAN_IMAGE=debian:trixie-20260918-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a
 ARG LLVM_VERSION=23
 ARG FLATBUFFERS_VERSION=25.12.19
@@ -23,6 +31,13 @@ ARG BUILDARCH
 ARG TARGETARCH
 ARG RUST_VERSION
 ARG KACHE_VERSION
+ARG KACHE_SHA256_AMD64
+ARG KACHE_SHA256_ARM64
+ARG TRUNK_VERSION
+ARG TRUNK_SHA256_AMD64
+ARG TRUNK_SHA256_ARM64
+ARG CARGO_AUDITABLE_VERSION
+ARG CARGO_SONIC_VERSION
 ARG LLVM_VERSION
 ARG FLATBUFFERS_VERSION
 ARG FLATBUFFERS_SHA256
@@ -46,6 +61,7 @@ RUN apt-get update \
         ca-certificates \
         cmake \
         curl \
+        fio \
         g++ \
         g++-aarch64-linux-gnu \
         gcc \
@@ -61,6 +77,8 @@ RUN apt-get update \
         pkg-config \
         protobuf-compiler \
         python3 \
+        sysbench \
+        util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -L --proto '=https' --tlsv1.2 -sSf \
@@ -98,13 +116,38 @@ RUN mkdir -p /etc/apt/keyrings \
         llvm-${LLVM_VERSION} \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -L --proto '=https' --tlsv1.2 -sSf \
-    https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh \
-    | bash \
-    && cargo binstall --no-confirm cargo-auditable \
-    && cargo binstall --no-confirm "kache@${KACHE_VERSION}" \
-    && cargo binstall --no-confirm trunk \
-    && cargo install cargo-sonic
+# kache and trunk come from the release archive of their pinned version, checked against its pinned
+# checksum. Each builds its release with fat LTO in one codegen unit, which takes minutes to
+# compile, and every image build runs this step.
+RUN case "${BUILDARCH}" in \
+        amd64) tool_arch=x86_64; kache_sha256="${KACHE_SHA256_AMD64}"; trunk_sha256="${TRUNK_SHA256_AMD64}" ;; \
+        arm64) tool_arch=aarch64; kache_sha256="${KACHE_SHA256_ARM64}"; trunk_sha256="${TRUNK_SHA256_ARM64}" ;; \
+        *) echo "no pinned kache or trunk archive for build architecture ${BUILDARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -L --proto '=https' --tlsv1.2 -sSf --retry 5 \
+        "https://github.com/kunobi-ninja/kache/releases/download/v${KACHE_VERSION}/kache-${tool_arch}-unknown-linux-musl.tar.gz" \
+        -o /tmp/kache.tar.gz \
+    && echo "${kache_sha256}  /tmp/kache.tar.gz" | sha256sum --check - \
+    && curl -L --proto '=https' --tlsv1.2 -sSf --retry 5 \
+        "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${tool_arch}-unknown-linux-gnu.tar.gz" \
+        -o /tmp/trunk.tar.gz \
+    && echo "${trunk_sha256}  /tmp/trunk.tar.gz" | sha256sum --check - \
+    && mkdir -p /tmp/release-tools \
+    && tar -xzf /tmp/kache.tar.gz -C /tmp/release-tools kache \
+    && tar -xzf /tmp/trunk.tar.gz -C /tmp/release-tools trunk \
+    && install -m 0755 /tmp/release-tools/kache /tmp/release-tools/trunk /usr/local/bin/ \
+    && test "$(kache --version)" = "kache ${KACHE_VERSION}" \
+    && test "$(trunk --version)" = "trunk ${TRUNK_VERSION}" \
+    && rm -rf /tmp/kache.tar.gz /tmp/trunk.tar.gz /tmp/release-tools
+
+# cargo-auditable and cargo-sonic compile in seconds, at their pinned version against the lockfile
+# each crate published, so a later compatible release of one of their dependencies can neither
+# change nor break them. The build below mounts its own registry cache, so the sources fetched here
+# are not kept in the layer.
+RUN cargo install --locked \
+    "cargo-auditable@${CARGO_AUDITABLE_VERSION}" \
+    "cargo-sonic@${CARGO_SONIC_VERSION}" \
+    && rm -rf "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
 
 WORKDIR /app
 
@@ -116,11 +159,15 @@ COPY examples/paced-simulation/rust ./examples/paced-simulation/rust
 COPY tests/scenarios.rs ./tests/scenarios.rs
 COPY scripts/kache_remote.py ./scripts/kache_remote.py
 COPY scripts/publish_kache_report.py ./scripts/publish_kache_report.py
+COPY scripts/wasm_bindgen.py ./scripts/wasm_bindgen.py
+COPY scripts/runner_diagnostics.py scripts/record_runner_load.py ./scripts/
 
 ENV CARGO_PROFILE_RELEASE_LTO=fat
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 ENV RUSTC_WRAPPER=kache
-ENV KACHE_MAX_SIZE=1TiB
+# Keep kache's disk-share default: the builder cache scales with its own volume.
+# BuildKit does not inherit the workflow's environment; opt into the same 64 GiB recovery floor.
+ENV KACHE_AUTO_RECOVER_MIN_FREE_BYTES=68719476736
 ENV KACHE_CACHE_EXECUTABLES=true
 ENV KACHE_REMOTE_KEY_LISTING=false
 
@@ -175,29 +222,31 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && echo "building on ${BUILDPLATFORM} for ${TARGETPLATFORM} (${RUST_TARGET})" \
     && echo "using LIBCLANG_PATH=${LIBCLANG_PATH}" \
     && echo "using cargo-sonic target CPUs: ${SONIC_TARGET_CPUS}" \
+    && python3 -m scripts.runner_diagnostics --label "docker-${TARGETARCH}${NERVIX_DIAGNOSTIC_SELECTION:+-${NERVIX_DIAGNOSTIC_SELECTION}}" --output /tmp/runner-diagnostics --storage-path /app/target \
     && rustup target add "${RUST_TARGET}" wasm32-unknown-unknown \
+    && wasm_bindgen_bin="$(python3 scripts/wasm_bindgen.py install)" \
     && cd crates/web-console \
-    && RUSTFLAGS="-D warnings" trunk build --release \
+    && PATH="${wasm_bindgen_bin}:${PATH}" RUSTFLAGS="-D warnings" trunk build --release --offline \
     && cd /app \
     && case "${NERVIX_DIAGNOSTIC_SELECTION}" in \
     "") \
       cargo sonic --target-cpus="${SONIC_TARGET_CPUS}" --parallelism="${SONIC_PARALLELISM}" --loader bundle --auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server \
       && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
-      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-nspl-format \
+      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-plexus-format \
       && mkdir -p /artifacts/release \
       && cp "/app/target/sonic/${RUST_TARGET}/release/nervix-server" /artifacts/release/nervix-server \
       && cp -R "/app/target/sonic/${RUST_TARGET}/release/nervix-server.bundle" /artifacts/release/nervix-server.bundle \
       && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/release/nervix-cli \
-      && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/release/nervix-nspl-format;; \
+      && cp "/app/target/${RUST_TARGET}/release/nervix-plexus-format" /artifacts/release/nervix-plexus-format;; \
     deloxide | deloxide-order | deloxide-stress) \
       cargo auditable build --release --target "${RUST_TARGET}" --package nervix-server --bin nervix-server --features "${NERVIX_DIAGNOSTIC_SELECTION}" \
       && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-cli \
-      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-nspl-format \
+      && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-plexus-format \
       && cargo auditable build --release --target "${RUST_TARGET}" --package nervix-deadlock --features report-tool --bin nervix-deadlock-report \
       && mkdir -p /artifacts/diagnostic \
       && cp "/app/target/${RUST_TARGET}/release/nervix-server" /artifacts/diagnostic/nervix-server \
       && cp "/app/target/${RUST_TARGET}/release/nervix-cli" /artifacts/diagnostic/nervix-cli \
-      && cp "/app/target/${RUST_TARGET}/release/nervix-nspl-format" /artifacts/diagnostic/nervix-nspl-format \
+      && cp "/app/target/${RUST_TARGET}/release/nervix-plexus-format" /artifacts/diagnostic/nervix-plexus-format \
       && cp "/app/target/${RUST_TARGET}/release/nervix-deadlock-report" /artifacts/diagnostic/nervix-deadlock-report;; \
     *) echo "unknown NERVIX_DIAGNOSTIC_SELECTION=${NERVIX_DIAGNOSTIC_SELECTION}" >&2; exit 1 ;; \
     esac \
@@ -350,7 +399,7 @@ FROM runtime-cuda AS cuda
 COPY --link --from=builder /artifacts/release/nervix-server /usr/local/bin/nervix-server
 COPY --link --from=builder /artifacts/release/nervix-server.bundle /usr/local/bin/nervix-server.bundle
 COPY --link --from=builder /artifacts/release/nervix-cli /usr/local/bin/nervix-cli
-COPY --link --from=builder /artifacts/release/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+COPY --link --from=builder /artifacts/release/nervix-plexus-format /usr/local/bin/nervix-plexus-format
 
 USER nervix:nervix
 
@@ -368,7 +417,7 @@ LABEL io.nervix.diagnostic.selection="${NERVIX_DIAGNOSTIC_SELECTION}"
 
 COPY --link --from=builder /artifacts/diagnostic/nervix-server /usr/local/bin/nervix-server
 COPY --link --from=builder /artifacts/diagnostic/nervix-cli /usr/local/bin/nervix-cli
-COPY --link --from=builder /artifacts/diagnostic/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+COPY --link --from=builder /artifacts/diagnostic/nervix-plexus-format /usr/local/bin/nervix-plexus-format
 COPY --link --from=builder /artifacts/diagnostic/nervix-deadlock-report /usr/local/bin/nervix-deadlock-report
 
 USER nervix:nervix
@@ -381,7 +430,7 @@ FROM runtime-cpu AS cpu
 COPY --link --from=builder /artifacts/release/nervix-server /usr/local/bin/nervix-server
 COPY --link --from=builder /artifacts/release/nervix-server.bundle /usr/local/bin/nervix-server.bundle
 COPY --link --from=builder /artifacts/release/nervix-cli /usr/local/bin/nervix-cli
-COPY --link --from=builder /artifacts/release/nervix-nspl-format /usr/local/bin/nervix-nspl-format
+COPY --link --from=builder /artifacts/release/nervix-plexus-format /usr/local/bin/nervix-plexus-format
 
 USER nervix:nervix
 

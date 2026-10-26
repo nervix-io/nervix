@@ -2,11 +2,11 @@ Feature: Sensitive data
   Scenario Outline: Sensitive relay fields are masked in session subscription output
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -70,11 +70,11 @@ Feature: Sensitive data
   Scenario Outline: leak_sensitive allows explicitly downgrading sensitive data
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -152,7 +152,7 @@ Feature: Sensitive data
 
   Scenario Outline: Sensitive data cannot flow into non-sensitive fields implicitly
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "would store sensitive data in a non-sensitive output field"
+    When these Plexus commands fail with "would store sensitive data in a non-sensitive output field"
       """
       CREATE UNPACED DOMAIN {{domain}};
 
@@ -187,12 +187,12 @@ Feature: Sensitive data
   Scenario Outline: Sensitive external emission requires explicit leakage
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -239,16 +239,15 @@ Feature: Sensitive data
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
 
-      CREATE EMITTER sensitive_notifications_out
+      CREATE ZEROMQ PUSH EMITTER sensitive_notifications_out
         FROM notifications
-        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING emitted_notification_codec
+        TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING emitted_notification_codec
         INHERIT user_id, action
         SET secret = leak_sensitive(input.secret)
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB

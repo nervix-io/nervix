@@ -1,5 +1,7 @@
 # SIMD Kernels
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix applies explicit SIMD to contiguous typed buffers where generated-instruction inspection
 and measurement justify it. The optimization includes the caller: decoding into Arrow builders,
 resolving a column once, retaining bitmaps, or folding a whole run removes the per-row structural
@@ -141,7 +143,7 @@ route errors, ACK attribution, and branch ownership.
 | Constant integer division | `UnsignedDivisor`, `SignedDivisor`, `ConstantDivision` | VM column-by-scalar `/` and `%` and fixed-unit datetime operations prepare the divisor once; measured 64-bit operations retain scalar reciprocal paths |
 | SYSLOG header and structured-data scanning | `ByteClass::first_in`, `ByteScanner` | Compiled SYSLOG fields retain names and Arrow types; byte classes find header refusals and structured-data syntax before scalar parsing at those positions |
 | Syslog TCP framing | memchr, retained read cursor, typed `FrameProgress` | The connector retains parsed octet counts and searches newly read bytes of split lines, with one compaction per read |
-| SQS XML character admission | `XmlChars::into_string` and `XmlChars::admits`, with simdutf8 | The SQS sink validates bodies and string attributes; its integration owns size limits and reporting |
+| SQS XML character admission | `XmlChars::into_string` and `XmlChars::admits`, with simdutf8 | The SQS emitter validates bodies and string attributes; its integration owns size limits and reporting |
 | OTEL trace/span identifiers | faster-hex | The OTEL connector decodes fixed-length nonzero hexadecimal IDs; `otel-hex-ids` compares every byte and each typed refusal with a per-digit scalar reference in ordinary and sanitizer execution |
 
 ### JSON Boundaries
@@ -390,7 +392,7 @@ decoder; it remains connector-level evidence rather than a Kafka pipeline measur
    it wins. Any end-to-end claim additionally needs same-host A/B. Publish raw evidence on the
    task and update this chapter and the caller's authoritative chapter in the same change.
 6. Run focused checks and `just validate`; lower ratchet baselines that fall. Keep public
-   contracts and NSPL skill routing current when their surfaces change, then run `just book dev`.
+   contracts and Plexus skill routing current when their surfaces change, then run `just book dev`.
 
 Do not add explicit kernels for operations LLVM already vectorizes without a measured caller
 benefit, or duplicate Arrow and library dispatch. Division by a column has no constant reciprocal

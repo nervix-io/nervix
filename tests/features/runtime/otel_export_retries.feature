@@ -19,11 +19,11 @@ Feature: OTEL Export requests through unknown outcomes
       """
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, body STRING );
       CREATE SCHEMA rejected_event (
@@ -47,20 +47,18 @@ Feature: OTEL Export requests through unknown outcomes
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main TYPE OTEL CONFIG {
+      CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = '{{otlp_receiver.collector}}',
         'protocol' = '<protocol>',
         'compression' = 'gzip',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER retried_logs FROM events
-        TO OTEL otel_main LOGS
-          VALUES { 'time' = now(), 'body' = input.body }
+      CREATE OTEL LOGS EMITTER retried_logs FROM events
+        TO otel_main
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s VALUES { 'time' = now(), 'body' = input.body }
           ATTRIBUTES { 'event.seq' = input.seq }
           RESOURCE { 'service.name' = 'nervix-cucumber' }
-          SCOPE 'retry-test' VERSION '1.0'
-          MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
-        BATCH MAX MESSAGES 2 MAX SIZE 1KiB
+          SCOPE 'retry-test' VERSION '1.0' BATCH MAX MESSAGES 2 MAX SIZE 1KiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR SEND TO rejected_events
           SET seq = input.seq,
@@ -112,11 +110,11 @@ Feature: OTEL Export requests through unknown outcomes
       """
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, body STRING );
       CREATE CODEC ingest_codec FROM JSON TO SCHEMA event
@@ -133,18 +131,16 @@ Feature: OTEL Export requests through unknown outcomes
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT otel_main TYPE OTEL CONFIG {
+      CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = '{{otlp_receiver.collector}}',
         'protocol' = '<protocol>',
         'timeout_ms' = 1000
       };
-      CREATE EMITTER timed_out_logs FROM events
-        TO OTEL otel_main LOGS
-          VALUES { 'time' = now(), 'body' = input.body }
+      CREATE OTEL LOGS EMITTER timed_out_logs FROM events
+        TO otel_main
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s VALUES { 'time' = now(), 'body' = input.body }
           RESOURCE { 'service.name' = 'nervix-cucumber' }
-          SCOPE 'timeout-test' VERSION '1.0'
-          MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          SCOPE 'timeout-test' VERSION '1.0' FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       START;

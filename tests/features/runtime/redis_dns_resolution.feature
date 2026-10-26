@@ -1,33 +1,35 @@
 Feature: Redis name resolution
 
-  Scenario Outline: Redis source and sink use the node DNS fixture over <scheme>
+  Scenario Outline: Redis source and emitter use the node DNS fixture over <scheme>
     Given Redis is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the Redis endpoints are published under fixture DNS name "redis.nervix.test"
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Redis channel "dns_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
-        'tls_ca_file' = '{{dev_tls}}/ca.pem'
+        'tls_ca_file' = '{{dev_tls}}/ca.pem',
+        'subscription_buffer_messages' = '1024',
+        'idle_timeout_ms' = '30000'
       };
       CREATE REDIS PUBSUB INGESTOR redis_in
         FROM redis_main CHANNEL 'dns_in_{{test_id}}' MODE NO ACK
@@ -36,9 +38,9 @@ Feature: Redis name resolution
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER redis_out FROM notifications
-        TO REDIS PUBSUB redis_main CHANNEL dns_out_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE REDIS PUBSUB EMITTER redis_out FROM notifications
+        TO redis_main CHANNEL 'dns_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -68,27 +70,29 @@ Feature: Redis name resolution
     And a <cluster_size> node nervix cluster is started
     And the Redis endpoints are published under fixture DNS name "redis.unlisted.test"
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 0 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 0 MAX 1 MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{redis_tls_dns_addr}}',
-        'tls_ca_file' = '{{dev_tls}}/ca.pem'
+        'tls_ca_file' = '{{dev_tls}}/ca.pem',
+        'subscription_buffer_messages' = '1024',
+        'idle_timeout_ms' = '30000'
       };
       CREATE REDIS PUBSUB INGESTOR redis_in
         FROM redis_main CHANNEL 'dns_in_{{test_id}}' MODE NO ACK
@@ -116,19 +120,21 @@ Feature: Redis name resolution
     And a <cluster_size> node nervix cluster is started
     And Redis is forwarded as "redis.nervix.test" from the fixture addresses "127.0.5.1,127.0.5.2"
     And the DNS fixture answers "redis.nervix.test" with addresses "127.0.5.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Redis channel "dns_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT redis_main TYPE REDIS POOL SIZE MIN 1 MAX 1 CONFIG {
-        'addr' = '{{redis_forwarded_addr}}'
+      CREATE REDIS CLIENT redis_main POOL SIZE MIN 1 MAX 1 CONFIG {
+        'addr' = '{{redis_forwarded_addr}}',
+        'subscription_buffer_messages' = '1024',
+        'idle_timeout_ms' = '30000'
       };
       CREATE REDIS PUBSUB INGESTOR redis_in
         FROM redis_main CHANNEL 'dns_in_{{test_id}}' MODE NO ACK
@@ -137,9 +143,9 @@ Feature: Redis name resolution
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER redis_out FROM notifications
-        TO REDIS PUBSUB redis_main CHANNEL dns_out_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
+      CREATE REDIS PUBSUB EMITTER redis_out FROM notifications
+        TO redis_main CHANNEL 'dns_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_codec
         INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

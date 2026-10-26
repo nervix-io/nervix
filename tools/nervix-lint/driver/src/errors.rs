@@ -17,7 +17,7 @@ use rustc_span::{
 };
 use rustc_trait_selection::traits::type_known_to_meet_bound_modulo_regions;
 
-use crate::contracts::{Flow, INVALID_CONTRACT, Message};
+use crate::contracts::{Flow, INVALID_CONTRACT, Message, contract_attribute};
 
 declare_tool_lint! { pub nervix::BARE_ERROR_SIGNATURE, Deny, "Nervix failure contracts require contextual reports", report_in_external_macro: true }
 declare_tool_lint! { pub nervix::DISCARDED_OUTCOME, Deny, "discarded failure outcomes require explicit classification", report_in_external_macro: true }
@@ -36,8 +36,7 @@ struct PanicCall {
 }
 
 fn boundary(tcx: TyCtxt<'_>, definition: DefId) -> Option<Boundary> {
-    let path = [Symbol::intern("nervix"), Symbol::intern("error_boundary")];
-    let attribute = tcx.get_attrs_by_path(definition, &path).next()?;
+    let attribute = contract_attribute(tcx, definition, "error_boundary")?;
     parse_boundary(attribute)
 }
 

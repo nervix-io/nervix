@@ -5,7 +5,7 @@
 //!   accumulators, due-window emission, stepping, and eviction.
 //! - **Depends on.** Validated window plans, Arrow batches, the window accumulators, and bound
 //!   domain time.
-//! - **Must not know.** NSPL parsing, placement decisions or connector transports.
+//! - **Must not know.** Plexus parsing, placement decisions or connector transports.
 
 #![cfg_attr(
     nervix_lint,
@@ -77,11 +77,11 @@ pub(super) enum WindowProcessorError {
         expected: ArrowDataType,
         found: ArrowDataType,
     },
-    #[error("{} requires finite floating-point arguments", .function.nspl_name())]
+    #[error("{} requires finite floating-point arguments", .function.plexus_name())]
     NonFiniteArgument { function: WindowAggregateFunction },
     #[error("SUM of the window does not fit {data_type:?}")]
     SumOverflow { data_type: ArrowDataType },
-    #[error("{} of the window is not finite", .function.nspl_name())]
+    #[error("{} of the window is not finite", .function.plexus_name())]
     StatisticNotFinite { function: WindowAggregateFunction },
     #[error("window aggregate did not initialize required output field '{field}'")]
     UninitializedOutputField { field: String },
@@ -342,7 +342,7 @@ pub(super) async fn flush_ready_window_processor(
                 ProcessorOutputDispatchContext {
                     branch,
                     node_kind,
-                    source_kind: ModelKind::WindowProcessor,
+                    entity_kind: ModelKind::WindowProcessor,
                     processor,
                     error_policies,
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
@@ -1084,7 +1084,7 @@ impl VmFunctionInjector for WindowAggregateResults {
             return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "window aggregate {} of structure {} was not evaluated for this emission",
-                    invocation.function.nspl_name(),
+                    invocation.function.plexus_name(),
                     invocation.demand_id
                 ),
             }));
@@ -1093,7 +1093,7 @@ impl VmFunctionInjector for WindowAggregateResults {
             return Err(Report::new(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
                     "window aggregate {} evaluated {} rows for output rows selected as {rows:?}",
-                    invocation.function.nspl_name(),
+                    invocation.function.plexus_name(),
                     result.len()
                 ),
             }));
@@ -2554,6 +2554,113 @@ mod tests {
             batch_value(&record, "total_latency"),
             Some(RuntimeValue::I64(30))
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn identical_event_times_share_one_window_until_domain_completion() {
+        let mut window = TestWindow::new(
+            "SET total = SUM(input.value), samples = COUNT(input.value)",
+            &[field("value", ParseAsType::I64)],
+            &[
+                field("total", ParseAsType::I64),
+                field("samples", ParseAsType::I64),
+            ],
+        );
+        let refused = window
+            .admit(vec![int64([Some(100), Some(200)])], &[0, 0])
+            .await;
+        assert!(refused.is_empty(), "{refused:?}");
+
+        let width = Duration::from_millis(30);
+        assert_eq!(
+            window_next_deadline(&window.state, Some(width)),
+            Some(at(30_000_000))
+        );
+        assert!(!window_width_met(
+            &window.state,
+            None,
+            Some(width),
+            at(29_999_999)
+        ));
+        assert!(window_width_met(
+            &window.state,
+            None,
+            Some(width),
+            at(30_000_000)
+        ));
+
+        let emitted_at = at(90_000_000);
+        assert!(window_width_met(
+            &window.state,
+            None,
+            Some(width),
+            emitted_at
+        ));
+        let record = window.emitted().await;
+        assert_eq!(batch_value(&record, "total"), Some(RuntimeValue::I64(300)));
+        assert_eq!(batch_value(&record, "samples"), Some(RuntimeValue::I64(2)));
+        let metadata = window_output_metadata(&window.state, emitted_at)
+            .assured("the test admitted two rows with supported timestamps");
+        assert_eq!(metadata.ingested_at_low_watermark(), at(0));
+        assert_eq!(metadata.ingested_at_high_watermark(), emitted_at);
+
+        advance_window(&mut window.state, None, Some(width), emitted_at);
+        assert!(window.state.entries.is_empty());
+    }
+
+    #[nervix_primitives::test]
+    async fn combined_window_completes_at_either_width_boundary() {
+        let mut window = TestWindow::new(
+            "SET total = SUM(input.value), samples = COUNT(input.value)",
+            &[field("value", ParseAsType::I64)],
+            &[
+                field("total", ParseAsType::I64),
+                field("samples", ParseAsType::I64),
+            ],
+        );
+        let width = Duration::from_secs(3);
+        window.admit(vec![int64([Some(1), Some(2)])], &[0, 0]).await;
+        assert_eq!(
+            window_next_deadline(&window.state, Some(width)),
+            Some(at(3_000_000_000))
+        );
+        assert!(!window_width_met(
+            &window.state,
+            Some(3),
+            Some(width),
+            at(2_999_999_999)
+        ));
+        assert!(window_width_met(
+            &window.state,
+            Some(3),
+            Some(width),
+            at(3_000_000_000)
+        ));
+        let timed = window.emitted().await;
+        assert_eq!(batch_value(&timed, "total"), Some(RuntimeValue::I64(3)));
+        assert_eq!(batch_value(&timed, "samples"), Some(RuntimeValue::I64(2)));
+        advance_window(&mut window.state, Some(3), Some(width), at(3_000_000_000));
+        assert!(window.state.entries.is_empty());
+
+        window
+            .admit(
+                vec![int64([Some(1), Some(2), Some(3)])],
+                &[4_000_000_000; 3],
+            )
+            .await;
+        assert_eq!(
+            window_next_deadline(&window.state, Some(width)),
+            Some(at(7_000_000_000))
+        );
+        assert!(window_width_met(
+            &window.state,
+            Some(3),
+            Some(width),
+            at(4_000_000_000)
+        ));
+        let counted = window.emitted().await;
+        assert_eq!(batch_value(&counted, "total"), Some(RuntimeValue::I64(6)));
+        assert_eq!(batch_value(&counted, "samples"), Some(RuntimeValue::I64(3)));
     }
 
     #[test]

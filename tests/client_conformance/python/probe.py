@@ -1290,7 +1290,7 @@ def fields_handle(specs):
 
 
 def type_text(levels):
-    """A field's type in NSPL's spelling, with nested fixed-size lists as dimensions."""
+    """A field's type in Plexus's spelling, with nested fixed-size lists as dimensions."""
     kind, _ = levels[0]
     if kind == "LIST":
         return f"VEC<{type_text(levels[1:])}>"

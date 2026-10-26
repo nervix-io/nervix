@@ -1,37 +1,37 @@
 Feature: SQS name resolution
 
-  An SQS source or sink resolves the host of its client's `endpoint` through the node's resolver for
+  An SQS source or emitter resolves the host of its client's `endpoint` through the node's resolver for
   each new connection, dials the answers in order, signs every request for the configured host, and
   over HTTPS verifies the service certificate against that host. These scenarios point every node at
   a DNS fixture the scenario controls, and provision every queue and topic explicitly.
 
-  Scenario Outline: SQS sources and sinks reach a service named by the node DNS fixture over <scheme>
+  Scenario Outline: SQS sources and emitters reach a service named by the node DNS fixture over <scheme>
     Given SQS is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the SQS endpoints are published under fixture DNS name "sqs.nervix.test"
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "dns_in_{{test_id}}" exists
     And SQS queue "dns_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT sqs_main TYPE SQS MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE SQS CLIENT sqs_main MOUNT dev_tls VERSION 1 CONFIG {
         <client_config>,
         'region' = 'us-east-1'
       };
@@ -45,8 +45,8 @@ Feature: SQS name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER sqs_out FROM notifications
-        TO SQS sqs_main QUEUE dns_out_{{test_id}} MODE <mode> RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE SQS QUEUE EMITTER sqs_out FROM notifications
+        TO sqs_main QUEUE 'dns_out_{{test_id}}' MODE <mode> RETRY POLICY BACKOFF 200ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -77,32 +77,32 @@ Feature: SQS name resolution
     And a <cluster_size> node nervix cluster is started
     And the SQS endpoints are published under fixture DNS name "sqs.unlisted.test"
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "dns_out_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT sqs_main TYPE SQS MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE SQS CLIENT sqs_main MOUNT dev_tls VERSION 1 CONFIG {
         'endpoint' = '{{sqs_tls_dns_endpoint}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_out FROM notifications
-        TO SQS sqs_main QUEUE dns_out_{{test_id}} MODE SINGLE RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE SQS QUEUE EMITTER sqs_out FROM notifications
+        TO sqs_main QUEUE 'dns_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 200ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -128,19 +128,19 @@ Feature: SQS name resolution
     And a <cluster_size> node nervix cluster is started
     And SQS is forwarded as "sqs.nervix.test" from the fixture addresses "127.0.5.1,127.0.5.2"
     And the DNS fixture answers "sqs.nervix.test" with addresses "127.0.5.3,127.0.5.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "sqs_dns_in_{{test_id}}" exists with 1 partitions
     And SQS queue "dns_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
@@ -155,12 +155,12 @@ Feature: SQS name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_forwarded_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_out FROM notifications
-        TO SQS sqs_main QUEUE dns_out_{{test_id}} MODE SINGLE RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE SQS QUEUE EMITTER sqs_out FROM notifications
+        TO sqs_main QUEUE 'dns_out_{{test_id}}' MODE SINGLE RETRY POLICY BACKOFF 100ms MAX 1s
           ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -208,18 +208,18 @@ Feature: SQS name resolution
     And a <cluster_size> node nervix cluster is started
     And SQS is forwarded as "sqs.nervix.test" from the fixture addresses "127.0.5.1,127.0.5.2"
     And the DNS fixture answers "sqs.nervix.test" with addresses "127.0.5.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "dns_in_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT sqs_main TYPE SQS CONFIG {
+      CREATE SQS CLIENT sqs_main CONFIG {
         'endpoint' = '{{sqs_forwarded_endpoint}}',
         'region' = 'us-east-1'
       };

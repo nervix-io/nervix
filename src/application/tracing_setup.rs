@@ -2,9 +2,10 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The subscriber the process installs, the OTLP exporter it may add, and the guard
-//!   that flushes them on shutdown.
-//! - **Depends on.** The command-line arguments, the node resolver and telemetry transport hooks.
+//! - **Owns.** The subscriber the process installs, the OTLP exporter it may add, the guard that
+//!   flushes them on shutdown, and the trace sample ratio setting the exporter samples with.
+//! - **Depends on.** The tracing command-line arguments, the node resolver and telemetry transport
+//!   hooks.
 //! - **Must not know.** What any other module records.
 
 #![cfg_attr(
@@ -26,6 +27,7 @@ use error_stack::{Report, ResultExt};
 use hyper_util::client::legacy::connect::HttpConnector;
 use meticulous::OptionExt as _;
 use nervix_dns::DnsResolver;
+use nervix_models::{NodeCapabilities, Setting, SettingDefinition};
 use nervix_primitives::{
     sync::{Arc, blocking::Mutex as ParkingMutex, watch},
     time::timeout,
@@ -43,11 +45,45 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-use super::{AppError, Args};
+use super::{AppError, TracingArgs};
 
 const DEFAULT_TRACE_FILTER: &str =
     "info,nervix=info,registry=info,openraft::core::heartbeat::worker=error,\
      openraft::replication=error,openraft::engine::handler::replication_handler=error";
+
+/// The share of root traces the node exports, between nothing and everything.
+pub struct TraceSampleRatio;
+
+impl SettingDefinition for TraceSampleRatio {
+    type Class = NodeCapabilities;
+    type Value = f64;
+    type Context = ();
+    type Error = TraceSampleRatioError;
+
+    const NAME: &'static str = "otel-trace-sample-ratio";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> f64 {
+        1.0
+    }
+
+    fn validate(ratio: &f64, _: &()) -> Result<(), Report<TraceSampleRatioError>> {
+        if (0.0..=1.0).contains(ratio) {
+            Ok(())
+        } else {
+            Err(Report::new(TraceSampleRatioError::OutOfRange {
+                ratio: *ratio,
+            }))
+        }
+    }
+}
+
+/// Why a trace sample ratio is refused.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum TraceSampleRatioError {
+    #[error("trace sample ratio {ratio} must be between 0.0 and 1.0")]
+    OutOfRange { ratio: f64 },
+}
 
 pub struct TracingGuard {
     traces: Option<TraceExportGuard>,
@@ -160,7 +196,7 @@ struct TraceExporter {
 }
 
 impl TraceExporter {
-    fn new(args: &Args) -> Result<Self, Report<AppError>> {
+    fn new(args: &TracingArgs) -> Result<Self, Report<AppError>> {
         let traces_endpoint =
             std::env::var(opentelemetry_otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).ok();
         let general_endpoint = std::env::var(opentelemetry_otlp::OTEL_EXPORTER_OTLP_ENDPOINT).ok();
@@ -217,7 +253,9 @@ impl TraceExporter {
     }
 }
 
-pub fn init_tracing(args: &Args) -> Result<TracingGuard, Report<AppError>> {
+pub fn init_tracing(args: &TracingArgs) -> Result<TracingGuard, Report<AppError>> {
+    let sample_ratio = Setting::<TraceSampleRatio>::new(args.otel_trace_sample_ratio, &())
+        .change_context(AppError::InitTracing)?;
     let env_filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_TRACE_FILTER));
     let fmt_layer = fmt::layer().with_ansi(false);
@@ -229,7 +267,7 @@ pub fn init_tracing(args: &Args) -> Result<TracingGuard, Report<AppError>> {
             .build();
         let tracer_provider = SdkTracerProvider::builder()
             .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
-                args.otel_trace_sample_ratio,
+                *sample_ratio.value(),
             ))))
             .with_resource(resource)
             .with_batch_exporter(trace.exporter)
@@ -286,7 +324,20 @@ impl io::Write for SharedFileWriter {
 /// what went wrong reaching it — and the failures that need them appear under whole-suite load,
 /// where re-running the feature alone does not reproduce them. They are per connection event
 /// rather than per message, so keeping them on costs a handful of lines per scenario.
-const TEST_TRACE_FILTER: &str = "nervix_interconnect=debug";
+///
+/// Native producers and consumers are restored the same way: a read that waits out its deadline
+/// after a restart is undiagnosable unless the log says which side stalled, whether the client
+/// waited out a refused restoration, the serving node refused or forwarded the open, or the
+/// executing endpoint never assigned the batch. Their decisions are logged at `debug`, once per
+/// open, refusal, attachment and attempt, so a scenario with endpoints costs a few dozen lines.
+const TEST_TRACE_FILTER: &str =
+    "nervix_interconnect=debug,nervix_client_core::restoration=debug,\
+     nervix_server::application=debug,nervix_client_core::consumer=debug,\
+     nervix_client_core::producer=debug,nervix_server::application::session::consumers=debug,\
+     nervix_server::application::session::producers=debug,\
+     nervix_server::application::client_consumers=debug,\
+     nervix_server::application::client_producers=debug,\
+     nervix_server::runtime::client_emitter=debug,nervix_server::runtime::client_ingestor=debug";
 
 pub fn init_tracing_to_file(path: &Path) -> io::Result<()> {
     let file = OpenOptions::new().create(true).append(true).open(path)?;

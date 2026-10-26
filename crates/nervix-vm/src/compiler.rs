@@ -519,7 +519,7 @@ impl Compiler {
                 code: CompileErrorCode::InvalidFunctionArity,
                 message: format!(
                     "function '{}' expects exactly {} argument(s), found {}",
-                    function.nspl_name(),
+                    function.plexus_name(),
                     function.expected_arity(),
                     args.len()
                 ),
@@ -535,7 +535,7 @@ impl Compiler {
                         message: format!(
                             "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
                              argument, found {first_type:?}",
-                            function.nspl_name()
+                            function.plexus_name()
                         ),
                         span: args[0].span,
                     }));
@@ -549,7 +549,7 @@ impl Compiler {
                         message: format!(
                             "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
                              argument, found {first_type:?}",
-                            function.nspl_name()
+                            function.plexus_name()
                         ),
                         span: args[0].span,
                     }));
@@ -621,7 +621,7 @@ impl Compiler {
                         message: format!(
                             "function '{}' requires an orderable argument (numeric, BOOL, STRING \
                              or DATETIME), found {first_type:?}",
-                            function.nspl_name()
+                            function.plexus_name()
                         ),
                         span: args[0].span,
                     }));
@@ -636,7 +636,7 @@ impl Compiler {
                         message: format!(
                             "function '{}' requires an orderable key (numeric, BOOL, STRING or \
                              DATETIME), found {key_type:?}",
-                            function.nspl_name()
+                            function.plexus_name()
                         ),
                         span: args[1].span,
                     }));
@@ -659,7 +659,7 @@ impl Compiler {
             code: CompileErrorCode::TypeMismatch,
             message: format!(
                 "function '{}' requires a numeric argument, found {argument_type:?}",
-                function.nspl_name()
+                function.plexus_name()
             ),
             span,
         }))
@@ -678,7 +678,7 @@ impl Compiler {
             code: CompileErrorCode::TypeMismatch,
             message: format!(
                 "function '{}' requires a BOOL argument, found {argument_type:?}",
-                function.nspl_name()
+                function.plexus_name()
             ),
             span,
         }))
@@ -4395,7 +4395,7 @@ mod tests {
     fn binding_failures_keep_specific_diagnostics_at_the_compile_boundary() {
         let input = schema(vec![Field::new("value", DataType::Int64, false)]);
         let program = parse_program("SET value = input.value")
-            .assured("the fixed assignment has valid NSPL syntax");
+            .assured("the fixed assignment has valid Plexus syntax");
         let duplicate = compile_program_for_bindings(
             &program,
             input.clone(),
@@ -4448,7 +4448,7 @@ mod tests {
     fn predicate_binding_errors_preserve_the_input_expression_span() {
         let input = schema(vec![Field::new("active", DataType::Boolean, false)]);
         let program = parse_program("WHERE input.active")
-            .assured("the fixed predicate has valid NSPL syntax");
+            .assured("the fixed predicate has valid Plexus syntax");
         let predicate = program
             .inner
             .filter
@@ -5769,7 +5769,7 @@ mod tests {
     #[test]
     fn bytes_and_text_require_explicit_conversion_functions() {
         let program = parse_program("SET raw = input.text AS BYTES")
-            .assured("the cast expression uses valid NSPL syntax");
+            .assured("the cast expression uses valid Plexus syntax");
         let input = schema(vec![Field::new("text", DataType::Utf8, false)]);
         let result = compile_program_with_output_fields(
             &program,

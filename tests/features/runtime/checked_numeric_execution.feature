@@ -2,11 +2,11 @@ Feature: Checked numeric execution
   Scenario Outline: Integer arithmetic fails only the messages whose operands fail in a batch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA operand (
         id STRING,
@@ -80,11 +80,11 @@ Feature: Checked numeric execution
   Scenario Outline: Narrow integer arithmetic fails only the messages whose exact results leave their width
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA narrow_operand (
         id STRING,
@@ -207,11 +207,11 @@ Feature: Checked numeric execution
   Scenario Outline: Floating-point arithmetic and math functions fail only non-finite messages in a batch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA measurement (
         id STRING,
@@ -285,12 +285,12 @@ Feature: Checked numeric execution
   Scenario Outline: Reingestor and emitter routes send numeric failures to their error relays
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA operand (
         id STRING,
@@ -342,15 +342,14 @@ Feature: Checked numeric execution
           ON MESSAGE ERROR SEND TO numeric_errors
           SET input_id = input.id,
               error_message = error.message;
-      CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-      CREATE EMITTER operand_sink
+      CREATE ZEROMQ PUSH EMITTER operand_sink
         FROM operands
-        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING operand_codec
+        TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING operand_codec
         INHERIT ALL
         SET left = input.left % input.divisor
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB

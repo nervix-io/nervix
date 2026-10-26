@@ -3,12 +3,13 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Restores the CLI runs and the checks of their reports, restore streams a scenario
-//!   shapes itself, archives altered to probe a restore's refusals, restore step pauses, the model
+//!   shapes itself, outcome recovery for explicit completion probes, archives altered to probe a
+//!   restore's refusals, restore step pauses, the model
 //!   and resource descriptions a scenario saves to compare across clusters and domains, and
 //!   replacing a scenario's cluster with a fresh one.
 //! - **Depends on.** The public CLI, the harness's own restore streams and sessions, the archive
 //!   format's reader and writer, the fault injection a scenario arms, and the language layer to
-//!   read an archive's NSPL.
+//!   read an archive's Plexus.
 //! - **Must not know.** How the server stages, plans or applies a restore.
 
 #[path = "../runtime/native_restore_inspection.rs"]
@@ -30,7 +31,8 @@ use nervix_primitives::task::AbortOnDropHandle;
 use super::*;
 use crate::common::{
     cluster::node_name,
-    raw_session::{TestRestore, TestRestoreEnd, send_restore},
+    phase_deadline::PhaseDeadline,
+    raw_session::{TestRestore, TestRestoreEnd, outcome_awaits_leader, send_restore},
 };
 
 /// How long a restore waits at an armed pause before a scenario gives up on reaching it.
@@ -302,6 +304,69 @@ fn given_restore_publication_pauses(
     );
 }
 
+/// Arms the existing node-specific hooks before a request learns its current leader. Only the
+/// coordinator that actually reaches publication remains held across the later authority change.
+#[given(expr = "restoring domain {string} pauses on its first coordinator")]
+fn given_first_restore_coordinator_pauses(world: &mut ScenarioWorld, domain: String) {
+    let domain = scenario_domain(world, &domain);
+    for coordinator in world.cluster().node_ids() {
+        world
+            .fault_injection
+            .pause_restore_state_publication(domain.clone(), node_name(&coordinator));
+    }
+}
+
+#[then(
+    expr = "the first publication coordinator for restoring domain {string} is saved as \
+            placeholder {string}"
+)]
+async fn then_first_restore_coordinator_is_saved(
+    world: &mut ScenarioWorld,
+    domain: String,
+    placeholder: String,
+) {
+    let domain = scenario_domain(world, &domain);
+    let candidates = world.cluster().node_ids();
+    let mut pauses = Vec::new();
+    for coordinator in &candidates {
+        let coordinator = coordinator.clone();
+        let fault_injection = world.fault_injection.clone();
+        let domain = domain.clone();
+        pauses.push(Box::pin(async move {
+            fault_injection
+                .wait_for_restore_state_publication(&domain, &node_name(&coordinator))
+                .await;
+            coordinator
+        }));
+    }
+    let mut background = world
+        .background_restore
+        .take()
+        .assured("the restore request is running before its publication barrier");
+    let coordinator = nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
+        nervix_primitives::select! {
+            biased;
+            (coordinator, _, _) = futures_util::future::select_all(pauses) => coordinator,
+            ended = &mut background => {
+                let ended = ended.assured("the background restore task does not panic");
+                panic!("restore ended before its publication barrier: {ended:?}");
+            }
+        }
+    })
+    .await
+    .assured("restore reaches its publication barrier");
+    world.background_restore = Some(background);
+    for candidate in candidates {
+        if candidate != coordinator {
+            world
+                .fault_injection
+                .release_restore_state_publication(&domain, &node_name(&candidate));
+        }
+    }
+    println!("restore publication is held on coordinator '{coordinator}'");
+    world.placeholders.insert(placeholder, coordinator);
+}
+
 #[then(expr = "restoring domain {string} by coordinator {string} has reached state publication")]
 async fn then_restore_publication_pauses(
     world: &mut ScenarioWorld,
@@ -329,6 +394,35 @@ fn when_restore_publication_released(
         &scenario_domain(world, &domain),
         &node_name(&expand_placeholders(world, &coordinator)),
     );
+}
+
+#[when(expr = "restore coordinator {string} yields leadership in a multi-node cluster")]
+async fn when_restore_coordinator_yields_leadership(
+    world: &mut ScenarioWorld,
+    coordinator: String,
+) {
+    let coordinator = expand_placeholders(world, &coordinator);
+    let nodes = world.cluster().node_ids();
+    if nodes.len() == 1 {
+        return;
+    }
+    let successor = nodes
+        .into_iter()
+        .find(|node| node != &coordinator)
+        .assured("a multi-node cluster has another voter");
+    world
+        .cluster()
+        .transfer_leadership(&coordinator, &successor);
+    world
+        .cluster()
+        .wait_for_leader(&successor, Some(&successor))
+        .await
+        .assured("the successor leads before the restore resumes");
+    world
+        .cluster()
+        .wait_for_leader(&coordinator, Some(&successor))
+        .await
+        .assured("the paused coordinator observes its lost leadership");
 }
 
 #[then(expr = "state publication of domain {string} by coordinator {string} is refused")]
@@ -362,21 +456,19 @@ async fn then_restore_eventually_completes(
     reference: String,
 ) {
     let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
-    let end = nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
-        let mut poll = nervix_primitives::time::interval(Duration::from_millis(100));
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            poll.tick().await;
-            let end = stream_restore(&request, None, None).await;
-            match &restore_outcome(&end).disposition {
-                CommandDisposition::Completed { .. } => break end,
-                CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying) => {}
-                other => panic!("restore recovery did not complete: {other:?}"),
-            }
-        }
-    })
+    let end = nervix_primitives::time::timeout(
+        RESTORE_PAUSE_TIMEOUT,
+        request.complete(restore_outcome_routes(world)),
+    )
     .await
     .assured("restore completes under the new coordinator");
+    assert!(
+        matches!(
+            restore_outcome(&end).disposition,
+            CommandDisposition::Completed { .. }
+        ),
+        "restore recovery completes: {end:?}"
+    );
     world.last_restore_end = Some(end);
 }
 
@@ -411,19 +503,119 @@ async fn then_restored_checkpoints_match(world: &mut ScenarioWorld, before: Stri
     .await;
 }
 
+/// How one state section differs between two archives, named by its path and sizes rather than by
+/// its bytes, which can run to tens of megabytes.
+#[derive(Debug, PartialEq, Eq)]
+enum StateSectionDifference {
+    /// Only the first archive holds the section.
+    OnlyBefore { path: String, length: usize },
+    /// Only the second archive holds the section.
+    OnlyAfter { path: String, length: usize },
+    /// Both archives hold the section, and its bytes first differ at `offset`.
+    Changed {
+        path: String,
+        before_length: usize,
+        after_length: usize,
+        offset: usize,
+    },
+}
+
+impl std::fmt::Display for StateSectionDifference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OnlyBefore { path, length } => {
+                write!(formatter, "only before: {path} ({length} bytes)")
+            }
+            Self::OnlyAfter { path, length } => {
+                write!(formatter, "only after: {path} ({length} bytes)")
+            }
+            Self::Changed {
+                path,
+                before_length,
+                after_length,
+                offset,
+            } => write!(
+                formatter,
+                "changed: {path} ({before_length} bytes before, {after_length} after, first \
+                 difference at byte {offset})"
+            ),
+        }
+    }
+}
+
+/// The offset of the first byte at which `before` and `after` differ, or the length of the
+/// shorter one when it is a prefix of the other.
+fn first_differing_byte(before: &[u8], after: &[u8]) -> usize {
+    for (offset, (left, right)) in before.iter().zip(after).enumerate() {
+        if left != right {
+            return offset;
+        }
+    }
+    before.len().min(after.len())
+}
+
+/// Every section that differs between `before` and `after`, in path order: first the sections
+/// `before` holds, then those only `after` holds.
+fn state_section_differences(
+    before: &BTreeMap<String, Vec<u8>>,
+    after: &BTreeMap<String, Vec<u8>>,
+) -> Vec<StateSectionDifference> {
+    let mut differences = Vec::new();
+    for (path, before_bytes) in before {
+        let Some(after_bytes) = after.get(path) else {
+            differences.push(StateSectionDifference::OnlyBefore {
+                path: path.clone(),
+                length: before_bytes.len(),
+            });
+            continue;
+        };
+        if before_bytes != after_bytes {
+            differences.push(StateSectionDifference::Changed {
+                path: path.clone(),
+                before_length: before_bytes.len(),
+                after_length: after_bytes.len(),
+                offset: first_differing_byte(before_bytes, after_bytes),
+            });
+        }
+    }
+    for (path, after_bytes) in after {
+        if !before.contains_key(path) {
+            differences.push(StateSectionDifference::OnlyAfter {
+                path: path.clone(),
+                length: after_bytes.len(),
+            });
+        }
+    }
+    differences
+}
+
 /// Asserts that archives `before` and `after` hold the same bytes in every section under one of
-/// `directories` of their domains' state, reading both on a blocking task.
+/// `directories` of their domains' state, reading both on a blocking task. A difference names each
+/// section that differs and where, never the bytes.
 async fn assert_same_state_sections(
     before: PathBuf,
     after: PathBuf,
     directories: &'static [&'static str],
-    message: &'static str,
+    state: &'static str,
 ) {
     off_the_runner(move || {
-        assert_eq!(
-            state_sections(&before, directories),
-            state_sections(&after, directories),
-            "{message}"
+        let before_sections = state_sections(&before, directories);
+        let after_sections = state_sections(&after, directories);
+        let differences = state_section_differences(&before_sections, &after_sections);
+        let mut report = String::new();
+        for difference in &differences {
+            std::fmt::Write::write_fmt(&mut report, format_args!("\n  {difference}"))
+                .assured("writing to a String cannot fail");
+        }
+        assert!(
+            differences.is_empty(),
+            "backup archives {} and {} hold different {state}: {} of {} and {} sections \
+             differ:{report}",
+            before.display(),
+            after.display(),
+            differences.len(),
+            before_sections.len(),
+            after_sections.len(),
         );
     })
     .await;
@@ -460,7 +652,7 @@ async fn then_restored_materialized_generations_match(
         archive_path(world, &before),
         archive_path(world, &after),
         &["materialized_relay"],
-        "a stale installer cannot replace the active materialized generation",
+        "materialized generations",
     )
     .await;
 }
@@ -475,7 +667,7 @@ async fn then_restored_branch_states_match(
         archive_path(world, &before),
         archive_path(world, &after),
         &["deduplicator", "window_processor"],
-        "a stale installer cannot replace the active deduplicator keys or windows",
+        "deduplicator keys or windows",
     )
     .await;
 }
@@ -490,7 +682,7 @@ async fn then_restored_deduplicator_states_match(
         archive_path(world, &before),
         archive_path(world, &after),
         &["deduplicator"],
-        "the running restore preserves each key and its original seen_at time",
+        "deduplicator keys",
     )
     .await;
 }
@@ -620,11 +812,11 @@ fn given_archive_path_is_saved(world: &mut ScenarioWorld, file: String, placehol
 async fn show_create_statements(path: PathBuf, domain: DomainName) -> Vec<String> {
     let archived = archived_models(path, domain).await;
     let statements = parse_client_statements(&archived)
-        .unwrap_or_else(|error| panic!("models.nspl parses: {error:?}\n{archived}"));
+        .unwrap_or_else(|error| panic!("models.plexus parses: {error:?}\n{archived}"));
     let mut shows = Vec::with_capacity(statements.len());
     for statement in statements {
         let ClientStatement::Server(Statement::Create(create)) = statement else {
-            panic!("models.nspl holds only model creations:\n{archived}");
+            panic!("models.plexus holds only model creations:\n{archived}");
         };
         shows.push(format!(
             "SHOW CREATE {} {};",
@@ -1134,6 +1326,69 @@ struct RestoreStreamRequest {
     archive: Vec<u8>,
 }
 
+/// Every current route is eligible to teach a probe the outcome of its immutable execution.
+fn restore_outcome_routes(world: &ScenarioWorld) -> Vec<String> {
+    world
+        .cluster()
+        .node_ids()
+        .into_iter()
+        .map(|node| {
+            world
+                .cluster()
+                .grpc_uri(&node)
+                .assured("each scenario node has a restore endpoint")
+        })
+        .collect()
+}
+
+impl RestoreStreamRequest {
+    /// Repeats one immutable restore request until a node knows its outcome. Only the destination
+    /// changes; a refusal or definitive failure returns with its actual origin and report.
+    async fn complete(mut self, servers: Vec<String>) -> TestRestoreEnd {
+        let deadline = PhaseDeadline::after(RESTORE_PAUSE_TIMEOUT);
+        let mut routes = servers.iter().cycle();
+        let mut end = stream_restore(&self, None, None).await;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let pending = match &end {
+                TestRestoreEnd::Replied(reply) => match &reply.disposition {
+                    RestoreDisposition::Outcome(outcome) => {
+                        assert_eq!(
+                            outcome.execution_reference, self.reference,
+                            "each attempt answers the same restore execution"
+                        );
+                        outcome_awaits_leader(outcome)
+                    }
+                    RestoreDisposition::UploadFailed { .. } => false,
+                },
+                TestRestoreEnd::Status(status) => matches!(
+                    status.code(),
+                    tonic::Code::Cancelled
+                        | tonic::Code::DeadlineExceeded
+                        | tonic::Code::Unavailable
+                        | tonic::Code::Unknown
+                ),
+                TestRestoreEnd::Abandoned => false,
+            };
+            if !pending {
+                return end;
+            }
+            tracing::debug!(reference = %self.reference, ?end, "learning a restore probe's outcome");
+            deadline.pause(Duration::from_millis(100)).await;
+            assert!(
+                !deadline.has_passed(),
+                "restore {} did not reach a known outcome: {end:?}",
+                self.reference
+            );
+            self.server = routes
+                .next()
+                .assured("a scenario cluster has at least one restore endpoint")
+                .clone();
+            end = stream_restore(&self, None, None).await;
+        }
+    }
+}
+
 async fn restore_stream_request(
     world: &mut ScenarioWorld,
     restore: &str,
@@ -1277,6 +1532,28 @@ async fn when_restore_is_streamed_in_the_background(
     )));
 }
 
+#[when(
+    expr = "restore {string} of backup archive {string} is streamed to node {string} under \
+            execution reference {string} in the background with outcome recovery"
+)]
+async fn when_restore_is_streamed_with_outcome_recovery(
+    world: &mut ScenarioWorld,
+    restore: String,
+    file: String,
+    node: String,
+    reference: String,
+) {
+    assert!(
+        world.background_restore.is_none(),
+        "a background restore stream is already running"
+    );
+    let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
+    let servers = restore_outcome_routes(world);
+    world.background_restore = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        request.complete(servers),
+    )));
+}
+
 /// The command outcome a restore stream was answered with.
 fn restore_outcome(end: &TestRestoreEnd) -> &WireCommandOutcome {
     let reply = match end {
@@ -1345,6 +1622,25 @@ async fn then_background_restore_stream_outcome(
         .await
         .expect("the background restore stream does not panic");
     assert_restore_outcome(&end, &disposition, &origin);
+    world.last_restore_end = Some(end);
+}
+
+#[then("the background restore stream completes with a known outcome")]
+async fn then_background_restore_stream_completes(world: &mut ScenarioWorld) {
+    let task = world
+        .background_restore
+        .take()
+        .assured("a preceding step streamed a restore in the background");
+    let end = task
+        .await
+        .assured("the background restore completion probe does not panic");
+    let outcome = restore_outcome(&end);
+    assert!(
+        matches!(outcome.disposition, CommandDisposition::Completed { .. }),
+        "the background restore completes: {:?}: {}",
+        outcome.disposition,
+        outcome.message
+    );
     world.last_restore_end = Some(end);
 }
 
@@ -1531,13 +1827,13 @@ pub(super) fn write_archive(
         .open(target)
         .expect("the altered archive is created");
     layout
-        .write_to(&mut file, |entry, sink| {
+        .write_to(&mut file, |entry, connector| {
             let path = entry.path.as_str();
             let bytes = match replaced.get(path) {
                 Some(bytes) => bytes,
                 None => &copy.sections[path],
             };
-            sink.write_all(bytes)
+            connector.write_all(bytes)
         })
         .unwrap_or_else(|report| panic!("the altered archive is written: {report:?}"));
 }
@@ -1732,7 +2028,7 @@ async fn then_native_metadata_matches(world: &mut ScenarioWorld, source: String)
     use nervix_backup::KafkaOffsetsRecord;
 
     /// The native metadata records the source archive holds.
-    struct SourceMetadata {
+    struct IngestorMetadata {
         lifecycles: Vec<BranchLifecycleRecord>,
         offsets: KafkaOffsetsRecord,
     }
@@ -1745,7 +2041,7 @@ async fn then_native_metadata_matches(world: &mut ScenarioWorld, source: String)
     }
 
     let source = archive_path(world, &source);
-    let SourceMetadata {
+    let IngestorMetadata {
         lifecycles,
         offsets,
     } = off_the_runner(move || {
@@ -1768,7 +2064,7 @@ async fn then_native_metadata_matches(world: &mut ScenarioWorld, source: String)
             "the fixture holds lifecycle records"
         );
         let offsets = offsets.assured("the fixture holds Kafka offsets");
-        SourceMetadata {
+        IngestorMetadata {
             lifecycles,
             offsets,
         }
@@ -2030,7 +2326,7 @@ async fn given_archive_with_models_replaced(
         let copy = copy_of_archive(&source);
         let models_path = SectionPath::domain_models(&domain).to_string();
         let text =
-            String::from_utf8(copy.sections[&models_path].clone()).expect("models.nspl is UTF-8");
+            String::from_utf8(copy.sections[&models_path].clone()).expect("models.plexus is UTF-8");
         assert!(
             text.contains(&needle),
             "the models of '{domain}' hold '{needle}':\n{text}"

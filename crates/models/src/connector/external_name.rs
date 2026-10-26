@@ -8,12 +8,12 @@
 //!   form, and the typed reasons a text is not a name of one kind.
 //! - **Depends on.** Nothing in Nervix.
 //! - **Must not know.** Which connector or entity a name belongs to, how a connector sends it, or
-//!   how NSPL quotes it. Each connector's module declares its names with `external_names!` and
+//!   how Plexus quotes it. Each connector's module declares its names with `external_names!` and
 //!   writes the rule each one follows.
 //!
 //! An external name is not a Nervix name. A Nervix name is an identifier Nervix normalises to lower
 //! case; an external name is whatever the external system calls the entity, case and punctuation
-//! included, so NSPL writes it as a string literal and a connector sends exactly that text.
+//! included, so Plexus writes it as a string literal and a connector sends exactly that text.
 //!
 //! Decoding is construction too: the serde and archived forms hold the text as written, and their
 //! decoders refuse text the rule refuses rather than producing a name no rule ever checked.
@@ -75,7 +75,7 @@ pub enum ExternalNameError {
 }
 
 /// The characters most rules refuse: control characters, which no external system expects in a
-/// name and no NSPL string literal shows legibly.
+/// name and no Plexus string literal shows legibly.
 pub(crate) fn refuse_control_characters(text: &str) -> Result<(), ExternalNameError> {
     match text.chars().find(|ch| ch.is_control()) {
         Some(ch) => Err(ExternalNameError::InvalidChar { ch }),
@@ -100,9 +100,16 @@ pub(crate) fn require_length(text: &str, max: usize) -> Result<(), ExternalNameE
 /// Declares external name types, each checked by its rule.
 ///
 /// A rule is a function from the text as written to whether it is a name of that kind. The type
-/// keeps the text exactly as written, so equality, ordering and display are the text's own.
+/// keeps the text exactly as written, so equality, ordering and display are the text's own. Each
+/// type also declares the label completion offers where a name of its kind is expected and one
+/// name its rule admits.
 macro_rules! external_names {
-    ($($(#[$doc:meta])* pub struct $Name:ident => $rule:path;)+) => {
+    (
+        $(
+            $(#[$doc:meta])*
+            pub struct $Name:ident => $rule:path, label $label:literal, example $example:literal;
+        )+
+    ) => {
         $(
             $(#[$doc])*
             #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, ::serde::Serialize)]
@@ -114,6 +121,14 @@ macro_rules! external_names {
             pub struct $Name(String);
 
             impl $Name {
+                /// The label completion offers where a name of this kind is expected, and one name
+                /// its rule admits.
+                pub const DECLARATION: $crate::ExternalNameDeclaration =
+                    $crate::ExternalNameDeclaration {
+                        label: $label,
+                        example: $example,
+                    };
+
                 /// Checks `raw` against this kind's rule and keeps it exactly as written.
                 pub fn parse(
                     raw: &str,
@@ -125,6 +140,14 @@ macro_rules! external_names {
                 #[inline]
                 pub fn as_str(&self) -> &str {
                     &self.0
+                }
+            }
+
+            impl $crate::ExternalName for $Name {
+                const DECLARATION: $crate::ExternalNameDeclaration = $Name::DECLARATION;
+
+                fn parse(raw: &str) -> ::error_stack::Result<Self, $crate::ExternalNameError> {
+                    $Name::parse(raw)
                 }
             }
 
@@ -220,3 +243,25 @@ macro_rules! external_names {
 }
 
 pub(crate) use external_names;
+
+/// The identifier alphabet and 128-byte language bound of external table and collection paths.
+/// Unlike a Nervix identity, the external text keeps its original case.
+pub(crate) fn external_identifier(text: &str) -> Result<(), ExternalNameError> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the Plexus table and collection locator grammar fixes the name at 1–128 \
+                      ASCII bytes, as specified in docs/src/emitters.md"
+        )
+    )]
+    const MAX_IDENTIFIER_BYTES: usize = 128;
+    require_length(text, MAX_IDENTIFIER_BYTES)?;
+    if let Some(ch) = text
+        .chars()
+        .find(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '~' | '.')))
+    {
+        return Err(ExternalNameError::InvalidChar { ch });
+    }
+    Ok(())
+}

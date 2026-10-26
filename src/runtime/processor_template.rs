@@ -714,6 +714,24 @@ impl BranchInstanceTemplate {
         Ok(())
     }
 
+    /// End the delivery channels this branch lane publishes through for `key`, and every delivery
+    /// still waiting for admission on them, because the lane's branch for that key has ended. A
+    /// recreated branch binds fresh channels. The channels another relay holds for the same key
+    /// belong to that relay's own branch, which ends only with its own expiry or eviction.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "branch expiry scans and capacity admission end the channels of each branch \
+                      they release"
+        )
+    )]
+    pub(super) fn retire_branch_channels(&self, key: &Option<BranchKey>) {
+        for relay in self.relays.values() {
+            relay.services.remove_branch_slots(key);
+        }
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -767,7 +785,7 @@ impl BranchInstanceTemplate {
                 .metrics
                 .resolve_node_batch_metrics(NodeBatchMetricsSpec {
                     domain,
-                    kind: self.source_kind,
+                    kind: self.entity_kind,
                     node: &ModelName::from(&self.source),
                     relay: &self.root_relay,
                     physical_node_id,
@@ -775,10 +793,10 @@ impl BranchInstanceTemplate {
                     branch,
                 });
         let source_input_metrics = match branch {
-            Some(branch) if self.source_kind == ModelKind::Ingestor => {
+            Some(branch) if self.entity_kind == ModelKind::Ingestor => {
                 Some(runtime.inner.metrics.resolve_branch_node_message_metrics(
                     domain,
-                    self.source_kind,
+                    self.entity_kind,
                     &ModelName::from(&self.source),
                     physical_node_id,
                     "received",
@@ -851,7 +869,7 @@ impl BranchInstanceTemplate {
             routing: runtime.domain_routing_cache(domain),
             routing_snapshot: None,
             domain_clock,
-            source_kind: self.source_kind,
+            entity_kind: self.entity_kind,
             source: self.source.clone(),
             root_relay: self.root_relay.clone(),
             relays,
@@ -860,7 +878,7 @@ impl BranchInstanceTemplate {
             processors,
             error_policies: self.error_policies.clone(),
             metrics: BranchRuntimeMetrics {
-                source_dirty: runtime.branch_metrics_mark(domain, self.source_kind, &self.source),
+                source_dirty: runtime.branch_metrics_mark(domain, self.entity_kind, &self.source),
                 processor_dirty,
                 source: source_metrics,
                 source_input: source_input_metrics,
@@ -870,6 +888,10 @@ impl BranchInstanceTemplate {
         }))
     }
 }
+
+#[cfg(test)]
+#[path = "branch_lane_channel_tests.rs"]
+mod branch_lane_channel_tests;
 
 #[cfg(test)]
 #[cfg_attr(

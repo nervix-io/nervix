@@ -1,0 +1,181 @@
+# Reviewed transport explanations for absent capabilities and directional differences.
+# Capability facts come only from the compiled vocabulary; stale explanation keys fail validation.
+
+[entity."CLIENT PRODUCER"]
+ingest_headers = "Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope."
+ingest_locator = "The body references the native schema; there is no external topic, queue or table to locate."
+metadata = "Application batches carry their declared schema; there is no separate transport metadata namespace."
+mirror = "Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope."
+
+[entity."HTTP REQUEST"]
+emit_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
+envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
+ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
+metadata = "HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields."
+mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."HTTP ENDPOINT"]
+ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
+metadata = "HTTP headers are available through header functions; this implementation declares no typed request or response metadata fields."
+mirror = "Polling and emitting send requests while an endpoint accepts requests. Response/request headers are transport headers; server endpoints run on every node and have no remote source position."
+
+[entity."KAFKA TOPIC"]
+envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
+mirror = "Consumption tracks replayable log offsets and consumer groups; publication uses a producer queue or delivery report. Both directions use the same quoted, case-preserving Kafka topic names."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."PULSAR TOPIC"]
+envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
+metadata = "The current topic declaration exposes properties as headers but no separate typed broker metadata namespace."
+mirror = "Consumption owns a subscription and broker positions; publication uses a producer receipt. Both directions use the same quoted, case-preserving Pulsar topic names."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."MQTT TOPIC"]
+emit_headers = "Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+ingest_headers = "Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
+metadata = "The current topic declaration exposes the payload and configured subscription, with no typed publish-property metadata namespace."
+mirror = "Subscription options select the session and inbound QoS; emitter QoS is part of its publishing mode. MQTT packets have no generic transport header map, and publish properties are not declared by this implementation."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."NATS SUBJECT"]
+envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
+metadata = "The current subject declaration exposes message headers but no typed subject or JetStream metadata namespace."
+mirror = "Subject consumption can join a queue group; publication chooses Core flush or JetStream acknowledgement. Both directions use quoted, case-preserving subjects; publication subjects exclude subscription wildcards."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."RABBITMQ QUEUE"]
+envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
+metadata = "The current queue declaration exposes transport headers but no typed AMQP delivery metadata namespace."
+mirror = "A queue consumer acknowledges delivery tags on its channel; publishing waits for a channel answer or publisher confirmation. Both directions use the same quoted, case-preserving RabbitMQ queue names."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."REDIS PUBSUB"]
+emit_headers = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+ingest_headers = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names."
+metadata = "The current Pub/Sub declaration delivers payloads without a typed channel metadata namespace."
+mirror = "Redis Pub/Sub carries only a channel and payload. A subscription has no acknowledgement; PUBLISH answers with a subscriber count rather than a delivery receipt. Both directions use quoted, case-preserving Redis channel names."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."PROMETHEUS QUERY"]
+ingest_headers = "The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared."
+ingest_locator = "QUERY is a PromQL expression option rather than an external entity name."
+metadata = "The current query result is decoded as payload; no separate typed query or evaluation-time metadata namespace is declared."
+mirror = "The Prometheus query API is polled for samples; no Prometheus remote-write emitter is declared."
+
+[entity."ZEROMQ PULL"]
+ingest_headers = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
+ingest_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
+metadata = "Payload frames have no broker position or typed transport metadata namespace."
+mirror = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
+
+[entity."SQS QUEUE"]
+envelope = "This implementation maps payloads and declared headers; it declares no additional per-record envelope clauses for this entity."
+metadata = "The current queue declaration exposes message attributes through headers but no separate typed receipt metadata namespace."
+mirror = "Receiving uses a visibility timeout and deletion; publishing uses single or batch service requests and may declare a FIFO group. Both directions use the same quoted, case-preserving SQS queue names, including the .fifo suffix."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."WEBSOCKETS CONNECTION"]
+ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
+mirror = "An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload."
+
+[entity."WEBSOCKETS ENDPOINT"]
+ingest_locator = "The configured client or endpoint owns the address and path; this body has no separate external-name locator."
+metadata = "The current frame declaration has no typed frame or handshake metadata namespace."
+mirror = "An outbound connection or server endpoint receives frames. The declared emitter set has no WebSocket frame publisher; handshake signaling remains distinct from a frame payload."
+
+[entity."SYSLOG LISTENER"]
+ingest_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+ingest_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
+mirror = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+
+[entity."CLIENT CONSUMER"]
+emit_headers = "Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope."
+emit_locator = "The body references the native schema; there is no external topic, queue or table to locate."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "Native Arrow batches cross an application session; producers submit batches and consumers explicitly acknowledge delivery attempts, with no broker envelope."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."ZEROMQ PUSH"]
+emit_headers = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
+emit_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."SENTRY EVENT"]
+emit_headers = "An event is encoded inside its Sentry envelope; arbitrary per-event HTTP header writes are not supported."
+emit_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "The Sentry envelope API accepts one encoded event per request; this connector declares no event-reading ingestor."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."SYSLOG COLLECTOR"]
+emit_headers = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+emit_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "A listener admits UDP datagrams or framed TCP/TLS input and exposes its peer address; a collector writes encoded syslog records. Syslog fields belong to the wire schema rather than a transport header map."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."OTEL LOGS"]
+emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
+emit_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "The OTLP export API accepts typed logs, traces or metrics with value, attribute and resource mappings; this connector declares no OTLP receiver."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."OTEL TRACES"]
+emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
+emit_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "The OTLP export API accepts typed logs, traces or metrics with value, attribute and resource mappings; this connector declares no OTLP receiver."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."OTEL METRICS"]
+emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
+emit_locator = "The configured client owns the transport address; no separate external entity name is written in this body."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "The OTLP export API accepts typed logs, traces or metrics with value, attribute and resource mappings; this connector declares no OTLP receiver."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."CLICKHOUSE TABLE"]
+emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "The ClickHouse connector inserts mapped rows into an existing table; it declares no change-data-capture or query ingestor."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."POSTGRES TABLE"]
+emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "The Postgres connector inserts mapped rows and handles declared conflicts; it declares no replication-slot or query ingestor."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."MYSQL TABLE"]
+emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "The MySQL connector inserts mapped rows and handles declared conflicts; it declares no binlog or query ingestor."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."MONGODB COLLECTION"]
+emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "The MongoDB connector writes mapped documents to an existing collection; it declares no change-stream ingestor."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[entity."ICEBERG TABLE"]
+emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
+envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
+mirror = "The Iceberg connector stages data files and commits through an object store and catalog; it declares no table-scanning ingestor."
+properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
+
+[position]
+broker_redelivered = "The host retains the positions, suspends the source, and resumes it. Once the resume succeeds it discards the retained positions, counts them in `nervix_ingestor_transport_redeliveries_total`, and reads again: the broker redelivers everything the lost connection did not acknowledge, and the new connection can neither acknowledge nor reject a delivery of the old one."
+none = "Nothing is pending. The host keeps no position and reads again after its retry delay."
+replayable = "The host retains the positions, suspends the source, and reestablishes its assignment. It retries the same rejection before polling any later batch or committing a later position, so a retried rejection must not depend on a poll. The [Kafka source](#integration-specific-boundaries) therefore seeks each rejected partition it is assigned at once, and starts every other one at its earliest rejected record when its consumer group assigns it again, until a commit passes that record."
+
+[confirmation]
+answered = "Once the broker answered: an SQS message is acknowledged by a `DeleteMessage` request, and acknowledging returns with its response. A Kafka source in an `ACK` mode commits each acknowledged batch's offsets, and acknowledging returns once the consumer group's coordinator answered the commit, or, under `OFFSET BY DOMAIN`, once the offsets' state replicas acknowledged it. A Pulsar source in an `ACK` mode acknowledges a batch's positions of each topic in one command that carries a request id, and acknowledging returns once the broker's `CommandAckResponse` arrived, within the client's operation timeout."
+none = "The source acknowledges nothing on its transport."
+written = "Once the acknowledgement is written to the connection. AMQP does not answer a `basic.ack`, and MQTT does not answer a `PUBACK`, so nothing more can be confirmed. An MQTT source returns once the client's event loop, which its connection's driver task keeps polling, has flushed every `PUBACK` the batch asks for to the connection."

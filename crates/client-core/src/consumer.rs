@@ -41,6 +41,7 @@ use nervix_primitives::sync::{
     oneshot, watch,
 };
 use nervix_recovery::Discarded as _;
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
@@ -111,6 +112,18 @@ enum ConsumerPhase {
     Restoring(Arc<()>),
     ReopenRequired(ConsumerReopenReason),
     Closed,
+}
+
+/// Where a read starts, decided under the consumer's lock together with the gap it reports first.
+enum ReadStart {
+    /// The attachment ended since a read last reported a gap: this read reports it.
+    Gap,
+    /// The read goes through this attachment.
+    Attached(Arc<ConsumerAttachment>),
+    Closed,
+    ReopenRequired(ConsumerReopenReason),
+    /// The session has to recover and restore an attachment before the read.
+    Unattached,
 }
 
 /// Why a consumer must explicitly open a new endpoint instead of following its former one.
@@ -236,7 +249,7 @@ impl Client {
                                 generation,
                                 closed: AtomicBool::new(false),
                             });
-                            let registry = client.inner.events.sinks.consumers.clone();
+                            let registry = client.inner.events.emitters.consumers.clone();
                             let inner = StdArc::new(ConsumerHandle {
                                 client,
                                 request,
@@ -386,6 +399,22 @@ impl ConsumerLifecycle {
         std::mem::take(&mut self.state.lock().interruption_pending)
     }
 
+    /// Decides where a read starts. A gap still to report comes first, under the same lock that
+    /// reads the phase, so a read that starts as its exchange ends reports the gap before any
+    /// recovery or restoration begins.
+    fn read_start(&self) -> ReadStart {
+        let mut state = self.state.lock();
+        if std::mem::take(&mut state.interruption_pending) {
+            return ReadStart::Gap;
+        }
+        match &state.phase {
+            ConsumerPhase::Active(attachment) => ReadStart::Attached(attachment.clone()),
+            ConsumerPhase::Closed => ReadStart::Closed,
+            ConsumerPhase::ReopenRequired(reason) => ReadStart::ReopenRequired(reason.clone()),
+            ConsumerPhase::Interrupted | ConsumerPhase::Restoring(_) => ReadStart::Unattached,
+        }
+    }
+
     /// Whether a reply read on `attachment` arrived after the attachment ended. Such a read reports
     /// the gap itself, so the gap is not reported again.
     fn reply_after_gap(&self, attachment: &Arc<ConsumerAttachment>) -> bool {
@@ -488,6 +517,14 @@ impl ConsumerHandle {
         self.request.clone()
     }
 
+    pub(crate) fn domain(&self) -> &DomainName {
+        &self.request.domain
+    }
+
+    pub(crate) fn emitter(&self) -> &EmitterName {
+        &self.request.emitter
+    }
+
     pub(crate) fn restoration_failed(&self, generation: &Arc<()>) {
         let mut state = self.lifecycle.state.lock();
         if !matches!(&state.phase, ConsumerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
@@ -529,6 +566,12 @@ impl ConsumerHandle {
             state.phase = ConsumerPhase::ReopenRequired(reason);
             drop(state);
             self.lifecycle.changed.send_replace(());
+            debug!(
+                domain = self.request.domain.as_str(),
+                emitter = self.request.emitter.as_str(),
+                refusal = ?refusal,
+                "a consumer restoration was refused for good"
+            );
             return false;
         }
         true
@@ -582,6 +625,13 @@ impl ConsumerHandle {
             valid && matches!(&state.phase, ConsumerPhase::Active(_))
         };
         self.lifecycle.changed.send_replace(());
+        debug!(
+            domain = self.request.domain.as_str(),
+            emitter = self.request.emitter.as_str(),
+            consumer = %id,
+            installed,
+            "a consumer restoration was opened"
+        );
         if !installed {
             attachment.closed.store(true, Ordering::Release);
             close_consumer(
@@ -594,22 +644,20 @@ impl ConsumerHandle {
         }
     }
 
+    /// Waits for an attachment to read through, recovering the session and restoring the consumer
+    /// when it has none. A gap that arises meanwhile is reported instead of restored past.
     async fn attachment(&self) -> error_stack::Result<Arc<ConsumerAttachment>, ClientError> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let mut changed = self.lifecycle.changed.subscribe();
-            {
-                let state = self.lifecycle.state.lock();
-                match &state.phase {
-                    ConsumerPhase::Active(attachment) => return Ok(attachment.clone()),
-                    ConsumerPhase::Closed => return Err(Report::new(ClientError::SessionClosed)),
-                    ConsumerPhase::ReopenRequired(reason) => {
-                        return Err(Report::new(ClientError::ConsumerReopenRequired(
-                            reason.clone(),
-                        )));
-                    }
-                    _ => {}
+            match self.lifecycle.read_start() {
+                ReadStart::Gap => return Err(Report::new(ClientError::ConsumerInterrupted)),
+                ReadStart::Attached(attachment) => return Ok(attachment),
+                ReadStart::Closed => return Err(Report::new(ClientError::SessionClosed)),
+                ReadStart::ReopenRequired(reason) => {
+                    return Err(Report::new(ClientError::ConsumerReopenRequired(reason)));
                 }
+                ReadStart::Unattached => {}
             }
             if !matches!(
                 self.client.recover_session(RecoveryMode::IfClosed).await,
@@ -621,6 +669,11 @@ impl ConsumerHandle {
             if self.current().is_some() {
                 continue;
             }
+            debug!(
+                domain = self.request.domain.as_str(),
+                emitter = self.request.emitter.as_str(),
+                "a consumer read waits for its restoration"
+            );
             changed
                 .changed()
                 .await
@@ -755,18 +808,21 @@ impl EmitterConsumer {
         self.inner.lifecycle.reopen_reason()
     }
 
-    /// Reads one attempt. An attachment gap is reported once before any restored delivery.
+    /// Reads one attempt. The first read after the attachment ends reports that gap once, before
+    /// the consumer is restored, and a later read restores the attachment and reads on.
     ///
     /// A caller that stops waiting leaves the read with the consumer, and the next read of the
     /// same attachment receives its reply, so no attempt the server assigned is stranded.
     pub async fn next_batch(&self) -> error_stack::Result<Option<EmitterDelivery>, ClientError> {
-        if self.inner.lifecycle.take_interruption() {
-            return Err(Report::new(ClientError::ConsumerInterrupted));
-        }
-        if self.inner.connection() == ConsumerConnection::Closed {
-            return Ok(None);
-        }
-        let attachment = self.inner.attachment().await?;
+        let attachment = match self.inner.lifecycle.read_start() {
+            ReadStart::Gap => return Err(Report::new(ClientError::ConsumerInterrupted)),
+            ReadStart::Closed => return Ok(None),
+            ReadStart::ReopenRequired(reason) => {
+                return Err(Report::new(ClientError::ConsumerReopenRequired(reason)));
+            }
+            ReadStart::Attached(attachment) => attachment,
+            ReadStart::Unattached => self.inner.attachment().await?,
+        };
         if self.inner.lifecycle.take_interruption() {
             return Err(Report::new(ClientError::ConsumerInterrupted));
         }
@@ -909,6 +965,10 @@ impl EmitterDelivery {
     }
 }
 
+#[cfg(all(test, not(feature = "shuttle")))]
+#[path = "consumer_tests.rs"]
+mod tests;
+
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
     use std::num::NonZeroU64;
@@ -970,6 +1030,58 @@ mod shuttle_tests {
                     1,
                     "one attachment gap was not reported exactly once"
                 );
+            });
+        });
+    }
+
+    /// A read starts while its exchange ends: the read reports the gap, or it starts on the
+    /// attachment before the end and the next read reports it. No read starts restoring the
+    /// consumer while the gap is unreported.
+    #[test]
+    fn shuttle_a_read_starting_as_its_exchange_ends_reports_the_gap_before_restoring() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let generation = Arc::new(());
+                let attachment = attachment_on(&generation);
+                let lifecycle = StdArc::new(ConsumerLifecycle::new(ConsumerPhase::Active(
+                    attachment.clone(),
+                )));
+                let ending = {
+                    let lifecycle = lifecycle.clone();
+                    nervix_primitives::task::spawn(async move {
+                        lifecycle.exchange_ended(&generation);
+                    })
+                };
+                let starting = {
+                    let lifecycle = lifecycle.clone();
+                    nervix_primitives::task::spawn(async move { lifecycle.read_start() })
+                };
+                ending
+                    .await
+                    .assured("the ending side only ends the exchange");
+                let start = starting
+                    .await
+                    .assured("the starting side only decides where its read starts");
+                let reported_by_the_next_read = lifecycle.take_interruption();
+                match start {
+                    ReadStart::Gap => assert!(
+                        !reported_by_the_next_read,
+                        "one attachment gap was reported twice"
+                    ),
+                    ReadStart::Attached(started_on) => {
+                        assert!(
+                            Arc::ptr_eq(&started_on, &attachment),
+                            "a read started on an attachment the consumer never had"
+                        );
+                        assert!(
+                            reported_by_the_next_read,
+                            "a read that started before the end left its gap unreported"
+                        );
+                    }
+                    ReadStart::Unattached | ReadStart::Closed | ReadStart::ReopenRequired(_) => {
+                        panic!("a read started past an unreported attachment gap");
+                    }
+                }
             });
         });
     }

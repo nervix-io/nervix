@@ -1,7 +1,7 @@
 //! Public materialized restore workloads with acknowledged input rows and small observable outputs.
 //!
 //! Layer: test harness.
-//! - **Owns.** NSPL graphs, client inputs, archive inventory assertions and generator subscriptions
+//! - **Owns.** Plexus graphs, client inputs, archive inventory assertions and generator subscriptions
 //!   that qualify many containers and a single container larger than the bulk memory budget,
 //!   plus bounded public state observations after an exact-row deadline expires.
 //! - **Depends on.** Public commands, acknowledged client producers, Row subscriptions and the
@@ -62,20 +62,35 @@ async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays
     )
     .await
     .assured("the workload client connects");
-    for command in nspl_statements(&commands) {
-        let outcome = client
-            .execute(command.clone())
-            .await
-            .assured("the workload command recovers through a leader change");
+    for command in plexus_statements(&commands) {
+        let started = Instant::now();
+        append_cucumber_log_line(&format!(
+            "materialized workload command started: domain={}, command={command}",
+            world.domain
+        ));
+        let outcome = match client.execute(command.clone()).await {
+            Ok(outcome) => outcome,
+            Err(error) => panic!(
+                "materialized workload command failed after {:?}: domain={}, command={command}: \
+                 {error:#}",
+                started.elapsed(),
+                world.domain
+            ),
+        };
         assert!(
             outcome.succeeded(),
             "the public materialized workload is valid: {command}: {}",
             outcome.message
         );
+        append_cucumber_log_line(&format!(
+            "materialized workload command completed: domain={}, elapsed={:?}, command={command}",
+            world.domain,
+            started.elapsed()
+        ));
         world.last_command_output = Some(outcome.message);
     }
     let leader = current_leader_node(world).await;
-    let session = crate::execute_nspl_commands_on_node(
+    let session = crate::execute_plexus_commands_on_node(
         world,
         &leader,
         "CREATE SUBSCRIPTION summary_subscription TO summaries;",
@@ -208,57 +223,101 @@ async fn then_materialized_generators_report_every_row(
     let length = kibibytes
         .checked_mul(1024)
         .assured("bounded row length fits");
-    while !pending.is_empty() {
-        let now = Instant::now();
-        let event = if now < deadline {
-            world
-                .active_session
-                .as_mut()
-                .assured("the summary subscription exists")
-                .try_next_subscription(deadline.saturating_duration_since(now))
-                .await
-                .assured("subscription remains connected")
-        } else {
-            None
-        };
-        let Some(event) = event else {
-            println!(
-                "missing materialized generator rows at the observation deadline: {pending:?}; \
-                 domain={}, round={round}, value_bytes={length}, subscription_node={:?}",
-                world.domain, world.active_session_node
-            );
-            capture_missing_materialized_state(world, &pending).await;
-            panic!("missing materialized generator rows: {pending:?}");
-        };
-        if !event.payload.contains(&format!("\"round\":{round}")) {
-            continue;
-        }
-        assert!(
-            event.payload.contains(&format!("\"length\":{length}")),
-            "{}",
-            event.payload
+    let mut session = world
+        .active_session
+        .take()
+        .assured("the summary subscription exists");
+    let (session, pending) =
+        crate::common::runner_observation::observe_off_the_runner(async move {
+            while !pending.is_empty() {
+                nervix_primitives::task::consume_budget().await;
+                let now = Instant::now();
+                let event = if now < deadline {
+                    session
+                        .try_next_subscription(deadline.saturating_duration_since(now))
+                        .await
+                        .assured("subscription remains connected")
+                } else {
+                    None
+                };
+                let Some(event) = event else {
+                    break;
+                };
+                if !event.payload.contains(&format!("\"round\":{round}")) {
+                    continue;
+                }
+                assert!(
+                    event.payload.contains(&format!("\"length\":{length}")),
+                    "{}",
+                    event.payload
+                );
+                if let Some(found) = pending
+                    .iter()
+                    .find(|(relay, tenant)| {
+                        event
+                            .payload
+                            .contains(&format!("\"relay\":\"state_{relay}\""))
+                            && event.payload.contains(&format!(
+                                "key={{\"tenant\":\"restore-tenant-{tenant}\"}}"
+                            ))
+                    })
+                    .copied()
+                {
+                    assert!(
+                        event
+                            .payload
+                            .contains(&format!("\"tenant\":\"restore-tenant-{}\"", found.1)),
+                        "payload and typed branch agree"
+                    );
+                    pending.remove(&found);
+                }
+            }
+            (session, pending)
+        })
+        .await;
+    world.active_session = Some(session);
+    if !pending.is_empty() {
+        println!(
+            "missing materialized generator rows at the observation deadline: {pending:?}; \
+             domain={}, round={round}, value_bytes={length}, subscription_node={:?}",
+            world.domain, world.active_session_node
         );
-        if let Some(found) = pending
-            .iter()
-            .find(|(relay, tenant)| {
-                event
-                    .payload
-                    .contains(&format!("\"relay\":\"state_{relay}\""))
-                    && event
-                        .payload
-                        .contains(&format!("key={{\"tenant\":\"restore-tenant-{tenant}\"}}"))
-            })
-            .copied()
-        {
-            assert!(
-                event
-                    .payload
-                    .contains(&format!("\"tenant\":\"restore-tenant-{}\"", found.1)),
-                "payload and typed branch agree"
-            );
-            pending.remove(&found);
-        }
+        capture_missing_materialized_state(world, &pending).await;
+        panic!("missing materialized generator rows: {pending:?}");
     }
+}
+
+#[then(
+    expr = "node {string} reuses its remote materialized generation across five complete \
+            observations of round {int}"
+)]
+async fn then_materialized_generation_is_reused(
+    world: &mut ScenarioWorld,
+    node: String,
+    round: u32,
+) {
+    let labels = [
+        "class=\"bulk\"".to_string(),
+        "direction=\"received\"".to_string(),
+    ];
+    let before = world
+        .cluster()
+        .read_observability_metric(&node, "nervix_interconnect_bulk_bytes_total", &labels)
+        .await
+        .assured("the remote reader exposes its transferred bulk bytes");
+    for _ in 0..5 {
+        then_materialized_generators_report_every_row(world, "30s".to_string(), round, 64, 1, 2)
+            .await;
+    }
+    let after = world
+        .cluster()
+        .read_observability_metric(&node, "nervix_interconnect_bulk_bytes_total", &labels)
+        .await
+        .assured("the remote reader still exposes its transferred bulk bytes");
+    assert_eq!(
+        after, before,
+        "five complete observations of unchanged rows must reuse the verified generation"
+    );
 }
 
 /// Observe the addressed owner's and replica's public state before failed-scenario teardown.

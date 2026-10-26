@@ -1,5 +1,7 @@
 # Consensus Storage And Replication
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix uses Raft to replicate the control-plane state described in the
 [Control Plane](./control-plane.md). Each node keeps its own durable log, applied state, votes,
 membership, and snapshots. This chapter defines when those records are durable, how a leader paces
@@ -25,7 +27,10 @@ owns the compiler and propagation rules.
 
 Every consensus mutation uses a full synchronization barrier that asks the filesystem to persist
 both data and filesystem metadata. The device and filesystem must honor that request for the
-host-power-loss guarantees in this chapter to hold.
+host-power-loss guarantees in this chapter to hold. This durability promise, `fsync every append`,
+is fixed by the build and is a prerequisite every node publishes: a node that promised anything else
+would give its acknowledgements another meaning, so it is refused at join, as
+[Node Settings](node-settings.md#the-prerequisite-list-is-closed) describes.
 
 The path from a proposal to its reply has four distinct boundaries:
 
@@ -68,10 +73,13 @@ Consensus startup, proposal, and membership operations carry contextual error re
 Database open failures retain their I/O cause; Raft configuration, startup, and handler
 registration failures retain the failure beneath the startup context. A rejected proposal keeps
 its Raft cause while classifying a known redirect as leadership loss, a fatal storage failure as
-storage, and other Raft write failures separately. A state-machine refusal remains a typed
-conflict, distinct from a storage or leadership failure. These classifications determine whether
-the control plane redirects, retries, or reports an uncertain failure; it does not parse the error
-message to decide.
+storage, and other Raft write failures separately. A leader whose lease lapsed, because no quorum
+acknowledged a heartbeat or append it sent within the maximum election timeout, refuses a proposal
+before appending it with a redirect that names no leader. That refusal is leadership loss as well,
+although the node can still lead, and nothing of the refused proposal reached the log. A
+state-machine refusal remains a typed conflict, distinct from a storage or leadership failure.
+These classifications determine whether the control plane redirects, retries, or reports an
+uncertain failure; it does not parse the error message to decide.
 
 Transaction mutation checks also create local reports. Raft's applied response retains its
 existing serialized `TransactionMutationError` outcome, so report frames are local to the state
@@ -99,6 +107,14 @@ A crash or lost connection after durable application but before delivery of the 
 the client uncertain even though the command took effect; persistent administrative requests use
 their stable execution reference to join or retrieve that result.
 
+Transaction tombstone removal evaluates age and the current applying command records together in
+the state machine. An applying transaction request retains its finished target, and an applying
+ordinary command retains its internal transactions, including planning refresh attempts, by their
+mutation owner. Their commit plans and reports remain durable with the tombstones. The leader uses
+the same eligibility decision to avoid cleanup proposals while every aged tombstone is retained;
+application rechecks it so a proposal cannot race a newly admitted consumer. Once the last consumer
+finishes, the original terminal timestamp determines eligibility, without an additional window.
+
 Transaction application completion persists the actual quiescence history and actual effects in
 the same applied state-machine boundary that changes the step from applying to applied or failed.
 Recovery therefore sees ordered requested, confirmed, failed or uncertain, and released outcomes
@@ -121,13 +137,17 @@ revision; segmented or inline replacement, header purge and incomplete unpublish
 permit bounded chunk deletion. Snapshot retention
 preserves preexisting readers, while the installation barrier serializes ordinary, replica and
 ownership writes with cleanup. This adds no consensus record or log
-mutation and never removes a replicated incomplete-installation gate. See
-[Backup And Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the
-quota, metrics and node-local cleanup boundary.
+mutation and never removes a replicated incomplete-installation gate. Because the sweep holds that
+read guard for its whole duration, as staging and publication jobs do, the node publishes its next
+applied revision only after the job finishes. See [Restore Staging
+Maintenance](backup-and-restore-architecture.md#restore-staging-maintenance) for the node-local
+cleanup boundary, and [Backup And
+Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the quota and its
+metrics.
 
 ### Coordinated WASM Reset Publications
 
-An NSPL reset first records a typed ordered transaction step with its captured planning inputs,
+A Plexus reset first records a typed ordered transaction step with its captured planning inputs,
 statement identity, and reset scope. That record changes no processor Model or schedule by itself;
 the coordinator uses its retained execution reference for the `Publishing` and `Ready` mutations.
 If the leader stops after recording the step, transaction recovery resumes that same reference.
@@ -208,7 +228,8 @@ Heartbeats keep the shorter deadline derived from the configured heartbeat inter
 seconds. With the default 250 ms heartbeat, the current soft deadline is 187.5 ms. Replication
 answers also prove leader contact, so sustained writes suppress redundant heartbeats for an
 automatically derived window. The window is no longer than the heartbeat interval or half the gap
-between that interval and the minimum election timeout. This keeps the heartbeat interval plus the
+between that interval and the minimum election timeout, which, with the election timeouts derived
+at six heartbeats, is one heartbeat interval. This keeps the heartbeat interval plus the
 suppression window below the minimum election timeout.
 
 The independent paths matter when a follower has slow storage: its append answer may take much
@@ -249,8 +270,13 @@ stream. If the leader has already purged part of that suffix, the follower recei
 snapshot and then the remaining log. Client proposals and management heartbeats continue while the
 catch-up runs.
 
-A discovered node joins as a learner. Each membership reconciliation gives a blocking learner
-catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
+A discovered node joins as a learner once the leader has read its published prerequisite record and
+found it compatible with the record of every live voter. The leader leaves any other candidate
+outside the membership and logs why once while the reason holds: at `debug` while the candidate has
+published no record the leader can read, and at `warn` with the voter and the mismatch when it
+cannot run beside a voter. [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes
+what the refused node does. Each membership reconciliation gives a blocking learner catch-up
+attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
 learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
 learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
 tries again while ordinary replication continues.
@@ -272,6 +298,11 @@ Committed-range application, startup replay, and leader-bounded replication stre
 successive admitted chunks. A chunk targets 1 MiB or 1,024 entries, whichever is reached first, and
 one oversized first entry travels alone. The reader releases the ordered storage worker between
 chunks and retains the chunk's memory charge until its entries have been handed to the consumer.
+Handing out the final entry releases the exhausted iterator allocation and its charge before that
+poll returns. A consumer that parks with its final entry therefore holds no empty chunk that could
+keep another reader or a source control call out of the Commands class. The reader retains an
+explicit exhausted boundary, without the allocation, so a subsequent chunk still yields before
+requesting the ordered storage worker.
 
 There is no range-size failure at 2 MiB or at any other aggregate backlog size. A committed range
 and a startup backlog may span any number of chunks. The state-machine worker applies the entries
@@ -405,7 +436,8 @@ nothing else, so a record no family owns is refused as well. Recovered resource 
 most one upload for each resource version, and an expired command execution's reference carries
 the issue time its expiry is ordered by. A transaction is in a state its transitions reach: an
 open or committing transaction queues exactly the statements and source bytes it accepted, a
-finished one queues none, a commit's results apply consecutive statements from the first and its
+finished one queues none and keeps the identity and admission of exactly as many statements as it
+accepted, a commit's results apply consecutive statements from the first and its
 progress stays inside the queue, and a failure names a statement the transaction accepted. Every
 log read checks that a log record is stored under its own entry's index.
 
@@ -452,19 +484,27 @@ purge requests appear at `debug`.
 
 ## Tuning
 
-The server exposes heartbeat, election, snapshot, and retention policy as command-line arguments and
-matching environment variables:
+The server exposes heartbeat, snapshot, and retention policy as command-line arguments and matching
+environment variables:
 
 | Argument | Environment | Default | Effect |
 | --- | --- | --- | --- |
-| `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for their soft deadline. It does not set the append-stream idle bound. |
-| `--raft-election-timeout-min` | `NERVIX_RAFT_ELECTION_TIMEOUT_MIN` | `1500ms` | Lower end of the randomized follower election timeout. Must exceed the heartbeat interval plus the derived suppression window. |
-| `--raft-election-timeout-max` | `NERVIX_RAFT_ELECTION_TIMEOUT_MAX` | `3000ms` | Exclusive upper end of the randomized election timeout. Must exceed the minimum. |
+| `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for their soft deadline, and for the randomized follower election timeout, which runs from six to twelve heartbeat intervals, `1.5s` to `3s` by default. It does not set the append-stream idle bound. |
 | `--raft-snapshot-entry-threshold` | `NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD` | `10000` | Applied entries since the last completed snapshot that request the next build. |
 | `--raft-snapshot-byte-threshold` | `NERVIX_RAFT_SNAPSHOT_BYTE_THRESHOLD` | `64MiB` | Appended entry bytes since the last completed snapshot that request the next build. |
 | `--raft-covered-log-entries-retained` | `NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED` | `1000` | Newest snapshot-covered entries retained for log catch-up. |
 | `--raft-covered-log-bytes-retained` | `NERVIX_RAFT_COVERED_LOG_BYTES_RETAINED` | `64MiB` | Newest snapshot-covered encoded bytes retained; the entry or byte bound reached first decides. |
 | `--raft-retained-log-cap` | `NERVIX_RAFT_RETAINED_LOG_CAP` | `1GiB` | Current-log byte level above which later mutations wait up to 30 seconds for reclamation. |
+
+Consensus runs its timings in whole milliseconds. Before a node opens a store or binds a listener,
+it refuses a heartbeat below one millisecond, such as
+`raft-heartbeat-interval (500µs) must be at least 1ms, the resolution consensus runs timings at`,
+and a heartbeat so long that twelve of it do not fit the milliseconds consensus counts an election
+timeout in, so consensus never opens with timings it would reject. The election timeouts are not
+configured on their own, because deriving them by fixed factors keeps every pairing of nodes
+safe: [Node Settings](node-settings.md) gives the class of each argument, and the heartbeat is a
+prerequisite that every two nodes keep within a factor of two of each other, so that one rolling
+change moves it by less than that. The snapshot and retention bounds are node capabilities.
 
 Replication batch and memory limits are fixed by the current server execution policy; the server
 does not expose flags for them:
@@ -481,9 +521,11 @@ does not expose flags for them:
 | Snapshot section / transport chunk | 8 MiB / 64 KiB |
 | Complete snapshot transfer | 30 seconds |
 
-Use the timing settings as one policy. Lowering the election minimum without lowering the heartbeat
-interval can make the configuration invalid at startup. Raising the heartbeat interval does not
-allow slower append storage because append liveness is progress-based and fixed at five seconds.
+The heartbeat sets the whole timing policy: lowering it shortens the election timeouts with it, and
+raising it lengthens them. Change it across a cluster by less than a factor of two per rolling
+restart; a node outside that bound of a live peer is refused as it joins. Raising the heartbeat
+interval does not allow slower append storage because append liveness is progress-based and fixed
+at five seconds.
 
 Snapshot and covered-log settings trade storage and catch-up method. Smaller thresholds build and
 transfer snapshots more often; smaller covered suffixes make a lagging follower switch to a snapshot

@@ -113,7 +113,7 @@ class InventoryTests(unittest.TestCase):
             [producer.name for producer in native_coverage.PRODUCERS],
             ["test-typed-ratchet", "bench-smoke", "test-primitives-ordinary",
              "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
-             "test-primitives-deloxide", "nspl-completion-walk", "test-shuttle", "test-loom", "test-turmoil",
+             "test-primitives-deloxide", "plexus-completion-walk", "validate-connector-matrix", "test-shuttle", "test-loom", "test-turmoil",
              "test-deadlock-evidence-order", "test-deadlock-report", "test-deloxide",
              "test-deloxide-order", "test-deloxide-stress", "test-deloxide-stress-restore"],
         )
@@ -183,8 +183,8 @@ class InventoryTests(unittest.TestCase):
         producers = native_coverage.PRODUCERS
         self.assertEqual(native_coverage.select_producers([], producers), list(producers))
         self.assertEqual(
-            native_coverage.select_producers(["nspl-completion-walk", "bench-smoke"], producers),
-            [next(producer for producer in producers if producer.name == "nspl-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],
+            native_coverage.select_producers(["plexus-completion-walk", "bench-smoke"], producers),
+            [next(producer for producer in producers if producer.name == "plexus-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],
         )
         with self.assertRaisesRegex(RunnerError, "no producer `bench`; the producers are"):
             native_coverage.select_producers(["bench"], producers)
@@ -218,7 +218,7 @@ class InventoryTests(unittest.TestCase):
                     for artifact in ("completion.json", "lcov.info", "lane.json"):
                         self.assertIn(f"target/native-coverage/test-${{{{ matrix.selection }}}}/**/{artifact}", upload)
                     self.assertNotIn("profraw", upload)
-                    # Diagnostic coverage never joins ordinary coverage or the CRAP gate.
+                    # Diagnostic coverage never joins ordinary coverage or its CRAP report.
                     coverage = job_section(workflow, "coverage")
                     self.assertNotIn("deloxide", coverage)
                     continue
@@ -1324,7 +1324,9 @@ class CollectTests(unittest.TestCase):
             return {
                 "selection": "deloxide",
                 "verdict": verdict,
-                "workspace": {"attempt": "target/native-coverage-build-deloxide/test-deloxide/deloxide/run.x"},
+                "stages": [{"name": name, "verdict": "complete", "budget_seconds": 600, "duration_seconds": 2.0} for name in ("build", "workloads")],
+                "build_measurements": [{"kind": kind, "duration_seconds": 0.5} for kind in ("initial", "warm")],
+                "workspace": {"attempt": "target/native-coverage-build-deloxide/test-deloxide/deloxide/run.x", "instrumented": True},
                 "counts": {"discovered": 3, "selected": 2, "executed": 2, "completed": 2},
                 "workloads": [{"id": "probe.a", "completed": True}, {"id": "probe.b", "completed": True}],
                 "findings": {"observations": 4, "qualifying": 4},
@@ -1354,7 +1356,7 @@ class CollectTests(unittest.TestCase):
         self.assertNotIn("instrument-coverage", lane["RUSTFLAGS"])
         self.assertEqual(record["instrumentation"]["instrumented_crates"], "workspace")
 
-        for case, content in {"no record": None, "a failed lane": lane_record("failed")}.items():
+        for case, content in {"no record": None, "a failed lane": lane_record("failed"), "builds only": lane_record("built")}.items():
             with self.subTest(case=case):
                 self.setUp()
                 commands = FakeCommands(self.root, {"test-deloxide-workloads": writes(content)})
@@ -1378,7 +1380,9 @@ class CollectTests(unittest.TestCase):
                 path.write_text(json.dumps({
                     "selection": selection,
                     "verdict": "complete",
-                    "workspace": {"attempt": "target/native-coverage-build-deloxide-stress/test-deloxide/x/run.y"},
+                    "stages": [{"name": name, "verdict": "complete", "budget_seconds": 600, "duration_seconds": 2.0} for name in ("build", "workloads")],
+                    "build_measurements": [{"kind": kind, "duration_seconds": 0.5} for kind in ("initial", "warm")],
+                    "workspace": {"attempt": "target/native-coverage-build-deloxide-stress/test-deloxide/x/run.y", "instrumented": True},
                     "counts": {"discovered": 2, "selected": 2, "executed": 2, "completed": 2},
                     "workloads": [{"id": "stress.a", "completed": True}],
                     "findings": {"observations": 1, "qualifying": 1},
@@ -1910,6 +1914,33 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(library[10], 3)
         self.assertEqual(library[19], 3)
         self.assertEqual(len(collection.record["selection"]["children"]), 1)
+
+    def test_completed_build_cleanup_keeps_collected_evidence_and_the_build_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target with spaces"
+            workspace = Workspace(self.fixture, target)
+            with workspace.build_lock():
+                artifact = workspace.build() / "debug/deps/fixture.rlib"
+                artifact.parent.mkdir(parents=True)
+                artifact.write_bytes(b"compiled output")
+            attempt = workspace.new_attempt(fixture_producer("walk"), "rust-1.99.0", "complete")
+            (attempt / "lcov.info").write_text("exported report\n")
+            (attempt / "completion.json").write_text('{"verdict":"complete"}\n')
+            (attempt / "profiles/walk.profraw").write_bytes(b"retained profile")
+            collected = files(target / native_coverage.COLLECTION_DIRECTORY)
+            sources = files(self.fixture / "src")
+            result = subprocess.run(
+                ["just", "clean-ci-benchmarks"],
+                cwd=REPOSITORY,
+                env={**os.environ, "CARGO_TARGET_DIR": str(target)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(artifact.exists())
+            self.assertTrue((workspace.build() / native_coverage.LOCK).is_file())
+            self.assertEqual(files(target / native_coverage.COLLECTION_DIRECTORY), collected)
+            self.assertEqual(files(self.fixture / "src"), sources)
 
     def test_the_ordinary_coverage_cleanup_leaves_every_collection_alone(self) -> None:
         collection = self.collect("walk")

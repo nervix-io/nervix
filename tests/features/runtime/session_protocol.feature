@@ -3,7 +3,7 @@ Feature: Session protocol
   Scenario Outline: Semantic completion pages reach every domain once
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE UNPACED DOMAIN completion_alpha;
@@ -26,13 +26,13 @@ Feature: Session protocol
   Scenario Outline: A long command leaves the session responsive and a waiter cancelled before admission admits nothing
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then the current leader node is saved as placeholder "leader"
     Given command admission on node "{{leader}}" pauses before proposal
-    When the active session sends request "slow" with this NSPL command
+    When the active session sends request "slow" with this Plexus command
       """
       CREATE SCHEMA cancelled_record (
         value STRING
@@ -48,7 +48,7 @@ Feature: Session protocol
     When the active session cancels request "slow"
     Then request "slow" is cancelled before admission
     When the command admission pause on node "{{leader}}" is released
-    And this NSPL command request is executed on the leader node
+    And this Plexus command request is executed on the leader node
       """
       SHOW CREATE SCHEMA cancelled_record;
       """
@@ -65,13 +65,13 @@ Feature: Session protocol
   Scenario Outline: Cancelling a durably admitted command ends only the wait for it
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then the current leader node is saved as placeholder "leader"
     Given command execution on node "{{leader}}" pauses after durable admission
-    When the active session sends request "admitted" with execution reference "cancel-admitted-{{test_id}}" and this NSPL command
+    When the active session sends request "admitted" with execution reference "cancel-admitted-{{test_id}}" and this Plexus command
       """
       CREATE SCHEMA admitted_record (
         value STRING
@@ -81,14 +81,14 @@ Feature: Session protocol
     When the active session cancels request "admitted"
     Then request "admitted" is cancelled after admission
     When the durable command admission pause on node "{{leader}}" is released
-    And this NSPL command request with execution reference "cancel-admitted-{{test_id}}" is executed on the leader node
+    And this Plexus command request with execution reference "cancel-admitted-{{test_id}}" is executed on the leader node
       """
       CREATE SCHEMA admitted_record (
         value STRING
       );
       """
     Then the last command request succeeded
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       SHOW CREATE SCHEMA admitted_record;
       """
@@ -105,7 +105,7 @@ Feature: Session protocol
   Scenario Outline: A malformed request is refused with a typed rejection and the session keeps serving
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -119,7 +119,7 @@ Feature: Session protocol
     Then request "oversized-page" is rejected as an invalid request naming "SuggestRequest.page_size"
     When the active session sends request "after-refusals" completing "SHOW é" at byte 5
     Then request "after-refusals" suggests "CLUSTER"
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       CREATE SCHEMA served_after_refusals (
         value STRING
@@ -139,20 +139,20 @@ Feature: Session protocol
   Scenario: Authentication, framing and protocol failures end a native session with their status
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then a session opened on the leader node with a wrong password is refused with status "Unauthenticated"
     When the active session sends a request whose identity is zero
     Then the active session is ended for violating the protocol
-    Given the leader node is configured with these NSPL commands
+    Given the leader node is configured with these Plexus commands
       """
       SHOW CLUSTER STATUS;
       """
     When the active session sends 12 bytes that are not a frame
     Then the active session ends with status "Internal"
-    Given the leader node is configured with these NSPL commands
+    Given the leader node is configured with these Plexus commands
       """
       SHOW CLUSTER STATUS;
       """
@@ -162,14 +162,14 @@ Feature: Session protocol
   Scenario: Leadership lost after durable admission leaves an unknown outcome that a retry recovers
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then the current leader node is saved as placeholder "admitted_leader"
     And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
     Given command execution on node "{{admitted_leader}}" pauses after durable admission
-    When this NSPL command request with execution reference "leadership-lost-{{test_id}}" begins executing in the background on the leader node
+    When this Plexus command request with execution reference "leadership-lost-{{test_id}}" begins executing in the background on the leader node
       """
       CREATE SCHEMA uncertain_record (
         value STRING
@@ -181,14 +181,14 @@ Feature: Session protocol
     And node "{{admitted_leader}}" eventually reports leader "{{successor}}"
     When the durable command admission pause on node "{{admitted_leader}}" is released
     Then the background command request reports an unknown outcome because leadership was lost
-    When this NSPL command request with execution reference "leadership-lost-{{test_id}}" is executed on the leader node
+    When this Plexus command request with execution reference "leadership-lost-{{test_id}}" is executed on the leader node
       """
       CREATE SCHEMA uncertain_record (
         value STRING
       );
       """
     Then the last command request succeeded
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       SHOW CREATE SCHEMA uncertain_record;
       """
@@ -200,21 +200,21 @@ Feature: Session protocol
   Scenario: A leader setup step learns the outcome of a command its leader admitted before losing leadership
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then the current leader node is saved as placeholder "admitted_leader"
     And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
     Given leadership moves from node "{{admitted_leader}}" to node "{{successor}}" under its next durably admitted command
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA recovered_record ( value STRING );
       CREATE RELAY recovered SCHEMA recovered_record UNBRANCHED;
       CREATE SUBSCRIPTION recovered_subscription TO recovered;
       """
     Then the leadership move under the durably admitted command completed
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       SHOW CREATE SCHEMA recovered_record;
       """
@@ -223,10 +223,131 @@ Feature: Session protocol
       CREATE SCHEMA recovered_record (
       """
 
+  Scenario: A leader configuration step learns the outcome of a command its leader admitted before losing leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "admitted_leader"
+    And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{admitted_leader}}" to node "{{successor}}" under its next durably admitted command
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE SCHEMA configured_record ( value STRING );
+      CREATE RELAY configured SCHEMA configured_record UNBRANCHED;
+      CREATE SUBSCRIPTION configured_subscription TO configured;
+      """
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA configured_record;
+      """
+    Then the leadership move under the durably admitted command completed
+    And the last command output contains
+      """
+      CREATE SCHEMA configured_record (
+      """
+
+  Scenario: A session that keeps its subscription learns the outcome of a command its leader admitted before losing leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE SCHEMA held_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( seq integer );
+      CREATE CODEC held_event_codec
+        FROM WIRE JSON SCHEMA held_event_wire
+        TO SCHEMA held_event;
+      CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
+      CREATE VHOST held_edge http-{{test_id}}-held.example.com;
+      CREATE ENDPOINT held_ingress ON held_edge PATH '/held' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        TO held_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION held_subscription TO held_events;
+      """
+    Then the current leader node is saved as placeholder "admitted_leader"
+    And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{admitted_leader}}" to node "{{successor}}" under its next durably admitted command
+    When these Plexus commands are executed
+      """
+      START;
+      """
+    Then the leadership move under the durably admitted command completed
+    And node "{{successor}}" eventually accepts http traffic for host "http-{{test_id}}-held.example.com" path "/held"
+      """
+      {"seq":1}
+      """
+    And within "30s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+
+  Scenario: A command request under its own execution reference learns the outcome its leader admitted before losing leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "admitted_leader"
+    And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{admitted_leader}}" to node "{{successor}}" under its next durably admitted command
+    When this Plexus command request with execution reference "moved-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA referenced_record ( value STRING );
+      """
+    Then the last command request succeeded
+    And the leadership move under the durably admitted command completed
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA referenced_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA referenced_record (
+      """
+
+  Scenario: A background execution learns the outcome of a command its leader admitted before losing leadership
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "admitted_leader"
+    And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{admitted_leader}}" to node "{{successor}}" under its next durably admitted command
+    When these Plexus commands begin executing in the background
+      """
+      CREATE SCHEMA background_record ( value STRING );
+      """
+    Then the background Plexus execution succeeds
+    And the leadership move under the durably admitted command completed
+    When this Plexus command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA background_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA background_record (
+      """
+
   Scenario: A redirect names no endpoint for a leader that discovery cannot reach
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -245,7 +366,7 @@ Feature: Session protocol
   Scenario Outline: An upload stream the protocol does not allow is refused with a typed failure and admits nothing
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE blob;
@@ -264,7 +385,7 @@ Feature: Session protocol
       """
     When an upload of resource "blob" with identity "oversized-declaration" that declares more bytes than an archive may hold is sent to the leader node
     Then the last upload is refused as "QuotaExceeded" for identity "oversized-declaration"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RESOURCE blob;
       """
@@ -282,13 +403,13 @@ Feature: Session protocol
   Scenario Outline: A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       START;
       """
     And a clock session is opened on the leader node
-    When the clock session sends request "attach" attaching the clock of domain "{{domain}}" and then request "stop" with this NSPL command
+    When the clock session sends request "attach" attaching the clock of domain "{{domain}}" and then request "stop" with this Plexus command
       """
       STOP;
       """
@@ -296,7 +417,7 @@ Feature: Session protocol
     And request "stop" of the clock session completed
     And within "10s" the clock session observes domain "{{domain}}" stopped at generation 1
     And the clock session received the reply to request "attach" before every frame about domain "{{domain}}"
-    When the clock session executes this NSPL command
+    When the clock session executes this Plexus command
       """
       BEGIN;
       """
@@ -304,11 +425,11 @@ Feature: Session protocol
     Then request "attach inside" of the clock session is refused because the session holds a transaction
     When the clock session sends request "detach inside" detaching the clock of domain "{{domain}}"
     Then request "detach inside" of the clock session is refused because the session holds a transaction
-    When the clock session executes this NSPL command
+    When the clock session executes this Plexus command
       """
       REVERT;
       """
-    And the clock session sends request "detach" detaching the clock of domain "{{domain}}" and then request "start" with this NSPL command
+    And the clock session sends request "detach" detaching the clock of domain "{{domain}}" and then request "start" with this Plexus command
       """
       START;
       """

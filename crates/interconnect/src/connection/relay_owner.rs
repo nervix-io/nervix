@@ -17,19 +17,17 @@
     nervix::context(
         bounded,
         key = "one authenticated peer transport and its process epochs",
-        bound = "configured incoming capacity bounds attempts, grants and outbound correlations; \
-                 no guard crosses await",
+        bound = "configured incoming capacity bounds attempts, grants and outbound correlations, \
+                 and the watermark capacity bounds retained watermarks; no guard crosses await",
         reason = "the retained peer owner serializes admission identity and channel ordering \
                   transitions"
     )
 )]
 
-use std::collections::hash_map::Entry as MapEntry;
-
 use ahash::{HashMap, HashMapExt as _};
 use nervix_primitives::sync::blocking::Mutex;
 
-use super::*;
+use super::{relay_watermarks::RelayChannelWatermarks, *};
 
 impl TransportState {
     pub(super) fn bind_relay_owner(
@@ -56,7 +54,10 @@ impl TransportState {
             {
                 return Err(Report::new(TransportError::PoolExhausted));
             }
-            let owner = StdArc::new(RelayPeerOwner::new(self.options.incoming_queue_capacity));
+            let owner = StdArc::new(RelayPeerOwner::new(
+                RelayPeerCapacity::of(&self.options),
+                self.observations.clone(),
+            ));
             assert!(
                 owner.bind_epoch(epoch, binding_sequence, member),
                 "a newly created owner accepts its first process binding"
@@ -128,6 +129,17 @@ pub(super) struct RelayOwnersPublication {
     live_nodes: Option<BTreeSet<ClusterNodeName>>,
 }
 
+/// Where the attempt a grant asks for stands against its channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RelayGrantPosition {
+    /// The attempt takes the channel's next position.
+    Next,
+    /// The channel's batch before it is still unadmitted.
+    Busy,
+    /// The attempt is not the channel's next position.
+    OutOfOrder,
+}
+
 enum RelayPeerRun {
     Starting,
     AwaitingMembership { epoch: u64, binding_sequence: u64 },
@@ -135,10 +147,33 @@ enum RelayPeerRun {
     Ended,
 }
 
+/// How much one peer's relay protocol owner may hold.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RelayPeerCapacity {
+    /// Grants, attempts, active channels and admission records at once: the transport's incoming
+    /// queue capacity.
+    pub(super) attempts: usize,
+    /// Channel watermarks retained. Options validation keeps it above `attempts`, so a full set
+    /// always holds the watermark of a channel with no attempt outstanding.
+    pub(super) watermarks: usize,
+}
+
+impl RelayPeerCapacity {
+    pub(super) fn of(options: &TransportOptions) -> Self {
+        Self {
+            attempts: options.incoming_queue_capacity,
+            watermarks: options.relay_channel_watermark_capacity,
+        }
+    }
+}
+
 pub(super) struct RelayPeerOwner {
     state: Mutex<RelayPeerProtocol>,
     capacity: usize,
     created_at: Instant,
+    /// The transport's counters, which outlive this owner, so a watermark it forgot to make room is
+    /// counted after the peer has gone.
+    observations: Arc<TransportObservations>,
     pub(super) closed: CancellationToken,
 }
 
@@ -149,7 +184,7 @@ struct RelayPeerProtocol {
     attempts: BTreeMap<RelayAttemptKey, StdArc<RelayAdmissionRecord>>,
     active_channels: HashMap<RelayChannelKey, u64>,
     admissions: HashMap<RelayAdmissionKey, StdArc<RelayAdmissionRecord>>,
-    watermarks: HashMap<RelayChannelKey, RelayChannelWatermark>,
+    watermarks: RelayChannelWatermarks,
     outbound_attempts: HashMap<OutboundRelayKey, OutboundRelayAttempt>,
     outbound_admissions: HashMap<RelayAdmissionKey, OutboundRelayKey>,
 }
@@ -160,7 +195,10 @@ struct OutboundRelayAttempt {
 }
 
 impl RelayPeerOwner {
-    pub(super) fn new(capacity: usize) -> Self {
+    pub(super) fn new(
+        capacity: RelayPeerCapacity,
+        observations: Arc<TransportObservations>,
+    ) -> Self {
         Self {
             state: Mutex::new(RelayPeerProtocol {
                 run: RelayPeerRun::Starting,
@@ -168,12 +206,13 @@ impl RelayPeerOwner {
                 attempts: BTreeMap::new(),
                 active_channels: HashMap::new(),
                 admissions: HashMap::new(),
-                watermarks: HashMap::new(),
+                watermarks: RelayChannelWatermarks::new(capacity.watermarks),
                 outbound_attempts: HashMap::new(),
                 outbound_admissions: HashMap::new(),
             }),
-            capacity,
+            capacity: capacity.attempts,
             created_at: Instant::now(),
+            observations,
             closed: CancellationToken::new(),
         }
     }
@@ -261,26 +300,21 @@ impl RelayPeerOwner {
         self.state.lock().retired_status(attempt)
     }
 
-    pub(super) fn can_follow(&self, attempt: &RelayAttemptKey) -> bool {
-        self.state.lock().can_follow(attempt)
-    }
-
-    pub(super) fn channel_busy(&self, attempt: &RelayAttemptKey) -> bool {
+    /// Where a grant for `attempt` stands against its channel. A grant for the position after an
+    /// attempt whose outcome is decided retires that attempt and takes the position.
+    pub(super) fn grant_position(&self, attempt: &RelayAttemptKey) -> RelayGrantPosition {
         let mut state = self.state.lock();
-        let Some(sequence) = state.active_channels.get(&attempt.channel).copied() else {
-            return false;
-        };
-        let active = RelayAttemptKey {
-            channel: attempt.channel.clone(),
-            sequence,
-        };
-        if let Some(record) = state.attempts.get(&active)
-            && record.is_unadmitted()
-        {
-            return true;
+        if state.channel_busy(attempt) {
+            return RelayGrantPosition::Busy;
         }
-        state.active_channels.remove(&attempt.channel);
-        false
+        if state.retire_resolved_predecessor(attempt) {
+            self.observations.relay_channel_watermark_evicted();
+        }
+        if state.can_follow(attempt) {
+            RelayGrantPosition::Next
+        } else {
+            RelayGrantPosition::OutOfOrder
+        }
     }
 
     pub(super) fn has_admission(&self, key: &RelayAdmissionKey) -> bool {
@@ -304,6 +338,9 @@ impl RelayPeerOwner {
         if let Some(status) = state.retired_status(&record.attempt) {
             return RelayGrantRegistration::Retired(status.into());
         }
+        if state.retire_resolved_predecessor(&record.attempt) {
+            self.observations.relay_channel_watermark_evicted();
+        }
         if !state.can_follow(&record.attempt) {
             return RelayGrantRegistration::InvalidSequence;
         }
@@ -313,13 +350,7 @@ impl RelayPeerOwner {
         if state.admissions.contains_key(&record.admission_key) {
             return RelayGrantRegistration::AdmissionBusy;
         }
-        // A retained watermark consumes a channel position too. Evicting it to accept another
-        // channel would let a delayed sequence-zero request be admitted again.
-        if state.grants.contains_key(&grant_id)
-            || state.attempts.len() >= self.capacity
-            || (!state.watermarks.contains_key(&record.attempt.channel)
-                && state.watermarks.len() >= self.capacity)
-        {
+        if state.grants.contains_key(&grant_id) || state.attempts.len() >= self.capacity {
             return RelayGrantRegistration::ChannelBusy;
         }
         state
@@ -369,7 +400,9 @@ impl RelayPeerOwner {
             .remove(&grant_id)
             .verified("the grant was found under this owner's guard");
         let status = grant.admission.cancel();
-        state.retire(&grant.admission, status);
+        if state.retire(&grant.admission, status) {
+            self.observations.relay_channel_watermark_evicted();
+        }
     }
 
     pub(super) fn control(
@@ -397,16 +430,16 @@ impl RelayPeerOwner {
         if let Some(status) = state.retired_status(attempt) {
             return (status, None);
         }
-        if cancel
-            && !state.active_channels.contains_key(&attempt.channel)
-            && state.can_follow(attempt)
-        {
-            if !state.watermarks.contains_key(&attempt.channel)
-                && state.watermarks.len() >= self.capacity
-            {
-                return (RelayAdmissionStatus::Unknown, None);
+        if !cancel {
+            return (RelayAdmissionStatus::Unknown, None);
+        }
+        if state.retire_resolved_predecessor(attempt) {
+            self.observations.relay_channel_watermark_evicted();
+        }
+        if !state.active_channels.contains_key(&attempt.channel) && state.can_follow(attempt) {
+            if state.record_watermark(attempt, RelayAdmissionStatus::Cancelled) {
+                self.observations.relay_channel_watermark_evicted();
             }
-            state.record_watermark(attempt, RelayAdmissionStatus::Cancelled);
             return (RelayAdmissionStatus::Cancelled, None);
         }
         (RelayAdmissionStatus::Unknown, None)
@@ -417,7 +450,9 @@ impl RelayPeerOwner {
         record: &StdArc<RelayAdmissionRecord>,
         status: RelayAdmissionStatus,
     ) {
-        self.state.lock().retire(record, status);
+        if self.state.lock().retire(record, status) {
+            self.observations.relay_channel_watermark_evicted();
+        }
     }
 
     pub(super) fn completed_admission(
@@ -459,22 +494,11 @@ impl RelayPeerOwner {
             state.outbound_attempts.clear();
             state.outbound_admissions.clear();
         }
-        let active = &state.active_channels;
-        let retained = &state.watermarks;
-        let expired = retained
-            .iter()
-            .filter(|(channel, watermark)| {
-                !active.contains_key(*channel)
-                    && now
-                        .checked_duration_since(watermark.last_reconciled_at())
-                        .unwrap_or(Duration::ZERO)
-                        >= RELAY_CHANNEL_RETENTION
-            })
-            .map(|(channel, _)| channel.clone())
-            .collect::<Vec<_>>();
-        for channel in expired {
-            state.watermarks.remove(&channel);
-        }
+        let protocol = &mut *state;
+        let attempts = &protocol.attempts;
+        protocol.watermarks.expire(now, |channel| {
+            RelayPeerProtocol::holds_attempt(attempts, channel)
+        });
         // Terminal outcomes whose replies were lost remain available throughout reconciliation.
         // A live sender must reconcile within the runtime's five-minute total admission bound.
         let expired = state
@@ -494,7 +518,9 @@ impl RelayPeerOwner {
             .collect::<Vec<_>>();
         for record in expired {
             let status = record.cancel();
-            state.retire(&record, status);
+            if state.retire(&record, status) {
+                self.observations.relay_channel_watermark_evicted();
+            }
         }
         let mut expired_outbound = Vec::new();
         for (key, attempt) in &state.outbound_attempts {
@@ -588,6 +614,7 @@ impl RelayPeerOwner {
             channels: state.active_channels.len(),
             attempts: state.attempts.len(),
             grants: state.grants.len(),
+            watermarks: state.watermarks.len(),
             oldest,
         }
     }
@@ -597,6 +624,7 @@ pub(super) struct RelayOwnerSnapshot {
     pub(super) channels: usize,
     pub(super) attempts: usize,
     pub(super) grants: usize,
+    pub(super) watermarks: usize,
     pub(super) oldest: Duration,
 }
 
@@ -631,8 +659,14 @@ impl RelayPeerProtocol {
     }
 
     fn retired_status(&mut self, attempt: &RelayAttemptKey) -> Option<RelayAdmissionStatus> {
-        let watermark = self.watermarks.get_mut(&attempt.channel)?;
-        watermark.mark_reconciled();
+        let Some(watermark) = self.watermarks.consult(&attempt.channel) else {
+            // A forgotten channel answers as an earlier position of a retained one would: its
+            // outcome is no longer known here, and it is never admitted again.
+            if self.forgotten(&attempt.channel) {
+                return Some(RelayAdmissionStatus::Retired);
+            }
+            return None;
+        };
         if attempt.sequence < watermark.sequence {
             return Some(RelayAdmissionStatus::Retired);
         }
@@ -644,32 +678,109 @@ impl RelayPeerProtocol {
 
     fn can_follow(&self, attempt: &RelayAttemptKey) -> bool {
         let Some(watermark) = self.watermarks.get(&attempt.channel) else {
-            return attempt.sequence == 0;
+            return attempt.sequence == 0 && !self.forgotten(&attempt.channel);
         };
         watermark.sequence.checked_add(1) == Some(attempt.sequence)
     }
 
-    fn record_watermark(&mut self, attempt: &RelayAttemptKey, status: RelayAdmissionStatus) {
-        match self.watermarks.entry(attempt.channel.clone()) {
-            MapEntry::Occupied(mut entry) => {
-                if attempt.sequence >= entry.get().sequence {
-                    entry.insert(RelayChannelWatermark::new(attempt.sequence, status));
-                }
-            }
-            MapEntry::Vacant(entry) => {
-                entry.insert(RelayChannelWatermark::new(attempt.sequence, status));
-            }
+    /// Whether `attempt`'s channel still has an unadmitted batch. A channel whose batch was
+    /// admitted or cancelled is no longer busy, even while that batch's attempt is retained.
+    fn channel_busy(&mut self, attempt: &RelayAttemptKey) -> bool {
+        let Some(sequence) = self.active_channels.get(&attempt.channel).copied() else {
+            return false;
+        };
+        let active = RelayAttemptKey {
+            channel: attempt.channel.clone(),
+            sequence,
+        };
+        if let Some(record) = self.attempts.get(&active)
+            && record.is_unadmitted()
+        {
+            return true;
         }
+        self.active_channels.remove(&attempt.channel);
+        false
     }
 
-    fn retire(&mut self, record: &StdArc<RelayAdmissionRecord>, status: RelayAdmissionStatus) {
+    /// Retire the attempt `attempt`'s channel holds at the position before it, once that attempt's
+    /// outcome is decided. Returns whether recording the outcome forgot another channel's
+    /// watermark to make room.
+    ///
+    /// The receiver retires an attempt when the delivery of its terminal outcome returns, but the
+    /// sender continues the channel as soon as the outcome reaches it, so a grant or a cancellation
+    /// for the next position can arrive first. A sender asks for a channel's next position only
+    /// once it holds the outcome of the position before, so that request proves what the returned
+    /// delivery would, and the channel's watermark keeps the outcome as it would then.
+    fn retire_resolved_predecessor(&mut self, attempt: &RelayAttemptKey) -> bool {
+        let Some(sequence) = attempt.sequence.checked_sub(1) else {
+            return false;
+        };
+        let predecessor = RelayAttemptKey {
+            channel: attempt.channel.clone(),
+            sequence,
+        };
+        let Some(record) = self.attempts.get(&predecessor) else {
+            return false;
+        };
+        if record.is_unadmitted() {
+            return false;
+        }
+        let record = StdArc::clone(record);
+        let status = record.status();
+        self.retire(&record, status)
+    }
+
+    /// Whether `channel` is one this owner forgot, or one its sender opened before such a channel:
+    /// the owner retains neither its watermark nor an attempt on it, and it lies at or below the
+    /// retired-channel floor.
+    fn forgotten(&self, channel: &RelayChannelKey) -> bool {
+        self.watermarks.is_forgotten(channel) && !Self::holds_attempt(&self.attempts, channel)
+    }
+
+    /// Whether `attempts` holds an attempt on `channel`, at any position. A channel holds at most
+    /// one attempt at a time.
+    fn holds_attempt(
+        attempts: &BTreeMap<RelayAttemptKey, StdArc<RelayAdmissionRecord>>,
+        channel: &RelayChannelKey,
+    ) -> bool {
+        let first = RelayAttemptKey {
+            channel: channel.clone(),
+            sequence: 0,
+        };
+        let last = RelayAttemptKey {
+            channel: channel.clone(),
+            sequence: u64::MAX,
+        };
+        attempts.range(first..=last).next().is_some()
+    }
+
+    /// Record `status` at `attempt`'s position. Returns whether another channel's watermark was
+    /// forgotten to make room.
+    fn record_watermark(
+        &mut self,
+        attempt: &RelayAttemptKey,
+        status: RelayAdmissionStatus,
+    ) -> bool {
+        let attempts = &self.attempts;
+        self.watermarks.record(attempt, status, |channel| {
+            Self::holds_attempt(attempts, channel)
+        })
+    }
+
+    /// Retire `record` if it is still this owner's attempt. Returns whether recording its outcome
+    /// forgot another channel's watermark to make room.
+    fn retire(
+        &mut self,
+        record: &StdArc<RelayAdmissionRecord>,
+        status: RelayAdmissionStatus,
+    ) -> bool {
         let Some(current) = self.attempts.get(&record.attempt) else {
-            return;
+            return false;
         };
         if !StdArc::ptr_eq(current, record) {
-            return;
+            return false;
         }
-        self.record_watermark(&record.attempt, status);
+        let forgot = self.record_watermark(&record.attempt, status);
         self.attempts.remove(&record.attempt);
         if self.active_channels.get(&record.attempt.channel) == Some(&record.attempt.sequence) {
             self.active_channels.remove(&record.attempt.channel);
@@ -680,6 +791,7 @@ impl RelayPeerProtocol {
             self.admissions.remove(&record.admission_key);
         }
         record.release_capacity();
+        forgot
     }
 
     fn retire_outbound(&mut self, key: &OutboundRelayKey) {

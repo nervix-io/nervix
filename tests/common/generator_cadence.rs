@@ -8,6 +8,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     io,
     time::Duration,
 };
@@ -16,6 +17,12 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::Timestamp;
 use nervix_primitives::time::{Instant, timeout_at};
 use serde_json::{Map, Value};
+
+/// A subscription read whose future can run independently of the scenario runner.
+pub(crate) trait GeneratorSubscription: Send {
+    fn next(&mut self, budget: Duration)
+    -> impl Future<Output = io::Result<Option<String>>> + Send;
+}
 
 /// One sample of complete logical occurrences, independent of how quickly its rows are read.
 #[derive(Debug)]
@@ -80,7 +87,7 @@ impl GeneratorCadenceObservation {
     pub(crate) async fn observe(
         &mut self,
         budget: Duration,
-        mut next: impl AsyncFnMut(Duration) -> io::Result<Option<String>>,
+        subscription: &mut impl GeneratorSubscription,
     ) {
         let deadline = Instant::now()
             .checked_add(budget)
@@ -95,7 +102,7 @@ impl GeneratorCadenceObservation {
             let remaining = deadline
                 .checked_duration_since(now)
                 .verified("the deadline comparison established remaining observation time");
-            let payload = match timeout_at(deadline, next(remaining)).await {
+            let payload = match timeout_at(deadline, subscription.next(remaining)).await {
                 Ok(Ok(Some(payload))) => payload,
                 Ok(Ok(None)) | Err(_) => panic!("generator observation timed out: {self:?}"),
                 Ok(Err(error)) => panic!("generator subscription failed: {error}; {self:?}"),

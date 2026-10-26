@@ -6,8 +6,8 @@
 executes Nervix code natively in its declared mode: `test-typed-ratchet` qualifies compiler-resolved
 source diagnostics, generated reports, semantic fixtures and paired API doctests with the pinned
 compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body once,
-`test-primitives` runs the primitive boundary's conformance checks, and `nspl-completion-walk`
-walks the NSPL completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
+`test-primitives` runs the primitive boundary's conformance checks, and `plexus-completion-walk`
+walks the Plexus completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
 `test-turmoil` collects the canonical simulation suite, including its fresh-process attempts,
 `test-deadlock-evidence-order` executes diagnostic owners and disposable-process probes,
 `test-deadlock-report` exercises the ordinary local report command in its own build, and
@@ -249,11 +249,15 @@ PRODUCERS: tuple[Producer, ...] = (
         for mode in ("shuttle", "loom", "turmoil", "deloxide")
     ),
     Producer(
-        name="nspl-completion-walk",
+        name="plexus-completion-walk",
         mode="ordinary",
         prepare=(),
-        instrumented="nspl-completion-walk",
+        instrumented="plexus-completion-walk",
         finish=(),
+    ),
+    Producer(
+        name="validate-connector-matrix", mode="ordinary", prepare=("test-connector-matrix",),
+        instrumented="validate-connector-matrix-render", finish=(),
     ),
     Producer(
         name="test-shuttle", mode="shuttle",
@@ -630,6 +634,11 @@ class Workspace:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise RunnerError(f"another native coverage run is using {build}") from None
+            # Cargo tags directories it creates. The collector creates this one first to lock
+            # it, so it also owns the cache marker that permits Cargo's guarded cleanup.
+            (build / "CACHEDIR.TAG").write_text(
+                "Signature: 8a477f597d28d172789f06886806bc55\n", encoding="utf-8"
+            )
             yield
 
     def display(self, path: Path) -> str:

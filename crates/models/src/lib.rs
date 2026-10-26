@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** Every NSPL Model, validated name and HTTP request-field types, `Timestamp`, branch
+//! - **Owns.** Every Plexus Model, validated name and HTTP request-field types, `Timestamp`, branch
 //!   and node references, the index that keys a domain's Models by the node each one configures,
-//!   structured message errors, and the canonical NSPL rendering of a Model.
+//!   structured message errors, and the canonical Plexus rendering of a Model.
 //! - **Depends on.** Serialization and primitive crates, and Arrow's schema types behind the
 //!   `arrow` feature for the one Arrow data type each schema type is represented as.
 //! - **Must not know.** How a Model was parsed, validated, scheduled or executed. No parser span,
@@ -44,6 +44,7 @@ mod name_spelling;
 mod names;
 mod node_endpoint;
 mod node_ref;
+mod prerequisites;
 mod processor;
 mod quiesce;
 mod rebind_resource;
@@ -55,6 +56,7 @@ mod restore;
 mod schedule;
 mod schema;
 mod schema_fingerprint;
+mod settings;
 mod statement;
 mod timestamp;
 mod udf;
@@ -68,10 +70,10 @@ pub use backup::{
     BackupDomainSummary, BackupQuiesceCounters, BackupResources, BackupScope, DescribeBackup,
 };
 pub use canonical::{
-    CanonicalNsplError, NSPL_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_nspl,
-    alter_cbor_wire_schema_to_canonical_nspl, alter_json_wire_schema_to_canonical_nspl,
-    canonical_nspl_document, expression_to_nspl, ingest_quiesce_to_nspl,
-    ingestor_input_body_to_nspl, string_literal,
+    CanonicalPlexusError, PLEXUS_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_plexus,
+    alter_cbor_wire_schema_to_canonical_plexus, alter_json_wire_schema_to_canonical_plexus,
+    canonical_plexus_document, expression_to_plexus, ingest_quiesce_to_plexus,
+    ingestor_input_body_to_plexus, string_literal,
 };
 pub use client_consumer::{
     CLIENT_CONSUMER_NODE_BYTES, CLIENT_CONSUMER_SESSION_BYTES, ClientConsumerLimits,
@@ -92,55 +94,90 @@ pub use command::{
 };
 pub use completion::{BuiltinFunctionScope, SemanticReference};
 pub use connector::{
-    AzureBlobConfigEntry, ClickHouseConfigEntry, ClickHouseSink, ClickHouseSinkEntity,
-    ClickHouseTableSink, ClickHouseValueMapping, ClientConfigEntry, ClientConsumerSink,
-    ClientIngestMode, ClientIngestorAlteration, ClientPoolBounds, ClientPoolBoundsError,
-    ClientProducerSource, ClientResourceMount, ClientSink, ClientSinkEntity, ClientSourceEntity,
-    ConnectorKind, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,
-    CreateClientHttp, CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb,
-    CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
+    AcknowledgementConfirmation, AzureBlobConfigEntry, BufferBound, BufferCapacity, BufferOverflow,
+    ChoiceRequirement, ClickHouseConfigEntry, ClickHouseEmitter, ClickHouseEmitterEntity,
+    ClickHouseTableEmitter, ClickHouseTableEmitterMode, ClickHouseTableName,
+    ClickHouseTablePublishingMode, ClickHouseValueMapping, ClientConfigEntry, ClientConfigOwner,
+    ClientConsumerEmitter, ClientConsumerPublishingMode, ClientDeadline, ClientDeadlineError,
+    ClientDeclaration, ClientEmitter, ClientEmitterEntity, ClientEmitterMode, ClientIngestMode,
+    ClientIngestorAlteration, ClientIngestorEntity, ClientPoolBounds, ClientPoolBoundsError,
+    ClientPooling, ClientProducerIngestor, ClientResourceMount, ConnectorKind,
+    CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
+    CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
+    CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
     CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, EmitSink, EmitSinkCapabilities, EmitSinkKind,
-    EndpointIngestMode, ExternalNameError, GcsConfigEntry, HttpConfigEntry, HttpEndpointSource,
-    HttpIngestorAlteration, HttpRequestIngestMode, HttpRequestSink, HttpRequestSource, HttpSink,
-    HttpSinkEntity, HttpSource, HttpSourceEntity, IcebergCatalog, IcebergRestConfigEntry,
-    IcebergSink, IcebergSinkEntity, IcebergStorageBackend, IcebergTableSink, IcebergValueMapping,
-    IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
-    IngestSourceCapabilities, IngestSourceKind, IngestorAlteration, IngestorEntityModel,
-    KafkaConfigEntry, KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestorAlteration,
-    KafkaOffsetMode, KafkaSink, KafkaSinkEntity, KafkaSource, KafkaSourceEntity, KafkaTopicName,
-    KafkaTopicSink, KafkaTopicSource, MongoDbCollectionSink, MongoDbConfigEntry,
-    MongoDbConflictAction, MongoDbSink, MongoDbSinkEntity, MongoDbValueMapping, MqttConfigEntry,
-    MqttIngestMode, MqttIngestorAlteration, MqttQos, MqttSession, MqttSink, MqttSinkEntity,
-    MqttSource, MqttSourceEntity, MqttTopicFilter, MqttTopicSink, MqttTopicSource,
-    MySqlConfigEntry, MySqlConflictAction, MySqlSink, MySqlSinkEntity, MySqlTableSink,
-    MySqlValueMapping, NatsConfigEntry, NatsIngestMode, NatsIngestorAlteration, NatsQueueGroupName,
-    NatsSink, NatsSinkEntity, NatsSource, NatsSourceEntity, NatsSubjectName, NatsSubjectSink,
-    NatsSubjectSource, OtelAggregationTemporality, OtelConfigEntry, OtelLogsSink, OtelMappings,
-    OtelMetric, OtelMetricKind, OtelMetricsSink, OtelScope, OtelSink, OtelSinkEntity,
-    OtelTracesSink, OtelValueMapping, PositionClass, PostgresConfigEntry, PostgresConflictAction,
-    PostgresSink, PostgresSinkEntity, PostgresTableSink, PostgresValueMapping,
-    PrometheusConfigEntry, PrometheusIngestMode, PrometheusIngestorAlteration,
-    PrometheusQuerySource, PrometheusSource, PrometheusSourceEntity, PulsarConfigEntry,
-    PulsarIngestMode, PulsarIngestorAlteration, PulsarSink, PulsarSinkEntity, PulsarSource,
-    PulsarSourceEntity, PulsarSubscriptionName, PulsarTopicName, PulsarTopicSink,
-    PulsarTopicSource, RabbitMqConfigEntry, RabbitMqIngestMode, RabbitMqIngestorAlteration,
-    RabbitMqQueueName, RabbitMqQueueSink, RabbitMqQueueSource, RabbitMqSink, RabbitMqSinkEntity,
-    RabbitMqSource, RabbitMqSourceEntity, RedisChannelName, RedisConfigEntry,
-    RedisIngestorAlteration, RedisPubSubIngestMode, RedisPubSubSink, RedisPubSubSource, RedisSink,
-    RedisSinkEntity, RedisSource, RedisSourceEntity, S3ConfigEntry, SentryConfigEntry,
-    SentryEventSink, SentrySink, SentrySinkEntity, SinkBody, SinkClientReference, SinkEntity,
-    SinkEntityKind, SinkReference, SinkValueMapping, SinkValueMappings, SourceBody, SourceEntity,
-    SourceEntityKind, SourceMetadataScope, SourceReference, SourceReferenceKind, SqsConfigEntry,
-    SqsFifoGroup, SqsIngestMode, SqsIngestorAlteration, SqsQueueName, SqsQueueSink, SqsQueueSource,
-    SqsSink, SqsSinkEntity, SqsSource, SqsSourceEntity, SyslogCollectorSink, SyslogConfigEntry,
-    SyslogIngestMode, SyslogIngestorAlteration, SyslogListenerSource, SyslogSink, SyslogSinkEntity,
-    SyslogSource, SyslogSourceEntity, WebsocketsConfigEntry, WebsocketsConnectionSource,
-    WebsocketsEndpointSource, WebsocketsIngestMode, WebsocketsIngestorAlteration, WebsocketsSource,
-    WebsocketsSourceEntity, ZeroMqConfigEntry, ZeroMqIngestMode, ZeroMqIngestorAlteration,
-    ZeroMqPullSource, ZeroMqPushSink, ZeroMqSink, ZeroMqSinkEntity, ZeroMqSource,
-    ZeroMqSourceEntity,
+    CreateClientWebsockets, CreateClientZeroMq, DEFAULT_CONNECT_TIMEOUT, DeadlineKey,
+    DeclaredBounds, DeclaredBuffer, DeclaredDelivery, DeclaredQuiesce, DeclaredValueMapping,
+    DeclaredWait, EmitterBodyForm, EmitterClientReference, EmitterDeclaration, EmitterEntity,
+    EmitterEntityBody, EmitterEntityCapabilities, EmitterEntityKind, EmitterEntityMetadata,
+    EmitterEntityModel, EmitterModeChange, EmitterPublication, EmitterReference,
+    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, EndpointIngestMode,
+    EnvelopeClauseKind, ExternalName, ExternalNameDeclaration, ExternalNameError, GcsConfigEntry,
+    HeaderLayout, HeaderModel, HeaderNames, HttpConfigEntry, HttpEmitter, HttpEmitterEntity,
+    HttpEndpointIngestor, HttpIngestor, HttpIngestorEntity, HttpRequestEmitter,
+    HttpRequestEmitterMode, HttpRequestIngestMode, HttpRequestIngestor,
+    HttpRequestIngestorAlteration, HttpRequestPublishingMode, IcebergCatalog, IcebergEmitter,
+    IcebergEmitterEntity, IcebergRestConfigEntry, IcebergStorageBackend, IcebergTableEmitter,
+    IcebergTableEmitterMode, IcebergTableName, IcebergTablePublishingMode, IcebergValueMapping,
+    IngestAcknowledgement, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestorAlteration, IngestorDeclaration, IngestorEntity,
+    IngestorEntityBody, IngestorEntityCapabilities, IngestorEntityKind, IngestorEntityMetadata,
+    IngestorEntityModel, IngestorMetadataScope, IngestorReference, IngestorReferenceKind,
+    KafkaConfigEntry, KafkaConsumerGroupName, KafkaEmitter, KafkaEmitterEntity, KafkaIngestMode,
+    KafkaIngestor, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicEmitter, KafkaTopicEmitterMode,
+    KafkaTopicIngestor, KafkaTopicIngestorAlteration, KafkaTopicName, KafkaTopicPublishingMode,
+    LiteralHeaderWrite, LocatorDeclaration, LocatorName, MQTT_MAXIMUM_PACKET_BYTES,
+    MQTT_SOURCE_MAXIMUM_PACKET_BYTES, MappedValueField, MappedValueSection, MappedValueType,
+    MappedValueTypes, MongoDbCollectionEmitter, MongoDbCollectionEmitterMode,
+    MongoDbCollectionName, MongoDbCollectionPublishingMode, MongoDbConfigEntry,
+    MongoDbConflictAction, MongoDbEmitter, MongoDbEmitterEntity, MongoDbValueMapping,
+    MqttConfigEntry, MqttEmitter, MqttEmitterEntity, MqttIngestMode, MqttIngestor,
+    MqttIngestorEntity, MqttQos, MqttSession, MqttTopicEmitter, MqttTopicEmitterMode,
+    MqttTopicFilter, MqttTopicIngestor, MqttTopicIngestorAlteration, MqttTopicName,
+    MqttTopicPublishingMode, MySqlConfigEntry, MySqlConflictAction, MySqlEmitter,
+    MySqlEmitterEntity, MySqlTableEmitter, MySqlTableEmitterMode, MySqlTableName,
+    MySqlTablePublishingMode, MySqlValueMapping, NatsConfigEntry, NatsEmitter, NatsEmitterEntity,
+    NatsIngestMode, NatsIngestor, NatsIngestorEntity, NatsPublishSubjectName, NatsQueueGroupName,
+    NatsSubjectEmitter, NatsSubjectEmitterMode, NatsSubjectIngestor, NatsSubjectIngestorAlteration,
+    NatsSubjectName, NatsSubjectPublishingMode, OTEL_HISTOGRAM_VALUE_TYPES, OTEL_LOG_VALUE_TYPES,
+    OTEL_NUMBER_VALUE_TYPES, OTEL_TRACE_VALUE_TYPES, OmittedDeadline, OptionChoice,
+    OptionDeclaration, OptionForm, OptionPresence, OptionValue, OtelAggregationTemporality,
+    OtelConfigEntry, OtelEmitter, OtelEmitterEntity, OtelEmitterMode, OtelLogsEmitter,
+    OtelLogsPublishingMode, OtelMappings, OtelMetric, OtelMetricKind, OtelMetricsEmitter,
+    OtelMetricsPublishingMode, OtelScope, OtelTracesEmitter, OtelTracesPublishingMode,
+    OtelValueMapping, PROMETHEUS_DEFAULT_MAX_BODY_SIZE, PositionClass, PostgresConfigEntry,
+    PostgresConflictAction, PostgresEmitter, PostgresEmitterEntity, PostgresTableEmitter,
+    PostgresTableEmitterMode, PostgresTableName, PostgresTablePublishingMode, PostgresValueMapping,
+    PrometheusApiRoot, PrometheusApiRootError, PrometheusClientConfigError, PrometheusClientKey,
+    PrometheusConfigEntry, PrometheusIngestMode, PrometheusIngestor, PrometheusIngestorEntity,
+    PrometheusQueryIngestor, PrometheusQueryIngestorAlteration, PropertyDeclaration,
+    PulsarConfigEntry, PulsarEmitter, PulsarEmitterEntity, PulsarIngestMode, PulsarIngestor,
+    PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName, PulsarSubscriptionOwnership,
+    PulsarTopicEmitter, PulsarTopicEmitterMode, PulsarTopicIngestor, PulsarTopicIngestorAlteration,
+    PulsarTopicName, PulsarTopicPublishingMode, RabbitMqConfigEntry, RabbitMqEmitter,
+    RabbitMqEmitterEntity, RabbitMqIngestMode, RabbitMqIngestor, RabbitMqIngestorEntity,
+    RabbitMqQueueEmitter, RabbitMqQueueEmitterMode, RabbitMqQueueIngestor,
+    RabbitMqQueueIngestorAlteration, RabbitMqQueueName, RabbitMqQueuePublishingMode,
+    RedisChannelName, RedisConfigEntry, RedisEmitter, RedisEmitterEntity, RedisIngestor,
+    RedisIngestorAlteration, RedisIngestorEntity, RedisPubSubEmitter, RedisPubSubEmitterMode,
+    RedisPubSubIngestMode, RedisPubSubIngestor, RedisPubSubPublishingMode, ReplacedHeaderWrite,
+    RuntimeCapability, S3ConfigEntry, SentryConfigEntry, SentryEmitter, SentryEmitterEntity,
+    SentryEventEmitter, SentryEventEmitterMode, SentryEventPublishingMode, SqsConfigEntry,
+    SqsEmitter, SqsEmitterEntity, SqsFifoGroup, SqsIngestMode, SqsIngestor, SqsIngestorEntity,
+    SqsQueueEmitter, SqsQueueEmitterMode, SqsQueueIngestor, SqsQueueIngestorAlteration,
+    SqsQueueName, SqsQueuePublishingMode, SyslogCollectorEmitter, SyslogCollectorEmitterMode,
+    SyslogCollectorPublishingMode, SyslogConfigEntry, SyslogEmitter, SyslogEmitterEntity,
+    SyslogIngestMode, SyslogIngestor, SyslogIngestorEntity, SyslogListenerIngestor,
+    SyslogListenerIngestorAlteration, WEBSOCKETS_CONTROL_FRAME_BUDGET, WaitBound,
+    WebsocketsClientConfig, WebsocketsClientConfigError, WebsocketsClientKey,
+    WebsocketsConfigEntry, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsFrameType, WebsocketsIngestMode, WebsocketsIngestor, WebsocketsIngestorAlteration,
+    WebsocketsIngestorEntity, WebsocketsUpgradeHeader, WebsocketsUpgradeHeaders,
+    WebsocketsUpgradeHeadersError, ZeroMqConfigEntry, ZeroMqEmitter, ZeroMqEmitterEntity,
+    ZeroMqIngestMode, ZeroMqIngestor, ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    ZeroMqPullIngestorAlteration, ZeroMqPushEmitter, ZeroMqPushEmitterMode,
+    ZeroMqPushPublishingMode,
 };
 pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
@@ -151,11 +188,11 @@ pub use domain_clock::{
 pub use duration_text::{DurationTextError, parse_duration_text};
 pub use emitter::{
     AckMode, AlterEmitter, AlterEmitterError, AlterEmitterOperation, CreateEmitter,
-    EmitterBatchContractError, EmitterBody, EmitterPublishingMode,
+    EmitterBatchContractError, EmitterBody, EmitterPublishing, EmitterPublishingModeKind,
 };
 pub use emitter_batch::{
-    BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy,
-    EmitterBatchRequirement, PayloadSizeLimit,
+    BatchMessageLimit, BatchUnavailability, ByteSizeUnit, EmitterBatchLegality,
+    EmitterBatchLimitError, EmitterBatchPolicy, PayloadSizeError, PayloadSizeLimit,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
@@ -175,18 +212,23 @@ pub use message_error::{
 pub use model_index::ModelIndex;
 pub use name_spelling::NamePosition;
 pub use names::{
-    BranchName, BuiltinFunctionName, ChannelName, ClientName, ClusterNodeName, CodecName,
-    CollectionName, CorrelatorName, DeduplicatorName, DomainName, DotPolicy, EmitterName,
-    EndpointName, FieldName, GeneratorName, InferencerName, IngestorName, JunctionName, LookupName,
-    ModelName, NameError, PlacementName, QueueName, ReingestorName, RelayName, ReordererName,
-    ResourceName, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName,
-    TopicName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
+    BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, CorrelatorName,
+    DeduplicatorName, DomainName, DotPolicy, EmitterName, EndpointName, FieldName, GeneratorName,
+    InferencerName, IngestorName, JunctionName, LookupName, ModelName, NameError, PlacementName,
+    ReingestorName, RelayName, ReordererName, ResourceName, SchemaName, SignalingProtocolName,
+    SubscriptionName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
     WireSchemaName,
 };
 pub use node_endpoint::{
     NodeEndpoint, NodeEndpointParseError, NodeServiceUrl, NodeServiceUrlParseError,
 };
 pub use node_ref::{DomainNodeRef, NodeRef};
+pub use prerequisites::{
+    ConsensusFloors, DescribedPrerequisite, FingerprintTextError, NodePrerequisites, Prerequisite,
+    PrerequisiteMismatch, PrerequisiteRecordError, PrerequisiteTimings, RaftLogDurability,
+    TIMING_COMPATIBILITY_FACTOR, TimingPrerequisite, TrustRootFingerprint, WireContractFingerprint,
+    timing_text,
+};
 pub use processor::{
     AlterDeduplicator, AlterDeduplicatorError, AlterDeduplicatorOperation, AlterJunction,
     AlterJunctionError, AlterProcessorError, AlterProcessorOperation, AlterReingestor,
@@ -257,6 +299,9 @@ pub use schema::{
     WireSchemaField, WireSchemaStrictness,
 };
 pub use schema_fingerprint::SchemaFingerprint;
+pub use settings::{
+    ClusterParameters, NodeCapabilities, Prerequisites, Setting, SettingClass, SettingDefinition,
+};
 pub use statement::{
     AckWindow, AlterDomain, AlterGenerator, AlterGeneratorError, AlterGeneratorOperation,
     AlterIngestor, AlterIngestorError, AlterIngestorOperation, AlterPlacement, AlterPlacementError,
@@ -266,14 +311,14 @@ pub use statement::{
     CodecWireFormat, CordonNode, CreateBranch, CreateCodec, CreateDomain, CreateEndpoint,
     CreateGenerator, CreateIngestor, CreateLookup, CreatePlacement, CreateRelay, CreateResource,
     CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser, CreateVhost,
-    DeleteSubscription, DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter,
-    DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement,
-    DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction,
-    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode,
-    EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource, InspectionFormat,
-    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, PlacementPolicy,
-    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    DeleteSubscription, DescribeCluster, DescribeCorrelator, DescribeDeduplicator, DescribeDomain,
+    DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup,
+    DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource,
+    DescribeTransaction, DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig,
+    DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTick, DrainNode, DropModel,
+    DropNode, EndpointType, ErrorPolicies, GeneralErrorPolicy, IngestTimestampSource,
+    InspectionFormat, LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
+    PlacementPolicy, RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
     RetryPolicy, ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements,
     ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,

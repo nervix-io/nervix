@@ -1,7 +1,7 @@
 Feature: HTTP receiver fixture
   The HTTP receiver stands in for an operator-provisioned endpoint. These scenarios qualify it
   against the HTTP client Nervix already has, the polling ingestor's, so the receiver's capture,
-  scripted status sequences and TLS identity are proven before an HTTP emitter depends on them.
+  scripted status sequences and TLS identity are proven before an HTTP REQUEST emitter depends on them.
 
   Scenario Outline: The HTTP receiver captures a polling client's requests and answers from its script
     Given HTTP receiver "api" is running
@@ -13,11 +13,11 @@ Feature: HTTP receiver fixture
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -29,8 +29,7 @@ Feature: HTTP receiver fixture
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT receiver_api
-        TYPE HTTP
+      CREATE HTTP CLIENT receiver_api
         CONFIG {
           'endpoint' = '{{http_receiver.api}}/poll/{{test_id}}?page=1',
           'method' = 'GET',
@@ -76,20 +75,20 @@ Feature: HTTP receiver fixture
     And HTTP receiver "secure" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has the TLS files of HTTP receiver "secure" in resource directory "receiver_tls"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE receiver_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE receiver_tls VERSION "{{receiver_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -101,8 +100,7 @@ Feature: HTTP receiver fixture
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT receiver_secure
-        TYPE HTTP
+      CREATE HTTP CLIENT receiver_secure
         MOUNT receiver_tls VERSION 1
         CONFIG {
           'endpoint' = '{{http_receiver.secure}}/poll/{{test_id}}',
@@ -143,11 +141,11 @@ Feature: HTTP receiver fixture
     Given HTTPS receiver "untrusted" is running with a certificate for "127.0.0.1"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -159,8 +157,7 @@ Feature: HTTP receiver fixture
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT receiver_untrusted
-        TYPE HTTP
+      CREATE HTTP CLIENT receiver_untrusted
         CONFIG {
           'endpoint' = '{{http_receiver.untrusted}}/poll/{{test_id}}',
           'method' = 'GET',

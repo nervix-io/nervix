@@ -3,7 +3,7 @@
 //! - **Owns.** The typed program vocabulary consumed by the expression compiler and runtime.
 //! - **Depends on.** Primitive Rust and Arrow value types, and the datetime constants a call
 //!   resolves when it is lowered: time zones and compiled datetime formats.
-//! - **Must not know.** NSPL tokens, parser diagnostics, Models, or the execution graph.
+//! - **Must not know.** Plexus tokens, parser diagnostics, Models, or the execution graph.
 
 #![cfg_attr(
     nervix_lint,
@@ -961,7 +961,7 @@ impl PartialOrd for WindowAggregateInvocation {
 }
 
 impl WindowAggregateFunction {
-    pub fn nspl_name(&self) -> &str {
+    pub fn plexus_name(&self) -> &str {
         self.as_ref()
     }
 

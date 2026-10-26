@@ -10,7 +10,7 @@ Feature: Paced simulation drivers
     Given a 1 node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE <time_rate>;
       """
@@ -49,13 +49,13 @@ Feature: Paced simulation drivers
     # among three nodes the authority of paced_simulation is node-3.
     And domain clock progress for domain "{{domain}}" on node "node-3" is paused before delivery
     When leadership is transferred to node "node-1"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 1.0;
       """
     Then domain clock progress for domain "{{domain}}" on node "node-3" reaches the delivery pause within the authority observation budget
     When domain clock progress for domain "{{domain}}" on node "node-3" resumes
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR simulated_readings ONTO NODE node-2 IGNORE PREFERENCES;
       RELOCATE EMITTER observed_readings ONTO NODE node-2 IGNORE PREFERENCES;
@@ -95,7 +95,7 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 2.0;
       """
@@ -131,18 +131,18 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 1.0;
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 300 --sensors 2 --follow-generations"
     Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
     Then within "60s" the paced simulation driver prints a line starting with "CLOCK generation=1 state=stopped"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 4.0;
       """
@@ -166,23 +166,23 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 0.05;
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 30 --sensors 2 --credit-batches 2"
     Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER observed_readings SET TO CLIENT SCHEMA observed_reading
+      ALTER CLIENT CONSUMER EMITTER observed_readings SET TO SCHEMA observed_reading
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;
-      ALTER EMITTER rejection_notices SET TO CLIENT SCHEMA rejected_reading
+      ALTER CLIENT CONSUMER EMITTER rejection_notices SET TO SCHEMA rejected_reading
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;
       """
     Then within "60s" the paced simulation driver prints a line starting with "CONSUMER reopen_required consumer=output-1 emitter=observed_readings reason=contract_changed"
     And within "60s" the paced simulation driver prints a line starting with "CONSUMER reopened consumer=output-1 emitter=observed_readings generation=1"
     And within "60s" the paced simulation driver prints a line starting with "CONSUMER reopened consumer=rejections emitter=rejection_notices generation=1"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA reading
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
@@ -225,7 +225,7 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER CLIENT PRODUCER INGESTOR simulated_readings REPLACE ROUTE TO readings
         INHERIT ALL SET admitted_at = now(), timestamp_source = 'at'
@@ -233,13 +233,13 @@ Feature: Paced simulation drivers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO rejected_readings SET reading_id = input.reading_id,
           occurred_at = input.occurred_at, error_code = error.code, error_message = error.message;
-      ALTER EMITTER observed_readings SET FLUSH IMMEDIATE;
-      ALTER EMITTER rejection_notices SET FLUSH IMMEDIATE;
+      ALTER CLIENT CONSUMER EMITTER observed_readings SET FLUSH IMMEDIATE;
+      ALTER CLIENT CONSUMER EMITTER rejection_notices SET FLUSH IMMEDIATE;
       START AT NOW TIME RATE 0.5;
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 8 --sensors 1 --credit-batches 1 --processing-time 2s"
     Then within "60s" the paced simulation driver prints a line starting with "WAITING credit"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA reading
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s
@@ -284,9 +284,9 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;
+      ALTER CLIENT CONSUMER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;
       START AT NOW TIME RATE 0.5;
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 1 --sensors 1 --consumer-delay 5s --deadline 2m"
@@ -306,7 +306,7 @@ Feature: Paced simulation drivers
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER CLIENT PRODUCER INGESTOR simulated_readings REPLACE ROUTE TO readings
         INHERIT ALL SET admitted_at = now(), timestamp_source = 'at'
@@ -320,7 +320,7 @@ Feature: Paced simulation drivers
       """
     And the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 30 --sensors 2 --deadline 5s"
     Then within "60s" the paced simulation driver prints a line starting with "OUTCOME tick="
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       <change>
       """
@@ -330,23 +330,23 @@ Feature: Paced simulation drivers
     Examples:
       | driver | cluster_size | change_kind       | endpoint | change                                                                                                                                                                          | error                                                                                               |
       | rust   | 1            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                                 | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
-      | rust   | 1            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
-      | rust   | 1            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | rust   | 1            | schema-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET TO SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | rust   | 1            | credit-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
       | rust   | 1            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                               | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
       | rust   | 1            | schema-mismatched | producer | ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
       | rust   | 3            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                                 | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
-      | rust   | 3            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
-      | rust   | 3            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | rust   | 3            | schema-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET TO SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | rust   | 3            | credit-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
       | rust   | 3            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                               | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
       | rust   | 3            | schema-mismatched | producer | ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
       | python | 1            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                                 | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
-      | python | 1            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
-      | python | 1            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | python | 1            | schema-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET TO SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | python | 1            | credit-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
       | python | 1            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                               | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
       | python | 1            | schema-mismatched | producer | ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
       | python | 3            | removed           | consumer | DROP EMITTER observed_readings;                                                                                                                                                 | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: endpoint not found   |
-      | python | 3            | schema-mismatched | consumer | ALTER EMITTER observed_readings SET TO CLIENT SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;                        | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
-      | python | 3            | credit-mismatched | consumer | ALTER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
+      | python | 3            | schema-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET TO SCHEMA revised_observed_reading MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s;               | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: schema mismatch      |
+      | python | 3            | credit-mismatched | consumer | ALTER CLIENT CONSUMER EMITTER observed_readings SET BATCH MAX MESSAGES 256 MAX SIZE 2MiB;                                                                                       | emitter 'observed_readings' of domain 'paced_simulation' refused the consumer: invalid limits       |
       | python | 3            | removed           | producer | DROP INGESTOR simulated_readings;                                                                                                                                               | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: endpoint not found |
       | python | 3            | schema-mismatched | producer | ALTER CLIENT PRODUCER INGESTOR simulated_readings SET FROM SCHEMA revised_reading MODE ACK PARALLEL MAX 8 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 2s ON QUIESCE SUSPEND; | ingestor 'simulated_readings' of domain 'paced_simulation' refused the producer: schema mismatch    |
 
@@ -358,7 +358,7 @@ Feature: Paced simulation drivers
     And the gRPC endpoint of node "node-1" is forwarded from fixture address "127.0.0.1"
     # At half real time the admission window retains 51 seconds of wall time, which the replay
     # below stays well inside.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 0.5;
       """
@@ -392,7 +392,7 @@ Feature: Paced simulation drivers
     And the leader node is configured with the paced simulation example graph
     # One batch of 300 readings fills the byte credit, so each tick's batch waits for the one
     # before it to complete while the consumers acknowledge its output.
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 0.5;
       """
@@ -422,7 +422,7 @@ Feature: Paced simulation drivers
     Given a 1 node nervix cluster is started
     And the active domain is "paced_simulation"
     And the leader node is configured with the paced simulation example graph
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 2.0;
       """
@@ -453,7 +453,7 @@ Feature: Paced simulation drivers
       """
       not json
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 2.0;
       """
@@ -491,7 +491,7 @@ Feature: Paced simulation drivers
     When the <driver> paced simulation driver runs through node "node-1" with arguments "--ticks 5"
     Then within "60s" the paced simulation driver exits with status 2
     And the paced simulation driver's errors contain "the clock of domain 'paced_simulation' is stopped at generation 0; START the domain before running the simulation"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 2.0;
       """

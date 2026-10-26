@@ -52,7 +52,8 @@ pub(crate) use domain_activation_plan::{
 };
 pub(crate) use entity_gate::{
     EntityGatePlan, entity_pause_relays_for_schedule, gate_boundary,
-    ownership_handoff_relays_for_schedule, scheduled_impact_coverage,
+    ownership_handoff_gate_participants, ownership_handoff_relays_for_schedule,
+    scheduled_impact_coverage,
 };
 #[cfg(test)]
 pub(crate) use entrypoint_plan::EntrypointPlanError;
@@ -70,12 +71,18 @@ pub(crate) use execution_revision::{
 };
 pub(crate) use graph::{ActiveGraph, EdgeKind};
 pub(crate) use ingestor_plan::{
-    ClientIngestorStartPlan, EndpointIngestorStartPlan, HttpIngestorStartPlan, IngestorInputPlan,
-    IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement, KafkaIngestorStartPlan,
-    KafkaOffsetPlan, MqttIngestorStartPlan, NatsIngestorStartPlan, PrometheusIngestorStartPlan,
-    PulsarIngestorStartPlan, RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan,
-    SourceStartPlan, SqsIngestorStartPlan, SyslogIngestorStartPlan, TransportInputPlan,
-    WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan,
+    ClientIngestorStartPlan, EndpointIntakeStartPlan, EndpointRequestPlan,
+    HttpEndpointIngestorStartPlan, HttpIngestorStartPlan, HttpRequestIngestorStartPlan,
+    IngestorConnectorPlan, IngestorInputPlan, IngestorSpec, IngestorStartPlan,
+    KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, KafkaOffsetPlan,
+    KafkaTopicIngestorStartPlan, MqttIngestorStartPlan, MqttTopicIngestorStartPlan,
+    NatsIngestorStartPlan, NatsSubjectIngestorStartPlan, PrometheusIngestorStartPlan,
+    PrometheusQueryIngestorStartPlan, PulsarIngestorStartPlan, PulsarTopicIngestorStartPlan,
+    RabbitMqIngestorStartPlan, RabbitMqQueueIngestorStartPlan, RedisIngestorStartPlan,
+    RedisPubSubIngestorStartPlan, SqsIngestorStartPlan, SqsQueueIngestorStartPlan,
+    SyslogIngestorStartPlan, SyslogListenerIngestorStartPlan, TransportInputPlan,
+    WebsocketsConnectionIngestorStartPlan, WebsocketsEndpointIngestorStartPlan,
+    WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan, ZeroMqPullIngestorStartPlan,
 };
 #[cfg(test)]
 pub(crate) use message_error_plan::MessageErrorRouteSpec;

@@ -1,4 +1,4 @@
-//! Resource upload: the archive a directory becomes, and the stream that carries it to a server.
+//! Edges layer: the archive a directory becomes, and the stream that carries it to a server.
 //!
 //! - **Owns.** Building the deterministic archive of a directory, streaming it as upload frames,
 //!   checking the reply against the upload it answers, and the routing that reply calls for.
@@ -12,7 +12,6 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
-use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
@@ -25,8 +24,9 @@ use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
 use tempfile::TempPath;
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
 };
+use tokio_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 
 use crate::{
@@ -46,6 +46,10 @@ const _: () = assert!(UPLOAD_CHUNK_BYTES <= SESSION_LIMITS.frame_bytes() / 2);
 
 /// Upload frames queued for the stream before the archive reader waits for the transport.
 const UPLOAD_FRAME_CAPACITY: usize = 8;
+
+/// Archive construction keeps one bounded read buffer and one bounded write buffer, avoiding
+/// a filesystem worker handoff for every small tar copy and header write.
+const ARCHIVE_BUFFER_BYTES: usize = 1024 * 1024;
 
 /// The request identity of an upload's start frame. Every attempt is a stream of its own that
 /// exactly one reply answers, so the identity only has to be non-zero.
@@ -218,9 +222,12 @@ impl UploadArchive {
         let file = File::create(&path)
             .await
             .change_context(ClientError::BuildUploadArchive)?;
-        Self::write(&directory, file)
-            .await
-            .change_context(ClientError::BuildUploadArchive)?;
+        Self::write(
+            &directory,
+            BufWriter::with_capacity(ARCHIVE_BUFFER_BYTES, file),
+        )
+        .await
+        .change_context(ClientError::BuildUploadArchive)?;
         let length = tokio::fs::metadata(&path)
             .await
             .change_context(ClientError::BuildUploadArchive)?
@@ -238,9 +245,11 @@ impl UploadArchive {
         W: AsyncWrite + Unpin + Send + Sync,
     {
         let entries = UploadArchiveEntry::collect(directory)?;
-        let mut builder = AsyncTarBuilder::new(writer);
+        // This constructor has no asynchronous drop finalizer: an error or cancellation
+        // abandons the partial archive with its writer. Only the successful path writes the
+        // terminator and flushes, before build exposes the temporary file to an upload.
+        let mut builder = AsyncTarBuilder::new_non_terminated(writer);
         builder.mode(HeaderMode::Deterministic);
-        let mut result = Ok(());
 
         for entry in entries {
             nervix_primitives::task::consume_budget().await;
@@ -248,7 +257,7 @@ impl UploadArchive {
             header.set_mtime(0);
             header.set_uid(0);
             header.set_gid(0);
-            let write_result = match entry {
+            match entry {
                 UploadArchiveEntry::Directory { relative } => {
                     header.set_size(0);
                     header.set_mode(0o755);
@@ -256,7 +265,7 @@ impl UploadArchive {
                     header.set_cksum();
                     builder
                         .append_data(&mut header, &relative, tokio::io::empty())
-                        .await
+                        .await?;
                 }
                 UploadArchiveEntry::File {
                     full_path,
@@ -268,20 +277,14 @@ impl UploadArchive {
                     header.set_entry_type(EntryType::Regular);
                     header.set_cksum();
                     let file = File::open(&full_path).await?;
-                    builder.append_data(&mut header, &relative, file).await
+                    let reader = BufReader::with_capacity(ARCHIVE_BUFFER_BYTES, file);
+                    builder.append_data(&mut header, &relative, reader).await?;
                 }
-            };
-
-            if let Err(error) = write_result {
-                result = Err(error);
-                break;
             }
         }
 
         let mut writer = builder.into_inner().await?;
-        let shutdown_result = writer.shutdown().await;
-        result?;
-        shutdown_result?;
+        writer.shutdown().await?;
         Ok(())
     }
 }
@@ -429,3 +432,7 @@ pub(crate) fn upload_status_is_retryable(status: &Status) -> bool {
     }
     false
 }
+
+#[cfg(all(test, not(feature = "shuttle")))]
+#[path = "upload_tests.rs"]
+mod tests;

@@ -11,27 +11,24 @@ the four types listed above.
 
 ## Declaring the bounds
 
-The clause is required, with its two bounds in this order, immediately after the client type and
+The clause is required, with its two bounds in this order, immediately after the client name and
 before an optional resource mount:
 
-```nspl,ignore
-CREATE [IF NOT EXISTS] CLIENT <name>
-  TYPE POSTGRES|MYSQL|MONGODB|REDIS
+```plexus,ignore
+CREATE [IF NOT EXISTS] POSTGRES|MYSQL|MONGODB|REDIS CLIENT <name>
   POOL SIZE MIN <minimum> MAX <maximum>
   [MOUNT <resource> VERSION <n>|LATEST]
   CONFIG { <connector configuration> };
 ```
 
-```nspl
-CREATE CLIENT postgres_main
-  TYPE POSTGRES
+```plexus
+CREATE POSTGRES CLIENT postgres_main
   POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=verify-full'
   };
 
-CREATE CLIENT redis_main
-  TYPE REDIS
+CREATE REDIS CLIENT redis_main
   POOL SIZE MIN 1 MAX 4
   MOUNT dev_tls VERSION 1
   CONFIG {
@@ -68,10 +65,18 @@ and other applications using the same database.
 ## Borrowing and waiting
 
 A borrower holds a connection only while it performs an external operation or its necessary
-metadata work. For Postgres and MySQL the unit is a bounded insert or its metadata lookup, and for
-Redis it is one publish and its response; a flush containing several inserts releases capacity
-between them so other emitters can make progress. An emitter waiting out a flush interval or a
-retry backoff holds no connection at all.
+metadata work. For Postgres the unit is one bounded insert: the metadata lookup of a write runs on
+its first insert's connection, and an insert the database refuses for one of its rows writes those
+rows one at a time on the same connection before returning it. MySQL likewise keeps one connection
+for a bounded insert and the isolation of any rows it refuses. For Redis the unit is one publish
+and its response. A flush containing several inserts releases capacity between them so other
+emitters can make progress. An emitter waiting out a flush interval or a retry backoff holds no
+connection at all.
+
+Because a Postgres or MySQL insert keeps its connection until it has an answer for every row it
+carries, isolating a rejected row never waits for the pool a second time, whether other emitters
+of the client queue for the same connections or the pool would have to open a new one. The host
+handles the per-record outcomes when the write completes, including any later inserts in it.
 
 When capacity is exhausted the operation waits, and that wait applies backpressure through the
 emitter's existing bounded input and flush buffers. A full pool is a waiting state rather than a
@@ -122,6 +127,10 @@ credential or a complete connection address.
 
 ## Bounds and connector configuration
 
+The generated [Connector Capabilities](connector-capabilities.md#clients) reference lists every
+client kind's declared pooling and CONFIG owner class. A driver's pass-through keys and the
+Nervix-owned keys keep their respective entity contracts.
+
 The bounds are structured client configuration, independent of the connector's string-valued
 `CONFIG`. Endpoint, authentication, database, TLS, and supported session options continue to belong
 to `CONFIG`. Connection-pool sizing is declared only through the `POOL SIZE` clause. Native
@@ -132,8 +141,7 @@ Both counts are strongly persisted with the rest of the client definition, and
 `SHOW CREATE CLIENT <name>;` reports them in the declared order:
 
 ```plain
-CREATE CLIENT postgres_main
-  TYPE POSTGRES
+CREATE POSTGRES CLIENT postgres_main
   POOL SIZE MIN 2 MAX 8
   CONFIG {
     'addr' = 'postgresql://USER:PASSWORD@HOST:5432/DATABASE?sslmode=verify-full'
@@ -143,6 +151,6 @@ CREATE CLIENT postgres_main
 ## Changing a bound
 
 There is no `ALTER CLIENT`. Change either bound the same way as any other part of a client
-definition: `DROP CLIENT` and `CREATE CLIENT` in one transaction. A client that runtime entities
+definition: `DROP CLIENT` and `CREATE <CONNECTOR> CLIENT` in one transaction. A client that runtime entities
 reference is replaced together with them, under the existing transactional quiesce contract for
 those entities.

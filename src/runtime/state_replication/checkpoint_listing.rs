@@ -2,7 +2,7 @@
 //! Owns: the owner's answer to a replica's catalog read, and its conversion to and from the
 //! interconnect envelope that carries it.
 //! May depend on: catalog listings, typed branch keys and the interconnect envelopes.
-//! Must not know: how the catalog is kept, how a replica acts on a listing, or NSPL.
+//! Must not know: how the catalog is kept, how a replica acts on a listing, or Plexus.
 
 #![cfg_attr(
     nervix_lint,

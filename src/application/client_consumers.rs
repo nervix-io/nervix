@@ -4,7 +4,7 @@
 //! - **Owns.** The local attachment or authenticated interconnect stream for one consumer,
 //!   forwarding its Arrow attempts and settlement, and detaching it when either peer disappears.
 //! - **Depends on.** The node's volatile emitter endpoint and the interconnect duplex contract.
-//! - **Must not know.** Session request frames, NSPL text, or graph processing.
+//! - **Must not know.** Session request frames, Plexus text, or graph processing.
 
 #![cfg_attr(
     nervix_lint,
@@ -36,6 +36,7 @@ use nervix_primitives::{
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::runtime::{
@@ -242,24 +243,67 @@ impl ClientConsumerRouter {
             expected_fields,
             limits,
         };
+        let started = Instant::now();
         let stream = nervix_primitives::time::timeout(
             OPEN_DEADLINE,
             self.interconnect.open_duplex_stream(owner, opening),
         )
-        .await
-        .map_err(|_| EmitterOpenRefusal::EndpointUnavailable)?
-        .map_err(|_| EmitterOpenRefusal::EndpointUnavailable)?;
+        .await;
+        let stream = match stream {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                debug!(
+                    %owner,
+                    elapsed = ?started.elapsed(),
+                    error = %format_args!("{error:#}"),
+                    "a forwarded consumer stream did not open"
+                );
+                return Err(EmitterOpenRefusal::EndpointUnavailable);
+            }
+            Err(_) => {
+                debug!(%owner, "opening a forwarded consumer stream outlived its deadline");
+                return Err(EmitterOpenRefusal::EndpointUnavailable);
+            }
+        };
         let (sender, mut receiver) = stream;
-        let first = nervix_primitives::time::timeout(OPEN_DEADLINE, receiver.next())
-            .await
-            .map_err(|_| EmitterOpenRefusal::EndpointUnavailable)?
-            .map_err(|_| EmitterOpenRefusal::EndpointUnavailable)?
-            .ok_or(EmitterOpenRefusal::EndpointUnavailable)?;
+        let first = nervix_primitives::time::timeout(OPEN_DEADLINE, receiver.next()).await;
+        let first = match first {
+            Ok(Ok(Some(first))) => first,
+            Ok(Ok(None)) => {
+                debug!(%owner, "a forwarded consumer stream ended before its open was answered");
+                return Err(EmitterOpenRefusal::EndpointUnavailable);
+            }
+            Ok(Err(error)) => {
+                debug!(
+                    %owner,
+                    error = %format_args!("{error:#}"),
+                    "a forwarded consumer stream failed before its open was answered"
+                );
+                return Err(EmitterOpenRefusal::EndpointUnavailable);
+            }
+            Err(_) => {
+                debug!(%owner, "a forwarded consumer open outlived its deadline");
+                return Err(EmitterOpenRefusal::EndpointUnavailable);
+            }
+        };
         let description = match first {
             ConsumerEvent::Opened(description) => description,
-            ConsumerEvent::Refused(refusal) => return Err(refusal_for(refusal)),
+            ConsumerEvent::Refused(refusal) => {
+                debug!(
+                    %owner,
+                    refusal = ?refusal,
+                    elapsed = ?started.elapsed(),
+                    "the executing node refused a forwarded consumer"
+                );
+                return Err(refusal_for(refusal));
+            }
             _ => return Err(EmitterOpenRefusal::EndpointUnavailable),
         };
+        debug!(
+            %owner,
+            elapsed = ?started.elapsed(),
+            "a forwarded consumer attached on its executing node"
+        );
         let (commands, incoming) = mpsc::unbounded_channel();
         let (deliveries, received) = mpsc::unbounded_channel();
         nervix_primitives::task::spawn(serve_forwarded(
@@ -378,6 +422,13 @@ async fn serve_owner(
     let (description, consumer, _grant) = match opened {
         Ok(opened) => opened,
         Err(refusal) => {
+            debug!(
+                domain = request.domain.as_str(),
+                emitter = request.emitter.as_str(),
+                serving_node = %request.serving_node,
+                refusal = ?refusal,
+                "refused a consumer another node forwarded"
+            );
             answers
                 .send(ConsumerEvent::Refused(refusal))
                 .await
@@ -392,31 +443,49 @@ async fn serve_owner(
     {
         return;
     }
+    debug!(
+        domain = request.domain.as_str(),
+        emitter = request.emitter.as_str(),
+        serving_node = %request.serving_node,
+        "attached a consumer another node forwarded"
+    );
     let (responder, deliveries) = consumer.split();
     let mut forward =
         nervix_primitives::task::spawn(forward_deliveries(deliveries, answers.clone()));
     let mut heartbeat = nervix_primitives::time::interval(HEARTBEAT_EACH);
     heartbeat.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
     let mut last_heard = Instant::now();
-    loop {
+    let ended = loop {
         nervix_primitives::select! {
             item = items.next() => match item {
                 Ok(Some(ChargedItem { item: ConsumerItem::Settle { key, reference, answer }, .. })) => {
                     last_heard = Instant::now();
                     let outcome = responder.answer(Uuid::from_bytes(reference), answer).await;
-                    if answers.send(ConsumerEvent::Settled { key, outcome }).await.is_err() { break; }
+                    if answers.send(ConsumerEvent::Settled { key, outcome }).await.is_err() { break "the serving node stopped reading"; }
                 }
                 Ok(Some(ChargedItem { item: ConsumerItem::Heartbeat, .. })) => last_heard = Instant::now(),
-                Ok(Some(ChargedItem { item: ConsumerItem::Close, .. })) => break,
-                _ => break,
+                Ok(Some(ChargedItem { item: ConsumerItem::Close, .. })) => break "the serving node closed the consumer",
+                Ok(None) => break "the serving node ended the stream",
+                Err(_) => break "the stream failed",
             },
             _ = heartbeat.tick() => {
-                if Instant::now().duration_since(last_heard) >= PEER_SILENCE
-                    || answers.send(ConsumerEvent::Heartbeat).await.is_err() { break; }
+                if Instant::now().duration_since(last_heard) >= PEER_SILENCE {
+                    break "the serving node fell silent";
+                }
+                if answers.send(ConsumerEvent::Heartbeat).await.is_err() {
+                    break "the serving node stopped reading";
+                }
             }
-            _ = &mut forward => break,
+            _ = &mut forward => break "the emitter endpoint ended",
         }
-    }
+    };
+    debug!(
+        domain = request.domain.as_str(),
+        emitter = request.emitter.as_str(),
+        serving_node = %request.serving_node,
+        ended,
+        "detached a consumer another node forwarded"
+    );
     forward.abort();
     responder.close();
 }
@@ -499,15 +568,19 @@ async fn serve_forwarded(
     let mut heartbeat = nervix_primitives::time::interval(HEARTBEAT_EACH);
     heartbeat.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
     let mut last_heard = Instant::now();
-    loop {
+    let ended = loop {
         nervix_primitives::select! {
             event = receiver.next() => {
-                let Ok(Some(event)) = event else { break; };
+                let event = match event {
+                    Ok(Some(event)) => event,
+                    Ok(None) => break "the executing node ended the stream",
+                    Err(_) => break "the stream failed",
+                };
                 last_heard = Instant::now();
                 match event {
                     ConsumerEvent::DeliveryStart { identity, reference, source, branch_fingerprint,
                         members, execution_now, bytes } => {
-                        if assembly.is_some() || bytes == 0 || u64::from(bytes) > grant.get() { break; }
+                        if assembly.is_some() || bytes == 0 || u64::from(bytes) > grant.get() { break "a delivery broke the stream contract"; }
                         assembly = Some(Assembly {
                             identity: Uuid::from_bytes(identity), reference: Uuid::from_bytes(reference),
                             source, branch_fingerprint, members, execution_now,
@@ -518,21 +591,21 @@ async fn serve_forwarded(
                         });
                     }
                     ConsumerEvent::DeliveryChunk { bytes, last } => {
-                        let Some(current) = assembly.as_mut() else { break; };
+                        let Some(current) = assembly.as_mut() else { break "a delivery broke the stream contract"; };
                         if bytes.is_empty() || bytes.len() > CHUNK_BYTES
                             || current.bytes.len().checked_add(bytes.len())
                                 .is_none_or(|total| total > current.expected)
-                        { break; }
+                        { break "a delivery broke the stream contract"; }
                         current.bytes.extend_from_slice(&bytes);
                         if last {
-                            let Some(current) = assembly.take() else { break; };
-                            if current.bytes.len() != current.expected { break; }
+                            let Some(current) = assembly.take() else { break "a delivery broke the stream contract"; };
+                            if current.bytes.len() != current.expected { break "a delivery broke the stream contract"; }
                             if deliveries.send(ConsumerDelivery {
                                 identity: current.identity, reference: current.reference,
                                 source: current.source, branch_fingerprint: current.branch_fingerprint,
                                 body: Bytes::from(current.bytes), members: current.members,
                                 execution_now: current.execution_now,
-                            }).is_err() { break; }
+                            }).is_err() { break "the session stopped reading"; }
                         }
                     }
                     ConsumerEvent::Settled { key, outcome } => {
@@ -540,9 +613,9 @@ async fn serve_forwarded(
                             reply.send(outcome).means_peer_left("forwarded settlement requester");
                         }
                     }
-                    ConsumerEvent::Ended => break,
+                    ConsumerEvent::Ended => break "the emitter endpoint ended",
                     ConsumerEvent::Heartbeat => {},
-                    ConsumerEvent::Opened(_) | ConsumerEvent::Refused(_) => break,
+                    ConsumerEvent::Opened(_) | ConsumerEvent::Refused(_) => break "the executing node broke the stream contract",
                 }
             }
             command = commands.recv() => match command {
@@ -555,25 +628,30 @@ async fn serve_forwarded(
                     }).is_err() {
                         reply.send(Err(ClientEmitterRefusal::Closed))
                             .means_peer_left("forwarded settlement requester");
-                        break;
+                        break "the stream stopped taking settlements";
                     }
                     pending.insert(key, reply);
                 }
                 Some(ForwardedCommand::Close) | None => {
                     outbound.try_send(ConsumerItem::Close)
                         .discarded("the stream is closing even if its close frame cannot be queued");
-                    break;
+                    break "the session closed the consumer";
                 }
             },
             _ = heartbeat.tick() => {
-                if Instant::now().duration_since(last_heard) >= PEER_SILENCE
-                    || outbound.is_closed() { break; }
+                if Instant::now().duration_since(last_heard) >= PEER_SILENCE {
+                    break "the executing node fell silent";
+                }
+                if outbound.is_closed() {
+                    break "the stream stopped taking items";
+                }
                 outbound.try_send(ConsumerItem::Heartbeat)
                     .discarded("a missed best-effort heartbeat is detected by peer silence");
             }
-            _ = &mut writer => break,
+            _ = &mut writer => break "the stream stopped taking items",
         }
-    }
+    };
+    debug!(ended, "a forwarded consumer stream ended");
     writer.abort();
     // Dropping the delivery sender ends the session's reads. The owner detaches the consumer and
     // reassigns every unsettled attempt when this duplex stream ends.

@@ -21,7 +21,9 @@ use error_stack::Report;
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
-use nervix_models::ClusterNodeName;
+use nervix_models::{
+    ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
+};
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::{access_with_context, deserialize_using, high::HighSerializer},
@@ -33,31 +35,52 @@ use rkyv::{
 };
 
 use super::{
-    PoolClass, RelayAdmissionStatus, RelayDelivery, RelayPayload, RelayPayloadKind, TransportError,
+    PoolClass, RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload,
+    RelayPayloadKind, TransportError,
 };
 
 const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
 
 /// Changes whenever the one supported interconnect contract changes.
-pub(crate) const WIRE_CONTRACT_FINGERPRINT: [u8; 32] = [
-    0xeb, 0xb6, 0x81, 0xd8, 0x5f, 0xf4, 0x69, 0x25, 0x85, 0x9f, 0xa5, 0x59, 0x73, 0x0c, 0xfa, 0xf1,
-    0x4b, 0xcf, 0x95, 0x83, 0xf0, 0xa2, 0xfd, 0x88, 0xea, 0xd6, 0x49, 0x83, 0x9f, 0xa5, 0x74, 0xfa,
-];
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the fingerprint names the one wire contract this build speaks; peers compare it \
+                  for equality in every connection handshake"
+    )
+)]
+pub const WIRE_CONTRACT: WireContractFingerprint = WireContractFingerprint::from_digest([
+    0xb7, 0x18, 0xa5, 0xd3, 0xa6, 0x6f, 0xa5, 0x92, 0x29, 0x14, 0x30, 0x7c, 0x35, 0xef, 0x28, 0xb5,
+    0xfc, 0x4b, 0x9c, 0x06, 0xf1, 0x08, 0x4d, 0x6f, 0xe0, 0x86, 0x4c, 0x2f, 0x2c, 0x54, 0x78, 0x1d,
+]);
 
+/// The first message of every connection: who dials, for which pool, and everything the dialing
+/// node brings to the cluster.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ConnectionHello {
-    pub(crate) fingerprint: [u8; 32],
     pub(crate) class: PoolClass,
     pub(crate) process_epoch: u64,
     pub(crate) node_id: ClusterNodeName,
     pub(crate) advertised_host: String,
+    pub(crate) prerequisites: NodePrerequisites,
+}
+
+/// The accepting node's answer to a hello.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum ConnectionAnswer {
+    /// The connection is bound, and the accepting node brings these prerequisites.
+    Accepted(ConnectionAccepted),
+    /// The accepting node cannot run beside the dialing one. The mismatch is seen from the accepting
+    /// node: its own value is the local one.
+    Refused { mismatch: PrerequisiteMismatch },
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct ConnectionAccepted {
-    pub(crate) fingerprint: [u8; 32],
     pub(crate) process_epoch: u64,
     pub(crate) node_id: ClusterNodeName,
+    pub(crate) prerequisites: NodePrerequisites,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -82,6 +105,7 @@ pub(crate) enum RelayGrantDisposition {
     Rejected(String),
     Cancelled,
     Retired,
+    Refused(RelayGrantRefusal),
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

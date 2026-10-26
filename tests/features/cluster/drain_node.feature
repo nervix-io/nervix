@@ -3,7 +3,7 @@ Feature: Drain node
   Scenario: Draining a live owner uses the gated handoff
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA handoff_event ( id I64 );
@@ -16,13 +16,13 @@ Feature: Drain node
       """
     Then the last cluster status owner for scheduled "junction" "handoff_junction" is saved as placeholder "drained_owner"
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       DRAIN NODE {{drained_owner}};
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And the last command output contains
       """
       drained node '{{drained_owner}}' (moved 2 of 2 scheduled graph node(s))
@@ -30,12 +30,38 @@ Feature: Drain node
       - kind=junction name=handoff_junction from={{drained_owner}} to=
       """
 
+  Scenario: A drain retries a gate engagement whose interconnect stream broke
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA transport_event ( id I64 );
+      CREATE RELAY transport_input SCHEMA transport_event UNBRANCHED;
+      CREATE RELAY transport_output SCHEMA transport_event UNBRANCHED;
+      CREATE JUNCTION transport_junction FROM transport_input UNBRANCHED
+        TO transport_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "junction" "transport_junction" is saved as placeholder "drained_owner"
+    Given the next ownership handoff gate engagement request in domain "{{domain}}" breaks in transport
+    When these Plexus commands are executed on the leader node
+      """
+      DRAIN NODE {{drained_owner}};
+      """
+    Then the last command output contains
+      """
+      drained node '{{drained_owner}}' (moved 2 of 2 scheduled graph node(s))
+      """
+    And the broken ownership handoff gate engagement request in domain "{{domain}}" was delivered
+
   @planned-handoff-owner-loss
   Scenario: Losing the former owner during a held drain leaves relocation to failover
     Given entity gate deadline is configured as "60s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CORDON NODE node-1;
       CORDON NODE node-3;
@@ -56,14 +82,14 @@ Feature: Drain node
       """
     And the last cluster status owner for scheduled "junction" "owner_loss_junction" is saved as placeholder "former_owner"
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       DRAIN NODE node-2;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     When node "node-2" is stopped
     And the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution fails with "former owner 'node-2' became unavailable during ownership handoff"
+    Then the background Plexus execution fails with "former owner 'node-2' became unavailable during ownership handoff"
     And node "node-1" eventually observes a stable leader
     And within "60s" node "node-1" eventually reports scheduled "junction" "owner_loss_junction" owner different from placeholder "former_owner"
 
@@ -72,7 +98,7 @@ Feature: Drain node
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -92,12 +118,12 @@ Feature: Drain node
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING drain_event_codec
         TO stalled_output INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT drain_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT drain_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER stalled_emitter FROM stalled_output
-        TO ZEROMQ drain_sink MODE NO_ACK RETRY POLICY BACKOFF 10ms MAX 100ms
+      CREATE ZEROMQ PUSH EMITTER stalled_emitter FROM stalled_output
+        TO drain_sink MODE NO ACK RETRY POLICY BACKOFF 10ms MAX 100ms
           ENCODE USING drain_event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION movable_junction FROM control_input UNBRANCHED
@@ -116,7 +142,7 @@ Feature: Drain node
       transient error: fault injector stalled emitter publish
       """
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
-    When these NSPL commands fail with "timed out draining domain"
+    When these Plexus commands fail with "timed out draining domain"
       """
       DRAIN NODE node-1;
       """
@@ -130,7 +156,7 @@ Feature: Drain node
       """
       - kind=junction name=movable_junction from=node-1 to=
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -141,7 +167,7 @@ Feature: Drain node
       """
       "seq":1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DRAIN NODE node-1;
       """
@@ -151,7 +177,7 @@ Feature: Drain node
       quiesce level: ENTITY_PAUSE
       - kind=emitter name=stalled_emitter from=node-1 to=
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -162,7 +188,7 @@ Feature: Drain node
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE UNPACED DOMAIN {{domain}};
 
@@ -221,7 +247,7 @@ Feature: Drain node
       """
     Then the last command output owner is saved as placeholder "drained_primary_node"
     And the first replica in the last command output is saved as placeholder "expected_promoted_replica"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DRAIN NODE {{drained_primary_node}};
       DESCRIBE DEDUPLICATOR dedup_txns;
@@ -231,11 +257,11 @@ Feature: Drain node
       """
       replicas: {{drained_primary_node}}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
-    And these NSPL commands are executed on node "{{expected_promoted_replica}}"
+    And these Plexus commands are executed on node "{{expected_promoted_replica}}"
       """
       CREATE SUBSCRIPTION after_handoff TO deduped;
       """
@@ -255,12 +281,12 @@ Feature: Drain node
     And Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA wait_event ( id I64, source STRING );
@@ -275,8 +301,7 @@ Feature: Drain node
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
-      CREATE CLIENT wait_kafka
-        TYPE KAFKA
+      CREATE KAFKA CLIENT wait_kafka
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -321,7 +346,7 @@ Feature: Drain node
         REQUIRE COLOCATION;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -335,7 +360,7 @@ Feature: Drain node
       """
       - domain={{domain}} kind=junction name=wait_for_state owner=node-1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION waiting_input_seen TO waiting_input;
       """
@@ -347,17 +372,17 @@ Feature: Drain node
       """
       {"id":7,"source":"input"}
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       DELETE SUBSCRIPTION waiting_input_seen;
       CREATE SUBSCRIPTION waiting_output_seen TO waiting_output;
       """
     Then the relay subscription does not receive a payload within "1s"
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       DRAIN NODE node-1;
       """
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And the last command output contains
       """
       quiesce level: ENTITY_PAUSE
@@ -384,7 +409,7 @@ Feature: Drain node
     Given Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE UNPACED DOMAIN {{domain}};
 
@@ -402,8 +427,7 @@ Feature: Drain node
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -445,7 +469,7 @@ Feature: Drain node
       """
       drained node 'node-2' (moved
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -453,7 +477,7 @@ Feature: Drain node
       """
       raft.cordoned_nodes: node-2
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE INGESTOR kafka_a;
       """
@@ -461,7 +485,7 @@ Feature: Drain node
       """
       owner: node-2
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE INGESTOR kafka_b;
       """
@@ -469,7 +493,7 @@ Feature: Drain node
       """
       owner: node-2
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE INGESTOR kafka_c;
       """

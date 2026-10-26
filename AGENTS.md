@@ -2,25 +2,44 @@
 
 ## Purpose
 
-Nervix is a domain-owned streaming system whose public language is NSPL. This file records the
+Nervix is a domain-owned streaming system configured with Plexus, the Nervix graph definition language. This file records the
 repository's durable architecture and correctness rules. It intentionally does not mirror the
-current module tree, enumerate parser helpers, or restate the complete NSPL grammar; those details
+current module tree, enumerate parser helpers, or restate the complete Plexus grammar; those details
 belong in the code, public specification, and tests.
 
 When code and this document disagree, do not add a compatibility path around the disagreement.
 Resolve the owning model and invariant directly, and update the public documentation when the
 language or interface changes.
 
+## Sources of Instruction
+
+An agent working on Nervix takes its instructions from three sources and no other: this
+repository, which is this file, the chapters under `docs/src`, the skills under `.agents/skills`
+and the checked-in configuration and tooling; ClickUp, whose docs, epics, tasks and comments
+define the work and hold its records; and the human directing the session.
+
+An agent does not use a local memory: a store of notes, preferences, conventions, decisions or
+facts kept outside the repository and ClickUp between sessions, however its tooling spells it,
+whether a memory directory, a saved profile or a scratch file. It writes nothing into such a
+store and acts on nothing one holds, and memory its tooling recalls into a session unasked is
+neither an instruction nor a source of fact. Such a store is invisible to the repository and to
+ClickUp, so what it holds cannot be reviewed, corrected or shared with the other agents and
+sessions working on the same code, and it silently diverges from the sources that can. A
+convention worth keeping is written into this file or the owning `docs/src` chapter; a decision,
+finding or constraint that belongs to a piece of work is recorded on its ClickUp task or in the
+ClickUp doc that owns it; and what the human states for a session governs that session, unless
+they ask for it to be recorded in one of those places.
+
 ## Alpha Stability and Compatibility
 
-NSPL has reached alpha. Its period of very active language experimentation is over, and large
+Plexus has reached alpha. Its period of very active language experimentation is over, and large
 backward-incompatible changes are no longer expected. The language will continue to evolve during
 alpha, however, and focused breaking changes may still be made when they materially improve its
 model or correctness.
 
 Nervix supports exactly one shape of everything: the current one. Until an explicit compatibility
 policy is introduced, there is no migration, dual read, version negotiation, or deprecation window.
-When a Model, stored shape, NSPL form, protocol message, or public interface changes, the previous
+When a Model, stored shape, Plexus form, protocol message, or public interface changes, the previous
 form is deleted outright in the same change.
 
 When a stored shape changes, previously written data using that shape is expected to break. It must
@@ -60,7 +79,7 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 
 ### Language pipeline
 
-- NSPL is lexed and parsed once into structured public semantic Models.
+- Plexus is lexed and parsed once into structured public semantic Models.
 - Parser-only spans and recovery state remain internal to parsing and diagnostics.
 - Completion is derived from expectations of the composed top-level grammar. REPLs and clients
   must not merge suggestions from independent feature parsers.
@@ -74,7 +93,7 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - Grammar labels use underscore style, such as `field_name` and `string_literal`. Completion labels
   for composed keyword phrases use their human-readable space-separated form.
 - The compiler consumes semantic Models directly. Persisted or public Models must never contain raw
-  executable NSPL that the runtime reparses.
+  executable Plexus that the runtime reparses.
 - Grammar keywords are case-insensitive language tokens. Original spelling may be retained for
   diagnostics, but unknown words are not a substitute for declaring language keywords.
 - External connector configuration remains raw only where pass-through is the intentional public
@@ -108,8 +127,8 @@ behavior, and a compatibility requirement the user states explicitly for the cur
 - [Connector Crates And The Connector Contract](docs/src/connector-contract.md) is the authoritative
   architecture reference for external integrations and the contract between connector crates and
   their host. Any change to a connector crate, the shared connector contract, connector planning or
-  composition, or host source and sink execution must keep that chapter current in the same change.
-  Its scope includes layer and dependency ownership, source and sink plans and lifecycle, metadata
+  composition, or host ingestor and emitter execution must keep that chapter current in the same change.
+  Its scope includes layer and dependency ownership, ingestor and emitter plans and lifecycle, metadata
   and header semantics, ACK and commit boundaries, host loops and cadence, special integrations,
   failures, guarantees, limits, and observability.
 - [Cluster Interconnect](docs/src/interconnect.md) is the authoritative architecture reference for
@@ -176,14 +195,24 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   delivery, session attachment with its observer, delivery order and what an attached client
   observes, execution snapshots, admission, logical and physical deadline ownership, recovery, and
   distributed-time guarantees.
+- [Execution Primitives](docs/src/execution-primitives.md) is the authoritative architecture
+  reference for the primitive boundary: governed families, backend selection, feature propagation,
+  target capabilities, authored-source scope, permissions, build contracts, and the distinction
+  between API, graph, compiler and execution evidence. Any change to those contracts keeps that
+  chapter current in the same change. Resolver, clock, executor and protocol policy stays with its
+  existing architecture owner.
+- [Coverage Reports And The Complexity Gate](docs/src/coverage-reports.md) is the authoritative
+  architecture reference for coverage producers and exports, source mapping and exclusions,
+  ordinary report ownership, merge records and integrity verdicts, patch coverage, the advisory
+  CRAP report, the full workspace union and the mandatory complexity count. Any change to those
+  contracts keeps that chapter current in the same change. Verification methods and scenario
+  supervision retain their own owners.
 - [Data-Plane Concurrency](docs/src/data-plane-concurrency.md) is the authoritative architecture
-  reference for synchronization on record, batch, remote-frame, and acknowledgement paths, and for
-  the primitive boundary those paths are built from. Any change to hot-path state publication,
-  task or branch ownership, delivery or assignment fences, the data-plane lock ratchet, the
-  primitive boundary or its execution modes, or a Shuttle check or Loom model must keep that
-  chapter current in the same change. Its scope includes the contentionless rule, published and
-  pre-resolved state, mutable execution state, bounded synchronization, review classification for
-  new lock sites, the primitive surface with its per-mode visibility and permitted real primitives,
+  reference for synchronization on record, batch, remote-frame, and acknowledgement paths. Any
+  change to hot-path state publication, task or branch ownership, delivery or assignment fences,
+  the data-plane lock ratchet, or a Shuttle check or Loom model must keep that chapter current in
+  the same change. Its scope includes the contentionless rule, published and pre-resolved state,
+  mutable execution state, bounded synchronization, review classification for new lock sites,
   deterministic checks of data-plane concurrency protocols, memory-ordering models, and the
   diagnostic mode's deadlock detection with its evidence and the locks it does not track. A change
   that adds a concurrent map, or changes how often one is reached or what disposes of it, updates
@@ -226,6 +255,22 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   placements and revisions, failure before and after each durability and authority boundary,
   stale-node catch-up and why state does not resurrect, quiescence, shutdown and restart, replay and
   duplicate windows, observability, and limits.
+- [Backup And Restore Architecture](docs/src/backup-and-restore-architecture.md) is the
+  authoritative architecture reference for backup and restore. Any change to the archive crate or
+  the archive format, to how a backup cuts a domain or captures, stages, transfers, assembles,
+  retains or serves state, to how a restore receives, prepares, plans, admits, records or resumes
+  its steps, or to how restored state is converted, staged, published, gated, reclaimed or resumed
+  must keep that chapter current in the same change. Its scope includes ownership by layer, the
+  archive contract and its compatibility rules, cut kinds, the quiesced cut protocol and its capture
+  fence, owner capture, the capture and installation interconnect operations, transfer, assembly
+  and retention, restore intake, preparation and planning, admission and durable step progress, the
+  installation authority, staging, complete-generation publication and the installation gate,
+  generation storage, restore staging maintenance and its quota, lifecycle resumption, state
+  placement identities, failure semantics at every boundary, guarantees and limits, observability,
+  and qualification evidence. [Backup And Restore](docs/src/backup-and-restore.md) remains the owner
+  of the statements, the command-line and console surfaces, the archive's section and record tables,
+  the operator limits and the reported failures; consensus storage, the interconnect, data-plane
+  concurrency, WASM state and shutdown keep their own contracts.
 - [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
   stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
   or drain deadline, termination signals, terminating placement eligibility, intake stop, graph
@@ -241,10 +286,15 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   missing value, state variant, required identity, conversion failure, or boundary representation
   is modeled or validated must keep that chapter current in the same change. Interconnect,
   domain-clock, and shutdown details remain in their own authoritative chapters.
+- [Node Settings](docs/src/node-settings.md) is the authoritative architecture reference for
+  prerequisites, cluster parameters and node capabilities. Changes to setting declarations,
+  defaults, derivations, fixed-value contracts, validation, carriers, change procedures,
+  capability sizing or settings enforcement keep that chapter current in the same change.
+  Interconnect, consensus, connector and lifecycle chapters retain their detailed contracts.
 - [Execution Plans](docs/src/execution-plans.md) is the authoritative architecture reference for
   converting a committed schedule into one typed execution revision and installing it as running
   or passive runtime state. Any change to revision construction, typed node, resource, source,
-  sink, processor or message-error plans, schedule-delta application, graph publication, or
+  emitter, processor or message-error plans, schedule-delta application, graph publication, or
   plan-based recovery must keep that chapter current in the same change. The linked engine,
   connector, concurrency, error, resource and state chapters retain their detailed contracts.
 
@@ -260,7 +310,7 @@ Nervix is layered. Innermost first, and each layer may name only the layers insi
    [Execution-sensitive primitives](#execution-sensitive-primitives).
 2. **Vocabulary.** Models, names, timestamps, branch keys, and node references: the words every
    other layer speaks.
-3. **Language.** NSPL lexing, parsing, completion, and lowering into Models. The parser is an edge
+3. **Language.** Plexus lexing, parsing, completion, and lowering into Models. The parser is an edge
    dependency only. It is named by the language crate itself, the formatter, the client tools, and
    the session adapter; every other layer consumes Models.
 4. **Engines and infrastructure.** The expression VM and its frontend, the UDF and WASM hosts, wire
@@ -303,7 +353,7 @@ the code. A contract rewritten to describe today's imports has stopped saying an
 ### Connector crates
 
 Every external integration belongs in its own crate under `crates/connectors/`, and implements the
-source contract, the sink contract, or both, from `nervix-connector` in `crates/connector`.
+ingestor contract, the emitter contract, or both, from `nervix-connector` in `crates/connector`.
 
 - A connector crate is an engine driven by the host. The host is the server's data plane, which owns
   task lifecycle, branch routing, acknowledgement tracking, quiesce, retry and flush cadence,
@@ -328,9 +378,32 @@ source contract, the sink contract, or both, from `nervix-connector` in `crates/
   encoded-size measure has a bounded Bolero property registered for ordinary and fuzz execution;
   shared implementations keep their properties with their owner. Unit tests do not replace
   required public scenarios or concurrency evidence.
-- The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard)
-  owns the detailed requirements. Before closing a connector epic, review landed parallel work
-  against it and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
+- Every buffer a connector holds between its transport and the host is declared in its entity's
+  `DeclaredBounds` with its capacity and overflow, and every network wait with what ends it,
+  unbounded ones included. A change adds no unbounded buffer and no wait that only the host's stop
+  ends; one that already exists stays declared unbounded until its connector bounds it. Each
+  client deadline key, such as `timeout_ms` or `connect_timeout_ms`, keeps the one meaning the
+  contract gives it and is read through `ConfiguredDeadline`; no driver call that parks its thread
+  runs on an asynchronous worker; and every deadline key an entity's waits name has its
+  `STALLED PEER` scenario in the capability inventory.
+  [Bounds and deadlines](docs/src/connector-contract.md#bounds-and-deadlines) owns the rule and
+  its review checklist.
+- A connector loses, duplicates or stalls nothing beyond what its declarations state. Every source
+  entity declares the position class and acknowledgement confirmation its transport actually
+  gives, and `acknowledge` returns only once that confirmation arrives, so progress, a drain and a
+  handoff wait for the transport. A read the host cancels returns every message it already took. A
+  payload its codec refuses is consumed as a decode rejection through the ingestor's general error
+  policy, never presented again. Every emitter implements `finish` for what its client still holds,
+  by the host's deadline, and a brokered emitter in `MODE ACK` awaits its broker through the shared
+  `ConfirmationWindow`, so a retry never resends a confirmed record. A connector delivery defect
+  is fixed red first, from a public scenario through the connector's real transport and, where the
+  defect is an interleaving, a Shuttle check over its production owner. The
+  [connector delivery standard](docs/src/connector-contract.md#connector-delivery-standard) owns
+  these rules and their review.
+- The [connector hygiene standard](docs/src/connector-contract.md#connector-hygiene-standard) and
+  the [connector delivery standard](docs/src/connector-contract.md#connector-delivery-standard)
+  own the detailed requirements. Before closing a connector epic, review landed parallel work
+  against both and record evidence and compliance tasks on ClickUp. Keep the contract chapter,
   relevant manuals and the ratchet current in the same change.
 
 `just ratchet` and the clock-boundary check treat the connector crates as data plane, so code that
@@ -417,7 +490,7 @@ choose a backend.
   stays retryable rather than becoming a decode, encode or authentication failure. A class whose
   wait queue is full refuses work that answers a request, because its sender can present it again.
   Work the node already accepted and keeps, which nothing can present again, such as a payload a
-  quiesce buffer retained or a poll a paced source moved past, states
+  quiesce buffer retained or a poll a paced ingestor moved past, states
   `QueueAdmission::WaitForPlace` and waits for a place instead; its owner lets shutdown and a new
   quiesce end that wait, and keeps the work where it was until then or decides on it again. A
   payload a source hands over without an acknowledgement waits only when holding the source's loop
@@ -535,7 +608,7 @@ choose a backend.
 `just validate-execution-mode-conflicts` enforce these rules in `just validate` and
 `just validate-ci`. Clippy's type lints resolve a re-export to its definition, so they cannot
 enforce where an item is imported from; the boundary check owns that, and Clippy keeps only
-genuinely forbidden types and operations. [Data-Plane Concurrency](docs/src/data-plane-concurrency.md)
+genuinely forbidden types and operations. [Execution Primitives](docs/src/execution-primitives.md)
 documents the surface, what each mode observes of it, and the permitted real primitives.
 
 ### Migration discipline
@@ -655,6 +728,41 @@ build and the existing tests, and nothing in it changes behavior.
 - Session subscriptions retain their existing creation, deletion, delivery, sampling, and
   backpressure semantics. They are read-only filtered views and do not support construction,
   inheritance, values, or side effects.
+
+## Node Settings
+
+- A setting exists as a field of a class-typed group. Its `SettingDefinition` declares exactly
+  one sealed class (`Prerequisites`, `ClusterParameters` or `NodeCapabilities`), its semantic
+  value, name, single default, optional derivation and validation. Groups carry `Setting<D>`
+  fields; explicit values and defaults cross the same typed validation boundary.
+- A prerequisite is what a node must bring to reach the live cluster; it travels through gossip
+  and the handshake and is checked at join. [Node Settings](docs/src/node-settings.md) owns the
+  closed list and timing bounds. Nothing needed to reach the cluster depends on what it can
+  learn only after reaching it.
+- A cluster parameter is what the cluster accepts or promises. It has one Raft-committed value,
+  seeded only at first bootstrap and changed by an administrative Plexus statement. A value
+  the registry validates against is never an independent node flag.
+- A node capability is what one node can carry. It is detected or overridden locally and
+  announced through Raft; peers honour its bounds and placement uses its committed record.
+  It changes no cluster acceptance rule or guarantee.
+- Derived values are named methods on their owner, never flags. Defaults are written once in
+  the owning definition. Dependent defaults remain `Option` at the edge until resolved against
+  typed context. Validate operator-supplied relationships before I/O and transitions at commit.
+- A fixed constant declares `nervix::constant(fixed, reason = "...")`, gated with
+  `cfg_attr(nervix_lint, ...)`; the reason names the wire format, RFC, persisted layout, ABI or
+  invariant that fixes it. A convenient literal is not a fixed-value contract.
+- Values depending on the external system are clauses or declared client keys in that
+  connector's Plexus surface, owned by its connector epic; node settings own host policy.
+- Changes remain correct during a rolling restart in any order, take full effect when the
+  last node adopts them, and support the same rollback in reverse. Only prerequisites reject
+  incompatible peers. Mixed operational values within one current shape obey the alpha
+  one-shape rule; they introduce no alternate data representation.
+- Flags use `--<area>-<name>` and `NERVIX_<AREA>_<NAME>`. Resolved settings are observable with
+  secrets redacted, including per-node capabilities and committed-versus-running drift.
+- The temporary `hidden_tunables` source count only decreases while area owners adopt the
+  declarations. It counts governed numeric constants and literal policy calls outside class
+  defaults and reviewed fixed contracts. Its compiler-rule replacement removes the detector
+  and numeric baseline entry together.
 
 ## Runtime and Infrastructure Invariants
 
@@ -978,6 +1086,13 @@ build and the existing tests, and nothing in it changes behavior.
   Do not use `trybuild` or add its dependencies, harnesses, fixtures, or diagnostic snapshots.
   Pair rejection examples with compiling examples of the current imports and supported signatures,
   and run the doctests in the normal test commands and CI.
+- Keep verification claims with their evidence. Paired API doctests check one API in the build's
+  selected configuration; Cargo graph, feature-conflict and target probes check the configurations
+  they actually build; compiler fixtures qualify resolved diagnostics; primitive conformance checks
+  compare backend semantics. None executes a production-owner concurrency model by itself. Record
+  the invariant, selected inventory, completed exploration, weakening and replay evidence when
+  claiming model verification. Use the matching toolchain's declared `llvm-tools` for coverage and
+  preserve the configured kache wrapper in every build and probe.
 - Tests cover the current shape only. Never define a removed Model, stored shape, or wire form in a
   test fixture, including to assert that loading it fails. See
   [Alpha Stability and Compatibility](#alpha-stability-and-compatibility).
@@ -1082,7 +1197,18 @@ build and the existing tests, and nothing in it changes behavior.
   supervision, the fault model, semantic traces and replay rules, seed selection, commands and
   budgets, the scenario matrix, simulated restart versus real-process evidence, findings and
   retained regressions, qualification evidence, and the prerequisites for whole-cluster simulation.
-- Unit tests support but do not replace cucumber coverage for behavior observable through an NSPL
+- [External Cluster Chaos](docs/src/cluster-chaos.md) is the authoritative architecture reference
+  for the external chaos runner and its suites. Any change to `scripts/chaos`, its Compose
+  deployment, fixtures, tool image pins, verifiers or self-tests, the chaos recipes in the
+  `justfile`, the `Chaos` workflow or the chaos and diagnostic-image jobs of the `Docker Build`
+  workflow must keep that chapter current in the same change. Its scope includes the public
+  observation boundary, image and tool identity, host requirements, the deployment, how each fault
+  is injected and proven, every scenario with its verdicts and bounds, seeded plans and replay,
+  failure categories and exit statuses, controller budgets versus product deadlines, artifacts,
+  cleanup and signals, diagnostic images, the suites and their shards, CI triggers, labels and
+  cancellation, guarantees and limits, and qualification evidence. The product contracts its
+  scenarios verify stay with their own chapters.
+- Unit tests support but do not replace cucumber coverage for behavior observable through a Plexus
   command, HTTP or public API call, cluster state, runtime output, or persisted state. Adding an
   executable statement with application or runtime handling is not parser-only. Do not substitute
   unit tests unless the user explicitly approves the exception for the current task.
@@ -1109,8 +1235,11 @@ build and the existing tests, and nothing in it changes behavior.
   parallelism, because the wait ends when the condition holds.
 - Every scenario runs beside the rest of the suite. Do not add a tag, lock, or harness mode that
   runs a scenario alone or stops other scenarios from starting while it runs, such as an @exclusive
-  tag. A scenario that passes only on an idle machine is a defect in that scenario: fix its timing
-  assumption, and rely on the suite’s retries for what load remains.
+  tag. The one reservation is the retry's share: a retry holds a larger share of the run slots on
+  each attempt, never more than a quarter of them, as
+  [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) specifies. A scenario that
+  passes only on an idle machine, or only once a retry's share quiets the machine, is a defect in
+  that scenario: fix its timing assumption, and rely on the suite’s retries for what load remains.
 - An assertion that something has **not** happened yet is the opposite, and no choice of window
   makes it reliable. Its window opens when the step starts, while the cadence it races started at
   the event before it, so the margin between them is consumed by whatever delayed the step
@@ -1141,11 +1270,11 @@ build and the existing tests, and nothing in it changes behavior.
   the repository, update that definition to require delivery to the corresponding ClickUp task.
   Then continue execution following this rule; an outdated epic or task definition does not
   override it.
-- `.agents/skills/nspl/SKILL.md` is the canonical, vendor-neutral, user-facing skill for configuring
-  Nervix with NSPL. Use it when helping users author, explain, review, or troubleshoot NSPL;
+- `.agents/skills/plexus/SKILL.md` is the canonical, vendor-neutral, user-facing skill for configuring
+  Nervix with Plexus. Use it when helping users author, explain, review, or troubleshoot Plexus;
   agents without automatic skill discovery must read it directly. Do not turn it into a workflow
   for extending the parser, Models, compiler, or runtime.
-- Avoid duplicating public guidance between `docs/src` and the NSPL skill. `SKILL.md` and its
+- Avoid duplicating public guidance between `docs/src` and the Plexus skill. `SKILL.md` and its
   references may contain documentation routing, agent workflow, and concise correctness checks;
   detailed syntax, semantic explanations, rationale, examples, and tuning guidance belong in
   `docs/src` and should be read from there rather than restated in the skill.
@@ -1184,9 +1313,18 @@ build and the existing tests, and nothing in it changes behavior.
   reruns. [Property Testing And Fuzzing](docs/src/property-testing-and-fuzzing.md#documentation-only-selection)
   owns the allowed locations, evidence and failure semantics; `just test-ci-selection` tests them.
 - Use `just validate` for formatting and validation.
+- Every ordinary coverage consumer reads the one merged, repository-relative `lcov-workspace.info`.
+  A new ordinary producer registers its reports in the merge's inputs; a producer outside the
+  ordinary report states its scope and why. Mode, diagnostic and live fuzz reports remain separate.
+  A merge missing an input or workspace member, or an analysis whose inputs do not match the
+  sources or match nothing, fails. Missing analysis never becomes zero coverage or zero debt.
+  Coverage percentages and CRAP scores are advisory; report integrity is mandatory. The
+  deterministic complexity verdict is the `just ratchet` count of functions above cyclomatic
+  complexity 30, which reads no coverage.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, actual
   Rust cast expressions, struct fields whose presence depends on `cfg(feature = "testing")`, and
-  functions whose cyclomatic complexity exceeds 30.
+  functions whose cyclomatic complexity exceeds 30, and `hidden_tunables`, numeric policy outside
+  class-typed settings and fixed-value contracts as specified in Node Settings.
   The stable source parser sees inactive branches and named or tuple fields; raw identifiers,
   import aliases, qualified paths and conditional documentation attributes are not those facts.
   Complexity is measured by the cargo-crap version `scripts/cargo_crap.py` pins, which
@@ -1216,7 +1354,7 @@ build and the existing tests, and nothing in it changes behavior.
   expectation widened to cover another operation fail. Generated reports are outputs under target,
   never enforcement inputs. Do not infer policy from filenames, sharing traits or method names.
 - [Architecture Rules And The Debt Ratchet](docs/src/architecture-enforcement.md) owns the complete
-  fifteen-family contract matrix, source/compiler scope, qualification and review limits. A new
+  sixteen-family contract matrix, source/compiler scope, qualification and review limits. A new
   or changed semantic rule ships with allowed/rejected compiler fixtures distinguished by the
   resolved fact, false-positive and false-negative controls, precise diagnostic/span assertions,
   and invalid, unfulfilled and widened-expectation checks. Source rules also qualify inactive
@@ -1254,11 +1392,11 @@ build and the existing tests, and nothing in it changes behavior.
   Cargo configuration: the host may set the wrapper there, and an empty `RUSTC_WRAPPER` switches
   it off. When kache is unavailable or a build fails under it, stop and report that instead of
   building without it.
-- Use `just validate-skill` to validate the public NSPL skill against the Agent Skills publication
+- Use `just validate-skill` to validate the public Plexus skill against the Agent Skills publication
   checks. CI runs this validation but does not create GitHub releases; the public default branch is
   the install source.
-- `docs/book.toml` owns the curated public NSPL chapter allowlist rendered into the versioned
-  `llms.txt` agent index. Keep that list focused on user-facing NSPL configuration and exclude
+- `docs/book.toml` owns the curated public Plexus chapter allowlist rendered into the versioned
+  `llms.txt` agent index. Keep that list focused on user-facing Plexus configuration and exclude
   architecture, repository-development, and local-operation material.
 - After each development cycle, run `just validate` and any focused tests added or changed.
 - Use `just test` for the full suite so repository-required environment is configured.
@@ -1270,19 +1408,22 @@ build and the existing tests, and nothing in it changes behavior.
   `client-conformance`; a pull request that changes the client protocol, the shared binding or a
   probe carries that label.
 - `just chaos suite smoke|soak --image IMAGE` runs the external chaos suites against an already
-  built image. CI runs the smoke suite against a pull request's own images only for a pull request
-  labeled `chaos`, and the soak suite for one labeled `chaos-soak` and nightly on `main`; a pull
-  request that changes the chaos runner, or the membership, failover, recovery or delivery behavior
-  its scenarios verify, carries the `chaos` label. Each suite runs against the release image and
-  against the Deloxide diagnostic image of the same revision, whose label makes every run fail
-  unless the deadlock evidence of each process its nodes started qualifies; a change to the
-  diagnostic image, its evidence collection or a path its scenarios exercise under tracked locks
-  keeps both green.
-- Directed-link burst-loss proof samples 400 packets at 10 ms intervals within the same
-  approximately four-second observation window and 30-second probe budget. Other profiles and
-  healthy observations use 40 packets at 100 ms intervals. Effect limits retain their received
-  and lost fractions at every sample size; an incomplete sample, ineffective fault, excessive loss
-  or missing consecutive burst fails qualification. Sampling never extends a product deadline.
+  built image; [External Cluster Chaos](docs/src/cluster-chaos.md) documents them. CI runs the
+  smoke suite against a pull request's own images only for a pull request labeled `chaos`, and the
+  soak suite for one labeled `chaos-soak` and nightly on `main`; a pull request that changes the
+  chaos runner, or the membership, failover, recovery or delivery behavior its scenarios verify,
+  carries the `chaos` label. Each suite runs against the release image and against the Deloxide
+  diagnostic image of the same revision, whose label makes every run fail unless the deadlock
+  evidence of each process its nodes started qualifies; a change to the diagnostic image, its
+  evidence collection or a path its scenarios exercise under tracked locks keeps both green.
+- Directed-link loss proof, for random, burst and combined loss, samples 400 packets at 10 ms
+  intervals within the same approximately four-second observation window and 30-second sample
+  bound; the probe helper's Docker launch has a separate bound. A loss floor judged over 40
+  packets fails a working fault too often: 20% independent loss misses a 5% floor about once in
+  700 samples. Other profiles and healthy observations use 40 packets at 100 ms intervals. Effect
+  limits retain their received and lost fractions at every sample size; an incomplete sample,
+  ineffective fault, excessive loss or missing consecutive burst fails qualification. Sampling
+  never extends a product deadline.
 - `just release-evidence <pull-request>` holds a pull request's head revision to
   `tests/release-evidence.toml`: every label-gated method's label is on the pull request and the
   latest run of every required check passed on that revision. Its register lists each gap a
@@ -1291,11 +1432,11 @@ build and the existing tests, and nothing in it changes behavior.
   inventory names, or adds a value to the matrix of one, updates the inventory in the same change;
   `just test-release-evidence` reads the Deloxide lane and release image matrices from the
   workflows and fails when the inventory lacks one of their jobs.
-- `just nspl-completion-walk` walks the NSPL completion graph and fails on any branch that cannot be
+- `just plexus-completion-walk` walks the Plexus completion graph and fails on any branch that cannot be
   completed by accepting the suggestions the parser offers. It is deliberately outside `just test`
   and runs in CI beside the main tests, in the job that carries the workspace-wide checks. Grammar
   changes that add a label must keep it passing; a new finding is a defect, not something to record
-  in its baseline. `just nspl-completion-walk-deep` relaxes deduplication to reach branches the
+  in its baseline. `just plexus-completion-walk-deep` relaxes deduplication to reach branches the
   gating budget stops short of.
 - A change to a primitive adapter or a synchronization protocol runs the checks of every mode it
   affects: `just test-shuttle [filter]` for interleavings, `just test-loom [filter]` for
@@ -1332,7 +1473,7 @@ build and the existing tests, and nothing in it changes behavior.
   denied, including each package `just test-shuttle` explores in test mode, so a warning in a check
   fails validation.
 - `just coverage-native-extras [producer ...]` runs eligible native extra checks under LLVM source
-  instrumentation: `test-typed-ratchet`, `bench-smoke`, `nspl-completion-walk`, the canonical
+  instrumentation: `test-typed-ratchet`, `bench-smoke`, `plexus-completion-walk`, the canonical
   `test-shuttle` and `test-loom` runners, the canonical `test-turmoil` suite,
   each `test-primitives-<mode>` conformance recipe,
   `test-deadlock-evidence-order`, `test-deadlock-report`, and the `test-deloxide`,
@@ -1355,8 +1496,8 @@ build and the existing tests, and nothing in it changes behavior.
   Model producers also retain `models.json` with canonical discovery, selection, execution and
   completion, including Shuttle's paired nondeterminism run and Loom's invariant, executions and
   bounds. Missing or incomplete evidence fails collection before export. Each mode uses its own
-  instrumented build directory; model and diagnostic reports never enter the ordinary coverage or
-  CRAP gate. Coverage bookkeeping stays outside model processes and supplies no synchronization
+  instrumented build directory; model and diagnostic reports never enter ordinary coverage or its
+  CRAP report. Coverage bookkeeping stays outside model processes and supplies no synchronization
   to the invariant.
 - `just coverage-patch [base] [report]` measures added executable lines from ordinary LCOV reports
   and retains an advisory Markdown report under target. `--pr <number>` publishes or updates the
@@ -1365,11 +1506,36 @@ build and the existing tests, and nothing in it changes behavior.
   percentages and reporting failures never fail a build; the complexity verdict is the
   `just ratchet` count of functions above cyclomatic complexity 30, which reads no coverage.
   The Turmoil job publishes its current-source report with `--scope turmoil` under a separate
-  comment marker; those counters remain outside the ordinary coverage and CRAP gate.
+  comment marker; those counters remain outside ordinary coverage and its CRAP report.
   `just test-patch-coverage` exercises accounting and publication, and
   `just coverage-patch-runner` collects its Python line coverage.
-- Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
-  user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
+- `just check-coverage [report] [record]` publishes the advisory CRAP report of the merged ordinary
+  report as `target/crap-report/crap.json` and `crap.md`: the pinned cargo-crap scores the
+  repository's Rust sources, with each record bound to its own file, and the coverage comment
+  carries its section for the changed files. No CRAP score fails a build, and no text calls CRAP a
+  gate. The check fails only when its analysis is vacuous: a merge record that is missing,
+  incomplete or of another revision, a report source this checkout does not track, a report Rust
+  file the analysis did not read or bind, or no matched file. A function in a file the report holds
+  no record of is listed as unmeasured, never scored as uncovered. `just test-crap-report`
+  exercises it, and `just coverage-crap-report-runner` collects its Python line coverage.
+- `just coverage-full [input ...]` combines every coverage producer one CI run selects into the
+  full workspace line-coverage union in `target/coverage-full/`, after `just coverage-full-select`
+  records the run's event and pull request label snapshot, its suite and Bolero selection, its run
+  and attempt, the tested revision and each producer job's result. CI's `coverage-full` job runs it
+  after every producer job, including a skipped or failed one, from downloaded artifacts only. The
+  selection derives the required producers: the ordinary report, the modeled primitive
+  conformance and diagnostic-evidence collections, and the producers the `shuttle`, `loom`,
+  `turmoil`, `deloxide` and `fuzz` labels enable. A run without `fuzz` requires the Bolero call's
+  recorded deliberate skip and refuses a fuzz report. A missing, stale, foreign, corrupt, failed,
+  incomplete or unselected input fails the union, which then writes no report. The union is line
+  coverage with per-mode attribution and carries no function or branch records; the ordinary
+  report, its patch coverage and its CRAP report never read it. A change to a producer job, the
+  producer it collects or the artifact it uploads keeps the requirement table in
+  `scripts/coverage_full.py` current in the same change, which its workflow contract tests hold.
+  `just test-coverage-full` exercises the union, and `just coverage-full-runner` collects its Python
+  line coverage.
+- Every public interface or Plexus surface change must update the relevant `docs/src` pages and the
+  user-facing Plexus skill in the same change. Keep `.agents/skills/plexus/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.
 - Keep parser tests near the grammar they protect.
 - Final implementation reports must name the cucumber scenario added or updated. If none was added,
@@ -1381,12 +1547,50 @@ build and the existing tests, and nothing in it changes behavior.
   Shuttle, Loom, Turmoil, Chaos or Bolero evidence that covers it instead.
 - After completing requested repository changes, include a proposed Conventional Commit title and
   description in the final response. Follow Conventional Commits and select the title type from the
-  current `type-enum` in `./commitlint.config.js`. Put the title and description together in one
-  fenced code block. Keep the title and each description paragraph on a single unwrapped line; do
-  not insert manual line breaks within them because Git and GitHub handle display wrapping.
+  current `type-enum` in `./commitlint.config.js` by the meanings in [Commit Types](#commit-types).
+  Put the title and description together in one fenced code block. Keep the title and each
+  description paragraph on a single unwrapped line; do not insert manual line breaks within them
+  because Git and GitHub handle display wrapping.
 - When the user requests follow-up changes, regenerate both so the final response contains an
   updated title and description that reflect the complete resulting change instead of a stale
   earlier proposal.
+
+## Commit Types
+
+A commit or pull request title takes its type from the `type-enum` in `./commitlint.config.js`,
+and each type has exactly one meaning:
+
+- `feat` adds or extends a product feature: something a user of Nervix, a developer building on
+  it, or an operator or administrator running it can see.
+- `fix` repairs an actual product defect. A repair to a test is `test`, and a repair to CI or a
+  script is `build`; neither is ever `fix`.
+- `perf` improves the performance of the product. Faster tests are `test` and faster scripts are
+  `build`; neither is ever `perf`.
+- `refactor` changes product code without changing its functionality or its performance. A product
+  code change that also affects performance is `perf`.
+- `style` changes style, such as formatting, anywhere in the repository.
+- `test` covers anything related to tests of every kind, including new tests and fixes to existing
+  ones.
+- `build` changes scripts, `justfile` recipes, CI workflows, how Cargo is invoked, and other build
+  and CI tooling.
+- `doc` changes the published product documentation, such as the book under `docs/src`, or
+  documentation in code.
+- `chore` covers anything no other type matches, and a change whose affected part is hard to state
+  clearly.
+- `version` is the commit that changes the product version.
+- `dep` changes Cargo dependencies, typically by upgrading them.
+- `security` is the preferred type for a security issue, including a dependency upgrade.
+- `revert` reverts an earlier commit.
+- `drop` removes product functionality.
+- `agent` changes the instructions for AI agents: `AGENTS.md` and the agent instructions it
+  references, such as the skills under `.agents/skills`.
+- `bench` changes benchmarks only.
+
+Choose the most relevant type even where types intersect. A type names the change as a whole
+rather than every part it touches: a feature adds tests and is still `feat`, and a fix adds its
+reproducer and is still `fix`. Where two types describe the same change, the more specific one is
+the more relevant: an upgrade to a dependency version that fixes a vulnerability is `security`, not
+`dep`. A change to the `type-enum` keeps this section current in the same change.
 
 ## Error and Diagnostic Quality
 

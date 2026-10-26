@@ -2,11 +2,11 @@ Feature: JAQ codec unfolding
   Scenario Outline: An HTTP endpoint ingestor unfolds a JSON array into one message per element
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA order_line (
         order_id STRING,
@@ -51,11 +51,11 @@ Feature: JAQ codec unfolding
   Scenario Outline: An HTTP endpoint ingestor unfolds newline-delimited JSON into one message per line
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA order_line (
         order_id STRING,
@@ -102,11 +102,11 @@ Feature: JAQ codec unfolding
   Scenario Outline: A payload whose unfolded element does not fit the schema is rejected as a whole
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA event (
         user_id I64
@@ -164,11 +164,11 @@ Feature: JAQ codec unfolding
   Scenario Outline: A payload that unfolds beyond the limit is rejected and the ingestor keeps serving
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA event (
         user_id I64
@@ -219,12 +219,12 @@ Feature: JAQ codec unfolding
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "selected_events_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA event (
         user_id I64
@@ -234,8 +234,7 @@ Feature: JAQ codec unfolding
         TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[] | select(.keep)';
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -278,13 +277,13 @@ Feature: JAQ codec unfolding
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "split_events_{{test_id}}" exists with 1 partitions
     And Kafka topic "held_events_out_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA split_event (
         user_id I64,
@@ -303,8 +302,7 @@ Feature: JAQ codec unfolding
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY delivered_events SCHEMA split_event UNBRANCHED;
       CREATE RELAY held_events SCHEMA split_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -327,7 +325,7 @@ Feature: JAQ codec unfolding
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER held_events_forward FROM held_events TO KAFKA kafka_main TOPIC held_events_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING split_event_wire_codec
+      CREATE KAFKA TOPIC EMITTER held_events_forward FROM held_events TO kafka_main TOPIC 'held_events_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING split_event_wire_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -366,13 +364,13 @@ Feature: JAQ codec unfolding
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "split_events_{{test_id}}" exists with 1 partitions
     And Kafka topic "held_events_out_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA split_event (
         user_id I64,
@@ -391,8 +389,7 @@ Feature: JAQ codec unfolding
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY delivered_events SCHEMA split_event UNBRANCHED;
       CREATE RELAY held_events SCHEMA split_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -415,7 +412,7 @@ Feature: JAQ codec unfolding
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER held_events_forward FROM held_events TO KAFKA kafka_main TOPIC held_events_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING split_event_wire_codec
+      CREATE KAFKA TOPIC EMITTER held_events_forward FROM held_events TO kafka_main TOPIC 'held_events_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING split_event_wire_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -448,12 +445,12 @@ Feature: JAQ codec unfolding
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "tenant_batches_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA tenant_event (
         tenant STRING,
@@ -473,8 +470,7 @@ Feature: JAQ codec unfolding
       CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
       CREATE IF NOT EXISTS BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY tenant_events SCHEMA sourced_tenant_event BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -514,11 +510,11 @@ Feature: JAQ codec unfolding
   Scenario Outline: An HTTP endpoint ingestor unfolds every value of a <format> payload
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,

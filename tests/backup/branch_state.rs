@@ -2,7 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** The shared domain text a feature saves once, the instants a scenario measures
-//!   deduplicator expiry from, and the posts that wait for a restored endpoint or a key's expiry.
+//!   deduplicator expiry from, the posts that wait for a restored endpoint or a key's expiry, and
+//!   the slow storage a scenario gives a window's branches as they stop.
 //! - **Depends on.** The scenario world's placeholders, the cluster's HTTP publishing, and the
 //!   active session's relay subscriptions.
 //! - **Must not know.** How the server archives, installs or restores branch-local state.
@@ -18,8 +19,8 @@ const DELIVERY_WINDOW: Duration = Duration::from_millis(350);
 /// How long a repeated post waits before posting again.
 const REPOST_INTERVAL: Duration = Duration::from_millis(100);
 
-#[given(expr = "these NSPL commands are saved as placeholder {string}")]
-fn given_nspl_commands_are_saved_as_placeholder(
+#[given(expr = "these Plexus commands are saved as placeholder {string}")]
+fn given_plexus_commands_are_saved_as_placeholder(
     world: &mut ScenarioWorld,
     placeholder: String,
     #[step] step: &Step,
@@ -28,6 +29,34 @@ fn given_nspl_commands_are_saved_as_placeholder(
     initialize_scenario_identity(world);
     let commands = expand_placeholders(world, docstring(step));
     world.placeholders.insert(placeholder, commands);
+}
+
+/// Each branch of the window processor writes what it published last only once this long after
+/// its branch stopped, as storage slow to take a large window would. A wait longer than a branch's
+/// stop grace leaves the write running after its branch task was ended.
+#[given(
+    expr = "every branch of window processor {string} takes {string} to write its state as it \
+            stops"
+)]
+fn given_stopping_window_branches_write_slowly(
+    world: &mut ScenarioWorld,
+    processor: String,
+    delay: String,
+) {
+    let delay = parse_duration_text(&delay).expect("step duration must be a valid duration");
+    let processor = expand_placeholders(world, &processor);
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .assured("the scenario domain is an identifier-shaped name");
+    let processor = nervix_models::ModelName::try_from(processor.as_str())
+        .assured("the window processor is an identifier-shaped name");
+    world.fault_injection.delay_stopped_branch_state_writes(
+        nervix_models::DomainNodeRef::node_in(
+            domain,
+            nervix_models::ModelKind::WindowProcessor,
+            processor,
+        ),
+        delay,
+    );
 }
 
 #[given(expr = "the current time is saved as timestamp placeholder {string}")]

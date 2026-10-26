@@ -119,10 +119,11 @@ impl nervix_connector::IngestMessageHeaders for TestIngestHeaders<'_> {
 
 /// Builds one group's ingest metadata through the group builders, as the runtime does.
 pub(super) fn ingest_metadata_for_test(
-    scope: super::SourceMetadataScope,
+    scope: super::IngestorMetadataScope,
     rows: &[nervix_connector::IngestMetadataRow<'_>],
 ) -> super::IngestFilterMapMetadata {
-    let mut builders = super::IngestMetadataBuilders::new(scope, rows.len());
+    let mut builders = super::IngestMetadataBuilders::new(scope, rows.len())
+        .expect("the fixture's metadata row capacity fits");
     for row in rows {
         builders
             .append(row)
@@ -158,11 +159,11 @@ pub(super) async fn execute_filter_map_for_test(
 }
 
 pub(super) fn expression(raw: &str) -> nervix_models::Expression {
-    nervix_nspl::parse_expression(raw).expect("valid semantic expression")
+    nervix_plexus::parse_expression(raw).expect("valid semantic expression")
 }
 
 pub(super) fn construction(raw: &str) -> nervix_models::RouteConstruction {
-    nervix_nspl::parse_route_construction(raw).expect("valid route construction")
+    nervix_plexus::parse_route_construction(raw).expect("valid route construction")
 }
 
 pub(super) fn window_outputs(relay: &str, set: &str) -> ProcessorOutputs {
@@ -371,7 +372,8 @@ pub(super) async fn attach_loopback_cluster(
         bootstrap_host: None,
         recovery_endpoints: Default::default(),
         interconnect: interconnect.clone(),
-        node_unavailability_timeout: Duration::from_secs(10),
+        membership: crate::cluster::MembershipSettings::default(),
+        prerequisites: interconnect.local_prerequisites(),
         fault_injection: Default::default(),
     })
     .await
@@ -441,6 +443,23 @@ pub(super) fn install_unpaced_test_domain(runtime: &super::Runtime, domain: &Dom
     runtime.inner.domain_routings.insert(
         domain.clone(),
         StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
+    );
+}
+
+/// Publish the routing of `domain` with the boundary services of `relays`, as a schedule that runs
+/// those relays on this node does.
+pub(super) fn publish_test_relay_routing(
+    runtime: &super::Runtime,
+    domain: &DomainName,
+    relays: impl IntoIterator<Item = (RelayName, Arc<super::RelayBoundaryServices>)>,
+) {
+    let relay_services = relays.into_iter().collect();
+    runtime.inner.domain_routings.insert(
+        domain.clone(),
+        StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot {
+            relay_services,
+            ..DomainRoutingSnapshot::default()
+        })),
     );
 }
 
@@ -866,7 +885,7 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
 /// tests whose subject is the bound route program.
 pub(super) fn bind_ingestor_route_for_test(
     identifier: &ModelName,
-    metadata_scope: SourceMetadataScope,
+    metadata_scope: IngestorMetadataScope,
     allow_header_reads: bool,
     construction: &RouteConstruction,
     schemas: RuntimeVmSchemaPair,
@@ -1205,7 +1224,7 @@ pub(super) fn junction_branch_template(
     let input_relay = named::<RelayName>(input_relay);
     super::BranchInstanceTemplate {
         revision: super::ProcessorPlanRevision::new(),
-        source_kind: ModelKind::Junction,
+        entity_kind: ModelKind::Junction,
         source: RelayName::from(&processor.clone()),
         root_relay: input_relay.clone(),
         branch: None,
@@ -1318,12 +1337,12 @@ pub(super) fn input_value(batch: &RelayRecordBatch) -> i64 {
     value
 }
 
-pub(super) fn sink_context() -> EmitterSinkContext {
+pub(super) fn emitter_context() -> EmitterConnectorContext {
     let domain = DomainName::parse("emitter_tests").expect("valid domain");
     let runtime = Runtime::default();
     let emitter = EmitterName::parse("output").assured("fixture emitter name is valid");
     let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
-    EmitterSinkContext {
+    EmitterConnectorContext {
         routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
         metrics_dirty: BranchMetricsMark::default(),
         status: runtime.emitter_status(&key),
@@ -1349,6 +1368,8 @@ pub(crate) fn single_worker_executor() -> Executor {
             bulk_cpu: one,
             consensus_storage: one,
             filesystem_storage: one,
+            connector_storage: nervix_execution::ConnectorStorageWorkers::resolve(Some(one))
+                .expect("one worker fits the primitive permit bound"),
             pending_jobs: one,
         },
         ..nervix_execution::ExecutionConfig::default()

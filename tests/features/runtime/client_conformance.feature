@@ -17,7 +17,7 @@ Feature: Cross-language client conformance
 
   Scenario Outline: A <runtime> client round-trips an operation, typed rows, an error and a closure
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA typed_row (
@@ -206,13 +206,13 @@ Feature: Cross-language client conformance
     # following the state of another.
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       """
     And the gRPC endpoint of node "<entry_node>" is forwarded from fixture address "127.0.0.1"
     And domain clock progress for domain "{{domain}}" on node "<clock_owner>" is paused before delivery
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
       """
@@ -220,11 +220,11 @@ Feature: Cross-language client conformance
     When domain clock progress for domain "{{domain}}" on node "<clock_owner>" resumes
     And the "<runtime>" client probe attaches to the domain clock through the forwarded gRPC endpoint of node "<entry_node>"
     Then within "120s" the client probe prints "TICK domain={{domain}} generation=1 boundary=origin+(id-1)*period"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START AT '2031-01-01T00:00:00Z' TIME RATE 4.0;
       """
@@ -291,7 +291,7 @@ Feature: Cross-language client conformance
     # reference expires, its submission's outcome is unknown, and the restored consumer receives
     # the same batch again.
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA typed_in_row (
@@ -355,8 +355,8 @@ Feature: Cross-language client conformance
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER typed_out FROM typed_rows
-        TO CLIENT SCHEMA typed_out_row
+      CREATE CLIENT CONSUMER EMITTER typed_out FROM typed_rows
+        TO SCHEMA typed_out_row
           MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT ALL EXCEPT secret
         SET secret = leak_sensitive(input.secret), echo = input.id

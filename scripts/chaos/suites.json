@@ -7,7 +7,7 @@
         {
           "id": "baseline-3",
           "shard": 1,
-          "budget_minutes": 14,
+          "budget_minutes": 4,
           "run": ["baseline", "--nodes", "3"]
         },
         {
@@ -36,13 +36,13 @@
         {
           "id": "baseline-1",
           "shard": 1,
-          "budget_minutes": 13,
+          "budget_minutes": 3,
           "run": ["baseline", "--nodes", "1"]
         },
         {
           "id": "baseline-3",
           "shard": 1,
-          "budget_minutes": 14,
+          "budget_minutes": 4,
           "run": ["baseline", "--nodes", "3"]
         },
         {
@@ -149,6 +149,13 @@
           "budget_minutes": 60,
           "note": "Draws a new seed for every run and records it",
           "run": ["mixed-instability", "--duration", "30m", "--policy", "temporary-quorum-loss"]
+        },
+        {
+          "id": "mixed-burst-loss-leader-peer",
+          "shard": 5,
+          "budget_minutes": 15,
+          "note": "Holds burst loss from the leader to one follower while every voter stays in a quorum",
+          "run": ["mixed-instability", "--plan", "scripts/chaos/fixtures/mixed-burst-loss-leader-peer.json"]
         },
         {
           "id": "pause-resume",
@@ -305,6 +312,78 @@
           "shard": 9,
           "budget_minutes": 25,
           "run": ["domain-time", "--nodes", "3", "--fault", "voter-partition"]
+        },
+        {
+          "id": "backup-cycles-1",
+          "shard": 10,
+          "budget_minutes": 10,
+          "run": ["backup-cycles", "--nodes", "1"]
+        },
+        {
+          "id": "backup-cycles-3",
+          "shard": 10,
+          "budget_minutes": 12,
+          "run": ["backup-cycles", "--nodes", "3"]
+        },
+        {
+          "id": "restore-into-fresh-cluster",
+          "shard": 10,
+          "budget_minutes": 12,
+          "run": ["restore-fresh-cluster"]
+        },
+        {
+          "id": "backup-under-owner-crash",
+          "shard": 10,
+          "budget_minutes": 14,
+          "run": ["backup-fault", "--fault", "owner-crash"]
+        },
+        {
+          "id": "restore-under-leader-crash",
+          "shard": 10,
+          "budget_minutes": 12,
+          "run": ["restore-fault", "--fault", "leader-crash"]
+        },
+        {
+          "id": "restore-under-owner-crash",
+          "shard": 10,
+          "budget_minutes": 11,
+          "run": ["restore-fault", "--fault", "owner-crash"]
+        },
+        {
+          "id": "restore-staging-volume",
+          "shard": 10,
+          "budget_minutes": 11,
+          "run": ["restore-volume"]
+        },
+        {
+          "id": "backup-under-leader-crash",
+          "shard": 11,
+          "budget_minutes": 14,
+          "run": ["backup-fault", "--fault", "leader-crash"]
+        },
+        {
+          "id": "backup-under-partition",
+          "shard": 11,
+          "budget_minutes": 15,
+          "run": ["backup-fault", "--fault", "owner-partition"]
+        },
+        {
+          "id": "rolling-restart-during-backup-stream",
+          "shard": 11,
+          "budget_minutes": 20,
+          "run": ["backup-fault", "--fault", "rolling-restart"]
+        },
+        {
+          "id": "restore-under-leader-partition",
+          "shard": 11,
+          "budget_minutes": 20,
+          "run": ["restore-fault", "--fault", "leader-partition"]
+        },
+        {
+          "id": "restore-reclamation-under-owner-crash",
+          "shard": 11,
+          "budget_minutes": 19,
+          "run": ["restore-fault", "--fault", "reclamation-owner-crash"]
         }
       ]
     }

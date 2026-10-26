@@ -8,13 +8,13 @@ Feature: Emitter payload assembly across Arrow carriers
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "assembled_{{test_id}}" exists with 1 partitions
     And Kafka topic "assembled_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, tenant STRING, source STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
@@ -43,10 +43,10 @@ Feature: Emitter payload assembly across Arrow carriers
           INHERIT ALL BRANCHED BY by_source_b SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER assembled
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER assembled
         FROM source_a_events, source_b_events
-        TO KAFKA kafka_main TOPIC assembled_{{test_id}}
+        TO kafka_main TOPIC 'assembled_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL

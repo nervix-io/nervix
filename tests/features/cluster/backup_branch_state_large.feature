@@ -2,6 +2,7 @@ Feature: Deduplicator keyspaces and windows larger than the bulk budget in backu
   A restore converts each archived keyspace and window into its native checkpoint one bounded
   group at a time, and a restored window larger than the bulk budget persists again.
 
+  @long_running
   Scenario Outline: A keyspace and a window above the bulk budget resume exactly beside many small branches on <cluster_size> nodes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
     And the production sticky scheduler is configured
@@ -30,7 +31,7 @@ Feature: Deduplicator keyspaces and windows larger than the bulk budget in backu
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
     Given the active domain is "{{source_domain}}_large_failure"
     When the cluster is restarted
-    And these NSPL commands fail with "restore state installation is incomplete"
+    And these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """

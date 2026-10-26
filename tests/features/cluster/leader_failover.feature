@@ -2,7 +2,7 @@ Feature: Cluster leader failover
 
   Scenario: Cluster elects a new leader when the current leader stops
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -21,7 +21,7 @@ Feature: Cluster leader failover
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE fraud_model;
@@ -110,8 +110,7 @@ Feature: Cluster leader failover
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -195,7 +194,7 @@ Feature: Cluster leader failover
       | window_processor | latency_window      | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION BRANCHED BY by_metric_source TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency) ON MESSAGE ERROR LOG                                                                                                                                                                 |
       | generator        | synth_notifications | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE GENERATOR synth_notifications USING MATERIALIZED STATE notifications EACH 100ms BRANCHED BY by_notification_source TO generated_notifications SET user_id = relay_state.notifications.user_id, tenant = relay_state.notifications.tenant, level = relay_state.notifications.level FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                                                      |
       | inferencer       | score_model         | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } BRANCHED BY by_feature_source TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                                                           |
-      | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG                                                                                                                                 |
+      | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE KAFKA TOPIC EMITTER kafka_emit FROM notifications TO kafka_main TOPIC 'notifications_out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG                                                                                                                         |
 
   Scenario Outline: Dead scheduled node primary failover falls back to another live node without a replica
     Given Kafka is running
@@ -203,7 +202,7 @@ Feature: Cluster leader failover
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE RESOURCE fraud_model;
@@ -292,8 +291,7 @@ Feature: Cluster leader failover
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
@@ -377,4 +375,4 @@ Feature: Cluster leader failover
       | window_processor | latency_window      | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION BRANCHED BY by_metric_source TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency) ON MESSAGE ERROR LOG                                                                                                                                                                 |
       | generator        | synth_notifications | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE GENERATOR synth_notifications USING MATERIALIZED STATE notifications EACH 100ms BRANCHED BY by_notification_source TO generated_notifications SET user_id = relay_state.notifications.user_id, tenant = relay_state.notifications.tenant, level = relay_state.notifications.level FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                                                      |
       | inferencer       | score_model         | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 1 FILE 'models/simple_score.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } BRANCHED BY by_feature_source TO scored SET score = score FLUSH IMMEDIATE ON MESSAGE ERROR LOG                                                                           |
-      | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG                                                                                                                                 |
+      | emitter          | kafka_emit          | ARRAY<F32, 2> | ARRAY<F32, 1> | CREATE KAFKA TOPIC EMITTER kafka_emit FROM notifications TO kafka_main TOPIC 'notifications_out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG                                                                                                                         |

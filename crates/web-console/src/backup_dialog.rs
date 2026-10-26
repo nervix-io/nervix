@@ -47,7 +47,7 @@ use nervix_models::{
     DomainName, ExistingUserPolicy, Restore, RestoreLifecycle, RestoreMode, RestoreReport,
     RestoreState, Statement, TransactionStatus,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 use nervix_primitives::unmodeled::futures::{AbortHandle, Abortable};
 use wasm_bindgen::JsCast as _;
 
@@ -868,7 +868,7 @@ impl BackupSignals {
             });
             return;
         };
-        let statement = restore.to_canonical_nspl();
+        let statement = restore.to_canonical_plexus();
         let reference = command_execution_reference();
         let attempt = advance(self.restore_attempt);
         let revision = self.restore_revision.get_untracked();
@@ -1133,7 +1133,7 @@ fn BackupForm(
 ) -> impl IntoView {
     let draft = backups.backup_draft;
     let preview = move || match draft.with(BackupDraft::model) {
-        Ok(backup) => backup.to_canonical_nspl(),
+        Ok(backup) => backup.to_canonical_plexus(),
         Err(_) => String::new(),
     };
     let validation = move || match draft.with(BackupDraft::model) {
@@ -1151,7 +1151,7 @@ fn BackupForm(
                 return;
             }
         };
-        let query = backup.to_canonical_nspl();
+        let query = backup.to_canonical_plexus();
         let domain = match &backup.scope {
             BackupScope::Domain(Some(domain)) => Some(domain.clone()),
             BackupScope::Domain(None) | BackupScope::Cluster => None,
@@ -1252,7 +1252,7 @@ fn BackupForm(
                 <span>"Without resource bytes"</span>
             </label>
             <div class="create-preview-block">
-                <span>"Canonical NSPL preview"</span>
+                <span>"Canonical Plexus preview"</span>
                 <code class="create-preview backup-preview">{preview}</code>
             </div>
             <Show when=move || validation().is_some() fallback=|| ()>
@@ -1304,7 +1304,7 @@ fn RestoreForm(backups: BackupSignals) -> impl IntoView {
         backups.archive_name.track();
         draft.track();
         match backups.restore_model(mode) {
-            Ok(restore) => restore.to_canonical_nspl(),
+            Ok(restore) => restore.to_canonical_plexus(),
             Err(_) => String::new(),
         }
     };

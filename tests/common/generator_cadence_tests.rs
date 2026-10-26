@@ -13,9 +13,49 @@ use nervix_primitives::time::{Instant, sleep};
 use rstest::{fixture, rstest};
 use serde_json::{Value, json};
 
-use crate::generator_cadence::GeneratorCadenceObservation;
+use crate::generator_cadence::{GeneratorCadenceObservation, GeneratorSubscription};
 
 const BUDGET: Duration = Duration::from_secs(30);
+
+struct ScriptedSubscription {
+    rows: VecDeque<String>,
+    read_delay: Duration,
+    read_budgets: Vec<Duration>,
+}
+
+impl ScriptedSubscription {
+    fn new(rows: VecDeque<String>) -> Self {
+        Self {
+            rows,
+            read_delay: Duration::ZERO,
+            read_budgets: Vec::new(),
+        }
+    }
+}
+
+impl GeneratorSubscription for ScriptedSubscription {
+    async fn next(&mut self, budget: Duration) -> io::Result<Option<String>> {
+        self.read_budgets.push(budget);
+        sleep(self.read_delay).await;
+        Ok(self.rows.pop_front())
+    }
+}
+
+struct StalledSubscription;
+
+impl GeneratorSubscription for StalledSubscription {
+    async fn next(&mut self, _budget: Duration) -> io::Result<Option<String>> {
+        future::pending().await
+    }
+}
+
+struct FailedSubscription;
+
+impl GeneratorSubscription for FailedSubscription {
+    async fn next(&mut self, _budget: Duration) -> io::Result<Option<String>> {
+        Err(io::Error::other("disconnected"))
+    }
+}
 
 #[derive(Clone, Copy)]
 struct SourceRow {
@@ -84,11 +124,9 @@ fn occurrences(times: [u64; 4]) -> VecDeque<String> {
 async fn interleaved_rows_preserve_fields_and_share_execution_timestamps(
     mut observation: GeneratorCadenceObservation,
 ) {
-    let mut rows = occurrences([0, 200, 400, 600]);
-    observation
-        .observe(BUDGET, async |_| Ok(rows.pop_front()))
-        .await;
-    assert!(rows.is_empty());
+    let mut subscription = ScriptedSubscription::new(occurrences([0, 200, 400, 600]));
+    observation.observe(BUDGET, &mut subscription).await;
+    assert!(subscription.rows.is_empty());
     assert_eq!(observation.last_payload(), Some(&ACME.payload(600)));
 }
 
@@ -106,19 +144,17 @@ async fn delayed_reads_and_late_branch_readiness_do_not_change_the_cadence_verdi
     // nor adjacent delivery, and all field and timestamp assertions still apply to early rows.
     rows.extend(occurrences([4_000, 8_000, 16_000, 32_000]));
     let started = Instant::now();
-    let mut read_budgets = Vec::new();
-    observation
-        .observe(BUDGET, async |remaining| {
-            read_budgets.push(remaining);
-            sleep(Duration::from_secs(1)).await;
-            Ok(rows.pop_front())
-        })
-        .await;
-    assert!(rows.is_empty());
+    let mut subscription = ScriptedSubscription::new(rows);
+    subscription.read_delay = Duration::from_secs(1);
+    observation.observe(BUDGET, &mut subscription).await;
+    assert!(subscription.rows.is_empty());
     assert_eq!(started.elapsed(), Duration::from_secs(19));
-    assert_eq!(read_budgets.len(), 19);
-    assert_eq!(read_budgets.first(), Some(&BUDGET));
-    assert_eq!(read_budgets.last(), Some(&Duration::from_secs(12)));
+    assert_eq!(subscription.read_budgets.len(), 19);
+    assert_eq!(subscription.read_budgets.first(), Some(&BUDGET));
+    assert_eq!(
+        subscription.read_budgets.last(),
+        Some(&Duration::from_secs(12))
+    );
 }
 
 #[rstest]
@@ -126,11 +162,9 @@ async fn delayed_reads_and_late_branch_readiness_do_not_change_the_cadence_verdi
 async fn a_pending_execution_and_coalescing_do_not_require_equal_execution_gaps(
     mut observation: GeneratorCadenceObservation,
 ) {
-    let mut rows = occurrences([0, 1, 2, 202]);
-    observation
-        .observe(BUDGET, async |_| Ok(rows.pop_front()))
-        .await;
-    assert!(rows.is_empty());
+    let mut subscription = ScriptedSubscription::new(occurrences([0, 1, 2, 202]));
+    observation.observe(BUDGET, &mut subscription).await;
+    assert!(subscription.rows.is_empty());
 }
 
 #[rstest]
@@ -142,10 +176,8 @@ async fn occurrences_must_span_the_logical_cadence(
     mut observation: GeneratorCadenceObservation,
     #[case] times: [u64; 4],
 ) {
-    let mut rows = occurrences(times);
-    observation
-        .observe(BUDGET, async |_| Ok(rows.pop_front()))
-        .await;
+    let mut subscription = ScriptedSubscription::new(occurrences(times));
+    observation.observe(BUDGET, &mut subscription).await;
 }
 
 #[rstest]
@@ -162,9 +194,8 @@ async fn every_source_field_is_checked(
     row[field] = replacement;
     row["generated_at"] = json!("1970-01-01T00:00:00Z");
     let payload = format!("key={{\"tenant\":\"acme\"}} payload={row}");
-    observation
-        .observe(BUDGET, async |_| Ok(Some(payload.clone())))
-        .await;
+    let mut subscription = ScriptedSubscription::new(VecDeque::from([payload]));
+    observation.observe(BUDGET, &mut subscription).await;
 }
 
 #[rstest]
@@ -176,9 +207,8 @@ async fn the_subscription_branch_key_must_match_the_row(
     let payload =
         ACME.payload(0)
             .replacen("key={\"tenant\":\"acme\"}", "key={\"tenant\":\"beta\"}", 1);
-    observation
-        .observe(BUDGET, async |_| Ok(Some(payload.clone())))
-        .await;
+    let mut subscription = ScriptedSubscription::new(VecDeque::from([payload]));
+    observation.observe(BUDGET, &mut subscription).await;
 }
 
 #[rstest]
@@ -190,14 +220,13 @@ async fn each_branch_has_strictly_ordered_timestamps(
     mut observation: GeneratorCadenceObservation,
     #[case] next_millis: u64,
 ) {
-    let mut rows = VecDeque::from([
+    let rows = VecDeque::from([
         ACME.payload(200),
         BETA.payload(200),
         ACME.payload(next_millis),
     ]);
-    observation
-        .observe(BUDGET, async |_| Ok(rows.pop_front()))
-        .await;
+    let mut subscription = ScriptedSubscription::new(rows);
+    observation.observe(BUDGET, &mut subscription).await;
 }
 
 #[rstest]
@@ -211,9 +240,8 @@ async fn independently_increasing_branch_timestamps_do_not_form_complete_occurre
         rows.push_back(ACME.payload(time));
         rows.push_back(BETA.payload(time + 1));
     }
-    observation
-        .observe(BUDGET, async |_| Ok(rows.pop_front()))
-        .await;
+    let mut subscription = ScriptedSubscription::new(rows);
+    observation.observe(BUDGET, &mut subscription).await;
 }
 
 #[rstest]
@@ -222,18 +250,14 @@ async fn independently_increasing_branch_timestamps_do_not_form_complete_occurre
 async fn a_stalled_read_still_ends_at_the_liveness_deadline(
     mut observation: GeneratorCadenceObservation,
 ) {
-    observation
-        .observe(BUDGET, async |_| future::pending().await)
-        .await;
+    observation.observe(BUDGET, &mut StalledSubscription).await;
 }
 
 #[rstest]
 #[nervix_primitives::test(start_paused = true)]
 #[should_panic(expected = "generator subscription failed: disconnected")]
 async fn a_subscription_failure_is_retained(mut observation: GeneratorCadenceObservation) {
-    observation
-        .observe(BUDGET, async |_| Err(io::Error::other("disconnected")))
-        .await;
+    observation.observe(BUDGET, &mut FailedSubscription).await;
 }
 
 #[rstest]
@@ -250,7 +274,6 @@ async fn invalid_public_rows_fail_the_observation(
     mut observation: GeneratorCadenceObservation,
     #[case] payload: &str,
 ) {
-    observation
-        .observe(BUDGET, async |_| Ok(Some(payload.to_string())))
-        .await;
+    let mut subscription = ScriptedSubscription::new(VecDeque::from([payload.to_string()]));
+    observation.observe(BUDGET, &mut subscription).await;
 }

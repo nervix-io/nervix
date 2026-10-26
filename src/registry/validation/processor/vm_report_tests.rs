@@ -18,8 +18,8 @@ use crate::registry::test_fixtures::named;
 fn output_with_construction(raw: &str) -> ProcessorOutput {
     ProcessorOutput {
         relay: named("mapped"),
-        construction: nervix_nspl::parse_route_construction(raw)
-            .expect("the test route is valid NSPL"),
+        construction: nervix_plexus::parse_route_construction(raw)
+            .expect("the test route is valid Plexus"),
         flush_policy: None,
         message_error_policy: MessageErrorPolicy::Log,
         branch: Some(OutputBranch::Unbranched),

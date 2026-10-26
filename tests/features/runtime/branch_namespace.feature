@@ -3,11 +3,11 @@ Feature: Branch namespace
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification_in (
         tenant STRING,
@@ -40,8 +40,7 @@ Feature: Branch namespace
       CREATE RELAY notifications SCHEMA notification_in BRANCHED BY by_mqtt_notifications;
       CREATE RELAY projected_notifications SCHEMA notification_out BRANCHED BY by_mqtt_notifications;
 
-      CREATE CLIENT mqtt_main
-        TYPE MQTT
+      CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branch-namespace-{{test_id}}'
@@ -100,11 +99,11 @@ Feature: Branch namespace
   Scenario: Correlators require explicit left and right expression scopes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA correlation_side (
         id STRING,
@@ -132,7 +131,7 @@ Feature: Branch namespace
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "bare field reads are unavailable in this expression context"
+    And these Plexus commands fail with "bare field reads are unavailable in this expression context"
       """
       CREATE CORRELATOR ambiguous_scope
         LEFT FROM left_records
@@ -152,11 +151,11 @@ Feature: Branch namespace
   Scenario Outline: Reingestor branch mapping reads the current branch key
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,

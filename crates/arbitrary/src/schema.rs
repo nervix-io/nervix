@@ -92,7 +92,7 @@ impl Arbitrary<'_> {
         self.distinct_names_refusing(minimum, maximum, &[])
     }
 
-    /// Between `minimum` and `maximum` names, none repeated, that in the NSPL domain spell none of
+    /// Between `minimum` and `maximum` names, none repeated, that in the Plexus domain spell none of
     /// `refused`, for a list whose position refuses more words than its kind of name does.
     pub fn distinct_names_refusing<N: GeneratedName>(
         &mut self,

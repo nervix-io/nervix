@@ -1,5 +1,7 @@
 # Resource Versions And Bindings
 
+*Plexus, the Nervix graph definition language.*
+
 A resource version is an immutable directory tree that the cluster verifies and installs on every
 live node before anything can use it. A binding is the part of a model that selects one of those
 versions: a TLS VHOST, a protobuf codec or signaling protocol, an inferencer, a WASM processor, a
@@ -12,7 +14,7 @@ completed version it binds, and its consumers load exactly that version. An uplo
 version to the catalog. A running consumer moves to another version only when a validated,
 classified, and atomic model mutation rebinds it.
 
-This chapter describes the architecture. [Resources](./resources.md) owns the NSPL statements, the
+This chapter describes the architecture. [Resources](./resources.md) owns the Plexus statements, the
 upload format, the per-version limits, and examples.
 
 ## Ownership By Layer
@@ -61,7 +63,7 @@ runtime revision its node applied.
 
 Visual client-mount and VHOST-TLS forms select a resource and one of its completed versions through
 typed session choices. Their drafts may submit `LATEST`; neither form resolves it locally or
-creates resource content. The server applies the same version validation and pinning as the NSPL
+creates resource content. The server applies the same version validation and pinning as the Plexus
 command path, so the rendered stored Model and every listener use a concrete version.
 
 ## Version Lifecycle
@@ -72,6 +74,10 @@ command path, so the rendered stored Model and every listener use a concrete ver
 Uploads are leader operations. A client-protocol upload declares the exact size of the archive it
 streams, and a follower redirects it to the leader. A web-console upload streams the selected files
 to the leader, which builds the archive itself; a follower refuses it.
+
+The native client's directory archive is completed and flushed locally before its upload call
+opens. A failed or cancelled construction discards its partial temporary archive and assigns no
+version. Once built, that exact archive is retained for every retry within the upload call.
 
 A number is assigned when the leader admits an upload. Once the complete body has arrived, the
 leader holds the archive's digest and records the upload under its identity in one consensus
@@ -277,6 +283,15 @@ client. Changing that client's definition or rebinding its mounted resource take
 configuration-entity domain pause. If the drain cannot complete, the candidate definition and
 its resource binding are not installed.
 
+MQTT input retirement resolves the preceding and replacement clients through their own pinned
+mounts and keeps both mount leases until network cleanup and replacement preparation finish.
+It can resolve the preceding client from a stopped domain's typed plan. A missing preceding
+mount is a reported best-effort cleanup failure; preparing the explicitly selected replacement
+still requires that replacement's complete binding. Retirement never changes a binding or
+selects a newer resource version. Pulsar input retirement resolves the dropped input's client the
+same way, from a stopped domain's typed plan too, and keeps its mount lease until the
+subscription's removal finishes; a missing mount is likewise a reported best-effort failure.
+
 ### The Pinning Invariant
 
 Three rules together guarantee that a consumer uses exactly the version its model names:
@@ -328,7 +343,7 @@ before retrying against that identity. A conflict found after admission ends the
 transaction instead of replanning it.
 
 Either way, a plan never commits a `LATEST` it resolved against an older catalog.
-[Control Plane](./control-plane.md#replicated-nspl-transactions) defines preview identity,
+[Control Plane](./control-plane.md#replicated-plexus-transactions) defines preview identity,
 admission, and the frozen plan.
 
 ## Rebinding
