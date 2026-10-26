@@ -36,7 +36,7 @@ transforms:
       . = {"id": string!(.id), "value": upcase(string!(.value))}
 {% endfor %}
 
-emitters:
+sinks:
   kafka_out:
     type: kafka
     inputs:

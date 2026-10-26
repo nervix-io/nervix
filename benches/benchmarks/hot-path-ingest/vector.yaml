@@ -24,7 +24,7 @@ sources:
         lossy: false
 {% endfor %}
 
-emitters:
+sinks:
   kafka_out:
     type: kafka
     inputs:

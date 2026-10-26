@@ -24,7 +24,7 @@ sources:
         lossy: false
 {% endfor %}
 
-emitters:
+sinks:
 {% for consumer in parameters.consumers %}
   kafka_out_{{ consumer }}:
     type: kafka

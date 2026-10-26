@@ -40,7 +40,7 @@ transforms:
       . = {"id": string!(.id), "value": upcase(value)}
 {% endfor %}
 
-emitters:
+sinks:
 {% for lane in lanes %}
   kafka_out_{{ lane }}:
     type: kafka
