@@ -143,12 +143,12 @@ Feature: Committed cluster parameters
       | 1            |
       | 3            |
 
-  Scenario Outline: A lower HTTP header count refuses the model that exceeds it on a cluster of <cluster_size>
+  Scenario Outline: A lower HTTP header <parameter> cap refuses known names with dynamic values on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus statements
       """
       CREATE UNPACED DOMAIN {{domain}};
-      CREATE SCHEMA event_schema (id I64);
+      CREATE SCHEMA event_schema (id STRING);
       CREATE RELAY outgoing SCHEMA event_schema UNBRANCHED;
       CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:9', 'timeout_ms' = 60000
@@ -157,19 +157,22 @@ Feature: Committed cluster parameters
         TO api METHOD 'POST' PATH '/events'
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
-        INVOKE write_header('x-first', 'a'), write_header('x-second', 'b')
+        INVOKE write_header('x-first', input.id), write_header('x-second', input.id)
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these Plexus statements fail with "http-header-fields"
+    When these Plexus statements fail with "<refusal>"
       """
-      ALTER CLUSTER SET HTTP_HEADER_FIELDS = 1;
+      ALTER CLUSTER SET <parameter> = <limit>;
       """
     Then the last command error contains
       """
       two_headers
       """
+    And node "node-1" eventually reports status containing "<refusal> committed=<initial>"
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | parameter          | limit | refusal            | initial |
+      | 1            | HTTP_HEADER_FIELDS | 1     | http-header-fields | 128     |
+      | 3            | HTTP_HEADER_FIELDS | 1     | http-header-fields | 128     |
+      | 1            | HTTP_HEADER_BYTES  | 10B   | http-header-bytes  | 32768B  |
+      | 3            | HTTP_HEADER_BYTES  | 10B   | http-header-bytes  | 32768B  |

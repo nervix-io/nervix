@@ -3587,13 +3587,13 @@ selections = [
 ]
 
 [[workload]]
-coverage = "A lowered header cardinality is validated against the committed HTTP emitter before publication."
-examples = 2
+coverage = "Lowered header cardinality and byte limits are validated against known HTTP header names even when their values are dynamic."
+examples = 4
 feature = "tests/features/cluster/cluster_parameters.feature"
 id = "parameters.header-cap"
-invariant = "A parameter transition cannot invalidate a model's literal HTTP header fields."
+invariant = "A parameter transition cannot invalidate a model's known HTTP header names or their byte requirement."
 invocation = "cluster-parameters"
-scenario = "A lower HTTP header count refuses the model that exceeds it on a cluster of <cluster_size>"
+scenario = "A lower HTTP header <parameter> cap refuses known names with dynamic values on a cluster of <cluster_size>"
 selections = [
   "deloxide",
   "deloxide-order",

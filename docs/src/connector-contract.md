@@ -2384,6 +2384,8 @@ delivery semantics rather than assuming a generic envelope or exactly-once exter
 ## Committed Host Bounds
 
 The Nervix host validates batch counts and client-emitter batch bytes against the committed
-cluster policy. HTTP request preparation captures typed header-byte and field-count bounds for that publication;
-the fixed field-count and syntax contract remains enforced by `HttpApplicationHeaders`. Connector
+cluster policy. HTTP request preparation captures typed header-byte and field-count bounds for that publication.
+Transition validation counts known HTTP header names independently of their values and preserves
+guaranteed byte contributions across dynamic replacements. `HttpApplicationHeaders` enforces the
+captured limits and the syntax contract on the evaluated envelope. Connector
 transport ownership and per-record acknowledgement boundaries are unchanged.

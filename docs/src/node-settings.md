@@ -341,6 +341,10 @@ Validation and publication share a commit fence. A concurrent model change or pa
 invalidates a captured transition before it applies, and validation runs again against the
 current state. Model admission likewise uses the committed parameter record, so a configuration
 cannot be accepted against a superseded cap.
+Known HTTP header names contribute their count and byte requirement even when their values depend
+on input. Dynamic names may replace earlier values, so transition validation retains only guaranteed
+byte contributions; request preparation checks each complete evaluated envelope against its captured
+bounds.
 
 Each live node installs the committed record before reporting that revision ready. Runtime timing
 and resource-store owners publish a new immutable policy over the same storage. Snapshot tasks
