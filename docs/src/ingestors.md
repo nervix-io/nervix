@@ -577,7 +577,7 @@ CREATE [IF NOT EXISTS] <kind> CLIENT <name>
 
 Transport-specific schemes and keys:
 
-- `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
+- `KAFKA`: librdkafka properties with the [reserved keys and consumer settings](#kafka) described below. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -1000,23 +1000,35 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
 <!-- connector-matrix:ingest-kafka-topic:end -->
 
-Kafka is the richest ingestion surface today.
-
 Offset modes:
 
 - `CONSUMER GROUP '<group>'`: Kafka manages offsets
 - `DOMAIN`: Nervix stores the next offset in replicated runtime state and commits partition-to-instance assignment in the Raft-backed domain schedule
 
-Kafka client configuration is passed through to librdkafka. Nervix does not override
+`CREATE KAFKA CLIENT` refuses the Nervix-owned keys `group.id`, `enable.auto.commit`,
+`enable.partition.eof`, `allow.auto.create.topics` and `delivery.report.only.error`. Other property
+names and values are checked offline by librdkafka before commitment and passed through to it.
+
+The statement's offset mode supplies the consumer's `group.id`. Only `OFFSET BY CONSUMER GROUP`
+with `MODE NO ACK` enables `enable.auto.commit`. Every consumer disables `enable.partition.eof`
+and `allow.auto.create.topics`. Nervix does not override
 `auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
 read records that may already exist. Under `OFFSET BY DOMAIN` in an unpaced domain the same
-setting places a partition that has no domain offset yet.
+setting places a partition that has no domain offset yet. These overrides also take precedence
+over the configurable driver defaults in the table above.
 
 A Kafka ingestor never creates the topic it reads. Every consumer Nervix runs for it sets
 `allow.auto.create.topics` to `false`, whatever the broker allows, and `CREATE KAFKA CLIENT` refuses a
 Kafka client whose `CONFIG` sets that key. Provision the topic before the ingestor starts. Until it
-exists, `DESCRIBE INGESTOR` reports `transient error: Kafka topic '<topic>' does not exist`, and the
+exists, `DESCRIBE INGESTOR` reports `transient error: KAFKA topic '<topic>' does not exist`, and the
 ingestor starts reading once the topic is created.
+
+Only `OFFSET BY CONSUMER GROUP '<group>'` joins a broker-managed group and commits offsets to it.
+That group belongs to the operator: dropping the ingestor leaves its committed offsets on Kafka
+for later consumers. `OFFSET BY DOMAIN` uses direct partition assignments, and the partition
+inspectors only fetch metadata. Their internal `nervix_domain_...` and watch group identifiers
+never become groups on the broker, so running or dropping those consumers creates or deletes no
+broker group.
 
 In an ACK mode, Nervix commits a Kafka position only after its downstream acknowledgement
 completes. If downstream work rejects a record, the ingestor seeks back to it. If Kafka cannot
@@ -1068,7 +1080,13 @@ read reconnects on the host's reconnect cadence: it waits 250 ms after its first
 doubles the wait after each further one, up to 30 seconds, until a batch is read again.
 `DESCRIBE INGESTOR` shows the current wait as its reconnect backoff.
 
-`OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
+`OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix
+persists the offsets on the runtime state snapshot interval and whenever a node stops executing
+the domain, and when the ingestor has state replicas, a commit completes only after every replica
+has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset
+snapshot. The leader watches Kafka partition topology and commits any rebalance through the
+strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path.
+Executing ingestors consume only the committed partition assignment.
 
 A commit or start-point reset waits for its replica acknowledgements within the native checkpoint
 bulk operation's thirty-second budget. A missing acknowledgement fails the commit at that deadline;
@@ -1081,13 +1099,22 @@ Offset recovery details:
 - a partition without a stored domain offset, such as one added to the topic or any partition on a domain's first `START`, starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
 - the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
 
-Quiescing leaves a consumer group, or unassigns domain-owned partitions, and resume continues from
-committed offsets. Topic time and size retention continue during the pause. For consumer-group
+Quiescing leaves a consumer group, or unassigns domain-owned partitions. In a generation begun
+with plain `START`, domain-owned partitions resume from their recorded offsets, and consumer-group
+partitions resume from the group's committed offsets or an outstanding rejection floor as described
+above. Topic time and size retention continue during the pause. For consumer-group
 offsets that age out, the client's pass-through `auto.offset.reset` setting decides whether resume
 uses the earliest retained record, skips to new records, or raises a general source error. Domain
-offsets clamp to the live watermark range and resume at the earliest retained record, exposing a
-gap. Other members of a user-named group may consume and commit while Nervix is absent. Quiescing
-does not change the auto-commit loss windows of `MODE NO ACK`.
+offsets clamp to the partition's current low and high watermarks; records retention has removed
+cannot be recovered. Other members of a user-named group may consume and commit while Nervix is
+absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
+
+A current limitation applies to a domain generation begun with `START AT <timestamp>` or
+`START AT NOW`: every resume of a `DOMAIN` ingestor reapplies the resolved start timestamp and
+replaces the stored offsets for the whole topic, including partitions assigned to other instances.
+A reconnect or quiesce/resume can therefore replay records already acknowledged in that generation.
+Use plain `START` when the domain should resume its saved positions. Consumer-group offsets do not
+use this domain start-point reset.
 
 ### Pulsar
 

@@ -1131,9 +1131,14 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-emit).
 <!-- connector-matrix:emit-kafka-topic:end -->
 
-`ACK` waits for every record's delivery report. Kafka's `acks`, idempotence, batching, linger, and
-compression remain pass-through client configuration. `ACK TIMEOUT` bounds the report wait and is
-also the producer's own delivery bound: the emitter sets librdkafka's `message.timeout.ms` to its
+`ACK` waits for every record's delivery report through the shared confirmation window. If a publish
+attempt fails, the window first settles the answers already received and returns only unresolved
+members for retry; confirmed records are not sent again by that attempt's retry. An unanswered
+report is still ambiguous: the broker may have accepted the record, so a retry can duplicate it.
+
+Kafka's `acks`, idempotence, batching, linger, and compression remain pass-through client
+configuration. `ACK TIMEOUT` bounds the report wait and is also the producer's own delivery bound:
+the emitter sets librdkafka's `message.timeout.ms` to its
 `ACK TIMEOUT`, rounded up to the millisecond, and removes `delivery.timeout.ms`, overriding either
 name in the client's `CONFIG`. The producer therefore gives up a record within about a second of
 the emitter doing so, the interval at which librdkafka checks message timeouts, instead of
@@ -1152,6 +1157,12 @@ queue is an infrastructure condition paced by the declared retry policy. In eith
 whose payload exceeds the entire `queue.buffering.max.kbytes` capacity is rejected through
 `ON MESSAGE ERROR`, with its payload size and the capacity in bytes. This queue capacity counts
 the payload alone; `message.max.bytes` separately bounds the encoded Kafka record.
+
+The producer keeps librdkafka's topic auto-creation default. A broker that permits it can therefore
+create a missing topic on the first publish, even though Nervix's consumers disable auto-creation
+and `CREATE KAFKA CLIENT` refuses `allow.auto.create.topics`. Provision output topics explicitly;
+the consumer's no-creation guarantee does not extend to the producer.
+
 When the emitter stops, it flushes what the producer still queues, in both modes and
 regardless of `linger.ms`: a `STOP`, an alteration or ownership move that replaces the emitter, and
 the node's graceful shutdown each give that flush their deadline. Records still awaiting their
