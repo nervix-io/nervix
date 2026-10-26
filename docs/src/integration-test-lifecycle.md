@@ -165,7 +165,7 @@ resubmitting an outcome that might already have produced output.
 | Unaccepted addresses | No task: a listening socket at a chosen loopback address and the one connection that fills its accept queue, so the kernel drops every later handshake. The scenario world owns both until the scenario ends | `tests/common/unaccepted_address.rs` |
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
-| Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's completion, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
+| Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
@@ -837,6 +837,19 @@ The harness keeps these boundaries explicit.
   scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
   released observations. The scenario asserts the original execution reference's outcome and a
   dependent command through the public session protocol; it adds no setup delay or request retry.
+- **Console backup download pauses.** The console reload scenarios hold the archive's first
+  download before it streams, so the reload interrupts a download in progress. The archive is
+  assembled and served by the leader that completes the backup. A leadership move while the backup
+  runs makes the new leader run it again under the same reference and serve the archive it
+  assembles, so no step can name that node before the backup ends. The scenarios therefore arm the
+  download pause on every node. Only a node that retains an archive under the reference reaches its
+  pause, and the step that waits for it reports which node did. Each pause is one-shot, so the
+  download the reload starts on that node streams while the first one stays held. The scenario
+  then releases every node's pause, and scenario teardown releases any pause still armed. One
+  three-node scenario moves leadership under the durably admitted backup command, and requires the
+  same paused download, reload and verified resumed archive. The scenario whose reload must resume
+  nothing arms the same pauses, so a backup the console resumed by mistake would stay held on
+  whichever node served it instead of downloading and clearing its record.
 - **Timed control probes.** The silent-peer health scenario connects a named production client
   before holding the peer's health response. Its nine-second probe then sends the user creation,
   relay creation and cluster-status statements in order on that client, under one deadline. The
@@ -849,10 +862,22 @@ The harness keeps these boundaries explicit.
   not a different product deadline.
   Its completion regression also holds every application-revision reply from the two followers
   after sampling the reply. Local revision publication and gossip continue, so the same prepared
-  client's mutations must finish while those replies remain held. Reached observations prove both
-  pauses were exercised before explicit release. The shared pause registry retains these controls
-  through request cancellation; scenario cleanup releases and clears them even after an assertion
-  fails. The original health-only scenario remains an independent check.
+  client's user creation, relay creation and cluster-status query must finish in order while
+  those replies remain held. This batch has one twenty-second harness budget. On 25 October
+  2026, with 16 runtime workers, 48 slots, six large materialized workloads and 192 distinct
+  health cases, 88 original requests exceeded nine seconds but all succeeded before fault
+  release in 9.016 to 11.998 seconds. Every pre-release status still reported node-3 connected.
+  Parallel mutation dispatch also exceeded nine seconds, so adding their latencies was not the
+  sole cause. Twenty seconds exceeds 1.5 times that measured maximum; the product's readiness
+  propagation and command deadlines remain with their owners.
+  The final retained status must report node-3 connected and name the new relay's scheduled owner
+  before any fault is released. The timed helper also checks each recorded completion instant:
+  a timeout future can return an already-ready reply when polled after its deadline. It captures
+  that instant before diagnostic logging and names the client, domain and statement position.
+  Reached observations prove both revision pauses were exercised before explicit release. The
+  shared pause registry retains these controls through request cancellation; scenario cleanup
+  releases and clears them even after an assertion fails. The original health-only scenario keeps
+  its nine-second sequential probe and remains an independent check.
 
   The large-resource control probe connects a named production client to the restarted node once
   it has started, then waits until that node's

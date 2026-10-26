@@ -1884,6 +1884,14 @@ executor permit keeps progressing while that view request waits. Ending the barr
 probe task. Queries retain their transport deadlines, and the barrier retains its command deadline
 and leader-tenure and incarnation checks.
 
+The public gossip-completion qualification holds the two followers' revision replies after
+sampling and a peer's health reply. One client connects before those faults, then creates a user,
+creates a relay and reads cluster status in order within one twenty-second harness budget. That
+budget includes margin over the measured multi-stage gossip propagation under parallel bulk load;
+it is not a product deadline. The retained status must still report the connected follower as
+connected and name the new relay's owner before releasing any reply. The adjacent health-only
+qualification keeps its nine-second sequential probe.
+
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
 probe is healthy, rather than merely that a transport pool exists.
