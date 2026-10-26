@@ -1042,6 +1042,10 @@ test-dns *args:
 test-connectors *args:
     cargo test --package 'nervix-connector*' --lib -- {{ args }}
 
+# Run the MySQL declaration consumers, statement builder and binding owners without a server.
+test-mysql *args:
+    cargo test --package nervix-connector-mysql --lib -- {{ args }}
+
 # Run the WebSockets transport and signaling owners without unrelated connector test roots.
 test-websockets *args:
     cargo test --package nervix-connector-websockets --lib -- {{ args }}

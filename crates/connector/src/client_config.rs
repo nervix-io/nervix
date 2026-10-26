@@ -38,6 +38,11 @@ pub enum OfflineClientConfigError {
     InvalidKey { key: String },
     #[error("the driver refused its client configuration")]
     Configuration,
+    #[error(
+        "client config parameter '{key}' sizes the connection pool; declare POOL SIZE MIN ... MAX \
+         ... on the client"
+    )]
+    PoolSizing { key: String },
 }
 
 impl OfflineClientConfigError {

@@ -6962,16 +6962,20 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "base64 0.22.1",
+ "bolero",
  "chrono",
  "error-stack",
  "meticulous",
  "mysql_async",
+ "mysql_common",
+ "nervix-arbitrary",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
+ "url",
 ]
 
 [[package]]

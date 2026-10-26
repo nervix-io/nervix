@@ -1004,6 +1004,13 @@ and the expression's inferred Arrow type, such as `VALUES key 'severity_number' 
 found Int64`. These are command refusals before publication, including during `ALTER`, rather
 than retried source or sink initialization failures. They never include a record's values.
 
+MySQL table-name construction refuses empty path parts and more than two parts with typed
+`ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through
+`OfflineClientConfigError::PoolSizing`, whose public message names the setting key and `POOL SIZE`
+without the address, credentials or parameter value. Driver URL syntax failures keep the driver
+cause under the existing key-bearing offline context; public projection still renders only that
+reviewed context.
+
 Registry validation and planning refuse invalid models before graph activation. Validation names the
 owning node, the route when the rule is route-local, the operation, and relevant fields or
 references. A branch mismatch in an error route, for example, identifies the source route, error

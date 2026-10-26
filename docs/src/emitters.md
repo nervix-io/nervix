@@ -2325,13 +2325,42 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
 | Network waits | connection, its handshake and an insert: unbounded |
-| Driver limits | The driver has no connect, read or write timeout. |
+| Driver limits | The driver has no connect, read or write timeout.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
 
-MySQL and MariaDB resolve conflicts through primary and unique keys already defined on the table, so the Plexus conflict policy does not accept a target list. `DO UPDATE` uses `ON DUPLICATE KEY UPDATE` for all mapped `VALUES` columns. `DO NOTHING` uses a no-op duplicate-key update.
+`TABLE` names one nonempty table part or two nonempty database/table parts, for example
+`'Orders'` or `'shop.Orders'`. The complete name uses 1–128 ASCII bytes from letters, digits,
+`_`, `-`, `~` and the separating dot. Nervix preserves case and quotes each part separately:
+`'shop.Orders'` becomes `` `shop`.`Orders` ``. Column keys are quoted as single identifiers,
+including any dot in a column key. Empty parts and more than two parts are refused when parsed
+or decoded.
+
+MySQL and MariaDB resolve conflicts through primary and unique keys already defined on the table,
+so the Plexus conflict policy takes no target list. `DO UPDATE` executes
+`ON DUPLICATE KEY UPDATE col = VALUES(col)` for every mapped `VALUES` column, including mapped
+key columns. `DO NOTHING` executes `ON DUPLICATE KEY UPDATE first = first`, where `first` is
+the first mapped column. This is a duplicate-key update and can run update triggers; it is not
+an insert-ignore operation.
+
+The connector binds the following exact Plexus types through MySQL's binary protocol. Nullable
+values bind as SQL `NULL`. The target table must already exist and provide compatible columns.
+
+| Plexus type | Bound representation |
+| --- | --- |
+| `BOOL` | Integer `0` or `1` |
+| `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `I64` | Signed 64-bit integer |
+| `U64` | Signed integer through `i64::MAX`; unsigned integer above it |
+| `F32`, `F64` | Double, including non-finite values; the server decides whether its column accepts the value |
+| `STRING` | UTF-8 bytes |
+| `BYTES` | The original octets |
+| `DATETIME` | RFC 3339 timestamp bytes with nanosecond precision where needed |
+| `ARRAY`, `VEC` | JSON text, recursively; byte elements use padded base64 and datetime elements use RFC 3339 strings; null elements and non-finite floating-point elements become JSON `null` |
+
+Other Arrow representations are outside the declared direct-value contract. Mapped expressions
+are checked at `CREATE` and `ALTER`; duplicate `VALUES` keys are refused before execution.
 
 MySQL clients declare their connection-pool bounds and use a mysql_async connection URL. See
 [Database Client Connection Pools](database-client-pools.md) for the accepted counts:
@@ -2345,6 +2374,12 @@ CREATE MYSQL CLIENT mysql
 ```
 
 For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path.
+
+The current client CONFIG keys are required `addr` and optional `tls_ca_file`. The address must
+be a `mysql://` URL accepted by the driver's offline parser. URL query options belong to the
+driver, except connection-pool sizing: declare that capacity with `POOL SIZE MIN ... MAX ...`.
+Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
+committed. Unknown standalone CONFIG keys are refused rather than ignored.
 
 ### MongoDB
 

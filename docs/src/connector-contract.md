@@ -716,6 +716,15 @@ connection, consumer, producer, DNS lookup or remote side effect. Checks requiri
 service still belong to client initialization. The registry names no connector crate and runtime
 receives entries and pinned mounts rather than a Model.
 
+The MySQL offline check also applies the vocabulary's pooled-client reserved-key declaration to
+URL query parameters. A pool override is a value-free refusal naming `POOL SIZE`, before storage
+or connection attempts; the host uses that same declaration for resolved configuration. MySQL's
+current client schema declares only the address and CA file its implementation consumes. Its
+table declaration admits one or two nonempty, case-preserving identifier parts, and the connector
+quotes each part separately. Its declared placeholder bound is shared with the statement divider;
+the bound narrows rows by mapped column count. The [MySQL manual](emitters.md#mysql) gives its
+exact binary binding and conflict semantics.
+
 Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
 exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed
 key-bearing contexts without rendering driver diagnostics that may contain credentials. Worker
@@ -1795,7 +1804,10 @@ shrink with a candidate: `connector-row-request-division` the division rule and 
 envelope grouping and the exact container bytes, `codec-bounded-encodings` and
 `bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
 `emitter-retained-payloads` the membership and byte-for-byte retry, `sqs-batch-requests`,
-`mqtt-publish-packets` and `postgres-insert-measures` the connector-specific measures.
+`mqtt-publish-packets`, `postgres-insert-measures` and `mysql-insert-measures` the connector-specific
+measures. The MySQL property compares the complete statement and bound parameters with the
+driver's binary serializer, including qualified table names, quoted column keys, nulls and
+nonempty slices of a rotated membership sequence.
 `mongodb-write-answers` checks the rows a failed MongoDB write delivers, rejects and leaves unresolved.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
 bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector

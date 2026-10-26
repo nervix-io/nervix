@@ -687,7 +687,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
 | Network waits | connection, its handshake and an insert: unbounded |  |
-| Driver limits | The driver has no connect, read or write timeout. |  |
+| Driver limits | The driver has no connect, read or write timeout.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### MONGODB COLLECTION emit

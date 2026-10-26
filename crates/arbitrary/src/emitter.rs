@@ -246,7 +246,7 @@ impl Arbitrary<'_> {
                 EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
                     mode: self.mysql_table_publication(),
                     client: self.name(),
-                    table: self.emitter_table_name(),
+                    table: self.mysql_table_name(),
                     values: self.value_mappings(1),
                     conflict_action: self.entropy.pick([
                         MySqlConflictAction::None,
