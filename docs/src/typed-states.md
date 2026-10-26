@@ -181,6 +181,13 @@ retain case. No absent namespace is filled from the Nervix domain, and no layer 
 namespace key. A commit-size limit is the same positive whole-byte value that bounds a batch;
 decoding validates that value rather than storing text for the runtime to parse.
 
+The Core NATS emitter's buffer is either empty or pending with a nonzero record count and its
+connection expectation. A pending write that began connected requires that same successful
+connection; one queued while disconnected requires the next connection. The state is consumed
+only once the driver drains its buffer, and a mismatched connection becomes a typed failure
+instead of certifying discarded bytes. A deadline leaves the pending state intact. This is
+volatile connector state, never a stored shape or a separate representation of the host's rows.
+
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
 is unchanged creates no retirement. A connector session catalog has a private constructor that
