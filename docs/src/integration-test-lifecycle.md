@@ -184,6 +184,15 @@ measures the silent connection's close from before connecting. The runtime task 
 polling gaps; it does not remove scheduling delays on the worker itself or change the listener's
 deadline.
 
+The controlled NATS endpoint publishes a positive observation when it holds a complete publish
+and stops reading behind it. A connection-loss scenario waits for that observation, ends the
+active connections, and waits for a refused reconnect before forwarding again. The same fault
+can run beside STOP. These event boundaries establish the outage without a sleep or a negative
+observation window. The publication scenario requires every original sequence member, allowing
+the duplicates an uncertain Core NATS retry permits. The STOP scenario observes the pending-record
+uncertainty through a retained public session; terminal domain teardown may cancel unresolved
+host work under the source's existing acknowledgement contract.
+
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
 `just test-deloxide-stress` or `just test-deloxide-stress-restore` builds, starts its
 deadlock diagnostics in `main`, right after it configures the lifecycle of its test dependencies and
