@@ -14,6 +14,7 @@ use nervix_client_core::ProducerOutcome;
 use nervix_models::{ClientProducerLimits, ClusterNodeName, IngestorName};
 
 use super::*;
+use crate::common::backup_phase::BackupPhase;
 
 #[when(expr = "a materialized restore workload with {int} relays is created")]
 async fn when_materialized_workload_is_created(world: &mut ScenarioWorld, relays: usize) {
@@ -144,62 +145,128 @@ async fn when_large_materialized_round_is_submitted(
         )
         .await
         .assured("the materialized input producer opens");
-    let deadline = Instant::now() + Duration::from_secs(120);
-    for tenant in 0..tenants {
-        let rows = RecordBatch::try_new(
-            StdArc::new(producer.arrow_schema()),
-            vec![
-                StdArc::new(StringArray::from(vec![format!("restore-tenant-{tenant}")])),
-                StdArc::new(StringArray::from(vec![value.as_str()])),
-                StdArc::new(Int64Array::from(vec![i64::from(round)])),
-                StdArc::new(
-                    TimestampNanosecondArray::from(vec![i64::from(round) * 1_000_000_000])
-                        .with_timezone("+00:00"),
-                ),
-            ],
-        )
-        .assured("the bounded row has the producer's exact input schema");
-        let body = producer.batch(&rows).assured("the fixture row encodes");
-        // Exercise an identical successful replay as well as possible partial failures. Every
-        // relay must retain exactly one revision per tenant and round in the archive below.
-        let completions_required = if round == 2 && tenant == 0 { 2 } else { 1 };
-        let mut completions = 0;
-        let mut attempts = 0_u32;
-        loop {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .assured("the materialized input round completes within its bounded budget");
-            attempts += 1;
-            let outcome = nervix_primitives::time::timeout(remaining, producer.send(body.clone()))
-                .await
-                .assured("the input producer reports a terminal outcome within the round budget")
-                .assured("the acknowledged input exchange succeeds");
-            match outcome {
-                ProducerOutcome::Completed => {
-                    println!(
-                        "materialized input round {round}, tenant {tenant}: completed after \
-                         {attempts} attempts"
+    let phase = BackupPhase::new(
+        format!(
+            "materialized input domain={}, initial_route={leader}, initial_producer={:?}, \
+             round={round}, tenants={tenants}, row_kib={kibibytes}",
+            world.domain,
+            producer.id(),
+        ),
+        Duration::from_secs(120),
+    );
+    let deadline = phase.deadline();
+    let domain = world.domain.clone();
+    let producer = phase
+        .observe(async move {
+            for tenant in 0..tenants {
+                nervix_primitives::task::consume_budget().await;
+                let rows = RecordBatch::try_new(
+                    StdArc::new(producer.arrow_schema()),
+                    vec![
+                        StdArc::new(StringArray::from(vec![format!("restore-tenant-{tenant}")])),
+                        StdArc::new(StringArray::from(vec![value.as_str()])),
+                        StdArc::new(Int64Array::from(vec![i64::from(round)])),
+                        StdArc::new(
+                            TimestampNanosecondArray::from(vec![i64::from(round) * 1_000_000_000])
+                                .with_timezone("+00:00"),
+                        ),
+                    ],
+                )
+                .assured("the bounded row has the producer's exact input schema");
+                let body = producer.batch(&rows).assured("the fixture row encodes");
+                // Exercise an identical successful replay as well as possible partial failures. Every
+                // relay must retain exactly one revision per tenant and round in the archive below.
+                let completions_required = if round == 2 && tenant == 0 { 2 } else { 1 };
+                let mut completions = 0;
+                let mut attempts = 0_u32;
+                loop {
+                    nervix_primitives::task::consume_budget().await;
+                    assert!(
+                        !deadline.has_passed(),
+                        "materialized input round expired: domain={domain}, round={round}, \
+                         tenant={tenant}"
                     );
-                    completions += 1;
-                    if completions == completions_required {
-                        break;
+                    attempts += 1;
+                    append_cucumber_log_line(&format!(
+                        "materialized input submitting: domain={domain}, round={round}, tenant={tenant}, \
+                         attempt={attempts}, producer={:?}, generation={}, initial_attachment={}, \
+                         connection={:?}, admission={:?}, remaining={:?}",
+                        producer.id(),
+                        producer.description().generation,
+                        producer.description().attachment,
+                        producer.connection(),
+                        producer.admission(),
+                        deadline.remaining(),
+                    ));
+                    let submission = producer
+                        .submit(body.clone())
+                        .await
+                        .assured("the input producer takes the bounded row");
+                    append_cucumber_log_line(&format!(
+                        "materialized input awaiting ACK: domain={domain}, round={round}, tenant={tenant}, \
+                         attempt={attempts}, producer={:?}, submission={submission}",
+                        producer.id(),
+                    ));
+                    let outcome = producer.rejoin(submission);
+                    let mut outcome = std::pin::pin!(outcome);
+                    let outcome = loop {
+                        nervix_primitives::task::consume_budget().await;
+                        nervix_primitives::select! {
+                            result = &mut outcome => {
+                                break result.assured("the acknowledged input exchange succeeds");
+                            }
+                            _ = nervix_primitives::time::sleep(Duration::from_secs(5)) => {
+                                append_cucumber_log_line(&format!(
+                                    "materialized input still awaiting ACK: domain={domain}, round={round}, \
+                                     tenant={tenant}, attempt={attempts}, producer={:?}, \
+                                     submission={submission}, connection={:?}, admission={:?}, end={:?}, \
+                                     pending={:?}, remaining={:?}",
+                                    producer.id(),
+                                    producer.connection(),
+                                    producer.admission(),
+                                    producer.end(),
+                                    producer.pending_submissions(),
+                                    deadline.remaining(),
+                                ));
+                            }
+                        }
+                    };
+                    append_cucumber_log_line(&format!(
+                        "materialized input outcome: domain={domain}, round={round}, tenant={tenant}, \
+                         attempt={attempts}, producer={:?}, submission={submission}, outcome={outcome:?}",
+                        producer.id(),
+                    ));
+                    match outcome {
+                        ProducerOutcome::Completed => {
+                            println!(
+                                "materialized input round {round}, tenant {tenant}: completed after \
+                                 {attempts} attempts"
+                            );
+                            completions += 1;
+                            if completions == completions_required {
+                                break;
+                            }
+                        }
+                        ProducerOutcome::ProcessingFailed { failure, message } => {
+                            // The fixture retains each row's explicit event timestamp on replay, so a
+                            // partially applied attempt does not create another materialized revision.
+                            // Replaying a reported failed attempt preserves its complete value oracle;
+                            // an unknown outcome or a final admission refusal remains a setup failure.
+                            println!(
+                                "materialized input round {round}, tenant {tenant}, attempt {attempts}: \
+                                 replaying reported processing failure {failure:?}: {message}"
+                            );
+                            nervix_primitives::time::sleep(Duration::from_millis(100)).await;
+                        }
+                        outcome => panic!(
+                            "materialized input round {round}, tenant {tenant}: {outcome:?}"
+                        ),
                     }
                 }
-                ProducerOutcome::ProcessingFailed { failure, message } => {
-                    // The fixture retains each row's explicit event timestamp on replay, so a
-                    // partially applied attempt does not create another materialized revision.
-                    // Replaying a reported failed attempt preserves its complete value oracle;
-                    // an unknown outcome or a final admission refusal remains a setup failure.
-                    println!(
-                        "materialized input round {round}, tenant {tenant}, attempt {attempts}: \
-                         replaying reported processing failure {failure:?}: {message}"
-                    );
-                    nervix_primitives::time::sleep(Duration::from_millis(100)).await;
-                }
-                outcome => panic!("materialized input round {round}, tenant {tenant}: {outcome:?}"),
             }
-        }
-    }
+            producer
+        })
+        .await;
     producer.close().await.assured("the input producer closes");
 }
 
