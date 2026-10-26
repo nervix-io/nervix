@@ -17,7 +17,7 @@ use meticulous::ResultExt as _;
 use rstest::rstest;
 
 use super::*;
-use crate::{ClientConfigOwner, ClientPooling, EmitterPublishingModeKind, ExternalNameError};
+use crate::{ClientConfigValue, ClientPooling, EmitterPublishingModeKind, ExternalNameError};
 
 #[rstest]
 #[case::mixed_case("Orders.Mixed-01".to_owned())]
@@ -51,8 +51,8 @@ fn client_configuration_keeps_uri_queries_at_the_driver_boundary() {
     );
     assert_eq!(declaration.pooling, ClientPooling::Unpooled);
     assert_eq!(
-        declaration.config,
-        ClientConfigOwner::NervixWithAddressQuery
+        declaration.config.key("addr").map(|key| key.value),
+        Some(ClientConfigValue::DriverAddress)
     );
     assert_eq!(declaration.options, &[]);
 }

@@ -5,9 +5,10 @@
 //! - **Owns.** The HTTP client Model, the polled request source with its delivery mode, the source
 //!   that reads an HTTP endpoint this cluster serves, the request emitter Model, and what each entity
 //!   declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations, expressions, the domain clock's
 //!   period and the names a body references.
-//! - **Must not know.** The HTTP client library, its configuration keys, how a request is built,
+//! - **Must not know.** The HTTP client library, how a request is built,
 //!   sent or classified, or how an endpoint is published, routed to or served.
 
 #![cfg_attr(
@@ -37,7 +38,24 @@ use crate::{
     OptionValue, PositionClass,
 };
 
-configured_client!(Http: unpooled, config Nervix, CreateClientHttp => HttpConfigEntry);
+configured_client!(Http: unpooled, config CLIENT_CONFIG, CreateClientHttp => HttpConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("endpoint", V::Url(&["http", "https"])),
+            K::optional("method", V::String),
+            K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// The request an HTTP client sends on a cadence of domain time, whose response is the payload.
 #[derive(

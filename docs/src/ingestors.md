@@ -1353,7 +1353,8 @@ number that fits the bounded channel.
 For example, choose `'subscription_buffer_messages' = '1024'` and `'idle_timeout_ms' = '30000'`
 for a 1,024-message handoff and a 30-second idle interval. A full message handoff stops TCP reads; quiesced
 intake still applies its declared `BUFFER` overflow policy or counts the messages `DROP` discards.
-Malformed capacity values fail ingestor initialization. This handoff applies TCP backpressure
+Malformed capacity values are refused at CREATE CLIENT, including after template rendering. The
+source still requires both keys when its plan is built. This handoff applies TCP backpressure
 when full; it does not discard a message to make room. Redis Pub/Sub still offers no replay or
 delivery acknowledgement, so neither buffer recovers messages missed during a disconnect.
 
@@ -1831,11 +1832,11 @@ CREATE PROMETHEUS CLIENT prom_main
 a key the client does not declare, a key written twice, a missing `addr` or `timeout_ms`, an
 `addr` that is not such a URL, a `timeout_ms` that is not a positive whole number of
 milliseconds, or one of `tls_cert_file` and `tls_key_file` without the other. For example,
-`PROMETHEUS client 'prom_main' in domain 'shop' cannot use its CONFIG: 'timeout_ms' is required`.
-Keys are matched without regard to ASCII case, as the client reads them. A value can name a file
-of the client's `MOUNT`, as in `'tls_ca_file' = '{{ dev_tls }}/ca.pem'`. When a source opens, it
-checks the configuration again with those values rendered, so the address it queries is the one
-the rules admit.
+`client 'prom_main' configuration is invalid in domain 'shop': missing required client config key 'timeout_ms'`.
+Keys are lowercase and case-sensitive. A value can name a file
+of the client's `MOUNT`, as in `'tls_ca_file' = '{{ dev_tls }}/ca.pem'`. The rendered configuration
+must satisfy these rules before commitment, and a source checks it again when opening, so the
+address it queries is the one the rules admit.
 
 ### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 
@@ -2062,7 +2063,7 @@ and quiesce-buffered frames retain that snapshot across suspension, reconnection
 Headers are not copied into every frame and are not propagated to a relay unless mapped explicitly.
 The connection is ingest-only; it declares no emitter envelope or `BATCH` clause.
 
-The client's Nervix-owned `CONFIG` is strict and matches keys without regard to ASCII case:
+The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive keys:
 
 | Key | Contract |
 | --- | --- |
@@ -2078,8 +2079,9 @@ The client's Nervix-owned `CONFIG` is strict and matches keys without regard to 
 
 Durations obey the shared schedulable physical-duration bound. Unknown or repeated keys are
 refused. TLS file keys are refused with `ws://`. Resource mounts and
-configuration templates keep their shared client contract; rendered values are checked again when
-opening the source. A ping write has a one-second physical budget and a failure triggers recovery.
+configuration templates keep their shared client contract; rendered values are checked before
+commitment and again when opening the source. A ping write has a one-second physical budget and a
+failure triggers recovery.
 
 An explicit idle timeout overrides the ping-derived value. Every received frame, including a
 ping or pong, refreshes activity. Sending a client ping or cancelling a read leaves the inactivity

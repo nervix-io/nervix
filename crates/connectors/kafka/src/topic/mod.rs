@@ -894,11 +894,8 @@ mod tests {
     }
 
     #[test]
-    fn a_producer_reports_every_record_whatever_the_client_says() {
-        let entries = [
-            entry("bootstrap.servers", "127.0.0.1:9092"),
-            entry("delivery.report.only.error", "true"),
-        ];
+    fn a_producer_reports_every_record_in_every_delivery_mode() {
+        let entries = [entry("bootstrap.servers", "127.0.0.1:9092")];
 
         for mode in [
             BrokerPublishingMode::NoAck,

@@ -4,6 +4,7 @@
 //!
 //! - **Owns.** The client's closed configuration schema and signaling reference, the connection's
 //!   literal upgrade fields and frame kind, the endpoint source Model, and their declarations.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** Shared source/client declarations, HTTP field rules and referenced names.
 //! - **Must not know.** Drivers, sockets, TLS file contents, signaling execution, or how endpoints
 //!   are published, routed to or served.
@@ -43,13 +44,33 @@ use super::{
     entity_union::connector_ingestors,
 };
 use crate::{
-    AcknowledgementConfirmation, ClientConfigEntry, ClientConfigOwner, ClientDeclaration,
-    ClientName, ClientPooling, ClientResourceMount, ConnectorKind, DeclaredDelivery,
-    DeclaredQuiesce, EndpointIngestMode, EndpointName, EndpointType, HeaderLayout, HeaderModel,
-    IngestAcknowledgement, IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody,
-    IngestorEntityCapabilities, IngestorMetadataScope, IngestorReference, IngestorReferenceKind,
-    OptionDeclaration, OptionForm, OptionPresence, OptionValue, PositionClass,
-    SignalingProtocolName,
+    AcknowledgementConfirmation, ClientConfigEntry, ClientDeclaration, ClientName, ClientPooling,
+    ClientResourceMount, ConnectorKind, DeclaredDelivery, DeclaredQuiesce, EndpointIngestMode,
+    EndpointName, EndpointType, HeaderLayout, HeaderModel, IngestAcknowledgement,
+    IngestQuiesceMode, IngestorDeclaration, IngestorEntityBody, IngestorEntityCapabilities,
+    IngestorMetadataScope, IngestorReference, IngestorReferenceKind, OptionDeclaration, OptionForm,
+    OptionPresence, OptionValue, PositionClass, SignalingProtocolName,
+};
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::CONNECT_TIMEOUT,
+            K::required("endpoint", V::Url(&["ws", "wss"])),
+            K::optional("handshake_buffer_capacity", V::PositiveInteger),
+            K::IDLE_TIMEOUT,
+            K::optional("max_frame_size", V::PositiveInteger),
+            K::optional("max_message_size", V::PositiveInteger),
+            K::optional("ping_interval_ms", V::Milliseconds),
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
 };
 
 #[derive(
@@ -71,7 +92,7 @@ impl<Version> CreateClientWebsockets<Version> {
     /// What every WebSockets client declares: the signaling protocol its connection may speak.
     pub const DECLARATION: ClientDeclaration = ClientDeclaration {
         pooling: ClientPooling::Unpooled,
-        config: ClientConfigOwner::Nervix,
+        config: CLIENT_CONFIG,
         options: &[OptionDeclaration {
             keywords: "WITH SIGNALING PROTOCOL",
             presence: OptionPresence::Optional { default: None },
