@@ -344,6 +344,7 @@ class InventoryTests(unittest.TestCase):
             "mqtt-publish-packets",
             "postgres-insert-measures",
             "mongodb-write-answers",
+            "mongodb-bson-mapping",
             "websocket-signaling-protobuf-values",
             "websocket-acknowledgement-values",
             "websocket-signaling-protobuf-malformed",

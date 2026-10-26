@@ -17,8 +17,9 @@ list value may own elements, as Arrow allows. Its oracle compares two batches by
 field and schema metadata included, their row counts, and every cell as a reader sees it: a null,
 or a value with floats compared by their bits and lists compared element by element.
 
-An ordinary randomized run hands a property at most 64 bytes, and a choice read after they run out
-takes its first option. Every property here therefore reads what shapes its case before the case:
+An ordinary randomized run of these server carrier properties hands a property at most 64 bytes,
+and a choice read after they run out takes its first option. Each therefore reads what shapes its
+case before the case:
 the damage and the share of the encoding where it lands, the defect a payload carries, the message
 damaged bytes are read as, how a stream ends, whether the batch is branched and which rows are
 registered, and the format, row count and first damaged payload of a payload group. What can wait
@@ -46,6 +47,7 @@ stream for each of the four.
 | Generated column pool: the Arrow IPC stream a WASM guest writes beside its routed outputs | `wasm-generated-pools` | The decoded pool is the written one, unnamed fields with their types, nullability and metadata and every row, value and null, whether the stream ends with the end-of-stream marker or is closed after its record batch |
 | Damaged generated pools | `wasm-generated-pools-malformed` | A typed defect of the guest's generated Arrow IPC or of its record batch count; or one record batch of unnamed columns that writes and decodes back to itself; only the empty byte string is no pool |
 | `WIRE JSON`, `WIRE CBOR` and `WIRE AVRO` rows | `codec-schemaful-rows` | Every row of a batch, encoded one payload per row by a codec of a shape the registry accepts and decoded into one group builder, is the original row |
+| MongoDB mapped columns encoded as BSON documents | `mongodb-bson-mapping` | Exact document bytes against a typed reference, including integer widths, float bits, native millisecond dates, binary subtype, arrays and nulls; stored size equals the BSON reference with the generated identifier when one is needed |
 | Groups of payloads with damaged members | `codec-schemaful-payload-groups` | Each payload is accepted or refused in a group exactly as alone, with a typed failure of its own bytes, and the group holds exactly the rows its accepted payloads decode to alone |
 | `WIRE JSON` and `WIRE CBOR` rows holding non-finite floats | `codec-json-non-finite-floats` | The projection, not a round trip: a non-finite float of an optional top-level field reads back as a null with every other value intact, and one in a required field or a list element refuses the payload with a typed failure |
 | Numbers through the JAQ-native `JSON`, `YAML`, `TOML` and `CBOR` codecs and a protobuf codec, with unchanged programs | `codec-transforming-numbers` | Every row of a batch of numbers, encoded one payload per row and decoded, is the original row: an `F64` and an `F32` to their bits, alone and in a list, and an `I64` to its value; a protobuf singular zero of either sign reads back as positive zero |
@@ -59,6 +61,14 @@ stream for each of the four.
 | Damaged client producer link frames | `client-producer-link-frames-malformed` | The codec's typed decode failure, as bytes that do not decode and never as work the node could not admit or execute, or a frame that encodes and decodes back to itself; no charge outlives the bytes |
 | Client consumer stream: the message that opens a stream, the `Settle`, heartbeat and `Close` frames of its serving node, and the `Opened`, `Refused`, `DeliveryStart`, `DeliveryChunk`, `Settled`, `Ended` and heartbeat answers of its owning node | `client-consumer-stream-frames` | Every field through the bounded duplex codec of the stream, under the relay class and payload limit the transport encodes a frame with, and no charge outlives a frame |
 | Damaged client consumer stream frames | `client-consumer-stream-frames-malformed` | The codec's typed decode failure, as bytes that do not decode and never as work the node could not admit or execute, or a frame that encodes and decodes back to itself; no charge outlives the bytes |
+
+The MongoDB connector owns its separate generator: 256 ordinary cases with at most 256 input bytes,
+paired value/null rows over the supported scalar families, and a nullable `I32` list with nullable
+elements. Its domain includes signed and in-range unsigned integers, arbitrary float bits, signed
+nanosecond instants, bounded text and bytes, and documents with and without an explicit `_id`.
+The `minimum` and `boundaries` corpus inputs run through that same encoder and complete oracle.
+Unsigned overflow retains its unit and public scenario evidence; this property generates the
+representable signed BSON range.
 
 The earlier Arrow targets remain the owners of their paths: `client-arrow-rows` and
 `client-arrow-selection` for Row subscriptions, `client-binding-rows` and `client-ffi-host-columns`

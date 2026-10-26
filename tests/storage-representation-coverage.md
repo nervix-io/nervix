@@ -66,10 +66,13 @@ the segment set a current chunk key projects to.
 - The consensus state targets read up to 64 KiB, because a revision holding records of every
   family reads about 38 KiB on average. The corruption target draws its damage from 64 leading
   bytes of its own.
-- Generators bound every record family to three records, names to the name rule's 128 bytes,
+- Generators bound every record family to three records, names to their declared byte budgets,
   chunked payloads to three chunks, windows to three rows and branch keys to three fields of two
   levels of nesting. Volatile state, such as records in flight, ACKs, plans and attempts, is never
   generated or stored.
+- Generated Models preserve MongoDB collection case, spaces and Unicode within its collection
+  budget, which reserves a nonempty database and the separator from the namespace budget. Model
+  archive and structured consensus-record properties inherit that domain and advance with it.
 - A Kafka offset capture reserves an upper bound on what it writes, not its exact length. Its
   property writes through the same encoder a replica's transfer stages, and reads back through the
   replica's own reader. The transfer header properties drive the receiver's header owner as the

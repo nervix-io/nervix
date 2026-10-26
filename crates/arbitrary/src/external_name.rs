@@ -8,9 +8,10 @@
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ExternalName, KafkaConsumerGroupName, KafkaTopicName, MqttTopicFilter, MqttTopicName,
-    NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PulsarSubscriptionName,
-    PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
+    ExternalName, KafkaConsumerGroupName, KafkaTopicName, MONGODB_NAMESPACE_MAX_BYTES,
+    MongoDbCollectionName, MqttTopicFilter, MqttTopicName, NatsPublishSubjectName,
+    NatsQueueGroupName, NatsSubjectName, PulsarSubscriptionName, PulsarTopicName,
+    RabbitMqQueueName, RedisChannelName, SqsQueueName,
 };
 
 use crate::Arbitrary;
@@ -227,7 +228,22 @@ impl Arbitrary<'_> {
 }
 
 impl Arbitrary<'_> {
-    /// An external table/collection identifier within its current lexical bound, with both cases.
+    /// A case-preserving MongoDB collection within the declared namespace budget.
+    pub fn mongodb_collection_name(&mut self) -> MongoDbCollectionName {
+        if self.entropy.flag() {
+            return MongoDbCollectionName::parse("a").assured("one letter is a collection name");
+        }
+        // Reserve the nonempty database and its dot, then the two framing letters. Framing
+        // ensures the generated text can never enter a reserved system namespace.
+        let body = self.pieces_text(
+            ["a", "Z", "0", "9", " ", ".", "_", "-", "~", "é", "中文"],
+            MONGODB_NAMESPACE_MAX_BYTES - 4,
+        );
+        MongoDbCollectionName::parse(&format!("C{body}z"))
+            .assured("the collection alphabet excludes NUL and dollar signs within its budget")
+    }
+
+    /// An external table identifier within its current lexical bound, with both cases.
     pub fn emitter_table_name<N: ExternalName>(&mut self) -> N {
         let text = self.pieces_text(["a", "Z", "0", "9", ".", "_", "-", "~"], 128);
         N::parse(&text)

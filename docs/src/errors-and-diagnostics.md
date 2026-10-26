@@ -14,6 +14,14 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+MongoDB's explicit-seed URL and delegated options are checked by its native parser without
+network I/O. Pool query options produce the typed `PoolSizing` outcome naming `POOL SIZE`;
+other native refusals retain the driver's error beneath the value-free key context. Its resolved
+database is required, and the collection checks the complete namespace budget before opening.
+Client initialization also preserves the driver cause of option installation and the validation
+ping. Public command refusal projection renders the reviewed key/pool context rather than driver
+input.
+
 Transaction model preflight adds its operation identity with `change_context` above the registry
 report. It does not nest that report in a context field: the ordinary typed report chain remains
 inspectable, so command projection can retain the schema's invalid-key diagnosis.

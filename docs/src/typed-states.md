@@ -10,6 +10,13 @@ boundary again before storage. Driver-specific validation stays in connector eng
 the composition root. Confidential inspection is an explicit projection of complete entries;
 stored configuration and archive serialization do not consume that projection.
 
+The MongoDB engine resolves a required nonempty database from its explicit key or the URL path
+into one private configuration value. It consumes the driver's optional default rather than
+carrying a second database identity. Collection names are validated vocabulary values that retain
+their original UTF-8 spelling; the resolved database, separator and collection cross the complete
+namespace-budget check before the emitter opens. Missing database configuration and a refused
+namespace return typed errors, never an empty database or a substituted collection.
+
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
 stand for a missing value or a different state. The owner of each state decides when a value is

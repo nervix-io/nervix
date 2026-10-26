@@ -162,7 +162,7 @@ fn bolero_external_names_round_trip_through_every_representation() {
             assert_external_name_round_trips!(MySqlTableName, arbitrary.emitter_table_name());
             assert_external_name_round_trips!(
                 MongoDbCollectionName,
-                arbitrary.emitter_table_name()
+                arbitrary.mongodb_collection_name()
             );
             assert_external_name_round_trips!(IcebergTableName, arbitrary.emitter_table_name());
             assert_external_name_round_trips!(

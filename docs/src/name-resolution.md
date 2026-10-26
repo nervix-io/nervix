@@ -413,7 +413,7 @@ Nervix selects each library's resolver deliberately. The locked versions and sel
 | Lapin and `async-rs` | 4.12.0 and 0.8.12 | `hickory-dns` deliberately off: it resolves through one process-wide resolver built on first use from `/etc/resolv.conf`, which ignores the node's configuration and bounds and keeps name-server connections of the first Tokio runtime that used it. The connector hands Lapin an established transport through `Connection::connector` instead |
 | Redis | 1.7.1 | `AsyncConnectionConfig::set_dns_resolver` for pooled command connections; the Pub/Sub reader uses `parse_redis_value_async` on a stream the connector dialled itself |
 | `rumqttc-next` | 0.34.0 | `MqttOptions::set_socket_connector` in place of the driver's `lookup_host` connector; its proxy and WebSocket transports are not selected |
-| MongoDB | 3.9.1 | `dns-resolver` selected for SRV and TXT discovery; see [Residual Resolution](#residual-resolution) |
+| MongoDB | 3.9.1 | The driver's `dns-resolver` feature is selected; Nervix admits explicit-seed `mongodb://` addresses and its pre-commit native parser performs no DNS lookup. Socket resolution remains under [Residual Resolution](#residual-resolution) |
 
 A feature selected anywhere in a workspace build is unified into every crate of that build, so a
 selection missing from one connector can be hidden by another. `just validate-dns-dependencies`
@@ -426,7 +426,8 @@ therefore checks each affected crate's own dependency graph, and runs in `just v
 - Neither the RabbitMQ connector nor the server selects the Hickory feature of Lapin,
   `amq-protocol`, `amq-protocol-tcp` or `async-rs`.
 - RabbitMQ, Redis, MQTT, ClickHouse and SQS keep their TLS on AWS-LC.
-- The MongoDB connector selects the driver's `dns-resolver` feature.
+- The MongoDB connector selects the driver's `dns-resolver` feature. Its current client declaration
+  admits explicit seeds only; native option validation completes synchronously without discovery.
 
 The interconnect, the native client crates and `nervix-dns` itself are not checked as roots: each
 depends on `nervix-dns` directly and selects no optional resolver feature. The check has no rule for
@@ -449,7 +450,7 @@ is assumed to be covered:
 
 | Path | Who resolves, and how | Why the node's resolver is not used |
 | --- | --- | --- |
-| MongoDB sources and emitters, `mongodb` 3.9.1 | For a `mongodb+srv` address, the driver's own Hickory resolver, selected by its `dns-resolver` feature and built from the host's `/etc/resolv.conf`, looks up the SRV and TXT records, and repeats the SRV lookup while it monitors the deployment. The host of every server address it connects to, whether listed in the address or discovered through SRV, is resolved with Tokio's `lookup_host` | The driver accepts no resolver for the addresses its sockets connect to. Its Hickory feature covers discovery only and does not replace that lookup |
+| MongoDB emitters, `mongodb` 3.9.1 | The host of each explicit seed or server discovered from the replica topology is resolved with Tokio's `lookup_host` when the driver connects. Pre-commit configuration validation does not resolve or connect | The driver accepts no resolver for its socket addresses; its selected discovery feature supplies no socket-resolution hook |
 | NATS sources and emitters, `async-nats` 0.49.1 | The driver resolves each server address with Tokio's `lookup_host` before its per-address connection timeout | No resolver or socket hook |
 | PostgreSQL pools, `sqlx-postgres` 0.9.0 | The driver connects with Tokio's `TcpStream::connect((host, port))` | No resolver or socket hook at the pool's connection boundary |
 | MySQL pools, `mysql_async` 0.36.2 | The driver connects with Tokio's `TcpStream::connect((host, port))` | Its `resolved_ips` option fixes one address list for the life of the pool, which would pin a name to one answer |
