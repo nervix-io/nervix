@@ -837,6 +837,19 @@ The harness keeps these boundaries explicit.
   scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
   released observations. The scenario asserts the original execution reference's outcome and a
   dependent command through the public session protocol; it adds no setup delay or request retry.
+- **Console backup download pauses.** The console reload scenarios hold the archive's first
+  download before it streams, so the reload interrupts a download in progress. The archive is
+  assembled and served by the leader that completes the backup. A leadership move while the backup
+  runs makes the new leader run it again under the same reference and serve the archive it
+  assembles, so no step can name that node before the backup ends. The scenarios therefore arm the
+  download pause on every node. Only a node that retains an archive under the reference reaches its
+  pause, and the step that waits for it reports which node did. Each pause is one-shot, so the
+  download the reload starts on that node streams while the first one stays held. The scenario
+  then releases every node's pause, and scenario teardown releases any pause still armed. One
+  three-node scenario moves leadership under the durably admitted backup command, and requires the
+  same paused download, reload and verified resumed archive. The scenario whose reload must resume
+  nothing arms the same pauses, so a backup the console resumed by mistake would stay held on
+  whichever node served it instead of downloading and clearing its record.
 - **Timed control probes.** The silent-peer health scenario connects a named production client
   before holding the peer's health response. Its nine-second probe then sends the user creation,
   relay creation and cluster-status statements in order on that client, under one deadline. The
