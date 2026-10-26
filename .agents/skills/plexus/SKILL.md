@@ -338,9 +338,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   send that depends on an earlier reply goes after the wait for it. A `WAIT` step may list several
   matchers when their frames may arrive in any order. Use `CAPTURE` on a single-matcher step to
   record values, and read them in later programs through `$state`.
-- Say where payload starts flowing with `ACCEPT DATA`, either on `ON CONNECT` or on the `WAIT` step
-  whose completion proves the peer is streaming. Frames arriving before that are dropped, not
-  buffered.
+- Use `ACCEPT DATA` on `ON CONNECT` or on the `WAIT` step that must finish before accepting payload.
+  Frames arriving before acceptance are dropped. For an outbound client's bounded handshake
+  handoff and delivery after readiness, read `Ingestors` → `WEBSOCKETS CONNECTION`.
 - Scope rejection to where it applies: `FAIL JAQ` on a `WAIT` step aborts during that step, and a
   `FAIL JAQ` written before `ON CONNECT` applies throughout the handshake.
 - Preserve written operation order in schema, relay, junction, deduplicator, reorderer, emitter,
