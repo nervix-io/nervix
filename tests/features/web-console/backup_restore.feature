@@ -334,8 +334,52 @@ Feature: Web console backup and restore
     When selector ".restore-submit" is clicked
     Then selector ".restore-status" contains "restored"
     And the web console never held two session connections at once
-    And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}"
-    And the web console's backup downloads and restores reached node "{{leader}}"
+    And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}", and then only nodes reported to it as the leader
+    And the web console's backup downloads and restores reached only nodes reported to it as the leader
+    When these Plexus commands are executed on the leader node
+      """
+      LIST DOMAINS;
+      """
+    Then the last command output contains
+      """
+      {{domain}}_typed pace=UNPACED status=STOPPED
+      """
+
+  @console_backup_shared_session
+  Scenario: The REPL and the backup controls keep one console session when leadership moves after the redirect
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      CREATE RELAY items SCHEMA item UNBRANCHED;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "follower"
+    When the web console is opened on node "{{follower}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".terminal" contains "connected to leader '{{leader}}'"
+    Given leadership moves from node "{{leader}}" to node "{{follower}}" under its next durably admitted command
+    When selector ".prompt-row input" is filled with "BACKUP DOMAIN {{domain}} TO 'typed.nvxb';"
+    And selector ".prompt-row input" is pressed with "Enter" and the web console's download is saved as backup archive "typed.nvxb"
+    Then the leadership move under the durably admitted command completed
+    And selector ".terminal" contains "connected to leader '{{follower}}'"
+    And selector ".backup-status" contains "downloaded 'typed.nvxb'"
+    And selector ".terminal" contains "BACKUP DOMAIN {{domain}} TO 'typed.nvxb';"
+    And selector ".terminal" contains "backed up domain '{{domain}}'" exactly 1 times
+    And selector ".terminal" contains "archive downloaded as 'typed.nvxb'"
+    When selector ".prompt-row input" is filled with "RESTORE DOMAIN {{domain}} AS {{domain}}_typed FROM 'typed.nvxb';"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".restore-status" contains "choose the archive"
+    When selector ".restore-file" is given backup archive "typed.nvxb"
+    And selector ".restore-dry-run" is clicked
+    Then selector ".restore-status" contains "dry run planned"
+    When selector ".restore-submit" is clicked
+    Then selector ".restore-status" contains "restored"
+    And the web console never held two session connections at once
+    And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}", and then only nodes reported to it as the leader
+    And the web console's backup downloads and restores reached only nodes reported to it as the leader
     When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
@@ -360,15 +404,15 @@ Feature: Web console backup and restore
     When the web console is opened on node "{{follower}}"
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{leader}}'"
-    Given command response delivery on node "{{leader}}" pauses after execution
+    Given command response delivery on every node pauses after execution
     And the web console's next download is expected as backup archive "typed.nvxb"
     When selector ".prompt-row input" is filled with "BACKUP DOMAIN {{domain}} TO 'typed.nvxb';"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then the command response delivery pause on node "{{leader}}" is reached
+    Then the command response delivery pause on the node that executes the command is reached
     When the web console loses its session connection
-    And the command response delivery pause on node "{{leader}}" is released
+    And the command response delivery pause is released on every node
     Then the web console's expected download is saved
-    And the web console's session reconnected to node "{{leader}}" after it was lost
+    And the web console's session reconnected where it lost its connection
     And selector ".backup-status" contains "downloaded 'typed.nvxb'"
     And selector ".terminal" contains "backed up domain '{{domain}}'" exactly 1 times
     And selector ".terminal" contains "archive downloaded as 'typed.nvxb'"
@@ -381,8 +425,58 @@ Feature: Web console backup and restore
     When selector ".restore-submit" is clicked
     Then selector ".restore-status" contains "restored"
     And the web console never held two session connections at once
-    And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}"
-    And the web console's backup downloads and restores reached node "{{leader}}"
+    And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}", and then only nodes reported to it as the leader
+    And the web console's backup downloads and restores reached only nodes reported to it as the leader
+    When these Plexus commands are executed on the leader node
+      """
+      LIST DOMAINS;
+      """
+    Then the last command output contains
+      """
+      {{domain}}_typed pace=UNPACED status=STOPPED
+      """
+
+  @console_backup_shared_session
+  Scenario: The REPL's backup keeps one console session when leadership moved after the redirect and the session's connection is lost
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      CREATE RELAY items SCHEMA item UNBRANCHED;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "follower"
+    When the web console is opened on node "{{follower}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".terminal" contains "connected to leader '{{leader}}'"
+    When leadership is transferred from node "{{leader}}" to node "{{follower}}"
+    Then node "{{leader}}" eventually reports leader "{{follower}}"
+    And selector ".terminal" contains "connected to leader '{{follower}}'"
+    Given command response delivery on every node pauses after execution
+    And the web console's next download is expected as backup archive "typed.nvxb"
+    When selector ".prompt-row input" is filled with "BACKUP DOMAIN {{domain}} TO 'typed.nvxb';"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then the command response delivery pause on the node that executes the command is reached
+    When the web console loses its session connection
+    And the command response delivery pause is released on every node
+    Then the web console's expected download is saved
+    And the web console's session reconnected where it lost its connection
+    And selector ".backup-status" contains "downloaded 'typed.nvxb'"
+    And selector ".terminal" contains "backed up domain '{{domain}}'" exactly 1 times
+    And selector ".terminal" contains "archive downloaded as 'typed.nvxb'"
+    When selector ".prompt-row input" is filled with "RESTORE DOMAIN {{domain}} AS {{domain}}_typed FROM 'typed.nvxb';"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".restore-status" contains "choose the archive"
+    When selector ".restore-file" is given backup archive "typed.nvxb"
+    And selector ".restore-dry-run" is clicked
+    Then selector ".restore-status" contains "dry run planned"
+    When selector ".restore-submit" is clicked
+    Then selector ".restore-status" contains "restored"
+    And the web console never held two session connections at once
+    And the web console's session reached node "{{follower}}" until it was redirected to node "{{leader}}", and then only nodes reported to it as the leader
+    And the web console's backup downloads and restores reached only nodes reported to it as the leader
     When these Plexus commands are executed on the leader node
       """
       LIST DOMAINS;
