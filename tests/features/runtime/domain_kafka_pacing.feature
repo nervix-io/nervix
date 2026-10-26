@@ -1,4 +1,193 @@
 Feature: Kafka ingestor domain pacing
+  @kafka_start_generation @deloxide_stress
+  Scenario Outline: A START AT Kafka generation keeps acknowledged offsets when its instances resume on <cluster_size> nodes
+    Given Kafka is running
+    And the production sticky scheduler is configured
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And Kafka topic "start_once_in_{{test_id}}" exists with 2 partitions
+    And Kafka topic "start_once_out_{{test_id}}" is observed
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE CODEC resumed_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR source
+        FROM kafka_main TOPIC 'start_once_in_{{test_id}}'
+        OFFSET BY DOMAIN INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+        RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER sink FROM events
+        TO kafka_main TOPIC 'start_once_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING event_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START AT <start_point>;
+      """
+    When Kafka message is published to topic "start_once_in_{{test_id}}" partition 0
+      """
+      {"seq":1}
+      """
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 1
+      """
+      {"seq":2}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1}
+      {"seq":2}
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      ALTER KAFKA TOPIC INGESTOR source SET DECODE USING resumed_codec;
+      """
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 0
+      """
+      {"seq":3}
+      """
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 1
+      """
+      {"seq":4}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":3}
+      {"seq":4}
+      """
+    When the cluster is restarted
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 0
+      """
+      {"seq":5}
+      """
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 1
+      """
+      {"seq":6}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":5}
+      {"seq":6}
+      """
+    When Kafka topic "start_once_in_{{test_id}}" partition count is changed to 3
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 2
+      """
+      {"seq":7}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":7}
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      STOP;
+      START AT '2020-01-01T00:00:00Z';
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1}
+      {"seq":2}
+      {"seq":3}
+      {"seq":4}
+      {"seq":5}
+      {"seq":6}
+      {"seq":7}
+      """
+
+    Examples:
+      | cluster_size | replica_count | instances | start_point            |
+      | 1            | 0             | 1         | NOW                    |
+      | 1            | 0             | 2         | '2020-01-01T00:00:00Z' |
+      | 3            | 1             | 2         | NOW                    |
+      | 3            | 1             | 2         | '2020-01-01T00:00:00Z' |
+
+  @kafka_start_generation_restore @deloxide_stress_restore
+  Scenario Outline: A backup preserves the applied START AT Kafka generation on <cluster_size> nodes
+    Given Kafka is running
+    And the production sticky scheduler is configured
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And Kafka topic "restored_start_in_{{test_id}}" exists with 2 partitions
+    And Kafka topic "restored_start_out_{{test_id}}" is observed
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE CODEC resumed_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR source
+        FROM kafka_main TOPIC 'restored_start_in_{{test_id}}'
+        OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+        RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER sink FROM events
+        TO kafka_main TOPIC 'restored_start_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING event_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START AT NOW;
+      """
+    When Kafka message is published to topic "restored_start_in_{{test_id}}" partition 0
+      """
+      {"seq":1}
+      """
+    And Kafka message is published to topic "restored_start_in_{{test_id}}" partition 1
+      """
+      {"seq":2}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1}
+      {"seq":2}
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "kafka-start.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
+    And Kafka topic "restored_start_out_{{test_id}}" is observed
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1}
+      {"seq":2}
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI restores "domain {{domain}} --resume" from "kafka-start.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore succeeded, restoring domain "{{domain}}" with 0 resource versions and 8 models
+    When Kafka message is published to topic "restored_start_in_{{test_id}}" partition 0
+      """
+      {"seq":3}
+      """
+    And Kafka message is published to topic "restored_start_in_{{test_id}}" partition 1
+      """
+      {"seq":4}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":3}
+      {"seq":4}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   @kafka_control_execution
   Scenario Outline: A stalled Kafka domain resume uses bounded connector execution while another ingestor delivers on <cluster_size> nodes
     Given a mock Kafka broker serves topic "control_wait_{{test_id}}"

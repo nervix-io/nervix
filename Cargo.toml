@@ -39,6 +39,7 @@ deloxide-stress = [
 ]
 # Selects Loom's primitives for the whole graph, and runs the Loom models of the server's owners.
 loom = [
+  "nervix-connector-fake/loom",
   "nervix-interconnect/loom",
   "nervix-consensus/loom",
   "nervix-execution/loom",
@@ -48,6 +49,7 @@ loom = [
 # Selects Shuttle's primitives for the whole graph through nervix-primitives. Sockets and the edge
 # I/O modules remain Tokio's real implementations, outside every model.
 shuttle = [
+  "nervix-connector-fake/shuttle",
   "dep:shuttle",
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
@@ -240,6 +242,7 @@ aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-sqs = { workspace = true }
 bolero = { workspace = true }
+nervix-connector-fake = { workspace = true }
 # The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 criterion = { workspace = true }
@@ -352,6 +355,7 @@ members = [
   "crates/client-wire",
   "crates/columnar-json",
   "crates/connector",
+  "crates/connector-fake",
   "crates/connectors/clickhouse",
   "crates/connectors/http",
   "crates/connectors/iceberg",
@@ -584,6 +588,7 @@ nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wir
 nervix-columnar-json = { package = "nervix-columnar-json", path = "crates/columnar-json" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
 nervix-connector-clickhouse = { package = "nervix-connector-clickhouse", path = "crates/connectors/clickhouse" }
+nervix-connector-fake = { package = "nervix-connector-fake", path = "crates/connector-fake" }
 nervix-connector-http = { package = "nervix-connector-http", path = "crates/connectors/http" }
 nervix-connector-iceberg = { package = "nervix-connector-iceberg", path = "crates/connectors/iceberg" }
 nervix-connector-kafka = { package = "nervix-connector-kafka", path = "crates/connectors/kafka" }
@@ -799,6 +804,9 @@ x509-parser = "0.18"
 zeromq = "0.4"
 
 [patch.crates-io]
+# A flush must drain async-nats' queued bytes before flushing the transport. The connection
+# generation lets a Core NATS write reject a replacement connection's flush after buffer loss.
+async-nats = { git = "https://github.com/glebpom/nats.rs.git", rev = "d131b7bc954fc57b8447e0d402a896b4b67010b1" }
 # rkyv 0.8.18 leaks partial allocations when semantic deserialization refuses
 # an element. Pin its 0.8.18 ownership fix until https://github.com/rkyv/rkyv/pull/710 ships.
 rkyv = { git = "https://github.com/glebpom/rkyv.git", rev = "868fa9c3c268560ad3459ddb95e271c7167bc097" }
