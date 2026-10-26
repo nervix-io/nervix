@@ -2,6 +2,7 @@ Feature: NATS emission
   Scenario Outline: NATS SUBJECT emitter drains a wide columnar batch in order without duplicates
     Given NATS is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these Plexus commands
       """
@@ -79,9 +80,25 @@ Feature: NATS emission
         ON GENERAL ERROR LOG;
       START;
       """
+    # Exercise both remote hops in the three-node example, before any record is published.
     And these Plexus commands are executed
       """
+      RELOCATE INGESTOR columnar_events_in ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY columnar_events ONTO NODE <relay_node> IGNORE PREFERENCES;
+      RELOCATE EMITTER columnar_events_out ONTO NODE node-1 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=columnar_events_in owner=node-1
+      """
+    And the last command output contains
+      """
+      - domain={{domain}} kind=relay name=columnar_events owner=<relay_node>
+      """
+    And the last command output contains
+      """
+      - domain={{domain}} kind=emitter name=columnar_events_out owner=node-1
       """
     Then the last cluster status owner for scheduled "ingestor" "columnar_events_in" is saved as placeholder "columnar_ingestor_owner"
     When emitter "columnar_events_out" enters stall mode
@@ -106,9 +123,9 @@ Feature: NATS emission
       """
 
     Examples:
-      | cluster_size | message_count |
-      | 1            | 32768         |
-      | 3            | 32768         |
+      | cluster_size | relay_node | message_count |
+      | 1            | node-1     | 32768         |
+      | 3            | node-2     | 32768         |
 
   Scenario Outline: NATS SUBJECT emitter publishes JSON payloads from a relay
     Given MQTT is running

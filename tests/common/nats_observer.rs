@@ -3,7 +3,8 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** One subscription per observed subject, the messages it delivers in the order the
-//!   server delivered them, and the count of messages the observing client received.
+//!   server delivered them, the count of messages the observing client received, and the connection
+//!   events its driver reported for that subject.
 //! - **Depends on.** The `async-nats` client and the binary's runtime.
 //! - **Must not know.** What a step asserts about a message, or how another broker is observed.
 //!
@@ -15,10 +16,13 @@
 
 use std::io;
 
-use async_nats::{Client as NatsClient, Message as NatsMessage, Statistics, Subscriber};
+use async_nats::{ConnectOptions, Event, Message as NatsMessage, Statistics, Subscriber};
 use nervix_primitives::{
     stream::StreamExt as _,
-    sync::{StdArc, atomic::Ordering},
+    sync::{
+        Arc, StdArc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 /// A subscription to one observed subject.
@@ -28,11 +32,36 @@ pub(crate) struct NatsObserver {
     /// The observing client's counters. The client shares them through the standard library's
     /// shared ownership, which is the type its API returns.
     client_statistics: StdArc<Statistics>,
+    connection_events: Arc<ConnectionEvents>,
 }
 
 impl NatsObserver {
-    /// Subscribes `client` to `subject`.
-    pub(crate) async fn subscribe(client: &NatsClient, subject: &str) -> io::Result<Self> {
+    /// Connects an observing client and subscribes while recording its driver's connection events.
+    pub(crate) async fn connect(address: &str, subject: &str) -> io::Result<Self> {
+        Self::connect_with_options(address, subject, ConnectOptions::new()).await
+    }
+
+    pub(super) async fn connect_with_options(
+        address: &str,
+        subject: &str,
+        options: ConnectOptions,
+    ) -> io::Result<Self> {
+        let connection_events = Arc::new(ConnectionEvents::default());
+        let events = Arc::clone(&connection_events);
+        let observed_subject = subject.to_string();
+        let client = options
+            .event_callback(move |event| {
+                events.record(&event);
+                tracing::info!(
+                    subject = %observed_subject,
+                    event = %event,
+                    "observing NATS client event"
+                );
+                std::future::ready(())
+            })
+            .connect(address)
+            .await
+            .map_err(io::Error::other)?;
         let subscription = client
             .subscribe(subject.to_string())
             .await
@@ -40,6 +69,7 @@ impl NatsObserver {
         Ok(Self {
             subscription,
             client_statistics: client.statistics(),
+            connection_events,
         })
     }
 
@@ -52,5 +82,55 @@ impl NatsObserver {
     /// How many messages the observing client has received from the server.
     pub(crate) fn received(&self) -> u64 {
         self.client_statistics.in_messages.load(Ordering::Relaxed)
+    }
+
+    /// Receipt and driver-event counts at the time a sequence assertion fails. The driver's event
+    /// channel is bounded, so event counts describe delivered notifications, not lost messages.
+    pub(crate) fn describe_receipts(&self) -> String {
+        let events = &self.connection_events;
+        format!(
+            "the observing NATS client had received {} messages from the server; connection \
+             events: connected={}, disconnected={}, slow_consumer={}, closed={}, \
+             server_errors={}, client_errors={}, lame_duck={}, draining={}",
+            self.received(),
+            events.connected.load(Ordering::Relaxed),
+            events.disconnected.load(Ordering::Relaxed),
+            events.slow_consumer.load(Ordering::Relaxed),
+            events.closed.load(Ordering::Relaxed),
+            events.server_errors.load(Ordering::Relaxed),
+            events.client_errors.load(Ordering::Relaxed),
+            events.lame_duck.load(Ordering::Relaxed),
+            events.draining.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// Fixed-size diagnostic counters shared with the driver's event callback. They publish no
+/// execution state: a relaxed load reads only how many notifications the callback has recorded.
+#[derive(Debug, Default)]
+struct ConnectionEvents {
+    connected: AtomicU64,
+    disconnected: AtomicU64,
+    slow_consumer: AtomicU64,
+    closed: AtomicU64,
+    server_errors: AtomicU64,
+    client_errors: AtomicU64,
+    lame_duck: AtomicU64,
+    draining: AtomicU64,
+}
+
+impl ConnectionEvents {
+    fn record(&self, event: &Event) {
+        let counter = match event {
+            Event::Connected => &self.connected,
+            Event::Disconnected => &self.disconnected,
+            Event::SlowConsumer(_) => &self.slow_consumer,
+            Event::Closed => &self.closed,
+            Event::ServerError(_) => &self.server_errors,
+            Event::ClientError(_) => &self.client_errors,
+            Event::LameDuckMode => &self.lame_duck,
+            Event::Draining => &self.draining,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 }

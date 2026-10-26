@@ -2090,6 +2090,22 @@ A step that waits for a sequence of messages and times out names how many messag
 client had received from its broker, for a client that counts them, so a message that never reached
 the observer reads differently from one the step had not yet taken.
 
+A sequence mismatch also keeps the observed headers and those receipt diagnostics. The NATS
+observer connects with a subject-labelled driver callback: each reported connection, disconnection,
+slow-consumer, close, server/client error, lame-duck and drain event appears with that subject in
+the scenario log. Eight fixed-size counters accompany a failure, without a second delivery queue.
+The driver's event channel is bounded, so these count notifications the callback received, not
+messages dropped or an exhaustive transport history. Receipt and event counts never excuse a
+sequence or header mismatch.
+
+The wide-columnar NATS emission outline uses the production sticky scheduler and explicitly moves
+the source and emitter to node-1 before publishing. Its relay is on node-1 in the one-node example
+and node-2 in the three-node example; cluster-status assertions establish both remote hops in the
+latter. Each example publishes all 32,768 records, waits for the source's sent count, releases the
+emitter stall, and checks every sequence and repeated header within the original 90-second budget,
+followed by the 500-millisecond duplicate check. The source count does not confirm delivery to the
+broker's observing subscriber.
+
 ## DNS Authorities
 
 A scenario about how nodes find one another by name selects its cluster's peer addressing before the
@@ -2879,6 +2895,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
 | A step takes the messages a NATS observer's client already holds without a poll of the runner task for each one, in the order the server delivered them | `a_step_takes_buffered_deliveries_without_a_poll_per_message` |
+| NATS driver diagnostics distinguish a deliberately overflowing subscription from a disconnected TCP peer, and a disconnect preserves all 32,768 deliveries already buffered | `an_observer_records_the_drivers_slow_consumer_notifications`, `a_disconnected_observer_keeps_its_buffered_burst_and_reports_the_connection_end` |
 | The actual sequence/header assertion drains all 32,768 messages while its caller is unpolled past its deadline, preserves each oracle and still fails a stalled delivery at the original deadline | `a_buffered_sequence_meets_its_deadline_while_the_runner_is_stalled`, `a_sequence_keeps_every_message_and_header_oracle`, `a_stalled_delivery_still_fails_at_the_captured_sequence_deadline` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
 
