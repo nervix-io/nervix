@@ -175,6 +175,12 @@ ordinary prefix; that original deadline then survives cancellation. The connecti
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
 
+**Iceberg catalog identity.** The namespace is required configuration, represented by one shared
+validated name type from parsing through connector opening. Dot-separated levels are nonempty and
+retain case. No absent namespace is filled from the Nervix domain, and no layer invents another
+namespace key. A commit-size limit is the same positive whole-byte value that bounds a batch;
+decoding validates that value rather than storing text for the runtime to parse.
+
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
 is unchanged creates no retirement. A connector session catalog has a private constructor that

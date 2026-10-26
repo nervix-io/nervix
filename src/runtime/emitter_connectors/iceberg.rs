@@ -40,7 +40,7 @@ impl EmitterConnectorStarter {
                     storage_config: connector.storage.config.entries.clone(),
                     catalog_name: connector.catalog.name.as_str().to_string(),
                     catalog_config: connector.catalog.config.entries.clone(),
-                    namespace: context.domain.as_str().to_string(),
+                    namespace: connector.namespace.clone(),
                     table: connector.table.clone(),
                     location: connector.location.clone(),
                     mapped_schema,

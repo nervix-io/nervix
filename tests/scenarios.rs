@@ -24539,6 +24539,22 @@ async fn given_iceberg_table_exists_at_with_columns(
         .expect("failed to create Iceberg table");
 }
 
+#[given(expr = "Iceberg table {string} in namespace {string} exists at {string} with columns")]
+async fn given_iceberg_table_in_namespace_exists(
+    world: &mut ScenarioWorld,
+    table: String,
+    namespace: String,
+    location: String,
+    #[step] step: &Step,
+) {
+    let mut fixture = IcebergTableFixture::from_step(world, table, location, docstring(step));
+    fixture.namespace = expand_placeholders(world, &namespace);
+    fixture
+        .ensure()
+        .await
+        .expect("failed to create Iceberg table in its explicit namespace");
+}
+
 #[given(expr = "Kafka topic {string} is observed")]
 async fn given_kafka_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
     let topic = expand_placeholders(world, &topic);
@@ -31149,8 +31165,27 @@ async fn then_iceberg_table_eventually_contains_row(
     table: String,
     #[step] step: &Step,
 ) {
+    assert_iceberg_table_contains_row(world, table, world.domain.clone(), step).await;
+}
+
+#[then(expr = "the Iceberg table {string} in namespace {string} eventually contains a row")]
+async fn then_iceberg_table_in_namespace_contains_row(
+    world: &mut ScenarioWorld,
+    table: String,
+    namespace: String,
+    #[step] step: &Step,
+) {
+    let namespace = expand_placeholders(world, &namespace);
+    assert_iceberg_table_contains_row(world, table, namespace, step).await;
+}
+
+async fn assert_iceberg_table_contains_row(
+    world: &ScenarioWorld,
+    table: String,
+    namespace: String,
+    step: &Step,
+) {
     let table = expand_placeholders(world, &table);
-    let domain = world.domain.clone();
     let expected = expand_placeholders(world, docstring(step));
     let expected = serde_json::from_str::<serde_json::Value>(&expected)
         .expect("Iceberg expected row must be valid JSON");
@@ -31160,7 +31195,7 @@ async fn then_iceberg_table_eventually_contains_row(
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match iceberg_table_rows(&dependencies, &domain, &table).await {
+        match iceberg_table_rows(&dependencies, &namespace, &table).await {
             Ok(rows) => {
                 if rows
                     .iter()
@@ -31427,7 +31462,9 @@ async fn rustfs_iceberg_table(
     table: &str,
 ) -> Result<iceberg::table::Table, String> {
     let catalog = rustfs_rest_catalog(dependencies).await?;
-    let table_ident = TableIdent::new(NamespaceIdent::new(domain.to_string()), table.to_string());
+    let namespace = NamespaceIdent::from_strs(domain.split('.'))
+        .map_err(|source| format!("invalid catalog namespace: {source}"))?;
+    let table_ident = TableIdent::new(namespace, table.to_string());
     catalog
         .load_table(&table_ident)
         .await
@@ -31484,7 +31521,7 @@ fn rustfs_iceberg_storage_factory() -> StdArc<dyn iceberg::io::StorageFactory> {
 
 struct IcebergTableFixture {
     dependencies: DependencyEndpoints,
-    domain: String,
+    namespace: String,
     table: String,
     location: String,
     fields: Vec<arrow_schema::Field>,
@@ -31497,7 +31534,7 @@ impl IcebergTableFixture {
     fn from_step(world: &ScenarioWorld, table: String, location: String, columns: &str) -> Self {
         Self {
             dependencies: world.dependencies.endpoints().clone(),
-            domain: world.domain.clone(),
+            namespace: world.domain.clone(),
             table: expand_placeholders(world, &table),
             location: expand_placeholders(world, &location),
             fields: Self::parse_fields(columns),
@@ -31530,7 +31567,8 @@ impl IcebergTableFixture {
 
     async fn ensure_once(&self) -> Result<(), String> {
         let catalog = rustfs_rest_catalog(&self.dependencies).await?;
-        let namespace = NamespaceIdent::new(self.domain.clone());
+        let namespace = NamespaceIdent::from_strs(self.namespace.split('.'))
+            .map_err(|source| format!("invalid catalog namespace: {source}"))?;
         if !catalog
             .namespace_exists(&namespace)
             .await

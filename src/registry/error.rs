@@ -382,6 +382,12 @@ pub(crate) enum RegistryError {
         identifier: String,
         reason: String,
     },
+    #[error("{kind} emitter '{identifier}' in domain '{domain}' has an invalid LOCATION")]
+    EmitterLocation {
+        domain: DomainName,
+        identifier: ModelName,
+        kind: EmitterEntityKind,
+    },
     #[error("codec '{codec}' in domain '{domain}' has an invalid {direction} jaq transformation")]
     InvalidCodecJaq {
         domain: DomainName,

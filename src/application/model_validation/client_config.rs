@@ -175,6 +175,21 @@ fn validate_driver(
         ConnectorKind::Redis => nervix_connector_redis::validate_client_configuration(config),
         ConnectorKind::RabbitMq => nervix_connector_rabbitmq::validate_client_configuration(config),
         ConnectorKind::Nats => nervix_connector_nats::validate_client_configuration(config),
+        ConnectorKind::S3 => nervix_connector_iceberg::validate_client_configuration(
+            nervix_models::IcebergStorageBackend::S3,
+            config,
+        ),
+        ConnectorKind::Gcs => nervix_connector_iceberg::validate_client_configuration(
+            nervix_models::IcebergStorageBackend::Gcs,
+            config,
+        ),
+        ConnectorKind::AzureBlob => nervix_connector_iceberg::validate_client_configuration(
+            nervix_models::IcebergStorageBackend::AzureBlob,
+            config,
+        ),
+        ConnectorKind::IcebergRest => {
+            nervix_connector_iceberg::validate_catalog_configuration(config)
+        }
         _ => Ok(()),
     }
 }

@@ -8,9 +8,9 @@
 
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_models::{
-    ClickHouseTableName, ExternalNameError, IcebergTableName, KafkaConsumerGroupName,
-    KafkaTopicName, MongoDbCollectionName, MqttTopicFilter, MqttTopicName, MySqlTableName,
-    NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PostgresTableName,
+    ClickHouseTableName, ExternalNameError, IcebergNamespace, IcebergTableName,
+    KafkaConsumerGroupName, KafkaTopicName, MongoDbCollectionName, MqttTopicFilter, MqttTopicName,
+    MySqlTableName, NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PostgresTableName,
     PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
 };
 
@@ -145,6 +145,7 @@ macro_rules! for_every_external_name_type {
         $assertion!(MySqlTableName, $text);
         $assertion!(MongoDbCollectionName, $text);
         $assertion!(IcebergTableName, $text);
+        $assertion!(IcebergNamespace, $text);
         $assertion!(MqttTopicName, $text);
         $assertion!(NatsPublishSubjectName, $text);
     };
@@ -165,6 +166,7 @@ fn bolero_external_names_round_trip_through_every_representation() {
                 arbitrary.emitter_table_name()
             );
             assert_external_name_round_trips!(IcebergTableName, arbitrary.emitter_table_name());
+            assert_external_name_round_trips!(IcebergNamespace, arbitrary.iceberg_namespace());
             assert_external_name_round_trips!(
                 MqttTopicName,
                 arbitrary.mqtt_publication_topic_name()

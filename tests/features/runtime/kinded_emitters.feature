@@ -148,7 +148,7 @@ Feature: Emitters name their connector and entity in the Plexus statement head
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE <storage> CLIENT storage CONFIG { <config> };
       CREATE ICEBERG_REST CLIENT catalog CONFIG { 'uri' = 'http://127.0.0.1:8181', 'warehouse' = 'warehouse' };
-      CREATE ICEBERG TABLE EMITTER outgoing FROM events TO storage TABLE 'Orders'
+      CREATE ICEBERG TABLE EMITTER outgoing FROM events TO storage TABLE 'Orders' NAMESPACE '{{domain}}'
         LOCATION '<location>' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'seq' = input.seq }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -184,7 +184,7 @@ Feature: Emitters name their connector and entity in the Plexus statement head
       """
     And these Plexus commands fail with "ICEBERG TABLE emitter requires a S3 or GCS or AZURE_BLOB client, found KAFKA"
       """
-      CREATE ICEBERG TABLE EMITTER outgoing FROM events TO broker TABLE 'Orders'
+      CREATE ICEBERG TABLE EMITTER outgoing FROM events TO broker TABLE 'Orders' NAMESPACE '{{domain}}'
         LOCATION 's3://warehouse/Orders' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB
         MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES { 'seq' = input.seq }
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
