@@ -156,7 +156,7 @@ Feature: Emitters name their connector and entity in the Plexus statement head
       """
     Then the last command output contains
       """
-      TO storage TABLE 'Orders' LOCATION '<location>' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB
+      TO storage TABLE 'Orders' NAMESPACE '{{domain}}' LOCATION '<location>' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB
       """
 
     Examples:
