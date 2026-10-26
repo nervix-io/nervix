@@ -5,9 +5,10 @@
 //! - **Owns.** The SQS client Model, the queue source and emitter Models with their delivery mode
 //!   and FIFO grouping, the queue name a source receives with and the rule SQS holds it to, the
 //!   message size SQS itself admits, and what each entity declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations, expressions and the names a body
 //!   references.
-//! - **Must not know.** The SQS driver, its configuration keys, or how a queue is received from or
+//! - **Must not know.** The SQS driver, or how a queue is received from or
 //!   sent to.
 
 #![cfg_attr(
@@ -37,7 +38,26 @@ use crate::{
     PayloadSizeLimit, PositionClass, RetryPolicy,
 };
 
-configured_client!(Sqs: unpooled, config Nervix, CreateClientSqs => SqsConfigEntry);
+configured_client!(Sqs: unpooled, config CLIENT_CONFIG, CreateClientSqs => SqsConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::optional("access_key_id", V::String).secret(),
+            K::required("endpoint", V::Url(&["http", "https"])),
+            K::optional("region", V::String),
+            K::optional("secret_access_key", V::String).secret(),
+            K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// The longest queue name SQS admits, its `.fifo` suffix included.
 const SQS_QUEUE_MAX: usize = 80;

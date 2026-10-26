@@ -262,6 +262,13 @@ clause. Omitting the clause is a parse error.
 | `HASH MAP` | The file it names, decoded line by line through its codec into an in-memory index | When a node builds the domain's execution: on every live node, whatever the schedule assigns, for running and stopped domains |
 | `CLIENT ... MOUNT` | The version's content directory, linked into a temporary mount root; the connector reads the files it names from there | Whenever the client is instantiated, such as by an ingestor or emitter when it starts, or once per node for a pooled client; each client instance keeps its mount root for its lifetime |
 
+Client CONFIG preflight renders mount templates against the candidate's pinned completed version
+before a standalone mutation or transaction commits, including a resource rebinding that changes a
+client. It checks the rendered schema and readability of Nervix-owned file keys without selecting
+a newer version or contacting the connector's service. Client initialization retains its material
+and network checks at the load boundary above. The [Connector Contract](connector-contract.md)
+defines the shared key schema and offline driver checks.
+
 Registry planning derives typed lookup and WASM resource inputs from each committed schedule. The
 lookup input carries the exact resource identity, version, file path, codec, and key field. The
 leader rejects a missing file during candidate binding validation. Running and stopped domain

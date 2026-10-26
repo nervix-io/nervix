@@ -1354,7 +1354,8 @@ number that fits the bounded channel.
 For example, choose `'subscription_buffer_messages' = '1024'` and `'idle_timeout_ms' = '30000'`
 for a 1,024-message handoff and a 30-second idle interval. A full message handoff stops TCP reads; quiesced
 intake still applies its declared `BUFFER` overflow policy or counts the messages `DROP` discards.
-Malformed capacity values fail ingestor initialization. This handoff applies TCP backpressure
+Malformed capacity values are refused at CREATE CLIENT, including after template rendering. The
+source still requires both keys when its plan is built. This handoff applies TCP backpressure
 when full; it does not discard a message to make room. Redis Pub/Sub still offers no replay or
 delivery acknowledgement, so neither buffer recovers messages missed during a disconnect.
 
@@ -1832,11 +1833,11 @@ CREATE PROMETHEUS CLIENT prom_main
 a key the client does not declare, a key written twice, a missing `addr` or `timeout_ms`, an
 `addr` that is not such a URL, a `timeout_ms` that is not a positive whole number of
 milliseconds, or one of `tls_cert_file` and `tls_key_file` without the other. For example,
-`PROMETHEUS client 'prom_main' in domain 'shop' cannot use its CONFIG: 'timeout_ms' is required`.
-Keys are matched without regard to ASCII case, as the client reads them. A value can name a file
-of the client's `MOUNT`, as in `'tls_ca_file' = '{{ dev_tls }}/ca.pem'`. When a source opens, it
-checks the configuration again with those values rendered, so the address it queries is the one
-the rules admit.
+`client 'prom_main' configuration is invalid in domain 'shop': missing required client config key 'timeout_ms'`.
+Keys are lowercase and case-sensitive. A value can name a file
+of the client's `MOUNT`, as in `'tls_ca_file' = '{{ dev_tls }}/ca.pem'`. The rendered configuration
+must satisfy these rules before commitment, and a source checks it again when opening, so the
+address it queries is the one the rules admit.
 
 ### `HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`
 
@@ -2063,7 +2064,7 @@ and quiesce-buffered frames retain that snapshot across suspension, reconnection
 Headers are not copied into every frame and are not propagated to a relay unless mapped explicitly.
 The connection is ingest-only; it declares no emitter envelope or `BATCH` clause.
 
-The client's Nervix-owned `CONFIG` is strict and matches keys without regard to ASCII case:
+The client's Nervix-owned `CONFIG` is strict, with lowercase, case-sensitive keys:
 
 | Key | Contract |
 | --- | --- |
@@ -2079,14 +2080,17 @@ The client's Nervix-owned `CONFIG` is strict and matches keys without regard to 
 
 Durations obey the shared schedulable physical-duration bound. Unknown or repeated keys are
 refused. TLS file keys are refused with `ws://`. Resource mounts and
-configuration templates keep their shared client contract; rendered values are checked again when
-opening the source. A ping write has a one-second physical budget and a failure triggers recovery.
+configuration templates keep their shared client contract; rendered values are checked before
+commitment and again when opening the source. A ping write has a one-second physical budget and a
+failure triggers recovery.
 
-An explicit idle timeout overrides the ping-derived value. Every received frame, including a
-ping or pong, refreshes activity. Sending a client ping or cancelling a read leaves the inactivity
-deadline in place. The idle deadline is physical time and a silent connection is closed and retried
-on the reconnect policy. Choose a bound that permits the peer's expected idle periods or keepalive
-cadence. Three ping intervals must fit the shared schedulable bound when they supply the deadline.
+After signaling succeeds, the idle timer starts. An explicit idle timeout overrides the
+ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
+client ping or cancelling a read leaves the inactivity deadline in place. The idle deadline is
+physical time and a silent connection is closed and retried on the host's reconnect cadence.
+Choose a bound that permits the peer's expected idle periods or keepalive cadence. Three ping
+intervals must fit the shared schedulable bound when they supply the deadline; the signaling
+handshake has its own `TIMEOUT`.
 
 Accepted signaling data stays in one bounded handoff until the handshake completes. The source
 then delivers those messages in order before reading new socket frames. In addition to the queue,
@@ -2101,19 +2105,23 @@ asynchronous resolver. It tries the returned addresses in order within the confi
 `connect_timeout_ms` budget for DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
 header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
 An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
-Resolution, connection and read failures are transient source failures. A peer Close records its
-code and reason in `DESCRIBE INGESTOR`; EOF also triggers recovery. Reconnects wait 250 ms initially,
-doubling to at most 30 seconds while attempts keep failing. A successful upgrade alone does not
-reset the delay or clear the last failure: a delivered batch does. Cancelling or stopping the
-source drops a pending connection attempt.
+Resolution, connection and read failures are transient source failures. Nervix answers a peer's
+Close before releasing the connection and reports any supplied code and reason in `DESCRIBE INGESTOR`;
+EOF also triggers recovery. This `MODE NO ACK` source reconnects on the host's cadence: 250 ms,
+500 ms, 1 second, and continuing to double up to 30 seconds. The current wait is visible as the
+reconnect backoff in `DESCRIBE INGESTOR`. A successful upgrade alone does not reset the delay or
+clear the last failure: a delivered batch does. A peer that repeatedly connects and closes without
+delivering a batch therefore receives the growing delay too. Cancelling or stopping the source
+drops a pending connection attempt.
 Both quiesce modes continue polling the connection so keepalives and reconnect behavior remain live.
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.
 
-Suspension and terminal close send a Close frame and wait up to one second for the peer's reply,
-including the time needed to send the frame, before releasing the connection. A peer that does
-not answer cannot hold shutdown indefinitely. Terminal close also clears queued signaling
-payloads; suspension retains them.
+When the host suspends or closes the source, it sends a Close frame and waits up to one second for
+the peer's reply, including the time needed to send the frame, before releasing the connection.
+A peer that does not answer cannot hold shutdown indefinitely. Suspension retains queued payloads
+from successful signaling and delivers them before opening a replacement connection. Terminal
+close clears that queue even if the Close exchange fails or times out.
 
 A `WEBSOCKETS CONNECTION` ingestor is a single-owner ingestor. It keeps its existing primary and
 replica assignment through schedule recomputation while every assigned cluster node remains live,
@@ -2175,23 +2183,26 @@ diagnostic. A failed handshake delivers no frame to the relay.
 ### Data Arriving During The Handshake
 
 Peers commonly start streaming before they finish acknowledging. `ACCEPT DATA`
-says where payload starts flowing to the relay:
+marks when incoming data becomes payload to retain during signaling:
 
 ```plexus,ignore
 ON CONNECT ACCEPT DATA                                  -- from the first frame
 WAIT JAQ '<matcher>' [FAIL JAQ '<matcher>'] [CAPTURE '<program>'] ACCEPT DATA
 ```
 
-On `ON CONNECT` the relay is open before anything is negotiated. On a `WAIT`
-step it opens when that step completes, which is the usual case: completing the
-step is what proves the peer is streaming. Because a step may list several
-matchers, a client can subscribe to two streams at once and open the relay when
-the first subscription is confirmed while the second is still outstanding.
+On `ON CONNECT`, acceptance starts with the first frame. On a `WAIT` step, it starts after every
+matcher in that step has succeeded. To retain data after one subscription is confirmed while
+another is still outstanding, use separate `WAIT` steps: mark the first with `ACCEPT DATA` and
+wait for the second afterward, as in the captured-state example below.
 
-Frames that arrive before the relay opens are not payload the graph asked for,
-so they are dropped rather than held. Nothing accumulates in memory, and nothing
-reaches a relay from a connection that was never established. Without
-`ACCEPT DATA` anywhere, payload starts flowing once the handshake finishes.
+Before acceptance starts, unmatched data frames are discarded. After acceptance starts, an
+outbound `WEBSOCKETS CONNECTION` ingestor holds payloads in its bounded handshake queue, whose
+`handshake_buffer_capacity` defaults to 16 messages. A full queue holds back further accepted
+data within the whole handshake's `TIMEOUT`. The ingestor reports readiness only after all
+signaling steps succeed, then delivers the retained messages in order before reading new socket
+frames. A failed or cancelled handshake discards that attempt's queue. Without `ACCEPT DATA`,
+unmatched frames are discarded throughout signaling and ordinary payload reads begin after the
+handshake succeeds.
 
 ### Sequencing And Captured State
 

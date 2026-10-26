@@ -5,6 +5,7 @@
 //! - **Owns.** The Redis client Model with its connection pool, the Pub/Sub source and emitter
 //!   Models with their delivery mode, the channel name a source subscribes to with the rule it
 //!   follows, and what each entity declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared ingestor and emitter declarations and the names a body references.
 //! - **Must not know.** The Redis driver, how a connection is opened, or how a channel is
 //!   subscribed or published to.
@@ -35,7 +36,25 @@ use crate::{
     LocatorDeclaration, LocatorName, PositionClass,
 };
 
-configured_client!(Redis: pooled, config NervixWithAddressQuery, CreateClientRedis => RedisConfigEntry);
+configured_client!(Redis: pooled, config CLIENT_CONFIG, CreateClientRedis => RedisConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("addr", V::DriverAddress),
+            K::CONNECT_TIMEOUT,
+            K::IDLE_TIMEOUT,
+            K::optional("subscription_buffer_messages", V::PositiveInteger),
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// The longest channel Nervix subscribes to, in bytes.
 const REDIS_CHANNEL_MAX: usize = 1024;

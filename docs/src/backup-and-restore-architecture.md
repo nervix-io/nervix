@@ -1015,8 +1015,10 @@ operation under the capability its binding grants is checked by the assignment a
 checks and Loom models. Quiesced capture, restore, offset, generation and ownership behavior is
 established by the ordinary, public and model evidence above, not by those examples.
 
-Ordinary Bolero properties run on every pull request; the sanitizer campaigns run only for one
-labeled `fuzz`, and a skipped campaign is neither execution nor coverage evidence. Coverage uses the
+Ordinary Bolero properties run when the reusable Bolero workflow is selected. Check excludes that
+workflow only for a verified prose-only pull request without `fuzz`; a labeled pull request runs
+both the ordinary properties and sanitizer campaigns. A skipped campaign is neither execution nor
+coverage evidence. Coverage uses the
 LLVM tools the toolchain declares, and patch coverage is advisory. The measured freeze durations,
 archive throughput and restore times, with their commands and image identities, are recorded on
 [Backup 07](https://app.clickup.com/t/86bc8dbxv); the freeze grows with a domain's branches and

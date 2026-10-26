@@ -402,7 +402,7 @@ impl Runtime {
         self.resolve_client_config_with_template_vars(domain, mount, config, BTreeMap::default())
     }
 
-    pub(in crate::runtime) fn resolve_client_config_with_instance(
+    pub(crate) fn resolve_client_config_with_instance(
         &self,
         domain: &DomainName,
         mount: Option<&ClientResourceMount>,

@@ -5,8 +5,9 @@
 //! - **Owns.** The NATS client Model, the subject source and emitter Models with their delivery
 //!   mode, the subject and queue group names a source subscribes with and the rules NATS holds
 //!   them to, and what each entity declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
-//! - **Must not know.** The NATS driver, its configuration keys, or how a subject is subscribed or
+//! - **Must not know.** The NATS driver, or how a subject is subscribed or
 //!   published to.
 
 #![cfg_attr(
@@ -38,7 +39,23 @@ use crate::{
     OptionPresence, OptionValue, PositionClass,
 };
 
-configured_client!(Nats: unpooled, config NervixWithAddressQuery, CreateClientNats => NatsConfigEntry);
+configured_client!(Nats: unpooled, config CLIENT_CONFIG, CreateClientNats => NatsConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("addr", V::DriverAddress),
+            K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// The longest subject Nervix subscribes to, in bytes.
 const NATS_SUBJECT_MAX: usize = 1024;

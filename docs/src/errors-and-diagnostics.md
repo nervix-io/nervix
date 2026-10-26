@@ -2,6 +2,23 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Client CONFIG validation keeps vocabulary `ClientConfigSchemaError` beneath the registry's
+client/domain context. The server's changed-model binding validation runs connector-owned offline
+checks before standalone mutation or transaction commit. `OfflineClientConfigError` retains typed
+native causes; the AMQP URI parser's string-only refusal is retained as a diagnostic attachment.
+Public command projections render the invalid key and client identity without driver values,
+including through transaction planning and commit wrappers. Resource resolution, file inspection,
+worker admission and cancellation have distinct contexts. Admission failure never claims that a
+key failed validation. Rendered WebSockets and Prometheus values retain their owning configuration
+errors; the public projection uses their value-free key contexts. Redis's capacity refusal keeps
+the ingestor plan's typed range error beneath `OfflineClientConfigError` for
+`subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
+
+Transaction model preflight adds its operation identity with `change_context` above the registry
+report. It does not nest that report in a context field: the ordinary typed report chain remains
+inspectable, so command projection can retain the schema's invalid-key diagnosis.
+
+
 Connector-storage worker capacity crosses the typed node-capability setting boundary before
 executor construction. A claim exceeding the primitive's permit representation returns
 `ExecutionConfigError::WorkerCountTooLarge` with its class, requested count and maximum; the
@@ -773,9 +790,11 @@ A Kafka source classifies an unknown topic from a subscription or topic metadata
 `KafkaTopicIngestorError::MissingTopic`, retaining the driver's typed `KafkaError` as an attachment.
 The named topic is the semantic failure shown in `DESCRIBE INGESTOR` until the operator provisions
 it. Partition watches recognize this variant as an empty topology; other inspection failures keep
-their existing reporting path. A Kafka client's attempt to set `allow.auto.create.topics` is
-`RegistryError::NervixOwnedClientConfigKey`, naming the domain, client and owned key without its
-configured value. The source and both inspectors enforce `false` after pass-through configuration.
+their existing reporting path. A Kafka client's attempt to set a host-owned key, such as
+`allow.auto.create.topics` or `delivery.report.only.error`, is
+`ClientConfigSchemaError::Reserved` beneath the registry's client context, naming the domain,
+client and owned key without its configured value. The source and both inspectors enforce `false`
+after pass-through configuration.
 
 A Kafka source keeps librdkafka's `KafkaError` beneath `KafkaTopicIngestorError::CommitOffset`, which names
 the consumer group, when the group's coordinator refuses an offset commit. A commit the coordinator
