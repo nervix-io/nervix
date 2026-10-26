@@ -696,6 +696,10 @@ Feature: Syslog support
       """
       "message":"beside an idle connection"
       """
+    And the relay subscription receives a payload
+      """
+      "message":"after it"
+      """
     And the Syslog client that sends nothing is disconnected no sooner than "1s" after it connected
 
     Examples:
