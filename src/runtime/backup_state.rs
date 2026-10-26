@@ -600,7 +600,7 @@ impl Runtime {
         if self
             .inner
             .fault_injection
-            .durable_restore_publication_fails(domain)
+            .restore_state_publication_fails(domain)
         {
             return Err(Report::new(BackupStateCaptureError::Storage));
         }

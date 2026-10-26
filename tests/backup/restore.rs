@@ -238,11 +238,42 @@ async fn then_restore_tenants_remain_isolated(
     }
 }
 
-#[given(expr = "restoring domain {string} fails after durable state publication")]
-fn given_durable_restore_publication_fails(world: &mut ScenarioWorld, domain: String) {
+/// Arms a failure that every durable publication of the domain's restored state meets until a
+/// step clears it, so a restore that recovery resumes under the same execution reference fails
+/// again rather than completing after a failure that was never recorded.
+#[given(expr = "durable state publications of restoring domain {string} fail")]
+fn given_restore_state_publications_fail(world: &mut ScenarioWorld, domain: String) {
     world
         .fault_injection
-        .fail_after_durable_restore_publication(scenario_domain(world, &domain));
+        .fail_restore_state_publications(scenario_domain(world, &domain));
+}
+
+#[when(expr = "the durable state publication failure of restoring domain {string} is cleared")]
+fn when_restore_state_publication_failure_is_cleared(world: &mut ScenarioWorld, domain: String) {
+    world
+        .fault_injection
+        .clear_restore_state_publication_failure(&scenario_domain(world, &domain));
+}
+
+#[then(expr = "restoring domain {string} has durable state publication failure state {word}")]
+fn then_restore_state_publication_failure_state(
+    world: &mut ScenarioWorld,
+    domain: String,
+    state: String,
+) {
+    let expected = match state.as_str() {
+        "pending" => Some(false),
+        "delivered" => Some(true),
+        "disabled" => None,
+        _ => panic!("unknown durable state publication failure state: {state}"),
+    };
+    assert_eq!(
+        world
+            .fault_injection
+            .restore_state_publication_failure_delivered(&scenario_domain(world, &domain)),
+        expected,
+        "the durable state publication failure of restoring domain '{domain}' is {state}"
+    );
 }
 
 #[given(expr = "restoring domain {string} fails before installing its first WASM checkpoint")]
@@ -1596,6 +1627,52 @@ async fn when_restore_is_streamed_with_outcome_recovery(
     });
 }
 
+#[when(
+    expr = "restore {string} of backup archive {string} is streamed to node {string} under \
+            execution reference {string} with outcome recovery"
+)]
+async fn when_restore_is_streamed_until_its_outcome_is_known(
+    world: &mut ScenarioWorld,
+    restore: String,
+    file: String,
+    node: String,
+    reference: String,
+) {
+    let request = restore_stream_request(world, &restore, &file, &node, &reference).await;
+    let end = nervix_primitives::time::timeout(
+        RESTORE_PAUSE_TIMEOUT,
+        request.complete(restore_outcome_routes(world)),
+    )
+    .await
+    .assured("restore recovery learns the outcome of its execution reference");
+    world.last_restore_end = Some(end);
+}
+
+/// Waits until the node holds the outcome of the background restore before recording it, and
+/// fails with the restore's own end if the stream ends first.
+#[then(expr = "the background restore's outcome is held on node {string} before it is recorded")]
+async fn then_background_restore_outcome_is_held(world: &mut ScenarioWorld, node: String) {
+    let node = node_name(&expand_placeholders(world, &node));
+    let fault_injection = world.fault_injection.clone();
+    let mut background = world
+        .background_restore
+        .take()
+        .assured("a restore stream runs in the background before its outcome is held");
+    nervix_primitives::time::timeout(RESTORE_PAUSE_TIMEOUT, async {
+        nervix_primitives::select! {
+            biased;
+            () = fault_injection.wait_for_command_finalization_pause(&node) => {},
+            ended = &mut background => {
+                let ended = ended.assured("the background restore task does not panic");
+                panic!("restore ended before its outcome was held: {ended:?}");
+            }
+        }
+    })
+    .await
+    .assured("restore reaches the finalization of its outcome");
+    world.background_restore = Some(background);
+}
+
 /// The command outcome a restore stream was answered with.
 fn restore_outcome(end: &TestRestoreEnd) -> &WireCommandOutcome {
     let reply = match end {
@@ -1626,6 +1703,10 @@ fn assert_restore_outcome(end: &TestRestoreEnd, disposition: &str, origin: &str)
             | (
                 "still applying",
                 CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying),
+            )
+            | (
+                "leadership lost",
+                CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::LeadershipLost),
             )
     );
     assert!(
@@ -1686,6 +1767,20 @@ async fn then_background_restore_stream_completes(world: &mut ScenarioWorld) {
         outcome.message
     );
     world.last_restore_end = Some(end);
+}
+
+#[then(expr = "the restore stream's outcome message contains {string}")]
+fn then_restore_stream_outcome_message_contains(world: &mut ScenarioWorld, fragment: String) {
+    let end = world
+        .last_restore_end
+        .as_ref()
+        .assured("a preceding step streamed a restore");
+    let outcome = restore_outcome(end);
+    assert!(
+        outcome.message.contains(&fragment),
+        "the restore outcome names '{fragment}': {}",
+        outcome.message
+    );
 }
 
 #[then("the restore stream's report shows every step applied")]
