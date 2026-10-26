@@ -685,13 +685,46 @@ remain in their owning work records until that delivery.
 | --- | --- |
 | Ingestor | Header reads, the typed metadata scope, every-node execution, the reference its body names, its position class and acknowledgement confirmation; its [bounds](#bounds-and-deadlines); the delivery modes its ingestors may name and the quiesce modes its transport can honor, each with the option choices it requires; the locator, which is the keywords and the external name with its completion label and an example its rule admits; and its options in the order a statement writes them, each with its value type, presence and default, and choices. |
 | Emitter | Header writes; its [bounds](#bounds-and-deadlines); the reference its body names (a client of one connector, the object store an Iceberg emitter writes to, or the schema of a client emitter's native batches); how its body is formed (a codec, a codec or `WITHOUT BODY`, `VALUES`, or native output); its `BATCH` legality, which is required, optional with the protocol maximum, or unavailable with its reason; whether a batch needs the codec's batch transformation; its publishing modes; its locator and options; and its envelope clauses and `PROPERTIES` keys, of which no entity declares any yet. |
-| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Prometheus and WebSockets clients also declare every key their `CONFIG` may set and the rule each value follows; the registry holds a client to them when it is created, and the ingestor holds its rendered configuration to them again when it opens. |
+| Client | Whether it is pooled and bounds its pool with `POOL SIZE`, who reads its `CONFIG` keys (Nervix, the driver, or Nervix while the driver reads the address URL's query or the object store's and catalog's property namespaces), and the options its statement writes, such as a WebSocket client's signaling protocol. Every client declares its CONFIG key names, required or optional presence, value type, confidentiality, file role and Nervix or driver ownership. The declaration explicitly names delegated property namespaces and reserved keys. Validation, composed-grammar completion, public inspection and the generated key reference read this one schema. |
 
 Plexus client definitions start with `CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>`. The
 composed head and canonical rendering use the vocabulary's connector kind; a console choice uses
 that same head. Pool bounds, when declared, precede the optional resource mount. WebSocket
 signaling precedes its mount. This syntax does not change which layer interprets configuration or
 how clients connect, pool or execute.
+
+Client keys are lowercase and case-sensitive. The pure registry refuses unknown, repeated,
+missing-required or mistyped Nervix-owned keys and incomplete TLS identities before a candidate
+can become an active graph. Kafka properties and object-store/catalog properties are explicitly
+driver-delegated; database, Redis, RabbitMQ and NATS address query options belong to their driver.
+Undeclared delegated values are confidential in public inspection. Drivers retain their existing
+trust policy: HTTPS without a custom CA uses their built-in roots, while MQTT's `mqtts` address
+requires its declared `tls_ca_file` before commit. Conditional presence belongs to the key declaration.
+Configured CA replacement or augmentation follows the connector's documented policy. A Nervix-owned custom file must be readable; it does
+not disable verification or silently fall back when unavailable.
+
+The server composition root extends the existing changed-model binding boundary before standalone
+mutation or transaction commit. It renders mount templates using the resource resolver and checks
+the rendered schema and Nervix-owned file paths on an admitted filesystem worker, charged to command memory.
+Rendered values also pass the existing WebSockets configuration and Prometheus API-root owners;
+an optional Redis subscription capacity passes the same range parser its ingestor plan uses.
+Ingestor-only presence requirements stay with that plan.
+MQTT's representative first instance uses the same instance-template renderer as execution.
+Connector-owned offline parsers check librdkafka property names and values, sqlx and mysql_async
+options, Redis connection information, lapin AMQP URIs and NATS server addresses. They create no
+connection, consumer, producer, DNS lookup or remote side effect. Checks requiring the remote
+service still belong to client initialization. The registry names no connector crate and runtime
+receives entries and pinned mounts rather than a Model.
+
+Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
+exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed
+key-bearing contexts without rendering driver diagnostics that may contain credentials. Worker
+admission and cancellation failures remain inspection failures, rather than invalid-key diagnoses.
+`SHOW CREATE CLIENT` and configured-choice/browser previews use the declared confidential
+projection, masking secrets and address credentials/query options as `********`. Complete canonical
+serialization retains values for strongly persisted configuration and backup archives; archives
+remain secret-bearing under [Backup And Restore](backup-and-restore.md). Existing entity `DESCRIBE`
+output references clients by name and does not print their CONFIG.
 
 A mode or a quiesce mode that needs an option choice declares it: an MQTT topic's `ACK` modes and its
 `SUSPEND` require `SESSION PERSISTENT` and `QOS 1`, the session a broker keeps messages for, and the
@@ -1438,10 +1471,12 @@ transient failure its pending work is still waiting out.
 Every emitter implements `finish`, and no emitter inherits a default. A publish reports a record
 delivered at the completion point its mode declares, and for `NO ACK` on Kafka, Pulsar and MQTT
 QoS 0 that point is the client taking the record, so the client can still hold delivered records
-when the emitter stops. A Core NATS write delivers its records once the client reports them flushed
-to its socket, so its client holds records only after a write ran out of the client's `timeout_ms`:
-they stay unresolved for the host's retry, and the client still sends them unless its connection
-fails first, which discards those the client had taken for that connection but not yet written.
+when the emitter stops. A Core NATS write delivers only after its queued bytes drain and flush on
+the same connection. A failed or timed-out write retains its pending count and connection
+expectation; its records stay unresolved for the host's retry. That count includes records the
+client may still send and records a failed connection may have discarded, until a later flush
+settles the client's buffer. A replacement connection cannot certify the preceding connection's
+unwritten bytes.
 `finish` sends what the client still holds by the deadline the host gives it and answers with one
 of two outcomes:
 
@@ -1480,7 +1515,7 @@ the emitter's transient error that `DESCRIBE EMITTER` shows and as an error even
 | Kafka | `NO ACK`: records librdkafka has queued and not yet sent, for up to the client's `linger.ms` or until a batch fills. `ACK`: nothing a completed publish reported delivered, but a record a failed publish stopped waiting for stays until librdkafka gives it up | Waits inside librdkafka's flush until the producer queue is empty or the deadline passes, which sends the queued records at once whatever `linger.ms` says, in both modes, and counts the records whose delivery report has not been served when the deadline passes |
 | Pulsar | `NO ACK`: accepted messages whose broker receipts have not arrived. `ACK`: nothing a completed publish reported delivered | Retains the receipts and waits for them until the finish deadline; reports a driver failure or the count still unanswered at that deadline |
 | MQTT | `QOS 0`: publishes the client took and its event loop has not yet written and flushed to the broker connection, which a client cut off from its broker holds until it connects again. `QOS 1` and `QOS 2`: nothing | Waits until the event loop has flushed every publish the client took or the deadline passes; reports a failed flush or the count still unflushed at that deadline |
-| NATS | Core `NO ACK`: nothing after a write whose flush completed; after a write that ran out of `timeout_ms`, the records it handed the client, which the next write flushes before it hands the client more. JetStream: nothing, because JetStream answers each record | Flushes the Core NATS client by the deadline, which sends what it holds; reports the count still held when the deadline passes, or the client's failure with the driver's cause beneath. A flush that completes after the client lost its connection and connected again answers Flushed, though the failed connection discarded the records it had taken but not yet written |
+| NATS | Core `NO ACK`: nothing after a write whose connection flushed; after a failed or timed-out write, its pending count and connection expectation until the client's buffer is settled. JetStream: nothing, because JetStream answers each record | Drains and flushes the Core NATS client by the deadline, then verifies the pending write's connection. A connection change fails finish with the uncertain record count; a driver failure retains its typed cause; an expired deadline reports the pending count. Only a flush on the expected connection answers Flushed |
 | ZeroMQ | Nothing a publish reported delivered: a completed send has flushed its frame to a peer's socket, and a send that ran out of `timeout_ms` failed its record | Nothing to send |
 | RabbitMQ, Redis Pub/Sub, SQS, Sentry, OTEL, HTTP, Syslog, ClickHouse, Postgres, MySQL, MongoDB, client emitters | Nothing: a publish returns once its transport answered for or wrote each record | Nothing to send |
 | Iceberg | Rows it staged and has not committed, which only a commit publishes | Nothing to send: a stop commits the staged rows before it finishes, and teardown leaves them uncommitted, as [Shutdown And Recovery](./shutdown.md#emitters) describes |
@@ -1507,6 +1542,8 @@ still holds a message whose report its polling thread is serving, after every re
 served, has flushed, since no record is left. Otherwise `Unsent` counts the records still retained.
 Because a record stays retained until its report is served, the producer always asks for every
 record's report and sets `delivery.report.only.error` to `false` after the client's own entries.
+That property is reserved for Nervix, so client admission refuses it rather than accepting a value
+the producer cannot honor.
 
 The MQTT emitter hands each QoS 0 record to its client with a flush notice, which the client's event
 loop ends once it has written the publish and flushed the connection, or fails when that write or

@@ -2,6 +2,14 @@
 
 *Plexus, the Nervix graph definition language.*
 
+Client configuration declarations distinguish required, optional and address-scheme-dependent keys, Nervix and driver
+ownership, typed value rules, TLS certificate/identity file roles and delegated property namespaces.
+`All` is an explicit driver namespace, not an empty-prefix sentinel. The vocabulary schema owns
+key presence, duplicates, type checks and TLS pairing; rendered mount values cross that same
+boundary again before storage. Driver-specific validation stays in connector engines called by
+the composition root. Confidential inspection is an explicit projection of complete entries;
+stored configuration and archive serialization do not consume that projection.
+
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
 stand for a missing value or a different state. The owner of each state decides when a value is
@@ -166,6 +174,13 @@ The following read starts its optional keep-alive deadline after the host acknow
 ordinary prefix; that original deadline then survives cancellation. The connection retains at
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
+
+The Core NATS emitter's buffer is either empty or pending with a nonzero record count and its
+connection expectation. A pending write that began connected requires that same successful
+connection; one queued while disconnected requires the next connection. The state is consumed
+only once the driver drains its buffer, and a mismatched connection becomes a typed failure
+instead of certifying discarded bytes. A deadline leaves the pending state intact. This is
+volatile connector state, never a stored shape or a separate representation of the host's rows.
 
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input

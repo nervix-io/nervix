@@ -848,13 +848,12 @@ not the events waiting in librdkafka's queue, and reports them as its transient 
 event. Pulsar retains the receipts of records accepted under `NO ACK` and waits for them within
 that same finish deadline. A driver failure or still-unanswered receipts fail its finish; an
 expired deadline reports their count, without claiming the broker did not receive them. A Core
-NATS client holds records only after a write ran out of the client's `timeout_ms`, which leaves them
-unresolved and with the client; its finish flushes them within that same finish deadline. A
-deadline that ends first reports how many the client still held, and a client that fails while it
-flushes fails the finish with the driver's cause. A connection the client loses while it holds them
-discards those the client had taken for it but not yet written, and a finish whose flush completes
-after the client connected again still reports them flushed. MQTT QoS 0 waits within that same
-finish deadline for its client's event loop to write and flush the publishes the client still holds;
+NATS client may hold records after a failed or timed-out write; its finish drains and flushes
+those pending bytes within that same finish deadline. A deadline that ends first reports the
+pending count, and a client failure keeps the driver's typed cause. A connection change before
+that pending write's flush completes fails finish with the uncertain record count: flushing a
+replacement connection cannot certify bytes discarded by the preceding one. MQTT QoS 0 waits
+within that same finish deadline for its client's event loop to write and flush the publishes the client still holds;
 a failed flush or publishes still unflushed when it ends fail its finish, which reports the failure
 or their count. Every other emitter
 holds nothing once a publish returns, so the publish itself is the

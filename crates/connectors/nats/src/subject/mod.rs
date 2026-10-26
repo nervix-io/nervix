@@ -32,7 +32,7 @@ mod ingestor;
 )]
 mod scripted_server;
 
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{future::Future, num::NonZeroU64, pin::Pin, time::Duration};
 
 use async_nats::{
     Client as NatsClient, PublishError as NatsPublishError,
@@ -135,18 +135,113 @@ impl NatsDelivery {
 }
 
 /// The core writes of one emitter: the bound the client's `timeout_ms` sets on each, and the records
-/// the client took that it has not flushed to its socket.
+/// the client took whose flush has not completed on their connection.
 ///
-/// A core write hands its records to the client and delivers them once the client flushed them to
-/// its socket; the server answers nothing. A write that runs out of `timeout_ms` before its flush
-/// completes leaves its records with the client, which still sends them once its connection drains
-/// or reconnects, so the emitter counts them until a flush completes.
+/// A core write delivers only after its connection flushes. A replacement connection cannot
+/// certify the preceding connection's discarded bytes. A timed-out attempt keeps its count and
+/// connection expectation until a later flush drains the client or reports the loss.
 struct CoreWrites {
     /// The client's `timeout_ms`, which bounds each write, the hand-over and the flush included.
     /// Without the key a write waits for its flush.
     timeout: Option<ConfiguredDeadline>,
-    /// The records the client took since its last completed flush.
-    unflushed: u64,
+    pending: CoreBuffer,
+}
+
+/// The connection that must flush one write. A write queued while disconnected belongs to the
+/// next successful connection; a second reconnect makes its outcome uncertain again.
+#[derive(Clone, Copy)]
+enum CoreConnection {
+    Connected { generation: u64 },
+    Reconnecting { after: u64 },
+}
+
+impl CoreConnection {
+    fn capture(client: &NatsClient) -> Self {
+        let generation = client.connection_generation();
+        match client.connection_state() {
+            async_nats::connection::State::Connected => Self::Connected { generation },
+            async_nats::connection::State::Pending
+            | async_nats::connection::State::Disconnected => {
+                Self::Reconnecting { after: generation }
+            }
+        }
+    }
+
+    fn accepts(self, generation: u64) -> bool {
+        match self {
+            Self::Connected {
+                generation: expected,
+            } => generation == expected,
+            Self::Reconnecting { after } => after.checked_add(1) == Some(generation),
+        }
+    }
+}
+
+/// A pending count always carries the connection whose flush can settle it.
+enum CoreBuffer {
+    Empty,
+    Pending {
+        records: NonZeroU64,
+        connection: CoreConnection,
+    },
+}
+
+impl CoreBuffer {
+    fn records(&self) -> u64 {
+        match self {
+            Self::Empty => 0,
+            Self::Pending { records, .. } => records.get(),
+        }
+    }
+
+    fn accepted(&mut self, connection: CoreConnection) {
+        match self {
+            Self::Empty => {
+                *self = Self::Pending {
+                    records: NonZeroU64::MIN,
+                    connection,
+                };
+            }
+            Self::Pending { records, .. } => {
+                *records = records.checked_add(1).assured(
+                    "the records one client holds are in memory, far fewer than u64 counts",
+                );
+            }
+        }
+    }
+
+    /// A completed driver flush leaves no queued bytes, even when reconnection discarded part
+    /// of this attempt. Clear that drained state, but keep the uncertain records unresolved.
+    fn flushed(&mut self, generation: u64) -> Result<(), Report<CoreFlushError>> {
+        let pending = std::mem::replace(self, Self::Empty);
+        match pending {
+            Self::Empty => Ok(()),
+            Self::Pending {
+                records,
+                connection,
+            } => {
+                if connection.accepts(generation) {
+                    Ok(())
+                } else {
+                    Err(Report::new(CoreFlushError::ConnectionChanged { records }))
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+enum CoreFlushError {
+    #[error(
+        "{} client failed to flush its pending records",
+        nervix_models::ConnectorKind::Nats
+    )]
+    ClientFlush,
+    #[error(
+        "{} connection changed before {records} pending records were flushed",
+        nervix_models::ConnectorKind::Nats
+    )]
+    ConnectionChanged { records: NonZeroU64 },
 }
 
 impl CoreWrites {
@@ -154,7 +249,7 @@ impl CoreWrites {
     fn new(timeout: Option<ConfiguredDeadline>) -> Self {
         Self {
             timeout,
-            unflushed: 0,
+            pending: CoreBuffer::Empty,
         }
     }
 
@@ -194,8 +289,7 @@ impl CoreWrites {
     /// earlier write left with the client. Answers with the records it flushed, having recorded in
     /// `outcome` each record NATS refuses for good.
     ///
-    /// The count of unflushed records changes only once the client took a record or a flush
-    /// completed, so a write the bound cuts short leaves it naming exactly what the client holds.
+    /// A cut-short write retains both its count and the connection that must complete its flush.
     async fn write(
         &mut self,
         client: &NatsClient,
@@ -205,10 +299,10 @@ impl CoreWrites {
     ) -> Result<Vec<EmitterRecordId>, Report<EmitterWriteError>> {
         // Records handed over before what the client still holds is flushed would queue behind
         // it, and a write that retries those records would queue a second copy of each.
-        if self.unflushed > 0 {
-            Self::flush(client).await?;
-            self.unflushed = 0;
+        if let CoreBuffer::Pending { .. } = self.pending {
+            self.flush(client).await.map_err(Self::publish_failure)?;
         }
+        let connection = CoreConnection::capture(client);
         let mut connector = client.clone();
         let mut handed_over = Vec::with_capacity(records.len());
         for record in records {
@@ -231,9 +325,7 @@ impl CoreWrites {
             match result {
                 Ok(()) => {
                     handed_over.push(record_id);
-                    self.unflushed = self.unflushed.checked_add(1).assured(
-                        "the records one client holds are in memory, far fewer than u64 counts",
-                    );
+                    self.pending.accepted(connection);
                 }
                 Err(error) if NatsSubjectEmitter::is_core_record_rejection(&error) => {
                     outcome.reject(RejectedEmitterMember::external(
@@ -245,18 +337,29 @@ impl CoreWrites {
                 Err(error) => return Err(NatsSubjectEmitter::publish_error(error)),
             }
         }
-        Self::flush(client).await?;
-        self.unflushed = 0;
+        self.flush(client).await.map_err(Self::publish_failure)?;
         Ok(handed_over)
     }
 
-    /// Flushes `client`'s connection, which writes everything handed to the client before it to
-    /// the client's socket.
-    async fn flush(client: &NatsClient) -> Result<(), Report<EmitterWriteError>> {
+    /// Drains the client's queued bytes, then checks the connection that flushed them. The
+    /// driver's completed flush orders its generation observation; its private atomics and socket
+    /// remain outside Nervix's modeled execution.
+    async fn flush(&mut self, client: &NatsClient) -> Result<(), Report<CoreFlushError>> {
+        if let CoreBuffer::Empty = self.pending {
+            return Ok(());
+        }
         client
             .flush()
             .await
-            .map_err(NatsSubjectEmitter::publish_error)
+            .change_context(CoreFlushError::ClientFlush)?;
+        self.pending.flushed(client.connection_generation())
+    }
+
+    fn publish_failure(error: Report<CoreFlushError>) -> Report<EmitterWriteError> {
+        let description = format!("{error:#}");
+        error
+            .change_context(EmitterWriteError::Publish { connector: NATS })
+            .attach_printable(description)
     }
 
     /// The failure of a write that ran out of the client's `timeout_ms`. An emitter shows the
@@ -270,25 +373,22 @@ impl CoreWrites {
 
     /// Flushes what the client still holds of the records writes handed it, by `deadline`.
     async fn finish(&mut self, client: &NatsClient, deadline: Instant) -> EmitterFinishResult {
-        if self.unflushed == 0 {
+        let records = self.pending.records();
+        if let CoreBuffer::Empty = self.pending {
             return Ok(EmitterFinish::NothingHeld);
         }
-        let flushed = nervix_primitives::time::timeout_at(deadline, client.flush()).await;
+        let flushed = nervix_primitives::time::timeout_at(deadline, self.flush(client)).await;
         match flushed {
-            Ok(Ok(())) => {
-                self.unflushed = 0;
-                Ok(EmitterFinish::Flushed)
-            }
+            Ok(Ok(())) => Ok(EmitterFinish::Flushed),
             Ok(Err(error)) => {
-                let description =
-                    format!("nats client failed to flush the records it held: {error}");
-                Err(Report::new(error)
+                let description = format!("{error:#}");
+                Err(error
                     .change_context(EmitterFinishError::Flush { connector: NATS })
                     .attach_printable(description))
             }
             Err(_elapsed) => Err(Report::new(EmitterFinishError::Unsent {
                 connector: NATS,
-                records: self.unflushed,
+                records,
             })),
         }
     }
@@ -554,10 +654,10 @@ impl EmitterLifecycle for NatsSubjectEmitter {
         Self::KIND
     }
 
-    /// A core write delivers its records once the client flushed them, so the client holds
-    /// records only after a write ran out of `timeout_ms`, and finishing flushes them by
-    /// `deadline`. JetStream answers each record, so its client holds nothing a publish reported
-    /// delivered.
+    /// A failed or timed-out core write retains its count and connection expectation. Finishing
+    /// validates that connection's flush by `deadline`; a replacement connection cannot certify
+    /// discarded bytes. JetStream answers each record, so its client holds nothing a publish
+    /// reported delivered.
     async fn finish(&mut self, deadline: Instant) -> EmitterFinishResult {
         match &mut self.delivery {
             NatsDelivery::Core(writes) => writes.finish(&self.client, deadline).await,
@@ -596,6 +696,7 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use async_nats::connection::State;
+    use meticulous::ResultExt as _;
     use nervix_connector::{DeadlineElapsed, EmitterFinishError};
     use nervix_models::{DeadlineKey, Timestamp};
 
@@ -951,6 +1052,108 @@ mod tests {
         assert_eq!(elapsed.key, DeadlineKey::Timeout);
         assert_eq!(elapsed.bound, Duration::from_millis(200));
         assert_eq!(printable_description(&failure), Some(elapsed.to_string()));
+    }
+
+    /// A reconnect discards the partly written record. Flushing the replacement connection
+    /// cannot establish that this write sent the record it handed to the failed connection.
+    #[nervix_primitives::test]
+    async fn a_core_write_does_not_deliver_a_record_its_failed_connection_discarded() {
+        const PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+        let server = ScriptedServer::with_receive_buffer(4_096).await;
+        let addr = server.addr();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.greet(PAYLOAD_BYTES).await;
+            let bytes = connection.expect_publish_prefix(b"discarded").await;
+            assert_eq!(bytes, PAYLOAD_BYTES);
+            connection.end().await;
+            server.accept(PAYLOAD_BYTES).await
+        });
+        let mut connector = core_emitter(&addr, &[]).await;
+        let mut payload = vec![b'x'; PAYLOAD_BYTES];
+        payload[..9].copy_from_slice(b"discarded");
+
+        let (outcome, connection) = bounded(async {
+            futures_util::join!(connector.publish(vec![record(0, &payload, &[])]), script)
+        })
+        .await;
+
+        let outcome = outcome.into_parts();
+        assert!(
+            outcome.delivered.is_empty(),
+            "a replacement connection cannot flush the record the failed connection discarded"
+        );
+        assert!(outcome.rejected.is_empty());
+        let failure = outcome
+            .infrastructure_error
+            .assured("the interrupted write reports its uncertainty");
+        assert_eq!(
+            failure.downcast_ref::<CoreFlushError>(),
+            Some(&CoreFlushError::ConnectionChanged {
+                records: NonZeroU64::MIN,
+            })
+        );
+        let mut connection = connection.assured("the replacement connection is greeted");
+        let (retried, received) = bounded(async {
+            futures_util::join!(
+                connector.publish(vec![record(0, b"retry", &[])]),
+                connection.expect_publish()
+            )
+        })
+        .await;
+        let retried = retried.into_parts();
+        assert_eq!(retried.delivered, vec![EmitterRecordId::new(0)]);
+        assert!(retried.infrastructure_error.is_none());
+        assert_eq!(received.message, b"retry");
+    }
+
+    /// Finishing cannot certify the outstanding record when the connection holding its
+    /// unwritten suffix ends while finish is waiting for that suffix to flush.
+    #[nervix_primitives::test]
+    async fn a_core_finish_does_not_certify_records_its_failed_connection_discarded() {
+        const PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+        let server = ScriptedServer::with_receive_buffer(4_096).await;
+        let addr = server.addr();
+        let (end, ended) = nervix_primitives::sync::oneshot::channel();
+        let script = nervix_primitives::task::spawn(async move {
+            let mut connection = server.greet(PAYLOAD_BYTES).await;
+            let bytes = connection.expect_publish_prefix(b"discarded").await;
+            assert_eq!(bytes, PAYLOAD_BYTES);
+            ended
+                .await
+                .assured("the check ends the original connection");
+            connection.end().await;
+            server.accept(PAYLOAD_BYTES).await
+        });
+        let mut connector = core_emitter(&addr, &[("timeout_ms", WRITE_TIMEOUT_MS)]).await;
+        let mut payload = vec![b'x'; PAYLOAD_BYTES];
+        payload[..9].copy_from_slice(b"discarded");
+        let outcome = bounded(connector.publish(vec![record(0, &payload, &[])]))
+            .await
+            .into_parts();
+        assert!(outcome.delivered.is_empty());
+        assert!(outcome.infrastructure_error.is_some());
+
+        let finish = connector.finish(check_deadline());
+        futures_util::pin_mut!(finish);
+        assert!(futures_util::poll!(finish.as_mut()).is_pending());
+        end.send(()).assured("the original connection waits to end");
+        let (finished, connection) = bounded(async { futures_util::join!(finish, script) }).await;
+        let _connection = connection.assured("the replacement connection is greeted");
+
+        let failure = match finished {
+            Err(failure) => failure,
+            Ok(finished) => panic!("the interrupted connection cannot certify {finished:?}"),
+        };
+        assert_eq!(
+            *failure.current_context(),
+            EmitterFinishError::Flush { connector: NATS }
+        );
+        assert_eq!(
+            failure.downcast_ref::<CoreFlushError>(),
+            Some(&CoreFlushError::ConnectionChanged {
+                records: NonZeroU64::MIN,
+            })
+        );
     }
 
     /// A write after one that ran out of `timeout_ms` first waits for the client to flush what it

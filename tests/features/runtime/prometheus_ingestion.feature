@@ -189,41 +189,41 @@ Feature: Prometheus ingestion
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'addr' is not an API root: the URL has a query string"
+    When these Plexus statements fail with "invalid Prometheus client config key 'addr': the URL has a query string"
       """
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'http://prometheus.nervix.test:9090/?stale=true',
         'timeout_ms' = 5000
       };
       """
-    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'addr' is not an API root: the URL has a fragment"
+    When these Plexus statements fail with "invalid Prometheus client config key 'addr': the URL has a fragment"
       """
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'http://prometheus.nervix.test:9090/#graph',
         'timeout_ms' = 5000
       };
       """
-    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'addr' is not an API root: the URL's scheme is not http or https"
+    When these Plexus statements fail with "invalid client config key 'addr': expected URL"
       """
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'prometheus.nervix.test:9090',
         'timeout_ms' = 5000
       };
       """
-    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'timeout_ms' is required"
+    When these Plexus statements fail with "missing required client config key 'timeout_ms'"
       """
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'http://prometheus.nervix.test:9090'
       };
       """
-    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'timeout_ms' is not a usable request timeout: not a positive whole number of milliseconds"
+    When these Plexus statements fail with "invalid client config key 'timeout_ms': expected positive, schedulable whole milliseconds"
       """
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'http://prometheus.nervix.test:9090',
         'timeout_ms' = 0
       };
       """
-    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'timeout' is not a key this client reads"
+    When these Plexus statements fail with "unknown client config key 'timeout'"
       """
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'http://prometheus.nervix.test:9090',
@@ -231,7 +231,7 @@ Feature: Prometheus ingestion
         'timeout' = 5000
       };
       """
-    When these Plexus statements fail with "PROMETHEUS client 'prom_main' in domain '{{domain}}' cannot use its CONFIG: 'tls_cert_file' and 'tls_key_file' must be set together"
+    When these Plexus statements fail with "client config key 'tls_cert_file' requires 'tls_key_file'"
       """
       CREATE PROMETHEUS CLIENT prom_main CONFIG {
         'addr' = 'https://prometheus.nervix.test:9090',
@@ -239,14 +239,26 @@ Feature: Prometheus ingestion
         'tls_cert_file' = '/etc/nervix/tls/client.pem'
       };
       """
-    When these Plexus statements are executed on the leader node
+    Given the leader node is configured with these Plexus commands
       """
-      CREATE PROMETHEUS CLIENT prom_main CONFIG {
+      CREATE RESOURCE trust_files;
+      """
+    And node "node-1" has resource directory "prometheus_tls_fixture" containing
+      """
+      {"ca.pem": "CA material is parsed on transport initialization\n", "client.pem": "certificate material is parsed on transport initialization\n", "client-key.pem": "key material is parsed on transport initialization\n"}
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE trust_files VERSION "{{prometheus_tls_fixture}}";
+      """
+    And these Plexus statements are executed on the leader node
+      """
+      CREATE PROMETHEUS CLIENT prom_main MOUNT trust_files VERSION 1 CONFIG {
         'addr' = 'https://prometheus.nervix.test:9090/monitoring/',
         'timeout_ms' = 5000,
-        'tls_ca_file' = '/etc/nervix/tls/ca.pem',
-        'tls_cert_file' = '/etc/nervix/tls/client.pem',
-        'tls_key_file' = '/etc/nervix/tls/client-key.pem'
+        'tls_ca_file' = '{{ trust_files }}/ca.pem',
+        'tls_cert_file' = '{{ trust_files }}/client.pem',
+        'tls_key_file' = '{{ trust_files }}/client-key.pem'
       };
       SHOW CREATE CLIENT prom_main;
       """

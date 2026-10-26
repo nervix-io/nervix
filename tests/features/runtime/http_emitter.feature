@@ -318,21 +318,7 @@ Feature: HTTP REQUEST emitter
         INVOKE write_header('Authorization', leak_sensitive(input.secret))
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE HTTP CLIENT unsafe_endpoint CONFIG {
-        'endpoint' = 'https://key@api.example.com', 'timeout_ms' = 5000
-      };
-      CREATE HTTP CLIENT zero_timeout CONFIG {
-        'endpoint' = 'https://api.example.com', 'timeout_ms' = 0
-      };
-      CREATE HTTP CLIENT text_timeout CONFIG {
-        'endpoint' = 'https://api.example.com', 'timeout_ms' = 'invalid'
-      };
-      CREATE HTTP CLIENT overflow_timeout CONFIG {
-        'endpoint' = 'https://api.example.com',
-        'timeout_ms' = '18446744073709551616'
-      };
-      CREATE HTTP CLIENT incomplete_tls CONFIG {
-        'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000,
-        'tls_cert_file' = '/tmp/client.pem'
+        'endpoint' = 'http://key@api.example.com', 'timeout_ms' = 5000
       };
       CREATE HTTP REQUEST EMITTER encoded FROM outgoing TO api
         METHOD 'POST' PATH output.id
@@ -354,21 +340,30 @@ Feature: HTTP REQUEST emitter
       """
       ALTER HTTP REQUEST EMITTER allowed SET CLIENT unsafe_endpoint;
       """
-    When these Plexus commands fail with "timeout_ms"
+    When these Plexus commands fail with "invalid client config key 'timeout_ms'"
       """
-      ALTER HTTP REQUEST EMITTER allowed SET CLIENT zero_timeout;
+      CREATE HTTP CLIENT zero_timeout CONFIG {
+        'endpoint' = 'http://api.example.com', 'timeout_ms' = 0
+      };
       """
-    When these Plexus commands fail with "timeout_ms"
+    When these Plexus commands fail with "invalid client config key 'timeout_ms'"
       """
-      ALTER HTTP REQUEST EMITTER allowed SET CLIENT text_timeout;
+      CREATE HTTP CLIENT text_timeout CONFIG {
+        'endpoint' = 'http://api.example.com', 'timeout_ms' = 'invalid'
+      };
       """
-    When these Plexus commands fail with "timeout_ms"
+    When these Plexus commands fail with "invalid client config key 'timeout_ms'"
       """
-      ALTER HTTP REQUEST EMITTER allowed SET CLIENT overflow_timeout;
+      CREATE HTTP CLIENT overflow_timeout CONFIG {
+        'endpoint' = 'http://api.example.com', 'timeout_ms' = '18446744073709551616'
+      };
       """
-    When these Plexus commands fail with "tls_key_file"
+    When these Plexus commands fail with "client config key 'tls_cert_file' requires 'tls_key_file'"
       """
-      ALTER HTTP REQUEST EMITTER allowed SET CLIENT incomplete_tls;
+      CREATE HTTP CLIENT incomplete_tls CONFIG {
+        'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000,
+        'tls_cert_file' = '/tmp/client.pem'
+      };
       """
     Then SHOW CREATE EMITTER on the leader node renders these clauses
       | emitter | clause                       |

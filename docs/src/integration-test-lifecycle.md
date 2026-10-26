@@ -175,6 +175,15 @@ resubmitting an outcome that might already have produced output.
 | Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards | The stallable TCP proxy in the cluster fixture, `tests/common/cluster.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
+The controlled NATS endpoint publishes a positive observation when it holds a complete publish
+and stops reading behind it. A connection-loss scenario waits for that observation, ends the
+active connections, and waits for a refused reconnect before forwarding again. The same fault
+can run beside STOP. These event boundaries establish the outage without a sleep or a negative
+observation window. The publication scenario requires every original sequence member, allowing
+the duplicates an uncertain Core NATS retry permits. The STOP scenario observes the pending-record
+uncertainty through a retained public session; terminal domain teardown may cancel unresolved
+host work under the source's existing acknowledgement contract.
+
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
 `just test-deloxide-stress` or `just test-deloxide-stress-restore` builds, starts its
 deadlock diagnostics in `main`, right after it configures the lifecycle of its test dependencies and
@@ -862,6 +871,25 @@ The harness keeps these boundaries explicit.
   same paused download, reload and verified resumed archive. The scenario whose reload must resume
   nothing arms the same pauses, so a backup the console resumed by mistake would stay held on
   whichever node served it instead of downloading and clearing its record.
+- **Console command response pauses.** The shared console session scenario that loses its session
+  connection holds the backup command's reply after the command ran and before either transport
+  delivers it, so the lost connection takes the reply with it and the console's reconnect must
+  recover the outcome under the command's execution reference. The command runs on whichever node
+  leads when the console sends it, and a leadership move after the redirect makes another node run
+  it, so no step can name that node in advance. The scenarios therefore arm the response pause on
+  every node, and the step that waits for it reports which node reached its pause. Each pause holds
+  only the first command its node completes, whoever sent it: the harness's status request is a
+  `SHOW CLUSTER STATUS;` command too, so no step polls a node's status while its pause is armed. A
+  command sent again under the same reference joins the held execution or returns its recorded
+  outcome without stopping there. The scenario releases every node's pause once the connection is
+  lost, and scenario teardown releases any pause still armed. Each shared session scenario has a
+  three-node variant in which leadership moves after the redirect, from the leader the console was
+  redirected to back to the node it was opened on, so the console's session, its download and its
+  restore streams follow a leader other than the one the scenario saved before the console opened.
+  The variant without a response pause moves leadership under the durably admitted backup command.
+  The variant that loses its session connection transfers leadership before the backup, waits until
+  the console reports the new leader, and only then arms the pauses, because the wait for a
+  leadership move polls the successor's status.
 - **Timed control probes.** The silent-peer health scenario connects a named production client
   before holding the peer's health response. Its nine-second probe then sends the user creation,
   relay creation and cluster-status statements in order on that client, under one deadline. The
@@ -1492,19 +1520,42 @@ the bounded selector predicate establishes clock readiness before the stability 
 Every console page starts with a connection recorder, a script the harness adds before the page's
 own scripts run. It subclasses the page's `WebSocket` constructor and notes, for each connection the
 console constructs, the console it reached, the call its path names (the session, a backup download
-or a restore stream), and when the page constructed it, saw it open, and let go of it by closing it
-or seeing it close. The record holds each connection's origin and path, never its query, which
-carries the credentials. One counter that only the page's event loop advances orders those moments,
-so a step reads the order the page acted in however late it reads and however loaded the machine
-is. The console lets go of its session connection before it constructs the next one, so `the web
-console never held two session connections at once` tells a reconnect of the console's one session
-from a second session without counting the leader notices, which every reconnect repeats. Other
-steps check which console each session connection reached around the leader redirect, and where
-the backup downloads and restores went. `the web console loses its session connection` closes the
-newest session connection the page holds, as a connection lost under the console closes, and notes
-that moment; `the web console's session reconnected to node ... after it was lost` then checks that
-a session connection the page constructed after that moment opened on that node. It reads the
-record once, after a step that waits for something only the new connection can deliver.
+or a restore stream), when the page constructed it, saw it open, and let go of it by closing it or
+seeing it close, and the first 16 and the last 64 binary frames of at most 16 KiB it received, with
+when the page received each, so a busy page keeps a bounded record. The record holds each
+connection's origin and path, never its query, which carries the credentials. One counter that only
+the page's event loop advances orders those moments, so a step reads the order the page acted in
+however late it reads and however loaded the machine is. The page receives a frame before it can
+act on it, so a frame comes before every connection the page makes because of it. The console lets go of its session connection before it constructs the next one, so
+`the web console never held two session connections at once` tells a reconnect of the console's one
+session from a second session without counting the leader notices, which every reconnect repeats.
+
+The harness reads from those frames which node the nodes reported as the leader on the page's own
+connections. The leader opens every console session it serves by reporting that it leads; any other
+node ends a console session with a redirect naming the leader's web console, and answers a command,
+a backup download or a restore it cannot serve because it does not lead with such a redirect too.
+A redirect that names no leader reports none. Every report comes first or last on its connection,
+because the console lets a session go as soon as a redirect names another leader, so the frames the
+recorder keeps hold every report. A frame larger than the recorder's bound is a domain snapshot or an
+archive chunk, which reports no leader, and a kept frame that does not decode as a frame of its
+connection's call fails the step that reads it. `the web console's session reached
+node ... until it was redirected to node ..., and then only nodes reported to it as the leader`
+checks that the session started where the page was opened, that its first connection anywhere else
+reached the node it names as the redirect's, and that from then on every session connection reached
+a node that some report had named the leader before the page made that connection. `the web
+console's backup downloads and restores reached only nodes reported to it as the leader` holds every
+download and restore stream to the same rule and requires at least one of each. A connection made
+again to a former leader, such as a restore streamed again to the node it was streaming to when
+leadership moved, still reached a node reported as the leader, and the redirect that node answers
+with names the next one. A leadership move after the redirect therefore only adds the new leader to
+the reports, and both checks hold however often leadership moves, while a connection to the page's
+origin or to a node no report named still fails them. `the web console loses its session
+connection` closes the newest session connection the page holds, as a connection lost under the
+console closes, and notes that moment; `the web console's session reconnected where it lost its
+connection` then checks that a session connection the page constructed after that moment opened on
+the console of the connection it lost, because the console connects its session again where its
+redirects took it. It reads the record once, after a step that waits for something only the new
+connection can deliver.
 
 The **active-scenario registry** holds every scenario that has started and not yet ended. A scenario
 registers in its before hook, before it acquires its permits, so a scenario that never gets them is

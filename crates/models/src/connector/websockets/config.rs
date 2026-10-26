@@ -27,7 +27,7 @@ use url::Url;
 
 use crate::{ClientConfigEntry, ClientDeadline, DEFAULT_CONNECT_TIMEOUT};
 
-/// Nervix-owned CONFIG keys, matched without regard to ASCII case.
+/// Nervix-owned CONFIG keys in their exact lowercase spelling.
 #[derive(
     Debug,
     Clone,
@@ -42,7 +42,7 @@ use crate::{ClientConfigEntry, ClientDeadline, DEFAULT_CONNECT_TIMEOUT};
     strum::EnumString,
     strum::EnumProperty,
 )]
-#[strum(serialize_all = "snake_case", ascii_case_insensitive)]
+#[strum(serialize_all = "snake_case")]
 pub enum WebsocketsClientKey {
     Endpoint,
     ConnectTimeoutMs,

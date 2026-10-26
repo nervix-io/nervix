@@ -30,7 +30,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Resources, uploads, mounts, and TLS files | `Resources` |
 | Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and emitters | `Common` → `Syslog` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
-| Plexus entity modes, ordered options, typed metadata, CONFIG ownership and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
+| Plexus entity modes, ordered options, typed metadata, generated client CONFIG key/type/confidentiality tables and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
 | Typed batches applications publish through client sessions, producer outcomes, and limits | `Ingestors` → `Client Ingestors`, and `Sessions` → `Producers` |
 | Constructed Arrow output applications receive and explicitly ACK, retry or reject | `Emitters` → `Client emitters`, `Sessions` → `Emitter Consumers`, and `Client Implementation Manual` → `Emitter Consumers` |
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
@@ -160,6 +160,8 @@ relay. Do not use them to scan across branches.
 
 ## Correctness checks
 
+Client CONFIG keys follow the generated schema: lowercase, case-sensitive, present once, required keys supplied and TLS identity files paired. Only declared driver namespaces accept extra property names. Treat SHOW CREATE as a confidential inspection projection, and backups as complete secret-bearing configuration. Offline CREATE checks need no broker; runtime initialization still owns remote checks.
+
 - Every referenced name is declared in the active domain before use.
 - Every placement rule has non-empty `FROM` and `TO` sets whose members already exist and are
   schedulable runtime nodes. Every relay is eligible and participates in corridor coverage,
@@ -200,14 +202,17 @@ relay. Do not use them to scan across branches.
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
 - For Pulsar receipt deadlines and the final wait after `NO ACK` acceptance, read
-  [Emitters → Pulsar](../../../docs/src/emitters.md#pulsar) and
-  [Finishing an emitter](../../../docs/src/connector-contract.md#finishing-a-emitter).
+  [Emitters → Pulsar](../../../../docs/src/emitters.md#pulsar) and
+  [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
 - A RabbitMQ queue ingestor uses automatic `MODE NO ACK`, prefetch-one `MODE ACK SEQUENTIAL`,
   or `MODE ACK PARALLEL MAX <n> BATCH TIMEOUT <d> ACK TIMEOUT <d> RETRY POLICY BACKOFF <d> MAX <d>`.
   Parallel `MAX` is 1 through 65,535 per instance. ACK/NACK follows each delivery's own graph
   outcome; a rejection requeues that delivery. `NO ACK` disables broker prefetch and cannot
   recover a delivery already consumed before downstream completion. See
-  [Ingestors → RabbitMQ](../../../docs/src/ingestors.md#rabbitmq).
+  [Ingestors → RabbitMQ](../../../../docs/src/ingestors.md#rabbitmq).
+- For Core NATS completion, reconnect retries and finish outcomes, read
+  [Emitters → NATS](../../../../docs/src/emitters.md#nats) and
+  [Finishing an emitter](../../../../docs/src/connector-contract.md#finishing-an-emitter).
 - CLIENT, ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; other supported emitters may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
@@ -228,14 +233,14 @@ relay. Do not use them to scan across branches.
   an `external` `publish` error, as is one a Pulsar topic's own `maxMessageSize` refuses under
   `MODE ACK` and one whose body RabbitMQ refuses as larger than its `max_message_size`. RabbitMQ
   counts the body alone, so a `MAX SIZE` no larger than `max_message_size` suffices there; see
-  [Emitters](../../../docs/src/emitters.md#broker-and-message-emitters).
+  [Emitters](../../../../docs/src/emitters.md#broker-and-message-emitters).
   A ClickHouse, Postgres, MySQL or MongoDB emitter writes the rows of successive carriers of one
   relay and branch as inserts or bulk writes of at most `MAX MESSAGES` rows whose measured request —
   the `JSONEachRow` body, the statement text and bound values, or the member documents — is at most
   `MAX SIZE`; a row that alone exceeds it follows `ON MESSAGE ERROR` as a `validation` error. MySQL
   also caps each insert at the rows whose placeholders fit 65,535, and a MongoDB document above
   16 MiB is rejected before its write; see
-  [Database writes](../../../docs/src/emitters.md#database-writes).
+  [Database writes](../../../../docs/src/emitters.md#database-writes).
   A batching OTEL emitter bounds each export request by the number of successfully mapped source
   records and the exact uncompressed protobuf size, including resource and scope. An oversized
   candidate is divided and an oversized singleton follows `ON MESSAGE ERROR`; without the clause,

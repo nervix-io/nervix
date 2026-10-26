@@ -1071,7 +1071,12 @@ build and the existing tests, and nothing in it changes behavior.
   features, domain version, source-adjacent corpus, input/case budgets and invariant. Use the same
   production path and complete assertion in ordinary randomized/corpus and coverage-guided
   libFuzzer runs. Registration in both CI modes is mandatory even while other work is concurrent;
-  CI runs the sanitizer mode only for PRs labeled `fuzz`.
+  CI runs the sanitizer mode only for PRs labeled `fuzz`. Check may exclude the reusable Bolero
+  workflow only for a verified prose-only PR without `fuzz`; a labeled PR runs both modes.
+  A target addition or change also updates the target register in
+  `docs/src/property-testing-and-fuzzing.md` and any owning representation coverage map in the
+  same change; the registered domain version, case count and input bound must agree with the
+  inventory.
   Keep generators in dev/test code, preserve inward dependencies, and keep modeled execution
   features and model-checker dependencies out of ordinary and fuzz builds.
 - For a bug, first add or identify a focused test or cucumber scenario and confirm that it fails for

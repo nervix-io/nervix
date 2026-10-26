@@ -4,9 +4,9 @@
 //!
 //! - **Owns.** The syslog client Model, the listener source Model with its delivery mode, the
 //!   collector emitter Model, and what each entity declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
-//! - **Must not know.** Syslog framing, its configuration keys, or how a listener is bound or a
-//!   collector is written to.
+//! - **Must not know.** Syslog framing or how a listener is bound or a collector is written to.
 
 #![cfg_attr(
     nervix_lint,
@@ -33,7 +33,28 @@ use crate::{
     PositionClass,
 };
 
-configured_client!(Syslog: unpooled, config Nervix, CreateClientSyslog => SyslogConfigEntry);
+configured_client!(Syslog: unpooled, config CLIENT_CONFIG, CreateClientSyslog => SyslogConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("addr", V::String),
+            K::CONNECT_TIMEOUT,
+            K::optional("framing", V::Choice(&["octet-counting", "non-transparent"])),
+            K::IDLE_TIMEOUT,
+            K::optional("max_message_size", V::PositiveInteger),
+            K::required("protocol", V::Choice(&["udp", "tcp", "tls"])),
+            K::TIMEOUT,
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// The listener a syslog client's configuration binds, which every node of the cluster serves.
 #[derive(

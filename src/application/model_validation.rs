@@ -36,6 +36,9 @@ use super::{
     tls::{ensure_file_exists, load_vhost_tls_materials},
 };
 
+mod client_config;
+pub(in crate::application) use client_config::client_validation_message;
+
 /// How long opening one ONNX model to read its tensor metadata may take before validation gives up.
 const MODEL_INSPECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -70,6 +73,11 @@ impl TensorDirection {
 
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum ModelBindingValidationError {
+    #[error("invalid client '{node}' in domain '{domain}'")]
+    Client {
+        domain: DomainName,
+        node: nervix_models::ClientName,
+    },
     #[error(
         "paced domain '{domain}' requires ingestor '{node}' to declare TIMESTAMP NOW or TIMESTAMP \
          AT <field>"
@@ -363,6 +371,9 @@ impl SessionServiceImpl {
     ) -> error_stack::Result<(), ModelBindingValidationError> {
         for model in planned.changed_models() {
             nervix_primitives::task::consume_budget().await;
+            if let Some(client) = model.configured_client() {
+                self.validate_client_configuration(domain, client).await?;
+            }
             match model {
                 Model::Ingestor(ingestor) => {
                     if pace.is_paced() && ingestor.timestamp_source.is_none() {

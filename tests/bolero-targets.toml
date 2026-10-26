@@ -3262,3 +3262,18 @@ random_iterations = 256
 source = "src/application/cli/properties.rs"
 test = "application::cli::properties::bolero_node_settings_survive_their_command_line"
 test_target = "lib"
+
+[[target]]
+case_timeout_seconds = 10
+corpus = "crates/models/src/connector/__fuzz__/connector__config_schema__tests__bolero_schema_checked_client_entries_round_trip/corpus"
+domain_version = 1
+features = []
+id = "client-config-schema"
+invariant = "Bounded entries drawn from every current client key schema preserve their complete values and schema acceptance through JSON and archive round trips, and public inspection is idempotent."
+manifest = "Cargo.toml"
+max_input_bytes = 1024
+package = "nervix-models"
+random_iterations = 256
+source = "crates/models/src/connector/config_schema_tests.rs"
+test = "connector::config_schema::tests::bolero_schema_checked_client_entries_round_trip"
+test_target = "lib"
