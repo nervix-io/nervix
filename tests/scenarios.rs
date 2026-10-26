@@ -22625,6 +22625,20 @@ async fn then_last_command_output_does_not_contain(world: &mut ScenarioWorld, #[
     );
 }
 
+#[then("the last command error does not contain")]
+async fn then_last_command_error_does_not_contain(world: &mut ScenarioWorld, #[step] step: &Step) {
+    let unexpected = expand_placeholders(world, docstring(step));
+    let error = world
+        .last_command_error
+        .as_deref()
+        .expect("a command error must exist before assertion");
+    assert!(
+        !error.contains(unexpected.trim()),
+        "unexpected command error fragment {} in {error}",
+        unexpected.trim()
+    );
+}
+
 fn owner_from_describe_output(output: &str) -> Option<&str> {
     output
         .lines()

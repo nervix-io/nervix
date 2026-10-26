@@ -4,12 +4,14 @@
 //! reconstructs the convention: `ref:*` is a semantic reference, an uppercase label is a keyword
 //! (or a space-separated keyword phrase) to emit verbatim, a label with no alphanumerics is
 //! punctuation, and a lowercase snake_case label is a placeholder that has to be filled in.
+//! Quoted suggestions are lexer-checked string literals and are emitted verbatim.
 //!
 //! Every placeholder needs an entry here. A label with no entry is reported rather than guessed at,
 //! so a grammar label added without a completion contract shows up in the report instead of
 //! silently truncating the walk.
 
 use ahash_compile_time::HashMap;
+use nervix_plexus::{Token, lex};
 use thiserror::Error;
 
 /// Prefix for every synthesized name, chosen so it lexes as an unknown word and can never collide
@@ -119,6 +121,8 @@ pub enum SuggestionClass {
     Keyword,
     /// Punctuation, emitted verbatim.
     Punctuation,
+    /// A complete string literal accepted by the shared lexer, emitted verbatim.
+    StringLiteral,
     /// A `ref:*` semantic reference to an existing object.
     Reference,
     /// A lowercase snake_case placeholder that must be filled in.
@@ -129,6 +133,20 @@ impl SuggestionClass {
     /// Classify a raw completion label, or `None` if it matches no known shape.
     pub fn classify(label: &str) -> Option<Self> {
         let first = label.chars().next()?;
+        if matches!(first, '\'' | '"' | '$') {
+            let Ok(tokens) = lex(label) else {
+                return None;
+            };
+            return match tokens.as_slice() {
+                [only]
+                    if matches!(&only.token, Token::StringLiteral(_))
+                        && only.span.end == label.len() =>
+                {
+                    Some(Self::StringLiteral)
+                }
+                _ => None,
+            };
+        }
         if label.starts_with("ref:") {
             Some(Self::Reference)
         } else if first.is_ascii_uppercase() {
@@ -193,9 +211,9 @@ impl Materializer {
         };
 
         match class {
-            SuggestionClass::Keyword | SuggestionClass::Punctuation => {
-                Ok(Materialized::verbatim(label))
-            }
+            SuggestionClass::Keyword
+            | SuggestionClass::Punctuation
+            | SuggestionClass::StringLiteral => Ok(Materialized::verbatim(label)),
             SuggestionClass::Reference => Ok(Materialized::verbatim(&synthetic_name(
                 label.trim_start_matches("ref:"),
                 occurrence,

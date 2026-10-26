@@ -98,7 +98,7 @@ Feature: WebSockets connection declarations
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus statements fail with "WEBSOCKETS client 'socket' in domain '{{domain}}' cannot use its CONFIG: 'unexpected' is not a key this client reads"
+    When these Plexus statements fail with "client 'socket' configuration is invalid in domain '{{domain}}': unknown client config key 'unexpected'"
       """
       CREATE WEBSOCKETS CLIENT socket CONFIG {
         'endpoint' = 'ws://websocket.nervix.test/events',
