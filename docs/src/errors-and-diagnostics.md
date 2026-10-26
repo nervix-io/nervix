@@ -14,6 +14,12 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+ZeroMQ endpoint validation keeps the socket driver's endpoint error beneath
+`OfflineClientConfigError` for `addr`. Its socket owners keep the shared Boolean parser's
+`ClientConfigError` beneath their configuration context for `bind`; a malformed value does not
+select a socket operation. Public CREATE refusals retain the key and client identity while the
+driver's diagnostic remains internal.
+
 Transaction model preflight adds its operation identity with `change_context` above the registry
 report. It does not nest that report in a context field: the ordinary typed report chain remains
 inspectable, so command projection can retain the schema's invalid-key diagnosis.
