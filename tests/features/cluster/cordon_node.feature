@@ -4,7 +4,7 @@ Feature: Cordon node
     Given Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       SHOW CLUSTER STATUS;
@@ -13,7 +13,7 @@ Feature: Cordon node
       """
       raft.cordoned_nodes: node-2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
 
@@ -31,15 +31,14 @@ Feature: Cordon node
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -58,7 +57,7 @@ Feature: Cordon node
   Scenario: An uncordoned node is visible as schedulable again
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       UNCORDON NODE node-2;

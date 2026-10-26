@@ -8,16 +8,16 @@ Feature: Recovery from a rejected WASM guest snapshot
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "state restore" failing WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_recovering_guest;
       UPLOAD RESOURCE wasm_recovering_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -29,8 +29,8 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR limited_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR limited_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
@@ -75,7 +75,7 @@ Feature: Recovery from a rejected WASM guest snapshot
       """
     Then within "20s" the active session observes a server error containing
       """
-      wasm processor 'recovering_guest' application state restoration failed (branch {"tenant":"alpha"}, resource 'wasm_recovering_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1)
+      wasm processor 'recovering_guest' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_recovering_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1)
       """
     When http payload is posted to host "wasm-recovery-{{test_id}}.example.com" path "/events"
       """
@@ -107,16 +107,16 @@ Feature: Recovery from a rejected WASM guest snapshot
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "state restore" failing WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_recovering_guest;
       UPLOAD RESOURCE wasm_recovering_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -128,8 +128,8 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR limited_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR limited_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
@@ -204,16 +204,16 @@ Feature: Recovery from a rejected WASM guest snapshot
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "state restore" failing WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_recovering_guest;
       UPLOAD RESOURCE wasm_recovering_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -225,8 +225,8 @@ Feature: Recovery from a rejected WASM guest snapshot
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-recovery-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR limited_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR limited_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
@@ -277,7 +277,7 @@ Feature: Recovery from a rejected WASM guest snapshot
     When fresh WASM reset guest initialization succeeds again on every node
     And the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION limited_events_subscription TO limited_events;
       """

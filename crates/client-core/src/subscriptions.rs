@@ -62,7 +62,7 @@ pub(crate) struct SubscriptionContract {
 
 impl SubscriptionContract {
     pub(crate) fn request(&self) -> SubscribeRequest {
-        let statement = nervix_nspl::subscribe::create_subscription_query(
+        let statement = nervix_plexus::subscribe::create_subscription_query(
             self.create.name.as_str(),
             self.create.relay.as_str(),
             self.create.delivery_behavior,
@@ -308,6 +308,13 @@ struct Inner {
 #[derive(Clone)]
 pub(crate) struct DesiredSubscriptions {
     inner: Arc<Inner>,
+}
+
+/// The event the registry reported itself when a reader looked, or how the reader waits for one.
+pub(crate) enum DesiredSubscriptionEvent {
+    Event(SubscriptionEvent),
+    /// Nothing was reported; the receiver observes the registry's next change.
+    Waiting(watch::Receiver<()>),
 }
 
 impl DesiredSubscriptions {
@@ -704,6 +711,19 @@ impl DesiredSubscriptions {
         true
     }
 
+    /// Takes the earliest event the registry reports itself, or subscribes to its next change when
+    /// it reports none.
+    ///
+    /// It subscribes before it looks: a subscription marks every change made so far as seen, so an
+    /// event the registry reported between a look and a later subscription would wait for another.
+    pub(crate) fn next_event_or_changes(&self) -> DesiredSubscriptionEvent {
+        let changes = self.watch();
+        if let Some(event) = self.take_event() {
+            return DesiredSubscriptionEvent::Event(event);
+        }
+        DesiredSubscriptionEvent::Waiting(changes)
+    }
+
     /// Takes the earliest event the registry reports itself: an interruption, a failed
     /// restoration, or an end its exchange ended before the caller read it.
     pub(crate) fn take_event(&self) -> Option<SubscriptionEvent> {
@@ -778,4 +798,89 @@ impl DesiredSubscriptions {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests;
+
+#[cfg(all(test, feature = "shuttle"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod shuttle_tests {
+    use std::num::NonZeroU64;
+
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_model_harness::shuttle::check_random_and_pct;
+    use nervix_models::{RelayName, SubscriptionDeliveryBehavior};
+
+    use super::*;
+
+    fn name() -> SubscriptionName {
+        SubscriptionName::parse("watch").assured("a literal subscription name")
+    }
+
+    fn contract() -> SubscriptionContract {
+        SubscriptionContract {
+            domain: DomainName::parse("tenant").assured("a literal domain name"),
+            create: CreateSubscription {
+                name: name(),
+                relay: RelayName::parse("events").assured("a literal relay name"),
+                delivery_behavior: SubscriptionDeliveryBehavior::Dropping,
+                batch_sample_rate: None,
+                where_clause: None,
+            },
+            subscription_type: SubscriptionType::Row,
+        }
+    }
+
+    /// A reader finds no event the registry reported while the subscription's exchange ends: it
+    /// takes the interruption that end reports, or its wait for the registry's next change
+    /// observes it.
+    #[test]
+    fn shuttle_a_reader_racing_a_reported_gap_takes_it_without_another_change() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let desired = DesiredSubscriptions::new();
+                let generation = Arc::new(());
+                let pending = desired
+                    .begin(contract(), generation.clone())
+                    .verified("the registry starts empty");
+                let opened = SubscriptionHandle {
+                    name: name(),
+                    generation: NonZeroU64::MIN,
+                };
+                desired.created(&pending, Some(&opened));
+                let ending = {
+                    let desired = desired.clone();
+                    nervix_primitives::task::spawn(async move { desired.ended(&generation) })
+                };
+                let reading = {
+                    let desired = desired.clone();
+                    nervix_primitives::task::spawn(async move {
+                        match desired.next_event_or_changes() {
+                            DesiredSubscriptionEvent::Event(_) => {}
+                            DesiredSubscriptionEvent::Waiting(mut changes) => {
+                                changes.changed().await.assured(
+                                    "the registry keeps the sender of its own notifications",
+                                );
+                                assert!(
+                                    desired.take_event().is_some(),
+                                    "the change the reader waited for reported no event"
+                                );
+                            }
+                        }
+                    })
+                };
+                ending
+                    .await
+                    .assured("the ending side only ends the exchange");
+                reading
+                    .await
+                    .assured("the reading side only takes the reported gap");
+            });
+        });
+    }
+}

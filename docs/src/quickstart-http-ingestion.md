@@ -2,7 +2,7 @@
 
 Orders do not have to come through a broker. Nervix hosts its own inbound HTTP endpoints: you
 declare a virtual host and a path, attach an ingestor, and POST records straight at the server.
-See [HTTP Endpoints](ingestors.md#http-endpoints).
+See [`HTTP ENDPOINT` And `WEBSOCKETS ENDPOINT`](ingestors.md#http-endpoint-and-websockets-endpoint).
 
 Inbound endpoints are served by the node itself on its HTTP listener — `--http-listen-addr`,
 `0.0.0.0:8080` by default (TLS-enabled vhosts use the separate HTTPS listener instead).
@@ -10,10 +10,11 @@ Inbound endpoints are served by the node itself on its HTTP listener — `--http
 ## Declare The Endpoint
 
 Three statements, in order: the `VHOST` names the hostnames served, the `ENDPOINT` binds a path on
-that vhost, and the ingestor consumes the endpoint. The existing `order_codec` decodes the same
-JSON as the Kafka path:
+that vhost, and the ingestor consumes the endpoint. An `HTTP ENDPOINT` ingestor names its connector
+and entity in its head and reads only a `TYPE HTTP` endpoint. The existing `order_codec` decodes
+the same JSON as the Kafka path:
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE RELAY orders_http SCHEMA order_record UNBRANCHED;
@@ -25,8 +26,8 @@ CREATE ENDPOINT orders_ingress
   PATH '/orders'
   TYPE HTTP;
 
-CREATE INGESTOR http_orders
-  FROM ENDPOINT orders_ingress MODE NO_ACK SEQUENTIAL
+CREATE HTTP ENDPOINT INGESTOR http_orders
+  FROM orders_ingress MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_codec
   TO orders_http
     INHERIT ALL
@@ -38,7 +39,7 @@ CREATE INGESTOR http_orders
 COMMIT;
 ```
 
-`MODE NO_ACK SEQUENTIAL` is the only mode endpoint ingestors support — there is no broker to
+`MODE NO ACK` is the only mode endpoint ingestors support — there is no broker to
 acknowledge to. With this schemaful codec each POST body is one record, while a JAQ-backed codec
 can [unfold](schemas-and-codecs.md#unfolding-payloads) one body into several. To merge this
 stream with the Kafka-fed `orders` relay, a [junction](processors.md#junction) can consume both

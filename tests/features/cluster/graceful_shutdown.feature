@@ -1,18 +1,136 @@
 @shutdown_qualification
 Feature: Graceful shutdown
 
+  @shutdown_leader_change @deloxide_stress
+  Scenario: A stopping follower resumes its remaining ownership moves after the leader changes
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA drain_event ( id I64 );
+      CREATE RELAY drain_input SCHEMA drain_event UNBRANCHED;
+      CREATE RELAY drain_output SCHEMA drain_event UNBRANCHED;
+      CREATE JUNCTION drain_route FROM drain_input UNBRANCHED
+        TO drain_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      RELOCATE JUNCTION drain_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=drain_route owner=node-2"
+    When leadership is transferred to node "node-3"
+    Given ownership handoff for domain "{{domain}}" pauses after preparation
+    When node "node-2" begins stopping
+    Then the ownership handoff preparation pause for domain "{{domain}}" is reached
+    When leadership is transferred to node "node-1"
+    Then node "node-3" eventually reports leader "node-1"
+    When the ownership handoff preparation pause for domain "{{domain}}" is released
+    And node "node-2" is stopped
+    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    And node "node-1" eventually reports status containing "raft.cordoned_nodes: (none)"
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "junction" "drain_route" is saved as placeholder "drain_route_destination"
+    And the last command output contains
+      """
+      kind=junction name=drain_route owner={{drain_route_destination}} replicas=- transition_from=node-2 state_recovery=complete
+      """
+
+  @shutdown_handoff_bystander
+  Scenario: A stopping owner hands its work over while the leader cannot reach a node that runs none of it
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When leadership is transferred to node "node-1"
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA bystander_event ( id I64 );
+      CREATE RELAY bystander_input SCHEMA bystander_event UNBRANCHED;
+      CREATE RELAY bystander_output SCHEMA bystander_event UNBRANCHED;
+      CREATE JUNCTION bystander_route FROM bystander_input UNBRANCHED
+        TO bystander_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      RELOCATE RELAY bystander_input ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY bystander_output ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE JUNCTION bystander_route ONTO NODE node-3 IGNORE PREFERENCES;
+      CORDON NODE node-2;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=bystander_route owner=node-3"
+    Given the ownership handoff gate engagement requests node "node-1" sends to node "node-2" are lost
+    When node "node-3" is gracefully stopped
+    Then the last shutdown of node "node-3" reports its drain-support phase "Completed"
+    And the link from node "node-1" to node "node-2" lost no ownership handoff gate engagement request
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      kind=junction name=bystander_route owner=node-1 replicas=- transition_from=node-3 state_recovery=complete
+      """
+
+  @shutdown_handoff_bystander_preparation
+  Scenario: A stopping owner hands its work over within its drain budget while a bystander's runtime preparation is held
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    When leadership is transferred to node "node-1"
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA bystander_event ( id I64 );
+      CREATE RELAY bystander_input SCHEMA bystander_event UNBRANCHED;
+      CREATE RELAY bystander_output SCHEMA bystander_event UNBRANCHED;
+      CREATE JUNCTION bystander_route FROM bystander_input UNBRANCHED
+        TO bystander_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE JUNCTION bystander_echo FROM bystander_input UNBRANCHED
+        TO bystander_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      RELOCATE RELAY bystander_input ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE RELAY bystander_output ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE JUNCTION bystander_route ONTO NODE node-3 IGNORE PREFERENCES;
+      RELOCATE JUNCTION bystander_echo ONTO NODE node-3 IGNORE PREFERENCES;
+      CORDON NODE node-2;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=bystander_route owner=node-3"
+    And node "node-1" eventually reports status containing "kind=junction name=bystander_echo owner=node-3"
+    When runtime preparation on node "node-2" is paused
+    And node "node-3" is gracefully stopped
+    Then the last shutdown of node "node-3" reports its drain-support phase "Completed"
+    And node "node-2" reaches its runtime preparation pause
+    When runtime preparation on node "node-2" is released
+    And these Plexus commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      kind=junction name=bystander_route owner=node-1 replicas=- transition_from=node-3 state_recovery=complete
+      """
+    And the last command output contains
+      """
+      kind=junction name=bystander_echo owner=node-1 replicas=- transition_from=node-3 state_recovery=complete
+      """
+
   Scenario: Graceful shutdown preserves an operator cordon across restart
     Given graceful shutdown drain is enabled
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     When leadership is transferred to node "node-2"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CORDON NODE node-2;
       """
     And node "node-2" is gracefully stopped
     And node "node-2" is started
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -21,12 +139,293 @@ Feature: Graceful shutdown
       raft.cordoned_nodes: node-2
       """
 
+  @shutdown_kafka_handoff @deloxide_stress
+  Scenario: A stopping Kafka ingestor closes intake while its attached emitter hands over
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And Kafka topic "shutdown_handoff_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "shutdown_handoff_out_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA handoff_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA handoff_wire MODE STRICT ( event_id integer );
+      CREATE CODEC handoff_codec
+        FROM WIRE JSON SCHEMA handoff_wire TO SCHEMA handoff_event;
+      CREATE RELAY handoff_records SCHEMA handoff_event UNBRANCHED CAPACITY 1;
+      CREATE KAFKA CLIENT handoff_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR handoff_source
+        FROM handoff_kafka TOPIC 'shutdown_handoff_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_handoff_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING handoff_codec
+        TO handoff_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE ATTACHED KAFKA TOPIC EMITTER handoff_output FROM handoff_records
+        TO handoff_kafka TOPIC 'shutdown_handoff_out_{{test_id}}'
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING handoff_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    And leadership is transferred to node "node-2"
+    When emitter "handoff_output" enters stall mode
+    And these Kafka messages are rapidly published to topic "shutdown_handoff_in_{{test_id}}"
+      """
+      {"event_id":1}
+      {"event_id":2}
+      {"event_id":3}
+      """
+    Then within "30s" DESCRIBE EMITTER "handoff_output" on the leader node contains
+      """
+      transient error: fault injector stalled emitter publish
+      """
+    Given ownership handoff for domain "{{domain}}" pauses after requesting flush
+    When node "node-1" begins stopping
+    Then the ownership handoff flush pause for domain "{{domain}}" is reached
+    And within "5s" node "node-2" eventually reports describe ingestor "handoff_source" as "quiesce state: shutdown"
+    When emitter "handoff_output" leaves stall mode
+    And the ownership handoff flush pause for domain "{{domain}}" is released
+    And node "node-1" is stopped
+    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    And within "30s" the observed broker receives payloads
+      """
+      {"event_id":1}
+      {"event_id":2}
+      {"event_id":3}
+      """
+    And within "30s" Kafka consumer group "shutdown_handoff_group_{{test_id}}" next offset for topic "shutdown_handoff_in_{{test_id}}" partition 0 is "at least 3"
+    And the observed broker does not receive a payload within "2s"
+    When these Plexus commands are executed on node "node-2"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "handoff_source" is saved as placeholder "handoff_source_destination"
+    And the last cluster status owner for scheduled "emitter" "handoff_output" is saved as placeholder "handoff_emitter_destination"
+    And the last command output contains
+      """
+      kind=ingestor name=handoff_source owner={{handoff_source_destination}} replicas=- transition_from=node-1 state_recovery=complete
+      """
+    And the last command output contains
+      """
+      kind=emitter name=handoff_output owner={{handoff_emitter_destination}} replicas=- transition_from=node-1 state_recovery=complete
+      """
+
+  @shutdown_flush_before_freeze @deloxide_stress
+  Scenario: A stopping ingestor flushes its admitted route before freezing ownership state
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And Kafka topic "shutdown_flush_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "shutdown_flush_out_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA flush_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA flush_wire MODE STRICT ( event_id integer );
+      CREATE CODEC flush_codec
+        FROM WIRE JSON SCHEMA flush_wire TO SCHEMA flush_event;
+      CREATE RELAY flush_records SCHEMA flush_event UNBRANCHED CAPACITY 1;
+      CREATE KAFKA CLIENT flush_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR flush_source
+        FROM flush_kafka TOPIC 'shutdown_flush_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_flush_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING flush_codec
+        TO flush_records INHERIT ALL UNBRANCHED
+          FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE ATTACHED KAFKA TOPIC EMITTER flush_output FROM flush_records
+        TO flush_kafka TOPIC 'shutdown_flush_out_{{test_id}}'
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING flush_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    Given ingestor "flush_source" pauses before polling its route
+    When these Kafka messages are rapidly published to topic "shutdown_flush_in_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then ingestor "flush_source" reaches the route poll pause
+    Given ownership handoff for domain "{{domain}}" pauses after requesting flush
+    When node "node-1" begins stopping
+    Then the ownership handoff flush pause for domain "{{domain}}" is reached
+    When ingestor "flush_source" leaves the route poll pause
+    And the ownership handoff flush pause for domain "{{domain}}" is released
+    And node "node-1" is stopped
+    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    And within "30s" the observed broker receives payloads
+      """
+      {"event_id":1}
+      """
+    And within "30s" Kafka consumer group "shutdown_flush_group_{{test_id}}" next offset for topic "shutdown_flush_in_{{test_id}}" partition 0 is "at least 1"
+    And the observed broker does not receive a payload within "2s"
+
+  @shutdown_cordon_release @deloxide_stress
+  Scenario Outline: A stopping <role> whose cordon release outlasts one second completes its drain and leaves no cordon
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA cordon_event ( id I64 );
+      CREATE RELAY cordon_input SCHEMA cordon_event UNBRANCHED;
+      CREATE RELAY cordon_output SCHEMA cordon_event UNBRANCHED;
+      CREATE JUNCTION cordon_route FROM cordon_input UNBRANCHED
+        TO cordon_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    When leadership is transferred to node "<leader>"
+    And these Plexus commands are executed on the leader node
+      """
+      RELOCATE JUNCTION cordon_route ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then node "node-1" eventually reports status containing "kind=junction name=cordon_route owner=node-2"
+    When the leader takes "2s" to release the shutdown drain cordon of node "node-2"
+    And node "node-2" is gracefully stopped
+    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    And node "node-1" eventually reports status containing "raft.cordoned_nodes: (none)"
+    When node "node-2" is started
+    Then node "node-2" eventually reports status containing "raft.cordoned_nodes: (none)"
+
+    Examples:
+      | role     | leader |
+      | leader   | node-2 |
+      | follower | node-1 |
+
+  Scenario: A follower started without the default user's password hands its work to another node before it stops
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And only the bootstrap node is given the default user's password
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When leadership is transferred to node "node-1"
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA transaction ( tenant STRING, transaction_id STRING, amount I64 );
+      CREATE WIRE JSON SCHEMA transaction_wire MODE STRICT (
+        tenant string,
+        transaction_id string,
+        amount integer
+      );
+      CREATE CODEC transaction_codec
+        FROM WIRE JSON SCHEMA transaction_wire
+        TO SCHEMA transaction;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY inbound SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE RELAY deduped SCHEMA transaction BRANCHED BY by_tenant;
+      CREATE VHOST edge follower-drain-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/follower-drain' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
+        TO inbound INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE DEDUPLICATOR dedup_txns FROM inbound
+        DEDUPLICATE ON input.transaction_id MAX TIME 10m
+        BRANCHED BY by_tenant
+        TO deduped INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      START;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION deduped_seen TO deduped;
+      """
+    Then node "node-1" eventually accepts http traffic for host "follower-drain-{{test_id}}.example.com" path "/follower-drain"
+      """
+      {"tenant":"acme","transaction_id":"txn-warmup","amount":1}
+      """
+    And within "20s" the relay subscription receives a payload
+      """
+      "transaction_id":"txn-warmup"
+      """
+    When these Plexus commands are executed on the active session
+      """
+      RELOCATE DEDUPLICATOR dedup_txns ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    And these Plexus commands are executed on the active session
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=deduplicator name=dedup_txns owner=node-2
+      """
+    When http payload is posted to node "node-1" with host "follower-drain-{{test_id}}.example.com" path "/follower-drain"
+      """
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"amount":10,"tenant":"acme","transaction_id":"txn-1"}
+      """
+    When node "node-2" is gracefully stopped
+    Then the last shutdown of node "node-2" reports its drain-support phase "Completed"
+    When these Plexus commands are executed on the active session
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      raft.cordoned_nodes: (none)
+      """
+    And the last cluster status owner for scheduled "deduplicator" "dedup_txns" is saved as placeholder "drain_destination"
+    And the last command output contains
+      """
+      - domain={{domain}} kind=deduplicator name=dedup_txns owner={{drain_destination}} replicas=- transition_from=node-2 state_recovery=complete
+      """
+    When http payload is posted to node "node-1" with host "follower-drain-{{test_id}}.example.com" path "/follower-drain"
+      """
+      {"tenant":"acme","transaction_id":"txn-1","amount":10}
+      """
+    Then the relay subscription does not receive a payload within "5s"
+    When http payload is posted to node "node-1" with host "follower-drain-{{test_id}}.example.com" path "/follower-drain"
+      """
+      {"tenant":"acme","transaction_id":"txn-2","amount":11}
+      """
+    Then within "15s" the relay subscription receives a payload
+      """
+      {"amount":11,"tenant":"acme","transaction_id":"txn-2"}
+      """
+
   Scenario: Placement excludes a terminating process and admits its next incarnation
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA shutdown_event ( id I64 );
@@ -36,7 +435,7 @@ Feature: Graceful shutdown
         TO shutdown_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       START;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -46,7 +445,7 @@ Feature: Graceful shutdown
     Given ownership handoff for domain "{{domain}}" pauses after preparation
     When node "{{terminating_owner}}" begins stopping
     Then node "{{drain_leader}}" eventually reports status containing "terminating: true"
-    When these NSPL commands are attempted on node "{{drain_leader}}"
+    When these Plexus commands are attempted on node "{{drain_leader}}"
       """
       DESCRIBE RELOCATION JUNCTION shutdown_route
         ONTO NODE {{terminating_owner}} FOLLOW PREFERENCES;
@@ -58,7 +457,7 @@ Feature: Graceful shutdown
       """
     When node "{{terminating_owner}}" is stopped
     And node "{{terminating_owner}}" is started
-    And these NSPL commands are executed on node "{{drain_leader}}"
+    And these Plexus commands are executed on node "{{drain_leader}}"
       """
       DESCRIBE RELOCATION JUNCTION shutdown_route
         ONTO NODE {{terminating_owner}} FOLLOW PREFERENCES;
@@ -74,7 +473,7 @@ Feature: Graceful shutdown
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -88,19 +487,19 @@ Feature: Graceful shutdown
       CREATE RELAY shutdown_ack_output SCHEMA shutdown_ack_event UNBRANCHED;
       CREATE VHOST edge shutdown-ack-{{test_id}}.example.com;
       CREATE ENDPOINT shutdown_ack_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR shutdown_ack_source
-        FROM ENDPOINT shutdown_ack_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR shutdown_ack_source
+        FROM shutdown_ack_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shutdown_ack_codec
         TO shutdown_ack_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE JUNCTION shutdown_ack_route FROM shutdown_ack_input UNBRANCHED
         TO shutdown_ack_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT shutdown_ack_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT shutdown_ack_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER shutdown_ack_output_sink FROM shutdown_ack_output
-        TO ZEROMQ shutdown_ack_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER shutdown_ack_output_sink FROM shutdown_ack_output
+        TO shutdown_ack_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING shutdown_ack_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE PLACEMENT keep_shutdown_ack_downstream_local
@@ -111,13 +510,13 @@ Feature: Graceful shutdown
       SHOW CLUSTER STATUS;
       """
     Then node "node-1" eventually reports status containing "kind=ingestor name=shutdown_ack_source owner=- replicas=node"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
     Then the first replica for scheduled "ingestor" "shutdown_ack_source" in the last cluster status is saved as placeholder "shutdown_ack_source_owner"
     And a node other than placeholder "shutdown_ack_source_owner" is saved as placeholder "shutdown_ack_downstream_owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE JUNCTION shutdown_ack_route
         ONTO NODE {{shutdown_ack_downstream_owner}} IGNORE PREFERENCES;
@@ -143,12 +542,12 @@ Feature: Graceful shutdown
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA held_event ( sequence I64, tenant STRING );
       CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer, tenant string );
@@ -159,8 +558,8 @@ Feature: Graceful shutdown
       CREATE RELAY held_routed SCHEMA held_event UNBRANCHED;
       CREATE VHOST edge held-shutdown-{{test_id}}.example.com;
       CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR held_source
-        FROM ENDPOINT held_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
         TIMESTAMP NOW
         TO held_ingested
@@ -171,12 +570,12 @@ Feature: Graceful shutdown
         ON GENERAL ERROR LOG;
       CREATE JUNCTION held_route FROM held_ingested UNBRANCHED
         TO held_routed INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-      CREATE CLIENT held_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT held_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER held_output FROM held_routed
-        TO ZEROMQ held_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER held_output FROM held_routed
+        TO held_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING held_event_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -199,6 +598,83 @@ Feature: Graceful shutdown
     When node "node-1" is started
     Then node "node-1" eventually observes a stable leader
 
+  # The drain ends once the NO ACK emitter delivered its records to its producer, which lingers for
+  # two minutes. Terminal teardown finishes the emitter within the shutdown deadline, so the producer
+  # sends the records it still holds before the node stops.
+  @shutdown_emitter_finish @deloxide_stress
+  Scenario: A single node sends the records its NO ACK Kafka emitter's producer holds before it stops
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And a 1 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "held_shutdown_out_{{test_id}}" exists with 1 partitions
+    And Kafka topic "held_shutdown_out_{{test_id}}" is observed
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA held_event ( sequence I64 );
+      CREATE WIRE JSON SCHEMA held_event_wire MODE STRICT ( sequence integer );
+      CREATE CODEC held_event_codec FROM WIRE JSON SCHEMA held_event_wire TO SCHEMA held_event;
+      CREATE RELAY held_events SCHEMA held_event UNBRANCHED;
+      CREATE VHOST edge held-finish-{{test_id}}.example.com;
+      CREATE ENDPOINT held_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR held_source
+        FROM held_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING held_event_codec
+        TIMESTAMP NOW
+        TO held_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA CLIENT lingering_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'linger.ms' = '120000'
+      };
+      CREATE KAFKA TOPIC EMITTER held_output FROM held_events
+        TO lingering_kafka TOPIC 'held_shutdown_out_{{test_id}}' MODE NO ACK
+          RETRY POLICY BACKOFF 100ms MAX 5s
+        ENCODE USING held_event_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "held-finish-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":1}
+      """
+    And http payload is posted to node "node-1" with host "held-finish-{{test_id}}.example.com" path "/events"
+      """
+      {"sequence":2}
+      """
+    Then within "30s" DESCRIBE EMITTER "held_output" on the leader node contains
+      """
+      messages_total sent relay=held_events
+      """
+    And the last command output owner is saved as placeholder "held_owner"
+    And within "30s" DESCRIBE EMITTER "held_output" on the leader node contains
+      """
+      messages_total sent relay=held_events physical_node={{held_owner}} total=2
+      """
+    # The producer holds the two delivered records for the rest of its two-minute linger.
+    And the observed broker does not receive a payload within "2s"
+    When node "node-1" begins stopping
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"sequence":1}
+      {"sequence":2}
+      """
+    When node "node-1" is stopped while timing shutdown
+    Then the last cluster operation completes within "30s"
+    When node "node-1" is started
+    Then node "node-1" eventually observes a stable leader
+
   Scenario: The last schedulable node completes interleaved branch work and commits its source offsets
     Given Kafka is running
     And graceful shutdown drain is enabled
@@ -207,7 +683,7 @@ Feature: Graceful shutdown
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_orders_{{test_id}}" exists with 1 partitions
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -221,13 +697,13 @@ Feature: Graceful shutdown
       CREATE BRANCH by_shutdown_tenant SCHEMA shutdown_tenant TTL 5m;
       CREATE RELAY shutdown_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
       CREATE RELAY shutdown_unique_orders SCHEMA shutdown_order BRANCHED BY by_shutdown_tenant;
-      CREATE CLIENT shutdown_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT shutdown_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR shutdown_order_source
-        FROM KAFKA shutdown_kafka TOPIC shutdown_orders_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_shutdown_orders_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR shutdown_order_source
+        FROM shutdown_kafka TOPIC 'shutdown_orders_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_orders_{{test_id}}'
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING shutdown_order_codec
@@ -246,12 +722,12 @@ Feature: Graceful shutdown
           INHERIT ALL
           FLUSH EACH 1h MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT shutdown_order_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT shutdown_order_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER shutdown_order_output FROM shutdown_unique_orders
-        TO ZEROMQ shutdown_order_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER shutdown_order_output FROM shutdown_unique_orders
+        TO shutdown_order_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING shutdown_order_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -259,7 +735,7 @@ Feature: Graceful shutdown
         ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION shutdown_orders_admitted TO shutdown_orders;
       """
@@ -293,13 +769,190 @@ Feature: Graceful shutdown
     And the observed broker does not receive a payload within "2s"
     And within "10s" Kafka consumer group "nervix_cucumber_shutdown_orders_{{test_id}}" next offset for topic "shutdown_orders_{{test_id}}" partition 0 is "at least 5"
 
+  @shutdown_source_confirmation @deloxide_stress
+  Scenario: A node that stops in place keeps draining until its transport confirms the source offsets
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "40s"
+    And a 1 node nervix cluster is started
+    And Kafka topic "shutdown_confirm_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "shutdown_confirm_out_{{test_id}}" is observed
+    And the transport of ingestor "confirm_source" takes "10s" to confirm its acknowledgements
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA confirm_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA confirm_wire MODE STRICT ( event_id integer );
+      CREATE CODEC confirm_codec
+        FROM WIRE JSON SCHEMA confirm_wire TO SCHEMA confirm_event;
+      CREATE RELAY confirm_records SCHEMA confirm_event UNBRANCHED;
+      CREATE KAFKA CLIENT confirm_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR confirm_source
+        FROM confirm_kafka TOPIC 'shutdown_confirm_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_confirm_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING confirm_codec
+        TO confirm_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER confirm_output FROM confirm_records
+        TO confirm_kafka TOPIC 'shutdown_confirm_out_{{test_id}}'
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING confirm_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And Kafka message is published to topic "shutdown_confirm_in_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the observed broker receives payloads
+      """
+      {"event_id":1}
+      """
+    When node "node-1" is gracefully stopped
+    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    And within "10s" Kafka consumer group "shutdown_confirm_group_{{test_id}}" next offset for topic "shutdown_confirm_in_{{test_id}}" partition 0 is "at least 1"
+
+  @shutdown_source_confirmation_handoff @deloxide_stress
+  Scenario: A stopping node hands a Kafka ingestor over only once its transport confirms the source offsets
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "40s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And Kafka topic "shutdown_confirm_handoff_in_{{test_id}}" exists with 1 partitions
+    And Kafka topic "shutdown_confirm_handoff_out_{{test_id}}" is observed
+    And the transport of ingestor "handoff_confirm_source" takes "10s" to confirm its acknowledgements
+    When these Plexus commands are executed on the leader node
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA handoff_confirm_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA handoff_confirm_wire MODE STRICT ( event_id integer );
+      CREATE CODEC handoff_confirm_codec
+        FROM WIRE JSON SCHEMA handoff_confirm_wire TO SCHEMA handoff_confirm_event;
+      CREATE RELAY handoff_confirm_records SCHEMA handoff_confirm_event UNBRANCHED;
+      CREATE KAFKA CLIENT handoff_confirm_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR handoff_confirm_source
+        FROM handoff_confirm_kafka TOPIC 'shutdown_confirm_handoff_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'shutdown_confirm_handoff_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING handoff_confirm_codec
+        TO handoff_confirm_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER handoff_confirm_output FROM handoff_confirm_records
+        TO handoff_confirm_kafka TOPIC 'shutdown_confirm_handoff_out_{{test_id}}'
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING handoff_confirm_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      UNCORDON NODE node-3;
+      """
+    And leadership is transferred to node "node-2"
+    And Kafka message is published to topic "shutdown_confirm_handoff_in_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the observed broker receives payloads
+      """
+      {"event_id":1}
+      """
+    When node "node-1" is gracefully stopped
+    Then the last shutdown of node "node-1" reports its drain-support phase "Completed"
+    And within "10s" Kafka consumer group "shutdown_confirm_handoff_group_{{test_id}}" next offset for topic "shutdown_confirm_handoff_in_{{test_id}}" partition 0 is "at least 1"
+    And the observed broker does not receive a payload within "10s"
+
+  @shutdown_kafka_refused_commit @deloxide_stress
+  Scenario Outline: A Kafka batch whose commit the broker refused is read and committed again, so restarting its owner on <cluster_size> nodes does not read it again
+    Given graceful shutdown drain is enabled
+    And drain timeout is configured as "40s"
+    And the production sticky scheduler is configured
+    And a mock Kafka broker serves topic "refused_stop_in_{{test_id}}"
+    And the mock Kafka broker also serves topic "refused_stop_out_{{test_id}}"
+    And the mock Kafka broker refuses the next offset commit
+    And a <cluster_size> node nervix cluster is started
+    And mock Kafka topic "refused_stop_out_{{test_id}}" is observed
+    # After a group's last member leaves, the mock coordinator answers the next join only once
+    # the leaving member's session timeout has nearly passed, so the client keeps it short.
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA refused_stop_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA refused_stop_wire MODE STRICT ( event_id integer );
+      CREATE CODEC refused_stop_codec
+        FROM WIRE JSON SCHEMA refused_stop_wire TO SCHEMA refused_stop_event;
+      CREATE RELAY refused_stop_records SCHEMA refused_stop_event UNBRANCHED;
+      CREATE KAFKA CLIENT refused_stop_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'auto.offset.reset' = 'earliest',
+        'session.timeout.ms' = '10000'
+      };
+      CREATE KAFKA TOPIC INGESTOR refused_stop_source
+        FROM refused_stop_kafka TOPIC 'refused_stop_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'refused_stop_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING refused_stop_codec
+        TO refused_stop_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER refused_stop_output FROM refused_stop_records
+        TO refused_stop_kafka TOPIC 'refused_stop_out_{{test_id}}'
+          MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING refused_stop_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And mock Kafka message is published to topic "refused_stop_in_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" mock Kafka consumer group "refused_stop_group_{{test_id}}" next offset for topic "refused_stop_in_{{test_id}}" partition 0 is "at least 1"
+    And within "10s" the observed broker receives exactly these payloads
+      """
+      {"event_id":1}
+      {"event_id":1}
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      DESCRIBE INGESTOR refused_stop_source;
+      """
+    Then the last command output owner is saved as placeholder "refused_stop_owner"
+    When node "{{refused_stop_owner}}" is gracefully stopped
+    And node "{{refused_stop_owner}}" is started
+    And mock Kafka message is published to topic "refused_stop_in_{{test_id}}"
+      """
+      {"event_id":2}
+      """
+    Then within "60s" the observed broker receives exactly these payloads
+      """
+      {"event_id":2}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: A node whose only uncordoned peer is terminating completes its admitted work in place
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -315,8 +968,8 @@ Feature: Graceful shutdown
       CREATE RELAY handoff_output SCHEMA eligible_event UNBRANCHED;
       CREATE VHOST edge eligible-shutdown-{{test_id}}.example.com;
       CREATE ENDPOINT eligible_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR eligible_source
-        FROM ENDPOINT eligible_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR eligible_source
+        FROM eligible_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING eligible_event_codec
         TO eligible_ingested
           INHERIT ALL
@@ -328,12 +981,12 @@ Feature: Graceful shutdown
         TO eligible_routed INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
       CREATE JUNCTION handoff_route FROM handoff_input UNBRANCHED
         TO handoff_output INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT eligible_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT eligible_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER eligible_output FROM eligible_routed
-        TO ZEROMQ eligible_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER eligible_output FROM eligible_routed
+        TO eligible_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING eligible_event_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -342,7 +995,7 @@ Feature: Graceful shutdown
       START;
       UNCORDON NODE node-2;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE JUNCTION handoff_route ONTO NODE node-2 IGNORE PREFERENCES;
       """
@@ -374,7 +1027,7 @@ Feature: Graceful shutdown
     And a 3 node nervix cluster is started
     And Kafka topic "shutdown_everyone_{{test_id}}" exists with 1 partitions
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
@@ -386,13 +1039,13 @@ Feature: Graceful shutdown
         TO SCHEMA everyone_event;
       CREATE RELAY everyone_ingested SCHEMA everyone_event UNBRANCHED;
       CREATE RELAY everyone_routed SCHEMA everyone_event UNBRANCHED;
-      CREATE CLIENT everyone_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT everyone_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR everyone_source
-        FROM KAFKA everyone_kafka TOPIC shutdown_everyone_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_shutdown_everyone_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR everyone_source
+        FROM everyone_kafka TOPIC 'shutdown_everyone_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_everyone_{{test_id}}'
           MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 100ms ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING everyone_event_codec
@@ -404,12 +1057,12 @@ Feature: Graceful shutdown
         ON GENERAL ERROR LOG;
       CREATE JUNCTION everyone_route FROM everyone_ingested UNBRANCHED
         TO everyone_routed INHERIT ALL FLUSH EACH 1h MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;
-      CREATE CLIENT everyone_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT everyone_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER everyone_output FROM everyone_routed
-        TO ZEROMQ everyone_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER everyone_output FROM everyone_routed
+        TO everyone_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING everyone_event_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -420,7 +1073,7 @@ Feature: Graceful shutdown
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION everyone_admitted TO everyone_ingested;
       """
@@ -444,16 +1097,198 @@ Feature: Graceful shutdown
       """
     And within "10s" Kafka consumer group "nervix_cucumber_shutdown_everyone_{{test_id}}" next offset for topic "shutdown_everyone_{{test_id}}" partition 0 is "at least 2"
 
+  @shutdown_terminating_destination @deloxide_stress
+  Scenario: A leader stopping with peers it has not seen terminate keeps its ingestor when the chosen peer refuses it
+    Given Kafka is running
+    And graceful shutdown drain is enabled
+    And drain timeout is configured as "30s"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" eventually reports leader "node-1"
+    And Kafka topic "terminating_peer_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA peer_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA peer_wire MODE STRICT ( event_id integer );
+      CREATE CODEC peer_codec FROM WIRE JSON SCHEMA peer_wire TO SCHEMA peer_event;
+      CREATE RELAY peer_records SCHEMA peer_event UNBRANCHED;
+      CREATE KAFKA CLIENT peer_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR peer_source
+        FROM peer_kafka TOPIC 'terminating_peer_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'terminating_peer_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING peer_codec
+        TO peer_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION peer_seen TO peer_records;
+      """
+    And Kafka message is published to topic "terminating_peer_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":1}
+      """
+    Given the graceful drain of node "node-2" pauses before it moves its work
+    And the graceful drain of node "node-3" pauses before it moves its work
+    When gossip exchanges involving node "node-2" are blocked with a "0s" send delay
+    And consensus connectivity for node "node-3" is blocked
+    And node "node-2" begins stopping
+    And node "node-3" begins stopping
+    Then node "node-2" reaches its graceful drain pause
+    And node "node-3" reaches its graceful drain pause
+    When node "node-1" is stopped
+    And the graceful drain pause of node "node-2" is released
+    And the graceful drain pause of node "node-3" is released
+    And node "node-2" is stopped
+    And node "node-3" is stopped
+    And gossip exchanges involving node "node-2" are restored
+    And consensus connectivity for node "node-3" is restored
+    And the cluster is restarted
+    And these Plexus commands are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=peer_source owner=node-1
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION restarted_peer_seen TO peer_records;
+      """
+    And Kafka message is published to topic "terminating_peer_{{test_id}}"
+      """
+      {"event_id":2}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":2}
+      """
+
+  @shutdown_unactivated_handoff @deloxide_stress
+  Scenario: A node whose relocated ingestor never activated on its restarted destination releases its storage when it stops
+    Given Kafka is running
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" eventually reports leader "node-1"
+    And Kafka topic "unactivated_handoff_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed through the client on node "node-1"
+      """
+      CORDON NODE node-2;
+      CORDON NODE node-3;
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA unactivated_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA unactivated_wire MODE STRICT ( event_id integer );
+      CREATE CODEC unactivated_codec
+        FROM WIRE JSON SCHEMA unactivated_wire TO SCHEMA unactivated_event;
+      CREATE RELAY unactivated_records SCHEMA unactivated_event UNBRANCHED;
+      CREATE KAFKA CLIENT unactivated_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR unactivated_source
+        FROM unactivated_kafka TOPIC 'unactivated_handoff_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'unactivated_handoff_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING unactivated_codec
+        TO unactivated_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      START;
+      UNCORDON NODE node-2;
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION unactivated_seen TO unactivated_records;
+      """
+    And Kafka message is published to topic "unactivated_handoff_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":1}
+      """
+    Given ownership handoff for domain "{{domain}}" pauses before activation
+    When these Plexus commands begin executing in the background
+      """
+      RELOCATE INGESTOR unactivated_source ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    Then the ownership handoff activation pause for domain "{{domain}}" is reached
+    When node "node-2" is stopped
+    And node "node-2" is started
+    Then node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-2" eventually reports interconnect to "node-1" as "connected"
+    When the ownership handoff activation pause for domain "{{domain}}" is released
+    Then the background Plexus execution fails with "ownership state activation did not complete"
+    When node "node-1" is stopped
+    And node "node-1" is started
+    And these Plexus commands are executed through the client on node "node-1"
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=ingestor name=unactivated_source owner=node-2
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION restarted_unactivated_seen TO unactivated_records;
+      """
+    And Kafka message is published to topic "unactivated_handoff_{{test_id}}"
+      """
+      {"event_id":2}
+      """
+    Then within "30s" the relay subscription receives payloads
+      """
+      {"event_id":2}
+      """
+
+  @long_running
+  Scenario Outline: Every node stopping at once ends its generators together on a cluster of <cluster_size>
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "10m"
+    And shutdown timeout is configured as "20s"
+    And drain timeout is configured as "20s"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When a materialized restore workload with 40 relays is created
+    And round 1 of 512 KiB materialized rows is submitted for 2 tenants
+    Then within "180s" the materialized generators report round 1, 512 KiB, 40 relays and 2 tenants
+    When the materialized summary subscription "summary_subscription" is closed
+    And all nodes are stopped
+    Then every node reports that its last shutdown finished before its deadline
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   Scenario: A generator releases its buffered output and stops producing when its node drains
     Given graceful shutdown drain is enabled
     And drain timeout is configured as "30s"
     And a 1 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA tenant_amount ( amount I64, tenant STRING );
       CREATE SCHEMA tenant_total ( tenant STRING, total I64 );
@@ -472,8 +1307,8 @@ Feature: Graceful shutdown
       CREATE RELAY generated_totals SCHEMA tenant_total BRANCHED BY by_generated_tenant;
       CREATE VHOST edge generated-shutdown-{{test_id}}.example.com;
       CREATE ENDPOINT tenant_amount_ingress ON edge PATH '/amounts' TYPE HTTP;
-      CREATE INGESTOR tenant_amount_source
-        FROM ENDPOINT tenant_amount_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR tenant_amount_source
+        FROM tenant_amount_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING tenant_amount_codec
         TO tenant_amounts
           INHERIT ALL
@@ -491,12 +1326,12 @@ Feature: Graceful shutdown
               total = relay_state.tenant_amounts.amount
           FLUSH EACH 1h MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT generated_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT generated_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER generated_output FROM generated_totals
-        TO ZEROMQ generated_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER generated_output FROM generated_totals
+        TO generated_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING tenant_total_codec
         INHERIT ALL
         FLUSH EACH 1h MAX BATCH SIZE 1MiB
@@ -528,11 +1363,11 @@ Feature: Graceful shutdown
     And a 1 node nervix cluster is started
     And Kafka topic "shutdown_waiting_{{test_id}}" exists with 1 partitions
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA wait_event ( id I64, source STRING );
       CREATE WIRE JSON SCHEMA wait_event_wire MODE STRICT ( id integer, source string );
@@ -543,13 +1378,13 @@ Feature: Graceful shutdown
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
       CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
-      CREATE CLIENT wait_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT wait_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR wait_event_source
-        FROM KAFKA wait_kafka TOPIC shutdown_waiting_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_shutdown_waiting_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR wait_event_source
+        FROM wait_kafka TOPIC 'shutdown_waiting_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_waiting_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING wait_event_codec
@@ -561,8 +1396,8 @@ Feature: Graceful shutdown
         ON GENERAL ERROR LOG;
       CREATE VHOST edge wait-state-{{test_id}}.example.com;
       CREATE ENDPOINT wait_state_ingress ON edge PATH '/state' TYPE HTTP;
-      CREATE INGESTOR wait_state_source
-        FROM ENDPOINT wait_state_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR wait_state_source
+        FROM wait_state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
         TO wait_state
           INHERIT ALL
@@ -577,12 +1412,12 @@ Feature: Graceful shutdown
           SET source = relay_state.wait_state.source
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT wait_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT wait_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER wait_output FROM waiting_output
-        TO ZEROMQ wait_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER wait_output FROM waiting_output
+        TO wait_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING wait_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -620,11 +1455,11 @@ Feature: Graceful shutdown
     And a 1 node nervix cluster is started
     And Kafka topic "shutdown_stalled_{{test_id}}" exists with 1 partitions
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA stalled_event ( event_id I64 );
       CREATE WIRE JSON SCHEMA stalled_event_wire MODE STRICT ( event_id integer );
@@ -632,13 +1467,13 @@ Feature: Graceful shutdown
         FROM WIRE JSON SCHEMA stalled_event_wire
         TO SCHEMA stalled_event;
       CREATE RELAY stalled_events SCHEMA stalled_event UNBRANCHED;
-      CREATE CLIENT stalled_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT stalled_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR stalled_source
-        FROM KAFKA stalled_kafka TOPIC shutdown_stalled_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_shutdown_stalled_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR stalled_source
+        FROM stalled_kafka TOPIC 'shutdown_stalled_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_shutdown_stalled_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m
           RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING stalled_event_codec
@@ -648,12 +1483,12 @@ Feature: Graceful shutdown
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT stalled_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT stalled_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE EMITTER stalled_output FROM stalled_events
-        TO ZEROMQ stalled_sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      CREATE ZEROMQ PUSH EMITTER stalled_output FROM stalled_events
+        TO stalled_sink MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s
         ENCODE USING stalled_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -687,7 +1522,7 @@ Feature: Graceful shutdown
     And drain timeout is configured as "1ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
 
@@ -722,8 +1557,8 @@ Feature: Graceful shutdown
         PATH '/dedup'
         TYPE HTTP;
 
-      CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO inbound
         INHERIT ALL
@@ -748,21 +1583,22 @@ Feature: Graceful shutdown
   Scenario: A transaction commit stuck at its shutdown deadline is cancelled and completed after restart
     Given graceful shutdown drain is enabled
     And shutdown timeout is configured as "5s"
+    And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Given client "owner" is connected to node "node-1"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       CREATE SCHEMA deadline_record (value STRING);
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
     Given transaction commit on node "node-1" pauses after 1 statement
-    When client "owner" begins executing these NSPL commands in the background
+    When client "owner" begins executing these Plexus commands in the background
       """
       COMMIT;
       """
@@ -778,14 +1614,15 @@ Feature: Graceful shutdown
   Scenario: A command still waiting for admission is cancelled without an effect when its node stops
     Given graceful shutdown drain is enabled
     And shutdown timeout is configured as "5s"
+    And drain timeout is configured as "5s"
     And a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Given command admission on node "node-1" pauses before proposal
-    When this NSPL command request begins executing in the background on the leader node
+    When this Plexus command request begins executing in the background on the leader node
       """
       CREATE SCHEMA held_admission_event ( id I64 );
       """
@@ -797,7 +1634,7 @@ Feature: Graceful shutdown
     When the command admission pause on node "node-1" is released
     And node "node-1" is started
     Then node "node-1" eventually observes a stable leader
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       SHOW CREATE SCHEMA held_admission_event;
       """

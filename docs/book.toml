@@ -20,9 +20,9 @@ preferred-dark-theme = "navy"
 
 [output.llms]
 command = "../scripts/mdbook_llms.py"
-description = "Public NSPL configuration reference for Nervix."
+description = "Plexus, the Nervix graph definition language: configuration reference."
 include = [
-  "nspl-overview.md",
+  "plexus-overview.md",
   "control-plane.md",
   "working-message.md",
   "filter-map-functions.md",
@@ -32,6 +32,7 @@ include = [
   "common.md",
   "syslog.md",
   "database-client-pools.md",
+  "connector-capabilities.md",
   "resources.md",
   "relay.md",
   "ingestors.md",
@@ -49,8 +50,9 @@ include = [
   "metrics-and-observability.md",
   "client-library.md",
   "examples.md",
+  "paced-simulation-drivers.md",
 ]
-title = "Nervix NSPL Documentation"
+title = "Nervix Plexus Documentation"
 
 # [output.pandoc]
 # profile.pdf = {}

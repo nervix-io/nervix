@@ -3,11 +3,11 @@ Feature: Branched branch behavior
   Scenario Outline: Branch keys are rendered as JSON instead of delimiter encoded text
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -39,8 +39,8 @@ Feature: Branched branch behavior
       CREATE ENDPOINT ingress
         ON edge
         PATH '/notifications'
-        TYPE HTTP; CREATE INGESTOR source_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR source_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -71,11 +71,11 @@ Feature: Branched branch behavior
   Scenario Outline: Deduplicator suppresses duplicates only within the same concrete relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         tenant STRING,
@@ -99,8 +99,8 @@ Feature: Branched branch behavior
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-        CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
@@ -153,11 +153,11 @@ Feature: Branched branch behavior
   Scenario Outline: Window processor aggregates only within each concrete branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -183,8 +183,8 @@ Feature: Branched branch behavior
         ON edge
         PATH '/metrics'
         TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -232,11 +232,11 @@ Feature: Branched branch behavior
   Scenario Outline: Junction preserves aligned branched relays without mixing them
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -263,8 +263,8 @@ Feature: Branched branch behavior
         ON edge
         PATH '/ingest-b'
         TYPE HTTP;
-        CREATE INGESTOR source_one
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
@@ -273,8 +273,8 @@ Feature: Branched branch behavior
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR source_two
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_two
+        FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
         INHERIT ALL
@@ -316,11 +316,11 @@ Feature: Branched branch behavior
   Scenario Outline: Reingestor is the node that changes branch branching
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -346,8 +346,8 @@ Feature: Branched branch behavior
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

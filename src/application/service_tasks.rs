@@ -7,6 +7,11 @@
 //! - **Depends on.** Tokio task tracking and cancellation, and the shutdown deadline.
 //! - **Must not know.** What any service task does.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use nervix_primitives::{
     sync::{Arc, CancellationToken},
     task::{JoinHandle, TaskTracker},

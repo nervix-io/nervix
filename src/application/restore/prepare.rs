@@ -1,6 +1,6 @@
 //! Receiving a restore's archive, verifying it, and planning the restore before anything changes.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //!
 //! - **Owns.** Staging a restore stream's archive in this node's staging area, reading and
 //!   verifying every section of it off the async workers, parsing each domain's models, planning
@@ -9,6 +9,18 @@
 //! - **Depends on.** The staging area, the archive format's reader, the language layer, and the
 //!   decision layer's restore and transaction planners.
 //! - **Must not know.** How a plan is applied, or which transport carried the stream.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "archive intake edge parses external Plexus before decision-layer planning"
+    )
+)]
+
+mod branch_keys;
+mod metadata;
+mod native;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -20,17 +32,25 @@ use arch_into::ArchInto as _;
 use bytes::Bytes;
 use error_stack::{Report, ResultExt as _};
 use futures_util::Stream;
-use meticulous::OptionExt as _;
-use nervix_backup::{ArchiveContents, ArchiveReadError, read_archive_contents};
-use nervix_execution::{Cancellation, ChargedBytes, Executor, MemoryClass, StorageClass};
-use nervix_models::{
-    CreateStatement, DomainName, Model, RequestedResourceVersion, ResourceUpload,
-    ResourceUploadState, ResourceUploads, ResourceUploadsError, Restore, RestoreArchive,
-    RestoreStep, Statement, Timestamp, TransactionImpactReport, UserName,
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_backup::{
+    ArchiveContents, ArchiveReadError, DescribedRuntimeState, DescribedSection, SectionPath,
+    read_archive_contents,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statement_sources};
+use nervix_execution::{
+    Cancellation, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation, StorageClass,
+};
+use nervix_models::{
+    CreateStatement, DomainName, Model, ModelKind, ModelName, RequestedResourceVersion,
+    ResourceUpload, ResourceUploadState, ResourceUploads, ResourceUploadsError, Restore,
+    RestoreArchive, RestoreStep, Statement, Timestamp, TransactionImpactReport, UserName,
+};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
+use nervix_primitives::sync::Arc;
 use thiserror::Error;
 
+use self::branch_keys::ArchivedKeyPlace;
+pub(in crate::application) use self::branch_keys::RestoredBranchDeclarations;
 use super::{
     archives::{
         RestoreStaging, RestoreStagingWriter, RestoreStreamPart, StagingFailure, StagingOutcome,
@@ -51,6 +71,8 @@ use crate::{
 pub(in crate::application) enum RestoreRefusal {
     #[error("the archive could not be read on this node")]
     Unreadable,
+    #[error("the archive metadata exceeds the node's available restore preparation budget")]
+    MetadataAdmission,
     #[error("the archive is not a valid backup archive")]
     InvalidArchive,
     #[error("the models of domain '{domain}' do not parse at line {line}")]
@@ -68,19 +90,146 @@ pub(in crate::application) enum RestoreRefusal {
     Plan,
     #[error("the models of domain '{domain}' do not form a valid configuration")]
     ModelRun { domain: DomainName },
+    #[error("materialized state of relay '{entity}' in domain '{domain}' could not be prepared")]
+    MaterializedState {
+        domain: DomainName,
+        entity: nervix_models::ModelName,
+    },
+    #[error("archived branch state of '{entity}' in domain '{domain}' could not be prepared")]
+    BranchState {
+        domain: DomainName,
+        entity: nervix_models::ModelName,
+    },
+    #[error(
+        "{place} in archive section '{section}' does not belong to the branching of {} '{entity}' \
+         in domain '{domain}'",
+        .kind.as_str()
+    )]
+    BranchKey {
+        domain: DomainName,
+        kind: ModelKind,
+        entity: ModelName,
+        section: SectionPath,
+        place: ArchivedKeyPlace,
+    },
+    #[error(
+        "the restored {} '{entity}' of domain '{domain}' declares no branching its archived branch \
+         keys could belong to",
+        .kind.as_str()
+    )]
+    UndeclaredBranching {
+        domain: DomainName,
+        kind: ModelKind,
+        entity: ModelName,
+    },
+}
+
+/// Why one section of a verified archive could not be read whole.
+#[derive(Debug, Error)]
+pub(in crate::application) enum ArchiveSectionReadError {
+    #[error("the archive section is longer than its {limit}-byte bound")]
+    TooLong { limit: u64 },
+    #[error("reading the archive section could not be admitted")]
+    Admission,
+    #[error("the archive section could not be read")]
+    Read,
 }
 
 /// An archive a restore stream staged and verified, with each domain's models parsed.
 pub(in crate::application) struct VerifiedArchive {
-    artifact: StagedArtifact,
+    artifact: Arc<StagedArtifact>,
+    data: Arc<VerifiedArchiveData>,
+}
+
+struct VerifiedArchiveData {
     contents: ArchiveContents,
     models: BTreeMap<DomainName, Vec<Model<RequestedResourceVersion>>>,
+    _reservation: Reservation,
 }
 
 impl VerifiedArchive {
+    pub(in crate::application) fn states_for(
+        &self,
+        domain: &DomainName,
+    ) -> &[DescribedRuntimeState] {
+        match self
+            .data
+            .contents
+            .description
+            .domains
+            .iter()
+            .find(|described| &described.capture.domain == domain)
+        {
+            Some(described) => described.state.as_slice(),
+            None => &[],
+        }
+    }
+
+    pub(in crate::application) fn skipped_state_for(
+        &self,
+        domain: &DomainName,
+    ) -> &[nervix_backup::SkippedStateSection] {
+        match self
+            .data
+            .contents
+            .description
+            .domains
+            .iter()
+            .find(|described| &described.capture.domain == domain)
+        {
+            Some(described) => described.skipped_state.as_slice(),
+            None => &[],
+        }
+    }
+
+    /// Reads `section` whole into memory charged to the bulk budget, refusing a section longer
+    /// than `limit` before reading a byte of it. Each read is one bounded window of the file.
+    pub(in crate::application) async fn read_bounded_section(
+        &self,
+        runtime: &Runtime,
+        section: &DescribedSection,
+        limit: u64,
+    ) -> Result<ChargedBytes, Report<ArchiveSectionReadError>> {
+        if section.length > limit {
+            return Err(Report::new(ArchiveSectionReadError::TooLong { limit }));
+        }
+        let charge = runtime
+            .executor()
+            .reserve(MemoryClass::Bulk, section.length.max(1))
+            .await
+            .change_context(ArchiveSectionReadError::Admission)?;
+        let capacity = usize::try_from(section.length)
+            .map_err(|_| Report::new(ArchiveSectionReadError::TooLong { limit }))?;
+        let chunk_bytes = u64::try_from(crate::runtime::RESTORE_STATE_CHUNK_BYTES)
+            .verified("one bounded chunk fits 64 bits");
+        let mut bytes = Vec::with_capacity(capacity);
+        let mut offset = 0_u64;
+        while offset < section.length {
+            nervix_primitives::task::consume_budget().await;
+            let position = section
+                .offset
+                .checked_add(offset)
+                .ok_or_else(|| Report::new(ArchiveSectionReadError::Read))?;
+            let remaining = section
+                .length
+                .checked_sub(offset)
+                .verified("the loop reads only while the offset is below the section length");
+            let length = remaining.min(chunk_bytes);
+            let chunk = StagedArtifact::read_window(self.artifact(), position, length)
+                .await
+                .change_context(ArchiveSectionReadError::Read)?;
+            bytes.extend_from_slice(&chunk);
+            let read = u64::try_from(chunk.len()).verified("one bounded chunk fits 64 bits");
+            offset = offset
+                .checked_add(read)
+                .ok_or_else(|| Report::new(ArchiveSectionReadError::Read))?;
+        }
+        Ok(ChargedBytes::from_owned(bytes, charge))
+    }
+
     /// When the backup that wrote the archive read its contents.
     pub(in crate::application) fn captured_at(&self) -> Timestamp {
-        self.contents.description.manifest.captured_at
+        self.data.contents.description.manifest.captured_at
     }
 
     /// The staged archive file, which holds every section at the offset its description names.
@@ -88,9 +237,14 @@ impl VerifiedArchive {
         self.artifact.path()
     }
 
-    /// The NSPL of the archived domain `domain`, as the archive holds it.
+    /// Keeps the verified archive and its disk quota alive through an admitted state read.
+    pub(in crate::application) fn artifact(&self) -> Arc<StagedArtifact> {
+        self.artifact.clone()
+    }
+
+    /// The Plexus of the archived domain `domain`, as the archive holds it.
     pub(in crate::application) fn models_text(&self, domain: &DomainName) -> &str {
-        match self.contents.models.get(domain) {
+        match self.data.contents.models.get(domain) {
             Some(text) => text.as_str(),
             None => "",
         }
@@ -201,42 +355,56 @@ impl SessionServiceImpl {
         artifact: StagedArtifact,
     ) -> Result<VerifiedArchive, Report<RestoreRefusal>> {
         let executor = self.inner.runtime.executor().clone();
-        let path = artifact.path().to_path_buf();
-        let reservation = executor
-            .reserve(
-                MemoryClass::Bulk,
-                executor.limits().bulk_chunk_bytes.as_u64(),
-            )
-            .await
-            .change_context(RestoreRefusal::Unreadable)?;
+        let artifact = Arc::new(artifact);
+        let reader_artifact = artifact.clone();
+        let reservation = metadata::reserve_metadata(&executor, artifact.clone()).await?;
         let read = executor
             .run_storage(
                 StorageClass::Filesystem,
                 reservation,
-                move |_charge, cancellation| {
-                    let file = match std::fs::File::open(&path) {
-                        Ok(file) => file,
-                        Err(error) => {
-                            return Err(Report::new(error).change_context(ArchiveReadError::Read));
-                        }
-                    };
-                    read_archive_contents(CancellableRead {
+                move |charge, cancellation| {
+                    let file = std::fs::File::open(reader_artifact.path())
+                        .map_err(Report::new)
+                        .change_context(ArchiveReadError::Read)?;
+                    let contents = read_archive_contents(CancellableRead {
                         inner: BufReader::new(file),
                         cancellation,
-                    })
+                    })?;
+                    Ok::<_, Report<ArchiveReadError>>((contents, charge))
                 },
             )
             .await
             .change_context(RestoreRefusal::Unreadable)?;
-        let contents = read.change_context(RestoreRefusal::InvalidArchive)?;
-        let mut models = BTreeMap::new();
-        for (domain, text) in &contents.models {
-            models.insert(domain.clone(), parse_models(domain, text)?);
-        }
+        let (contents, mut reservation) = read.change_context(RestoreRefusal::InvalidArchive)?;
+        let branch_state = metadata::branch_state_working_bytes(&contents)
+            .ok_or_else(|| Report::new(RestoreRefusal::MetadataAdmission))?;
+        let admitted = reservation
+            .bytes()
+            .checked_add(branch_state)
+            .ok_or_else(|| Report::new(RestoreRefusal::MetadataAdmission))?;
+        reservation
+            .grow_to(admitted)
+            .change_context(RestoreRefusal::MetadataAdmission)?;
+        let data = executor
+            .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
+                let mut models = BTreeMap::new();
+                for (domain, text) in &contents.models {
+                    cancellation
+                        .check()
+                        .change_context(RestoreRefusal::Unreadable)?;
+                    models.insert(domain.clone(), parse_models(domain, text)?);
+                }
+                Ok::<_, Report<RestoreRefusal>>(VerifiedArchiveData {
+                    contents,
+                    models,
+                    _reservation: charge,
+                })
+            })
+            .await
+            .change_context(RestoreRefusal::Unreadable)??;
         Ok(VerifiedArchive {
             artifact,
-            contents,
-            models,
+            data: Arc::new(data),
         })
     }
 
@@ -262,19 +430,33 @@ impl SessionServiceImpl {
             .await
             .into_keys()
             .collect();
-        RestorePlan::new(
-            restore,
-            ArchiveToRestore {
-                description: &archive.contents.description,
-                models: &archive.models,
-            },
-            &ExistingState {
-                users: &users,
-                domains: &domains,
-                recorded,
-            },
-        )
-        .change_context(RestoreRefusal::Plan)
+        let data = archive.data.clone();
+        let restore = restore.clone();
+        let recorded = recorded.clone();
+        let executor = self.inner.runtime.executor();
+        let charge = executor
+            .reserve(MemoryClass::Bulk, 1)
+            .await
+            .change_context(RestoreRefusal::MetadataAdmission)?;
+        executor
+            .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
+                cancellation.check().change_context(RestoreRefusal::Plan)?;
+                RestorePlan::new(
+                    &restore,
+                    ArchiveToRestore {
+                        description: &data.contents.description,
+                        models: &data.models,
+                    },
+                    &ExistingState {
+                        users: &users,
+                        domains: &domains,
+                        recorded: &recorded,
+                    },
+                )
+                .change_context(RestoreRefusal::Plan)
+            })
+            .await
+            .change_context(RestoreRefusal::Plan)?
     }
 
     /// Plans every domain's model run with the transaction planner, against the domain as the
@@ -284,6 +466,8 @@ impl SessionServiceImpl {
         &self,
         plan: &RestorePlan,
         owner: &UserName,
+        archive: &VerifiedArchive,
+        state: nervix_models::RestoreState,
     ) -> Result<Vec<Option<TransactionImpactReport>>, Report<RestoreRefusal>> {
         let mut reports = Vec::with_capacity(plan.domains.len());
         for domain in plan.domains.values() {
@@ -314,9 +498,168 @@ impl SessionServiceImpl {
                 .await
                 .change_context_lazy(refusal)?;
             let report = planned.report().change_context_lazy(refusal)?;
+            if state != nervix_models::RestoreState::ConfigurationOnly {
+                let schedule = planned
+                    .steps()
+                    .iter()
+                    .rev()
+                    .find_map(|step| match &step.kind {
+                        crate::registry::PlannedTransactionStepKind::Models { plan } => {
+                            plan.schedule.as_ref()
+                        }
+                        _ => None,
+                    });
+                if let Some(schedule) = schedule {
+                    archive
+                        .validate_branch_keys(&self.inner.runtime, &domain.source, schedule)
+                        .await?;
+                }
+                self.validate_branch_states(domain, archive, schedule)
+                    .await?;
+                for captured in archive.states_for(&domain.source) {
+                    let nervix_backup::DescribedRuntimeState::Materialized {
+                        descriptor,
+                        groups,
+                        ..
+                    } = captured
+                    else {
+                        continue;
+                    };
+                    let Some(schedule) = schedule else {
+                        continue;
+                    };
+                    let reference = nervix_models::NodeRef::new(
+                        nervix_models::ModelKind::Relay,
+                        descriptor.entity.clone(),
+                    );
+                    let Some(node) = schedule.nodes.get(&reference) else {
+                        continue;
+                    };
+                    if node.schema_fingerprint != descriptor.schema {
+                        continue;
+                    }
+                    let Some(schema) = domain.materialized_schemas.get(&descriptor.entity) else {
+                        continue;
+                    };
+                    let refusal = || RestoreRefusal::MaterializedState {
+                        domain: domain.source.clone(),
+                        entity: descriptor.entity.clone(),
+                    };
+                    let declarations = RestoredBranchDeclarations::of(schedule, &reference)
+                        .change_context_lazy(refusal)?;
+                    // Validate the same bounded conversion used by installation before admission.
+                    // Its temporary file drops here; no checkpoint namespace is published.
+                    super::materialized::prepare_materialized_checkpoint(
+                        &self.inner.runtime,
+                        archive,
+                        descriptor,
+                        groups,
+                        schema.clone(),
+                        Arc::new(declarations),
+                    )
+                    .await
+                    .change_context_lazy(refusal)?;
+                }
+            }
             reports.push(Some(report));
         }
         Ok(reports)
+    }
+}
+
+impl SessionServiceImpl {
+    /// Validates the same bounded conversion installation runs for every archived deduplicator
+    /// keyspace and window the restored schedule installs. Their temporary files drop here; no
+    /// checkpoint namespace is published.
+    async fn validate_branch_states(
+        &self,
+        domain: &PlannedDomain,
+        archive: &VerifiedArchive,
+        schedule: Option<&nervix_models::DomainSchedule>,
+    ) -> Result<(), Report<RestoreRefusal>> {
+        let mut lifecycles = Vec::new();
+        for archived in archive.states_for(&domain.source) {
+            if let DescribedRuntimeState::BranchLifecycle { lifecycle, .. } = archived {
+                lifecycles.push(lifecycle);
+            }
+        }
+        for archived in archive.states_for(&domain.source) {
+            nervix_primitives::task::consume_budget().await;
+            let refusal = |entity: &nervix_models::ModelName| RestoreRefusal::BranchState {
+                domain: domain.source.clone(),
+                entity: entity.clone(),
+            };
+            match archived {
+                DescribedRuntimeState::Deduplicator {
+                    descriptor, groups, ..
+                } => {
+                    let reference = nervix_models::NodeRef::new(
+                        nervix_models::ModelKind::Deduplicator,
+                        descriptor.entity.clone(),
+                    );
+                    let Some(node) = schedule.and_then(|schedule| schedule.nodes.get(&reference))
+                    else {
+                        continue;
+                    };
+                    if node.schema_fingerprint != descriptor.schema {
+                        continue;
+                    }
+                    let Some(key_schema) =
+                        domain.branch_state_schemas.deduplicator(&descriptor.entity)
+                    else {
+                        continue;
+                    };
+                    super::branch_state::prepare_deduplicator_checkpoint(
+                        &self.inner.runtime,
+                        archive,
+                        descriptor,
+                        groups,
+                        key_schema,
+                    )
+                    .await
+                    .change_context_lazy(|| refusal(&descriptor.entity))?;
+                }
+                DescribedRuntimeState::Window {
+                    descriptor, groups, ..
+                } => {
+                    let reference = nervix_models::NodeRef::new(
+                        nervix_models::ModelKind::WindowProcessor,
+                        descriptor.entity.clone(),
+                    );
+                    let Some(node) = schedule.and_then(|schedule| schedule.nodes.get(&reference))
+                    else {
+                        continue;
+                    };
+                    if node.schema_fingerprint != descriptor.schema {
+                        continue;
+                    }
+                    let Some(window) = domain.branch_state_schemas.window(&descriptor.entity)
+                    else {
+                        continue;
+                    };
+                    if window
+                        .skip_of(descriptor, lifecycles.iter().copied())
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    super::branch_state::prepare_window_checkpoint(
+                        &self.inner.runtime,
+                        archive,
+                        descriptor,
+                        groups,
+                        window,
+                    )
+                    .await
+                    .change_context_lazy(|| refusal(&descriptor.entity))?;
+                }
+                DescribedRuntimeState::Wasm { .. }
+                | DescribedRuntimeState::KafkaOffsets { .. }
+                | DescribedRuntimeState::BranchLifecycle { .. }
+                | DescribedRuntimeState::Materialized { .. } => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -413,8 +756,11 @@ fn line_at(text: &str, offset: usize) -> usize {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
-    use meticulous::ResultExt as _;
 
     use super::*;
 

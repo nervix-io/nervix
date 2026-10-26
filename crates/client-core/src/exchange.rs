@@ -10,14 +10,20 @@
 //!
 //! - **Owns.** Request identities, the waiters of an exchange, the reassembly of replies too large
 //!   for one frame, the subscriptions an exchange holds, and the delivery of unsolicited messages
-//!   and domain clock replies to the client's event sinks.
+//!   and domain clock replies to the client's event emitters.
 //! - **Depends on.** The wire contract's frames and tonic's gRPC client.
 //! - **Must not know.** What a request means, how its outcome is routed, or how a lost exchange is
 //!   recovered.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{collections::VecDeque, fmt::Display, num::NonZeroU64};
 
 use ahash::{HashMap, HashSet};
+use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     self as wire, ClientFrame, DomainInfo, EncodedFrame, Leadership, OpenIngestorDisposition,
@@ -442,7 +448,7 @@ impl EventQueue<SubscriptionEvent> {
 
 /// Where the unsolicited messages of every exchange of one client go.
 #[derive(Clone)]
-pub(crate) struct EventSinks {
+pub(crate) struct EventTargets {
     pub(crate) subscriptions: EventQueue<SubscriptionEvent>,
     pub(crate) desired: DesiredSubscriptions,
     pub(crate) notices: EventQueue<ServerEvent>,
@@ -459,7 +465,7 @@ pub(crate) struct EventSinks {
     pub(crate) consumers: crate::consumer::DesiredConsumers,
 }
 
-impl EventSinks {
+impl EventTargets {
     pub(crate) fn begin_generation(&self) -> Arc<()> {
         let generation = Arc::new(());
         self.subscriptions.begin(&generation);
@@ -477,9 +483,9 @@ impl EventSinks {
     }
 }
 
-/// The client's event sinks together with the receiving ends its callers read.
+/// The client's event emitters together with the receiving ends its callers read.
 pub(crate) struct SessionEvents {
-    pub(crate) sinks: EventSinks,
+    pub(crate) emitters: EventTargets,
     pub(crate) leadership: watch::Receiver<Option<Leadership>>,
     pub(crate) domains: Mutex<watch::Receiver<Option<Vec<DomainInfo>>>>,
 }
@@ -492,7 +498,7 @@ impl SessionEvents {
         let (leadership, observed_leadership) = watch::channel(None);
         let (domains, observed_domains) = watch::channel(None);
         Self {
-            sinks: EventSinks {
+            emitters: EventTargets {
                 subscriptions: subscriptions.clone(),
                 desired,
                 notices: notices.clone(),
@@ -513,8 +519,10 @@ pub(crate) struct Exchange {
     pub(crate) requests: Arc<ExchangeRequests>,
     /// The task routing the exchange's frames. Dropping the exchange aborts it.
     pub(crate) reader: JoinHandle<()>,
-    pub(crate) sinks: EventSinks,
+    pub(crate) emitters: EventTargets,
     pub(crate) generation: Arc<()>,
+    /// The channel the exchange runs on, which resource uploads share.
+    pub(crate) channel: Channel,
 }
 
 /// What a request needs of the exchange it is sent on.
@@ -523,8 +531,6 @@ pub(crate) struct ExchangeRequests {
     /// The waiters of the exchange's requests. The exchange's reader shares the registry: it
     /// completes each waiter as its reply arrives and closes the registry when the exchange ends.
     pub(crate) pending: Arc<SyncMutex<PendingReplies>>,
-    /// The channel the exchange runs on, which resource uploads share.
-    pub(crate) channel: Channel,
 }
 
 impl ExchangeRequests {
@@ -565,8 +571,8 @@ impl Exchange {
     pub(crate) async fn open(
         channel: Channel,
         connector: &GrpcConnector,
-        sinks: EventSinks,
-    ) -> Result<Self, ClientError> {
+        emitters: EventTargets,
+    ) -> error_stack::Result<Self, ClientError> {
         let mut client = tonic::client::Grpc::new(channel.clone())
             .max_decoding_message_size(SESSION_LIMITS.frame_bytes())
             .max_encoding_message_size(SESSION_LIMITS.frame_bytes());
@@ -574,7 +580,10 @@ impl Exchange {
         let mut request = Request::new(ReceiverStream::new(outbound));
         connector.authorize(&mut request);
         let response = nervix_primitives::time::timeout(connector.connect_timeout(), async {
-            client.ready().await.map_err(ClientError::ConnectServer)?;
+            client
+                .ready()
+                .await
+                .map_err(|error| Report::new(ClientError::ConnectServer(error)))?;
             client
                 .streaming(
                     request,
@@ -582,23 +591,20 @@ impl Exchange {
                     ClientExchangeCodec::new(SESSION_LIMITS),
                 )
                 .await
-                .map_err(|status| ClientError::StartSession(Box::new(status)))
+                .map_err(|status| Report::new(ClientError::StartSession(Box::new(status))))
         })
         .await
-        .map_err(|_| ClientError::SessionOpenDeadline)??;
+        .map_err(|_| Report::new(ClientError::SessionOpenDeadline))??;
         let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
-        let generation = sinks.begin_generation();
-        let reader = ExchangeReader::new(pending.clone(), sinks.clone(), generation.clone());
+        let generation = emitters.begin_generation();
+        let reader = ExchangeReader::new(pending.clone(), emitters.clone(), generation.clone());
         let reader = nervix_primitives::task::spawn(reader.run(response.into_inner()));
         Ok(Self {
-            requests: Arc::new(ExchangeRequests {
-                frames,
-                pending,
-                channel,
-            }),
+            requests: Arc::new(ExchangeRequests { frames, pending }),
             reader,
-            sinks,
+            emitters,
             generation,
+            channel,
         })
     }
 
@@ -619,7 +625,7 @@ impl Exchange {
             "an aborted reader ends cancelled, and one that ended first already closed its \
              requests",
         );
-        self.sinks.close_generation(&self.generation);
+        self.emitters.close_generation(&self.generation);
     }
 }
 
@@ -722,10 +728,10 @@ pub(crate) enum ReaderFlow {
 }
 
 /// Routes the frames of one exchange: each reply to the request that waits for it, each transfer
-/// part into the reply it reassembles, and each unsolicited message to the client's event sinks.
+/// part into the reply it reassembles, and each unsolicited message to the client's event emitters.
 pub(crate) struct ExchangeReader {
     pending: Arc<SyncMutex<PendingReplies>>,
-    sinks: EventSinks,
+    emitters: EventTargets,
     generation: Arc<()>,
     subscriptions: SubscriptionRegistry,
     transfers: HashMap<RequestId, TransferAssembly>,
@@ -734,12 +740,12 @@ pub(crate) struct ExchangeReader {
 impl ExchangeReader {
     pub(crate) fn new(
         pending: Arc<SyncMutex<PendingReplies>>,
-        sinks: EventSinks,
+        emitters: EventTargets,
         generation: Arc<()>,
     ) -> Self {
         Self {
             pending,
-            sinks,
+            emitters,
             generation,
             subscriptions: SubscriptionRegistry::default(),
             transfers: HashMap::default(),
@@ -770,7 +776,7 @@ impl ExchangeReader {
             }
         }
         self.pending.lock().close_with(failure);
-        self.sinks.close_generation(&self.generation);
+        self.emitters.close_generation(&self.generation);
     }
 
     /// Routes one frame of the exchange.
@@ -802,19 +808,19 @@ impl ExchangeReader {
         if let ReplyBody::Subscribe(outcome) = &reply.body
             && let SubscribeDisposition::Opened(opened) = &outcome.disposition
         {
-            self.sinks
+            self.emitters
                 .desired
                 .acknowledge(&opened.subscription, &self.generation);
         }
         self.subscriptions.track(&reply.body);
         match &reply.body {
             ReplyBody::DomainClockAttach(outcome) => {
-                self.sinks.clocks.apply_attach(outcome, &self.generation);
+                self.emitters.clocks.apply_attach(outcome, &self.generation);
             }
-            ReplyBody::DomainClockDetach(outcome) => self.sinks.clocks.apply_detach(outcome),
+            ReplyBody::DomainClockDetach(outcome) => self.emitters.clocks.apply_detach(outcome),
             ReplyBody::OpenIngestor(outcome) => {
                 if let OpenIngestorDisposition::Opened(opened) = &outcome.disposition {
-                    self.sinks.producers.opened(
+                    self.emitters.producers.opened(
                         &self.generation,
                         ProducerId::opened_by(reply.request_id),
                         opened.description.admission,
@@ -858,18 +864,18 @@ impl ExchangeReader {
         ReaderFlow::Continue
     }
 
-    /// Delivers an unsolicited message to the client's event sinks.
+    /// Delivers an unsolicited message to the client's event emitters.
     async fn publish(&mut self, event: wire::ServerEvent) -> ReaderFlow {
         match event {
             wire::ServerEvent::Notice(notice) => self.notify(ServerEvent::from(notice)),
             wire::ServerEvent::Leadership(observed) => {
-                self.sinks
+                self.emitters
                     .leadership
                     .send_replace(Some(observed.leadership));
                 ReaderFlow::Continue
             }
             wire::ServerEvent::Domains(observed) => {
-                self.sinks.domains.send_replace(Some(observed.domains));
+                self.emitters.domains.send_replace(Some(observed.domains));
                 ReaderFlow::Continue
             }
             // Observations of one domain follow a domain selection, which this client never sends.
@@ -907,27 +913,29 @@ impl ExchangeReader {
                 // The end is applied before its event is queued, so no caller reads an end the
                 // client does not hold, and a session lost before the end is read cannot restore
                 // the generation it ended.
-                self.sinks.desired.end(&ended, &self.generation);
+                self.emitters.desired.end(&ended, &self.generation);
                 self.forward(SubscriptionEvent::Ended(ended))
             }
             wire::ServerEvent::DomainClockObserved(observed) => {
-                self.sinks.clocks.apply_observed(observed, &self.generation);
+                self.emitters
+                    .clocks
+                    .apply_observed(observed, &self.generation);
                 ReaderFlow::Continue
             }
             wire::ServerEvent::DomainClockTicked(ticked) => {
-                self.sinks.clocks.apply_ticked(ticked, &self.generation);
+                self.emitters.clocks.apply_ticked(ticked, &self.generation);
                 ReaderFlow::Continue
             }
             wire::ServerEvent::DomainClockAttachmentEnded(ended) => {
-                self.sinks.clocks.apply_ended(ended, &self.generation);
+                self.emitters.clocks.apply_ended(ended, &self.generation);
                 ReaderFlow::Continue
             }
             wire::ServerEvent::ProducerAdmissionChanged(changed) => {
-                self.sinks.producers.admission(&self.generation, changed);
+                self.emitters.producers.admission(&self.generation, changed);
                 ReaderFlow::Continue
             }
             wire::ServerEvent::ProducerEnded(ended) => {
-                self.sinks.producers.ended(&self.generation, ended);
+                self.emitters.producers.ended(&self.generation, ended);
                 ReaderFlow::Continue
             }
             // No reply follows for any request still in flight; the waiters observe the closed
@@ -941,11 +949,11 @@ impl ExchangeReader {
         let handle = event.subscription().clone();
         let bytes = event.queued_bytes();
         let overflowed = self
-            .sinks
+            .emitters
             .subscriptions
             .push(&self.generation, event, bytes);
         if overflowed {
-            self.sinks.desired.overflow(&handle, &self.generation);
+            self.emitters.desired.overflow(&handle, &self.generation);
         }
         ReaderFlow::Continue
     }
@@ -953,7 +961,7 @@ impl ExchangeReader {
     /// Hands a notice to its bounded queue without delaying another reply.
     fn notify(&self, notice: ServerEvent) -> ReaderFlow {
         let bytes = notice.queued_bytes();
-        self.sinks.notices.push(&self.generation, notice, bytes);
+        self.emitters.notices.push(&self.generation, notice, bytes);
         ReaderFlow::Continue
     }
 }

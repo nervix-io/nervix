@@ -2,7 +2,7 @@ Feature: Session subscription lifecycle
 
   Scenario Outline: A relay redefined under a subscription ends it before a row of its new definition reaches it
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64, secret STRING );
@@ -12,8 +12,8 @@ Feature: Session subscription lifecycle
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge redefined-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor
-        FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events
         SET id = message.id, secret = message.secret
@@ -23,7 +23,7 @@ Feature: Session subscription lifecycle
         ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION watch TO events;
       """
@@ -35,7 +35,7 @@ Feature: Session subscription lifecycle
       """
       "secret":"public"
       """
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       ALTER RELAY events SET SCHEMA secret_event;
       """
@@ -50,7 +50,7 @@ Feature: Session subscription lifecycle
       domain="{{domain}}"
       relay="events"
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       CREATE SUBSCRIPTION watch TO events;
       """
@@ -73,14 +73,14 @@ Feature: Session subscription lifecycle
 
   Scenario Outline: Removing a relay ends its subscriptions, which stay deletable
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
       CREATE RELAY events SCHEMA event UNBRANCHED;
       START;
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION watch TO events;
       """
@@ -89,7 +89,7 @@ Feature: Session subscription lifecycle
       domain="{{domain}}"
       relay="events"
       """
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       DROP RELAY events;
       """
@@ -99,7 +99,7 @@ Feature: Session subscription lifecycle
       domain="{{domain}}"
       relay="events"
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       DELETE SUBSCRIPTION watch;
       """
@@ -116,7 +116,7 @@ Feature: Session subscription lifecycle
 
   Scenario Outline: Stopping and starting a domain keeps its subscriptions delivering
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
@@ -125,8 +125,8 @@ Feature: Session subscription lifecycle
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge restarted-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor
-        FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events
         INHERIT ALL
@@ -136,7 +136,7 @@ Feature: Session subscription lifecycle
         ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION watch TO events;
       """
@@ -148,11 +148,11 @@ Feature: Session subscription lifecycle
       """
       {"id":1}
       """
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       STOP;
       """
-    And this NSPL command request is executed on the leader node
+    And this Plexus command request is executed on the leader node
       """
       START;
       """
@@ -178,7 +178,7 @@ Feature: Session subscription lifecycle
 
   Scenario Outline: A node's interest in a relay follows every subscription of every session exactly
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
@@ -187,8 +187,8 @@ Feature: Session subscription lifecycle
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge interest-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor
-        FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events
         INHERIT ALL
@@ -199,19 +199,19 @@ Feature: Session subscription lifecycle
       START;
       """
     And client "neighbor" is connected to node "<subscriber>"
-    When these NSPL commands are executed on node "<subscriber>"
+    When these Plexus commands are executed on node "<subscriber>"
       """
       CREATE SUBSCRIPTION first TO events;
       """
-    And these NSPL commands are executed on the active session
+    And these Plexus commands are executed on the active session
       """
       CREATE SUBSCRIPTION second TO events;
       """
-    And client "neighbor" executes these NSPL commands
+    And client "neighbor" executes these Plexus commands
       """
       CREATE SUBSCRIPTION third TO events;
       """
-    And these NSPL commands fail on the active session
+    And these Plexus commands fail on the active session
       """
       CREATE SUBSCRIPTION second TO events;
       """
@@ -219,7 +219,7 @@ Feature: Session subscription lifecycle
       """
       session subscription 'second' already exists
       """
-    When these NSPL commands fail on the active session
+    When these Plexus commands fail on the active session
       """
       CREATE SUBSCRIPTION unfiltered TO events WHERE missing_field > 0;
       """
@@ -227,7 +227,7 @@ Feature: Session subscription lifecycle
       """
       failed to compile session subscription 'unfiltered'
       """
-    When these NSPL commands fail on the active session
+    When these Plexus commands fail on the active session
       """
       CREATE SUBSCRIPTION absent TO absent_relay;
       """
@@ -240,7 +240,7 @@ Feature: Session subscription lifecycle
       domain="{{domain}}"
       relay="events"
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       DELETE SUBSCRIPTION first;
       """
@@ -261,7 +261,7 @@ Feature: Session subscription lifecycle
       """
       {"id":1}
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       DELETE SUBSCRIPTION second;
       """
@@ -293,7 +293,7 @@ Feature: Session subscription lifecycle
 
   Scenario Outline: A subscription whose client reads nothing is deleted without that client, and nothing about it follows its deletion
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA seed ( text STRING );
@@ -305,8 +305,8 @@ Feature: Session subscription lifecycle
       CREATE RELAY probes SCHEMA filler UNBRANCHED;
       CREATE VHOST edge saturated-{{test_id}}.example.com;
       CREATE ENDPOINT seed_endpoint ON edge PATH '/seeds' TYPE HTTP;
-      CREATE INGESTOR seed_ingestor
-        FROM ENDPOINT seed_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR seed_ingestor
+        FROM seed_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING seed_codec
         TIMESTAMP NOW
         TO seeds
@@ -336,7 +336,7 @@ Feature: Session subscription lifecycle
       """
     And client "neighbor" is connected to node "node-1"
     When client "neighbor" selects domain "neighbor_{{test_id}}"
-    And client "neighbor" executes these NSPL commands
+    And client "neighbor" executes these Plexus commands
       """
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
@@ -344,8 +344,8 @@ Feature: Session subscription lifecycle
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge neighbor-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor
-        FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events
         INHERIT ALL
@@ -356,11 +356,11 @@ Feature: Session subscription lifecycle
       START;
       CREATE SUBSCRIPTION neighbor_events TO events;
       """
-    And these NSPL commands are executed on node "node-1"
+    And these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION flood TO floods BLOCKING;
       """
-    And these NSPL commands are executed on the active session
+    And these Plexus commands are executed on the active session
       """
       CREATE SUBSCRIPTION probe TO probes DROPPING;
       """

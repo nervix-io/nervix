@@ -7,6 +7,11 @@
 //! - **Depends on.** The active graph and the Models the rules name.
 //! - **Must not know.** Which cluster member a plan ends up assigning.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::{cmp::Ordering, collections::VecDeque, num::NonZeroU64};
 
 use ahash::{HashMap, HashMapExt, HashSet};
@@ -721,55 +726,6 @@ fn is_user_placement_member_model(model: &Model) -> bool {
     )
 }
 
-fn is_placement_eligible_member_model(model: &Model) -> bool {
-    match model {
-        Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
-        _ => is_user_placement_member_model(model),
-    }
-}
-
-pub(in crate::registry) fn ensure_placement_member_shape_change_allowed(
-    domain: &DomainName,
-    before: &Model,
-    after: &Model,
-    candidate_models: &ModelIndex,
-) -> Result<(), Report<RegistryError>> {
-    if !is_placement_eligible_member_model(before) || is_placement_eligible_member_model(after) {
-        return Ok(());
-    }
-
-    let member = after.name();
-    let mut placements = Vec::new();
-    for model in candidate_models.models() {
-        let Model::Placement(placement) = model else {
-            continue;
-        };
-        if placement
-            .from
-            .iter()
-            .chain(&placement.to)
-            .any(|candidate| *candidate == member)
-        {
-            placements.push(placement.name.clone());
-        }
-    }
-    placements.sort_by(|left, right| left.as_str().cmp(right.as_str()));
-    placements.dedup();
-    if placements.is_empty() {
-        return Ok(());
-    }
-
-    Err(Report::new(RegistryError::PlacementMemberPinned {
-        domain: domain.as_str().to_string(),
-        identifier: member.as_str().to_string(),
-        placements: placements
-            .iter()
-            .map(|name| name.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-    }))
-}
-
 fn is_placement_runtime_model(model: &Model) -> bool {
     match model {
         Model::Ingestor(_) if model.executes_on_every_cluster_node() => false,
@@ -900,9 +856,9 @@ mod tests {
     use std::fs;
 
     use nervix_models::{
-        AlterIngestor, AlterIngestorOperation, AlterPlacement, AlterPlacementOperation,
-        ClusterNodeName, DropModel, IngestSource, MaterializedRelayState,
-        MaterializedStateDependency, MaterializedStatePolicy,
+        AlterPlacement, AlterPlacementOperation, ClusterNodeName, DropModel, HttpEndpointIngestor,
+        HttpIngestor, IngestorEntity, MaterializedRelayState, MaterializedStateDependency,
+        MaterializedStatePolicy, SyslogIngestor, SyslogListenerIngestor,
     };
     use nonzero_ext::nonzero;
 
@@ -1206,13 +1162,13 @@ mod tests {
         let nervix_models::IngestorInput::Transport(transport) = &mut ingestor.input else {
             panic!("the full graph's ingestor reads a transport");
         };
-        transport.source = IngestSource::Endpoint {
+        transport.source = IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
             endpoint: named("ingest_http"),
-            mode: nervix_models::EndpointIngestMode::NoAckSequential,
+            mode: nervix_models::EndpointIngestMode::NoAck,
             quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
                 max_size: "1MiB".to_string(),
             },
-        };
+        }));
         endpoint_models.extend([
             vhost("public", &["events.example.com"]),
             endpoint(
@@ -1252,10 +1208,12 @@ mod tests {
         let nervix_models::IngestorInput::Transport(transport) = &mut ingestor.input else {
             panic!("the full graph's ingestor reads a transport");
         };
-        transport.source = IngestSource::Syslog {
-            client: named("syslog_listener"),
-            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-        };
+        transport.source =
+            IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
+                client: named("syslog_listener"),
+                mode: nervix_models::SyslogIngestMode::NoAck,
+                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+            }));
         syslog_models.extend([
             syslog_client("syslog_listener"),
             placement(
@@ -1362,70 +1320,6 @@ mod tests {
             panic!("unexpected error: {error:#}");
         };
         assert_eq!(blockers, "pin_ing");
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn placement_non_placeable_alter_names_every_pinning_rule() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("placement_pinned_alter").expect("valid domain");
-        let mut models = full_graph_batch();
-        models.extend([
-            vhost("public", &["events.example.com"]),
-            endpoint(
-                "ingest_http",
-                "public",
-                "/ingest",
-                nervix_models::EndpointType::Http,
-            ),
-            placement(
-                "pin_a",
-                &["ing"],
-                &["emit"],
-                PlacementPolicy::PreferColocation,
-                None,
-            ),
-            placement(
-                "pin_b",
-                &["ing"],
-                &["p99_proc"],
-                PlacementPolicy::RequireColocation,
-                Some(nonzero!(1u64)),
-            ),
-        ]);
-        registry
-            .apply_batch(&domain, models)
-            .expect("placements should validate");
-
-        let error = registry
-            .plan_mutations(
-                &domain,
-                &[RegistryMutation::AlterIngestor(AlterIngestor {
-                    ingestor: named("ing"),
-                    operations: vec![AlterIngestorOperation::SetSource {
-                        source: IngestSource::Endpoint {
-                            endpoint: named("ingest_http"),
-                            mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                max_size: "1MiB".to_string(),
-                            },
-                        },
-                    }],
-                })],
-            )
-            .expect_err("a pinned member cannot become non-placement-eligible");
-        let RegistryError::PlacementMemberPinned {
-            identifier,
-            placements,
-            ..
-        } = error.current_context()
-        else {
-            panic!("unexpected error: {error:#}");
-        };
-        assert_eq!(identifier, "ing");
-        assert_eq!(placements, "pin_a, pin_b");
 
         let _ = fs::remove_dir_all(path);
     }

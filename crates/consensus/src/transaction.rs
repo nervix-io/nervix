@@ -76,6 +76,13 @@ impl TransactionStatementRequest {
     pub fn source_bytes(&self) -> u64 {
         self.source.len().arch_into()
     }
+
+    /// The BLAKE3 digest of the statement's source. The source determines the statement, so a
+    /// finished transaction tells an exact repetition of an append it accepted from a changed one
+    /// by this digest and the append's position.
+    fn source_digest(&self) -> [u8; 32] {
+        *blake3::hash(self.source.as_bytes()).as_bytes()
+    }
 }
 
 impl std::ops::Deref for TransactionStatement {
@@ -83,6 +90,51 @@ impl std::ops::Deref for TransactionStatement {
 
     fn deref(&self) -> &Self::Target {
         &self.request
+    }
+}
+
+/// What a finished transaction keeps of a statement it accepted once its queue is gone: the
+/// request that queued it, by reference, position and source digest, and the admission recorded
+/// for it. An exact repetition of that append is answered from it, including the repetition a
+/// command execution makes when it resumes after the transaction finished.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub(crate) struct AcceptedTransactionStatement {
+    request_reference: CommandExecutionReference,
+    #[rkyv(with = nervix_models::CountAsU64)]
+    expected_position: usize,
+    source_digest: [u8; 32],
+    admission: TransactionCommandResult,
+}
+
+impl AcceptedTransactionStatement {
+    /// What finishing keeps of `statement`, which the transaction accepted.
+    pub(crate) fn accepted(statement: TransactionStatement) -> Self {
+        let source_digest = statement.request.source_digest();
+        let TransactionStatement { request, admission } = statement;
+        Self {
+            request_reference: request.request_reference,
+            expected_position: request.expected_position,
+            source_digest,
+            admission,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expected_position(&self) -> usize {
+        self.expected_position
+    }
+
+    #[cfg(test)]
+    pub(crate) fn admission(&self) -> &TransactionCommandResult {
+        &self.admission
+    }
+
+    /// Whether `request` is the append this statement accepted: the same position and source.
+    fn accepted_request(&self, request: &TransactionStatementRequest) -> bool {
+        self.expected_position == request.expected_position
+            && self.source_digest == request.source_digest()
     }
 }
 
@@ -185,6 +237,19 @@ impl TransactionStepResult {
 
     pub fn statement_count(&self) -> usize {
         self.operation_range().operation_count().get()
+    }
+
+    /// The statement after the last of `results`, when they apply consecutive statements from the
+    /// first one.
+    fn end_of_consecutive(results: &[Self]) -> Option<usize> {
+        let mut next = 0_usize;
+        for result in results {
+            if result.first_statement() != next {
+                return None;
+            }
+            next = next.checked_add(result.statement_count())?;
+        }
+        Some(next)
     }
 }
 
@@ -308,6 +373,23 @@ pub struct FinishedTransaction {
     pub outcome_revision: u64,
     pub finished_at: Timestamp,
     pub results: Vec<TransactionStepResult>,
+    /// Every statement the transaction accepted, in the order it queued them, as finishing kept
+    /// it.
+    pub(crate) accepted: Vec<AcceptedTransactionStatement>,
+}
+
+impl FinishedTransaction {
+    /// The statement `request_reference` queued, when the transaction accepted it.
+    fn accepted_statement(
+        &self,
+        request_reference: &CommandExecutionReference,
+    ) -> Option<&AcceptedTransactionStatement> {
+        // The transaction accepted at most `limits.max_statements` statements while it was open,
+        // so this identity lookup has the bound queue admission enforced on them.
+        self.accepted
+            .iter()
+            .find(|accepted| accepted.request_reference == *request_reference)
+    }
 }
 
 /// The durable actual-UTC activity and inclusive inactivity boundary of an OPEN transaction.
@@ -422,6 +504,13 @@ pub struct ReplicatedTransaction {
     mutation_owner: DomainMutationOwner,
 }
 
+impl crate::records::StoredUnder<String> for ReplicatedTransaction {
+    /// A transaction is stored under its id, in a state its transitions reach.
+    fn is_stored_under(&self, id: &String) -> bool {
+        self.id == *id && self.is_reachable()
+    }
+}
+
 impl ReplicatedTransaction {
     pub fn open(
         id: String,
@@ -468,6 +557,31 @@ impl ReplicatedTransaction {
             latest_preview: None,
             commit_plan: None,
             mutation_owner,
+        }
+    }
+
+    /// The transaction `opened` began as, at a later point of its life, for generated storage
+    /// states: in `state`, still queuing `statements` of `queued_source_bytes` source bytes after
+    /// queuing `statement_count` statements in all, with the latest preview and commit plan header
+    /// its admissions recorded. Opening fixed its identity, creation instant and mutation owner.
+    #[cfg(test)]
+    pub(crate) fn generated(
+        opened: Self,
+        state: TransactionState,
+        statement_count: usize,
+        queued_source_bytes: u64,
+        statements: Vec<TransactionStatement>,
+        latest_preview: Option<TransactionPreviewIdentity>,
+        commit_plan: Option<TransactionCommitPlanHeader>,
+    ) -> Self {
+        Self {
+            state,
+            statement_count,
+            queued_source_bytes,
+            statements,
+            latest_preview,
+            commit_plan,
+            ..opened
         }
     }
 
@@ -524,6 +638,81 @@ impl ReplicatedTransaction {
                 .iter()
                 .map(TransactionStepResult::statement_count)
                 .sum(),
+        }
+    }
+
+    /// Whether this transaction is in a state its transitions reach. Queuing keeps every accepted
+    /// statement and its source bytes until the transaction finishes, which empties the queue and
+    /// keeps what an exact repetition needs of each statement it accepted. A commit applies the
+    /// queue in consecutive steps from its first statement, and a failure names a statement the
+    /// transaction accepted. Readers count statements and number operations on these facts without
+    /// checking them again, so recovery refuses a stored transaction that breaks one.
+    fn is_reachable(&self) -> bool {
+        match &self.state {
+            TransactionState::Open(_) => self.holds_its_queue(),
+            TransactionState::Committing(progress) => {
+                self.holds_its_queue() && self.holds_commit_progress(progress)
+            }
+            TransactionState::Finished(finished) => {
+                self.statements.is_empty()
+                    && self.queued_source_bytes == 0
+                    && finished.accepted.len() == self.statement_count
+                    && self.holds_finished_outcome(finished)
+            }
+        }
+    }
+
+    /// Whether the queue holds as many statements as were accepted, and exactly their source
+    /// bytes.
+    fn holds_its_queue(&self) -> bool {
+        if self.statements.len() != self.statement_count {
+            return false;
+        }
+        let mut source_bytes = 0_u64;
+        for statement in &self.statements {
+            let Some(total) = source_bytes.checked_add(statement.source_bytes()) else {
+                return false;
+            };
+            source_bytes = total;
+        }
+        source_bytes == self.queued_source_bytes
+    }
+
+    /// Whether `progress` applied consecutive steps from the first statement up to its next one,
+    /// within the queue, and a step it is applying continues from there inside the queue.
+    fn holds_commit_progress(&self, progress: &TransactionCommitProgress) -> bool {
+        let queued = self.statements.len();
+        let applied = TransactionStepResult::end_of_consecutive(&progress.results);
+        if applied != Some(progress.next_statement) || progress.next_statement > queued {
+            return false;
+        }
+        let Some(applying) = &progress.applying else {
+            return true;
+        };
+        let applying_count = applying.next_statement.checked_sub(progress.next_statement);
+        applying.next_statement > progress.next_statement
+            && applying.next_statement <= queued
+            && applying.result.first_statement() == progress.next_statement
+            && applying_count == Some(applying.result.statement_count())
+    }
+
+    /// Whether `finished` applied consecutive steps from the first statement within the accepted
+    /// ones, and a failure names an accepted statement.
+    fn holds_finished_outcome(&self, finished: &FinishedTransaction) -> bool {
+        let Some(applied) = TransactionStepResult::end_of_consecutive(&finished.results) else {
+            return false;
+        };
+        if applied > self.statement_count {
+            return false;
+        }
+        match &finished.outcome {
+            TransactionOutcome::Failed { failing_step, .. }
+            | TransactionOutcome::PlanningInputsChanged { failing_step, .. } => {
+                *failing_step < self.statement_count
+            }
+            TransactionOutcome::Committed
+            | TransactionOutcome::Reverted
+            | TransactionOutcome::Expired => true,
         }
     }
 
@@ -609,6 +798,19 @@ impl ReplicatedTransaction {
             if existing.request == *statement {
                 return Ok(TransactionQueueAdmission::Existing(
                     existing.admission.clone(),
+                ));
+            }
+            return Err(Report::new(TransactionMutationError::RequestConflict {
+                id: self.id.clone(),
+                request_reference: statement.request_reference.clone(),
+            }));
+        }
+        if let TransactionState::Finished(finished) = &self.state
+            && let Some(accepted) = finished.accepted_statement(&statement.request_reference)
+        {
+            if accepted.accepted_request(statement) {
+                return Ok(TransactionQueueAdmission::Existing(
+                    accepted.admission.clone(),
                 ));
             }
             return Err(Report::new(TransactionMutationError::RequestConflict {
@@ -1067,13 +1269,17 @@ impl ReplicatedTransaction {
         outcome: TransactionOutcome,
         results: Vec<TransactionStepResult>,
     ) {
-        self.statements.clear();
+        let accepted = std::mem::take(&mut self.statements)
+            .into_iter()
+            .map(AcceptedTransactionStatement::accepted)
+            .collect();
         self.queued_source_bytes = 0;
         self.state = TransactionState::Finished(FinishedTransaction {
             outcome,
             outcome_revision,
             finished_at: at,
             results,
+            accepted,
         });
     }
 }
@@ -1305,6 +1511,9 @@ pub(crate) fn assert_count_archives(count: usize) {
         statement: Statement::ShowTransactions(nervix_models::ShowTransactions),
     };
     assert_round_trip(&request);
+    assert_round_trip(&AcceptedTransactionStatement::accepted(
+        TransactionStatement::test_admitted(request),
+    ));
     assert_round_trip(&TransactionQueueLimits {
         max_statements: count,
         max_source_bytes: 1024,
@@ -1627,6 +1836,112 @@ mod tests {
             panic!("an invalid result must leave the transaction committing");
         };
         assert!(progress.applying.is_some());
+    }
+
+    #[test]
+    fn a_finished_transaction_answers_each_accepted_append_with_its_recorded_admission() {
+        let owner = test_owner();
+        let domain = test_domain();
+        let limits = TransactionQueueLimits {
+            max_statements: 2,
+            max_source_bytes: 1024,
+        };
+        let mut committed = transaction_with_one_statement();
+        let accepted = committed
+            .statements
+            .first()
+            .assured("the test transaction queued one statement")
+            .clone();
+        committed
+            .begin_application(0, Timestamp::from_unix_nanos(4), applying_step())
+            .assured("the application step spans the queued test statement");
+        committed
+            .complete_application(
+                0,
+                Timestamp::from_unix_nanos(5),
+                5,
+                ActualExecutionStepImpact::applying(),
+                None,
+            )
+            .assured("the last applying step completes the commit");
+
+        let mut reverted = ReplicatedTransaction::open(
+            "reverted".to_string(),
+            domain.clone(),
+            owner.clone(),
+            activity(1),
+        );
+        reverted
+            .queue(&owner, &domain, activity(2), 2, accepted.clone(), limits)
+            .assured("the first test statement is within every admission limit");
+        reverted
+            .revert(&owner, activity(3), 3)
+            .assured("the owner reverts its open test transaction");
+
+        let mut expired = ReplicatedTransaction::open(
+            "expired".to_string(),
+            domain.clone(),
+            owner.clone(),
+            activity(1),
+        );
+        expired
+            .queue(&owner, &domain, activity(2), 2, accepted.clone(), limits)
+            .assured("the first test statement is within every admission limit");
+        assert!(
+            expired
+                .expire(Timestamp::from_unix_nanos(i64::MAX), 3)
+                .assured("an open transaction past its deadline expires")
+        );
+
+        let mut changed_source = accepted.request.clone();
+        changed_source.source = "SHOW TRANSACTIONS;".to_string();
+        let mut changed_position = accepted.request.clone();
+        changed_position.expected_position = 1;
+        let never_accepted = TransactionStatementRequest {
+            request_reference: CommandExecutionReference::parse("request.1")
+                .assured("the test command reference is an accepted literal"),
+            expected_position: 1,
+            source: "SHOW TRANSACTIONS".to_string(),
+            statement: Statement::ShowTransactions(ShowTransactions),
+        };
+        for (finished, outcome) in [
+            (&committed, TransactionOutcome::Committed),
+            (&reverted, TransactionOutcome::Reverted),
+            (&expired, TransactionOutcome::Expired),
+        ] {
+            assert_eq!(finished.finished_outcome(), Some(&outcome));
+            assert!(crate::records::StoredUnder::is_stored_under(
+                finished,
+                &finished.id
+            ));
+            assert_eq!(
+                finished
+                    .queue_admission(&owner, &domain, &accepted.request, limits)
+                    .as_ref()
+                    .map_err(Report::current_context),
+                Ok(&TransactionQueueAdmission::Existing(
+                    accepted.admission.clone()
+                )),
+                "a {} transaction must answer its accepted append",
+                outcome.as_str()
+            );
+            for changed in [&changed_source, &changed_position] {
+                let conflict = finished
+                    .queue_admission(&owner, &domain, changed, limits)
+                    .expect_err("a changed append under an accepted reference must conflict");
+                assert!(matches!(
+                    conflict.current_context(),
+                    TransactionMutationError::RequestConflict { .. }
+                ));
+            }
+            let refused = finished
+                .queue_admission(&owner, &domain, &never_accepted, limits)
+                .expect_err("a finished transaction must refuse an append it never accepted");
+            assert!(matches!(
+                refused.current_context(),
+                TransactionMutationError::NotOpen { .. }
+            ));
+        }
     }
 
     #[test]

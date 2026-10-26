@@ -7,6 +7,14 @@
 //! - **Depends on.** Resource vocabulary and the authenticated interconnect request contract.
 //! - **Must not know.** Resource-store paths, HTTP endpoints, cluster discovery, or handler logic.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use nervix_interconnect::{
@@ -17,6 +25,13 @@ use rkyv::{Archive, Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed resource wire response carries remote publication outcomes"
+    )
+)]
 pub(crate) enum ResourceInterconnectError {
     #[error("authenticated node '{authenticated}' cannot publish resource state for '{declared}'")]
     ReplicaOrigin {

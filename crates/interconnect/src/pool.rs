@@ -7,6 +7,14 @@
 //! - **Depends on.** The execution budget the limits are read from.
 //! - **Must not know.** Connection lifetime, request dispatch, or what any message means.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use meticulous::OptionExt as _;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
 use rkyv::{Archive, Deserialize, Serialize};
@@ -71,6 +79,14 @@ impl PoolClass {
             self,
             Self::Management | Self::Commands | Self::Replication | Self::Relay
         )
+    }
+
+    /// Whether this pool's client connections grant each stream the bulk receive window, backed
+    /// by a `bulk_window` reservation for as long as the stream is open. Only bulk streams carry
+    /// responses large enough to be paced by the other pools' small windows: resource archives,
+    /// runtime checkpoints and snapshots.
+    pub(crate) const fn grants_bulk_receive_window(self) -> bool {
+        matches!(self, Self::Bulk)
     }
 
     pub(crate) fn preconnected_connections_per_peer() -> usize {

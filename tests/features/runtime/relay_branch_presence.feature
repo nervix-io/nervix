@@ -2,12 +2,12 @@ Feature: Relay branch presence
   Scenario Outline: Relay branch presence follows interleaved branches through LRU eviction and recreation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -55,8 +55,8 @@ Feature: Relay branch presence
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR state_notifications
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR state_notifications
+        FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO tenant_state
         INHERIT ALL
@@ -66,8 +66,8 @@ Feature: Relay branch presence
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_notifications
         INHERIT ALL
@@ -178,6 +178,23 @@ Feature: Relay branch presence
     Then within "30s" the relay subscription receives a payload
       """
       {"source":"acme-second","tenant":"acme","user_id":30}
+      """
+    And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"gamma","user_id":31,"source":"input"}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      {"source":"gamma-first","tenant":"gamma","user_id":31}
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme","user_id":32,"source":"input"}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      {"source":"acme-second","tenant":"acme","user_id":32}
       """
     And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
 

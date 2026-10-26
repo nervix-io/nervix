@@ -2,11 +2,11 @@ Feature: Vhost persistence
   Scenario Outline: Vhost definitions are persisted and rendered through SHOW CREATE
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE VHOST edge api.example.com, ws.example.com;
       SHOW CREATE VHOST edge;
@@ -25,7 +25,7 @@ Feature: Vhost persistence
   @command_completion
   Scenario Outline: Uploads are catalog-only and VHOST bindings keep their pinned certificate
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -39,7 +39,7 @@ Feature: Vhost persistence
       """
     And node "node-1" has TLS resource directory "tls_v1" for hosts "pinned-{{test_id}}.example.com"
     And node "node-1" has TLS resource directory "tls_v2" for hosts "pinned-{{test_id}}.example.com"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE invalid_tls;
       UPLOAD RESOURCE invalid_tls VERSION "{{invalid_tls_bundle}}";
@@ -51,7 +51,7 @@ Feature: Vhost persistence
       latest: 1
       versions: 1
       """
-    When these NSPL commands fail with "invalid TLS resource for VHOST 'edge' in domain '{{domain}}'"
+    When these Plexus commands fail with "invalid TLS resource for VHOST 'edge' in domain '{{domain}}'"
       """
       CREATE VHOST edge pinned-{{test_id}}.example.com WITH TLS invalid_tls VERSION 1;
       """
@@ -63,7 +63,7 @@ Feature: Vhost persistence
       """
       no certificates found in TLS CA certificate
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE tls_bundle;
       UPLOAD RESOURCE tls_bundle VERSION "{{tls_v1}}";
@@ -77,7 +77,7 @@ Feature: Vhost persistence
       latest: 2
       versions: 1,2
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       SHOW CREATE VHOST edge;
       """
@@ -95,12 +95,12 @@ Feature: Vhost persistence
   Scenario Outline: TLS vhost definitions preserve explicit resource version through SHOW CREATE
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has TLS resource directory "tls_bundle" for hosts "api.example.com, ws.example.com"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE tls_bundle;
       UPLOAD RESOURCE tls_bundle VERSION "{{tls_bundle}}";
@@ -118,21 +118,21 @@ Feature: Vhost persistence
       | 3            | 0             |
       | 3            | 1             |
 
-  @command_completion
+  @command_completion @vhost_tls_rebinding @deloxide_stress
   Scenario Outline: Rebinding a VHOST to another version of its TLS bundle refreshes every HTTPS listener without pausing ingestion
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has TLS resource directory "tls_v1" for hosts "rotate-{{test_id}}.example.com"
     And node "node-1" has TLS resource directory "tls_v2" for hosts "rotate-{{test_id}}.example.com"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE tls_bundle;
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v1}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
@@ -140,8 +140,8 @@ Feature: Vhost persistence
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge rotate-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 1s DECODE USING event_codec
         TO events
         INHERIT ALL
@@ -152,7 +152,7 @@ Feature: Vhost persistence
       START;
       """
     Then the HTTPS listener of every node for host "rotate-{{test_id}}.example.com" presents the certificate from resource directory "tls_v1"
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v2}}';
       """
@@ -161,7 +161,7 @@ Feature: Vhost persistence
       """
       {"id":1}
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE tls_bundle TO VERSION LATEST;
       """
@@ -176,7 +176,7 @@ Feature: Vhost persistence
       """
     And the HTTPS listener of every node for host "rotate-{{test_id}}.example.com" presents the certificate from resource directory "tls_v2"
     And the background https publishing accepted every payload
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE VHOST edge;
       """
@@ -195,22 +195,22 @@ Feature: Vhost persistence
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has TLS resource directory "tls_v1" for hosts "stopped-{{test_id}}.example.com"
     And node "node-1" has TLS resource directory "tls_v2" for hosts "stopped-{{test_id}}.example.com"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE tls_bundle;
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v1}}';
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v2}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE VHOST edge stopped-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       """
     Then the HTTPS listener of every node for host "stopped-{{test_id}}.example.com" presents the certificate from resource directory "tls_v1"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       REBIND RESOURCE tls_bundle TO VERSION 2 FOR VHOST edge;
       """
@@ -238,22 +238,22 @@ Feature: Vhost persistence
         "tls.key": "not a private key"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE tls_bundle;
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v1}}';
       UPLOAD RESOURCE tls_bundle VERSION '{{invalid_tls_bundle}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE VHOST edge unusable-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       START;
       """
-    When these NSPL commands fail with "invalid TLS resource for VHOST 'edge' in domain '{{domain}}'"
+    When these Plexus commands fail with "invalid TLS resource for VHOST 'edge' in domain '{{domain}}'"
       """
       REBIND RESOURCE tls_bundle TO VERSION 2;
       """
@@ -265,7 +265,7 @@ Feature: Vhost persistence
       """
       no certificates found in TLS CA certificate
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE VHOST edge;
       """
@@ -285,23 +285,23 @@ Feature: Vhost persistence
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has TLS resource directory "tls_v1" for hosts "rollback-{{test_id}}.example.com"
     And node "node-1" has TLS resource directory "tls_v2" for hosts "rollback-{{test_id}}.example.com"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE tls_bundle;
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v1}}';
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_v2}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE VHOST edge rollback-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       START;
       """
     Given the next HTTPS listener installation on node "<failing_node>" fails
-    When these NSPL commands fail with "failed to install the HTTPS listener TLS configuration on node '<failing_node>'"
+    When these Plexus commands fail with "failed to install the HTTPS listener TLS configuration on node '<failing_node>'"
       """
       REBIND RESOURCE tls_bundle TO VERSION 2;
       """
@@ -309,7 +309,7 @@ Feature: Vhost persistence
       """
       the model batch was rolled back
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE VHOST edge;
       """
@@ -327,22 +327,22 @@ Feature: Vhost persistence
   Scenario Outline: Changing a TLS VHOST's hostnames still pauses the domain and refreshes every HTTPS listener
     Given a <cluster_size> node nervix cluster is started
     And node "node-1" has TLS resource directory "tls_bundle" for hosts "before-{{test_id}}.example.com, after-{{test_id}}.example.com"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE tls_bundle;
       UPLOAD RESOURCE tls_bundle VERSION '{{tls_bundle}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE VHOST edge before-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       START;
       """
     Given client "owner" is connected to the leader node
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       BEGIN;
       DROP VHOST edge;
@@ -352,7 +352,7 @@ Feature: Vhost persistence
       """
       quiesce level: DOMAIN_PAUSE
       """
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       COMMIT;
       """

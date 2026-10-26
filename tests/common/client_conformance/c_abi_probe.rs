@@ -36,7 +36,7 @@ const ROWS_DEADLINE_MILLIS: u64 = 120_000;
 /// How long the probe waits for the clock events each step of the scenario produces.
 const CLOCK_DEADLINE_MILLIS: u64 = 120_000;
 
-/// A reporting sink: one call per report line.
+/// A reporting emitter: one call per report line.
 pub(super) type Emit<'a> = dyn FnMut(&str) -> io::Result<()> + 'a;
 
 /// Turns a returned failure into an error, releasing it.

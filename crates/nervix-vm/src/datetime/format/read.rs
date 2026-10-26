@@ -16,6 +16,14 @@
 //! as a nearby instant. Only letter case in names and `AM`/`PM`, and whether an unpadded number
 //! carries a leading zero, are not checked.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::fmt;
 
 use arrow_array::{Array, StringArray, TimestampNanosecondArray};

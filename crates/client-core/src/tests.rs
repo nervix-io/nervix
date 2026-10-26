@@ -11,6 +11,10 @@
 // Shuttle test, so the tests over a real connection, and those that pause Tokio's clock, drive the
 // production build only.
 #[cfg(not(feature = "shuttle"))]
+mod clock_restoration;
+#[cfg(not(feature = "shuttle"))]
+mod reports;
+#[cfg(not(feature = "shuttle"))]
 mod restoration;
 #[cfg(not(feature = "shuttle"))]
 mod session;
@@ -56,7 +60,7 @@ use crate::{
     ServerEvent, SubscriptionEvent, SubscriptionRequest, TlsRequirement,
     connection::{GrpcConnector, ServerDirectory},
     exchange::{
-        EventQueue, EventQueueError, EventSinks, Exchange, ExchangeReader, ExchangeRequests,
+        EventQueue, EventQueueError, EventTargets, Exchange, ExchangeReader, ExchangeRequests,
         PendingReplies, ReaderFlow, RegisteredRequest, SERVER_NOTICE_BYTES, SESSION_LIMITS,
         SUBSCRIPTION_EVENT_BYTES, SUBSCRIPTION_RETAINED_BYTES, SUBSCRIPTIONS_RETAINED_IN_FULL,
         SessionEvents,
@@ -70,6 +74,16 @@ const DEADLINE: Duration = Duration::from_secs(10);
 
 fn domain(name: &str) -> DomainName {
     DomainName::parse(name).assured("the test domain is an accepted literal")
+}
+
+/// The client failure one level beneath the report's current context: the failure an uncertain
+/// outcome stands above.
+#[cfg(not(feature = "shuttle"))]
+fn cause_beneath(report: &error_stack::Report<ClientError>) -> Option<&ClientError> {
+    report
+        .frames()
+        .filter_map(|frame| frame.downcast_ref::<ClientError>())
+        .nth(1)
 }
 
 fn request_id(id: u64) -> RequestId {
@@ -152,6 +166,7 @@ fn command_reply(disposition: CommandDisposition, message: &str) -> ReplyBody {
 fn domain_list_reply() -> ReplyBody {
     ReplyBody::DomainList(DomainList {
         domains: vec![DomainInfo {
+            start_version: 1,
             domain: domain("orders"),
             status: DomainStatus::Running,
             pace: DomainPace::Unpaced,
@@ -260,17 +275,14 @@ fn detached_exchange(
     frames: mpsc::Sender<EncodedFrame<ClientFrame>>,
     pending: Arc<Mutex<PendingReplies>>,
 ) -> Exchange {
-    let sinks = SessionEvents::new().sinks;
-    let generation = sinks.begin_generation();
+    let emitters = SessionEvents::new().emitters;
+    let generation = emitters.begin_generation();
     Exchange {
-        requests: Arc::new(ExchangeRequests {
-            frames,
-            pending,
-            channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
-        }),
+        requests: Arc::new(ExchangeRequests { frames, pending }),
         reader: nervix_primitives::task::spawn(std::future::ready(())),
-        sinks,
+        emitters,
         generation,
+        channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
     }
 }
 
@@ -286,11 +298,11 @@ fn client_reaching(
 ) -> Client {
     let connector = GrpcConnector::new(ConnectOptions::default())
         .assured("options without credentials build no authorization metadata");
-    let sinks = exchange.sinks.clone();
+    let emitters = exchange.emitters.clone();
     let events = SessionEvents {
-        leadership: sinks.leadership.subscribe(),
-        domains: nervix_primitives::sync::Mutex::new(sinks.domains.subscribe()),
-        sinks,
+        leadership: emitters.leadership.subscribe(),
+        domains: nervix_primitives::sync::Mutex::new(emitters.domains.subscribe()),
+        emitters,
     };
     Client::assemble(exchange, events, connector, session_domain, servers)
 }
@@ -370,9 +382,9 @@ impl Loopback {
         let (frames, requests) = mpsc::channel(8);
         let pending = Arc::new(Mutex::new(PendingReplies::new()));
         let mut replacement = detached_exchange(frames, pending.clone());
-        let sinks = self.client.inner.events.sinks.clone();
-        replacement.generation = sinks.begin_generation();
-        replacement.sinks = sinks;
+        let emitters = self.client.inner.events.emitters.clone();
+        replacement.generation = emitters.begin_generation();
+        replacement.emitters = emitters;
         self.requests = requests;
         self.pending = pending;
         self.client.install(replacement).await;
@@ -395,7 +407,7 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
     let (leadership, observed_leadership) = watch::channel(None);
     let (domains, observed_domains) = watch::channel(None);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
-    let sinks = EventSinks {
+    let emitters = EventTargets {
         subscriptions: subscriptions.clone(),
         desired: crate::subscriptions::DesiredSubscriptions::new(),
         notices: notices.clone(),
@@ -405,8 +417,8 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
         producers: crate::producer::ProducerRegistry::default(),
         consumers: crate::consumer::DesiredConsumers::default(),
     };
-    let generation = sinks.begin_generation();
-    let reader = ExchangeReader::new(pending.clone(), sinks, generation);
+    let generation = emitters.begin_generation();
+    let reader = ExchangeReader::new(pending.clone(), emitters, generation);
     ReaderFixture {
         reader,
         pending,
@@ -429,7 +441,8 @@ fn statement_splitting_returns_exact_source_slices() {
     let query = "USE prod; LIST DOMAINS;";
 
     assert_eq!(
-        split_query_statements(query).assured("the literal statement batch is valid current NSPL"),
+        split_query_statements(query)
+            .assured("the literal statement batch is valid current Plexus"),
         ["USE prod;", "LIST DOMAINS;"]
     );
 }
@@ -445,9 +458,9 @@ fn statement_splitting_reports_invalid_source_with_context() {
     );
 
     let rejection = error
-        .downcast_ref::<nervix_nspl::schema::ParseFromSourceError>()
+        .downcast_ref::<nervix_plexus::schema::ParseFromSourceError>()
         .assured("the split keeps the language's report beneath its own context");
-    let nervix_nspl::schema::ParseFromSourceError::Parse { diagnostics, .. } = rejection else {
+    let nervix_plexus::schema::ParseFromSourceError::Parse { diagnostics, .. } = rejection else {
         panic!("the batch lexes, so parsing rejects it: {rejection:?}");
     };
     let span = diagnostics
@@ -747,7 +760,7 @@ async fn connect_rejects_plain_server_when_tls_is_required() {
         .connect(&server)
         .await
         .expect_err("plain server should be rejected when tls is required");
-    assert!(matches!(error, ClientError::TlsRequired));
+    assert!(matches!(error.current_context(), ClientError::TlsRequired));
 }
 
 #[nervix_primitives::test]
@@ -1025,7 +1038,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
     let subscriptions = EventQueue::new(10, 128);
     let (leadership, _) = watch::channel(None);
     let (domains, _) = watch::channel(None);
-    let sinks = EventSinks {
+    let emitters = EventTargets {
         subscriptions,
         desired: crate::subscriptions::DesiredSubscriptions::new(),
         notices: notices.clone(),
@@ -1035,7 +1048,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
         producers: crate::producer::ProducerRegistry::default(),
         consumers: crate::consumer::DesiredConsumers::default(),
     };
-    let generation = sinks.begin_generation();
+    let generation = emitters.begin_generation();
     notices.push(
         &generation,
         ServerEvent {
@@ -1058,7 +1071,6 @@ async fn closing_a_failed_exchange_preserves_its_grpc_status_for_waiters() {
     let exchange = ExchangeRequests {
         frames,
         pending: fixture.pending.clone(),
-        channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
     };
     let mut request = exchange.register().assured("the exchange is open");
     fixture
@@ -1100,6 +1112,27 @@ async fn request_identities_start_at_one_and_are_never_reused() {
 
 #[nervix_primitives::test]
 async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecting() {
+    for backup_wait_timeout in [Duration::ZERO, Duration::from_secs(24 * 60 * 60 + 1)] {
+        nervix_primitives::task::consume_budget().await;
+        let result = Client::connect_with_options(
+            "http://127.0.0.1:9",
+            None,
+            ConnectOptions {
+                backup_wait_timeout,
+                ..ConnectOptions::default()
+            },
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("an unbounded backup wait is rejected before connecting");
+        };
+        assert!(matches!(
+            error.current_context(),
+            ClientError::InvalidDeadline {
+                field: "backup_wait_timeout"
+            }
+        ));
+    }
     let endpoint = Url::parse("http://127.0.0.1:9").assured("the test endpoint is a URL");
     let too_many_seeds = ConnectOptions {
         seed_servers: vec![endpoint.clone(); 33],
@@ -1110,7 +1143,7 @@ async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecti
         panic!("too many seeds are rejected before connecting");
     };
     assert!(matches!(
-        error,
+        error.current_context(),
         ClientError::TooManySeedServers { count: 33 }
     ));
 
@@ -1123,7 +1156,7 @@ async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecti
         panic!("a zero request deadline is rejected before connecting");
     };
     assert!(matches!(
-        error,
+        error.current_context(),
         ClientError::InvalidDeadline {
             field: "request_timeout"
         }
@@ -1137,7 +1170,7 @@ async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecti
     else {
         panic!("a TLS session rejects a plaintext recovery seed");
     };
-    assert!(matches!(error, ClientError::TlsRequired));
+    assert!(matches!(error.current_context(), ClientError::TlsRequired));
 }
 
 #[nervix_primitives::test]
@@ -1373,6 +1406,7 @@ async fn observations_keep_only_their_latest_value() {
             domains: names
                 .iter()
                 .map(|name| DomainInfo {
+                    start_version: 1,
                     domain: domain(name),
                     status: DomainStatus::Running,
                     pace: DomainPace::Unpaced,
@@ -1405,7 +1439,7 @@ async fn observations_keep_only_their_latest_value() {
         fixture
             .domains
             .has_changed()
-            .assured("the domain sink is alive")
+            .assured("the domain emitter is alive")
     );
     let latest = Option::clone(&fixture.domains.borrow_and_update())
         .verified("the reader published a domain list");
@@ -1416,9 +1450,9 @@ async fn observations_keep_only_their_latest_value() {
 async fn the_client_reads_the_latest_observations_of_its_exchange() {
     let client = test_client("tenant");
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
-    let sinks = client.inner.events.sinks.clone();
-    let generation = sinks.begin_generation();
-    let mut reader = ExchangeReader::new(pending, sinks, generation);
+    let emitters = client.inner.events.emitters.clone();
+    let generation = emitters.begin_generation();
+    let mut reader = ExchangeReader::new(pending, emitters, generation);
     assert_eq!(client.leadership(), None);
 
     let observed = LeadershipObserved {
@@ -1432,6 +1466,7 @@ async fn the_client_reads_the_latest_observations_of_its_exchange() {
             domains: names
                 .iter()
                 .map(|name| DomainInfo {
+                    start_version: 1,
                     domain: domain(name),
                     status: DomainStatus::Stopped,
                     pace: DomainPace::Unpaced,
@@ -1447,7 +1482,7 @@ async fn the_client_reads_the_latest_observations_of_its_exchange() {
     let domains = nervix_primitives::time::timeout(DEADLINE, client.next_domain_list())
         .await
         .assured("an observed list is returned at once")
-        .assured("the client's domain sink is alive");
+        .assured("the client's domain emitter is alive");
     assert_eq!(
         domains.len(),
         2,
@@ -1498,7 +1533,7 @@ fn subscription_query_is_rendered() {
         .dropping()
         .with_batch_sample_rate("0.1")
         .with_where_clause(
-            nervix_nspl::parse_expression("input.tenant = \"acme\"")
+            nervix_plexus::parse_expression("input.tenant = \"acme\"")
                 .expect("valid subscription expression"),
         );
     assert_eq!(
@@ -1508,7 +1543,7 @@ fn subscription_query_is_rendered() {
     );
 
     assert_eq!(
-        nervix_nspl::subscribe::delete_subscription_query("sampled_orders"),
+        nervix_plexus::subscribe::delete_subscription_query("sampled_orders"),
         "DELETE SUBSCRIPTION sampled_orders;"
     );
 }
@@ -1767,7 +1802,10 @@ async fn execute_returns_session_closed_when_request_channel_is_closed() {
         .execute("SHOW CLUSTER STATUS;")
         .await
         .expect_err("must fail");
-    assert!(matches!(error, ClientError::SessionClosed));
+    assert!(matches!(
+        error.current_context(),
+        ClientError::SessionClosed
+    ));
 }
 
 #[nervix_primitives::test]
@@ -1843,7 +1881,10 @@ async fn a_subscription_needs_a_selected_domain() {
         .await
         .expect_err("a subscription is refused without a domain");
 
-    assert!(matches!(error, ClientError::NoActiveDomain));
+    assert!(matches!(
+        error.current_context(),
+        ClientError::NoActiveDomain
+    ));
 }
 
 #[nervix_primitives::test]
@@ -1891,7 +1932,7 @@ async fn a_create_subscription_statement_is_sent_as_a_subscribe_request() {
         .client
         .inner
         .events
-        .sinks
+        .emitters
         .close_generation(&generation);
     let interrupted = loopback
         .client
@@ -2123,7 +2164,7 @@ async fn an_acknowledged_subscription_retries_restoration_on_the_replacement_exc
             opened_reply(subscription("live", 2)),
         )
         .await;
-    let mut changed = loopback.client.inner.events.sinks.desired.watch();
+    let mut changed = loopback.client.inner.events.emitters.desired.watch();
     nervix_primitives::time::timeout(DEADLINE, async {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -2162,7 +2203,12 @@ async fn subscription_events_follow_the_next_session_when_nothing_awaits_restora
         .generation
         .clone();
     loopback.pending.lock().close();
-    loopback.client.inner.events.sinks.close_generation(&ended);
+    loopback
+        .client
+        .inner
+        .events
+        .emitters
+        .close_generation(&ended);
     nervix_primitives::task::yield_now().await;
 
     loopback.replace_exchange().await;
@@ -2188,7 +2234,7 @@ async fn subscription_events_follow_the_next_session_when_nothing_awaits_restora
         .await
         .generation
         .clone();
-    loopback.client.inner.events.sinks.subscriptions.push(
+    loopback.client.inner.events.emitters.subscriptions.push(
         &current,
         SubscriptionEvent::DeliveryLost(nervix_client_wire::SubscriptionDeliveryLost {
             subscription: subscription("live", 1),
@@ -2232,7 +2278,7 @@ async fn a_session_lost_before_create_acknowledgement_does_not_restore_the_reque
         .client
         .inner
         .events
-        .sinks
+        .emitters
         .close_generation(&generation);
     assert!(creating.await.assured("the create task completes").is_err());
     let name = SubscriptionName::parse("live").assured("the test name is valid");
@@ -2278,7 +2324,7 @@ async fn a_session_lost_during_unsubscribe_releases_the_name_on_the_next_exchang
         .client
         .inner
         .events
-        .sinks
+        .emitters
         .close_generation(&generation);
     let deleted = deleting
         .await
@@ -2672,13 +2718,13 @@ async fn a_rejected_request_surfaces_as_a_typed_error() {
         rejection,
         field,
         message,
-    } = error
+    } = error.current_context()
     else {
         panic!("the rejection is reported as such, not as {error:?}");
     };
-    assert_eq!(request, RequestKind::ListDomains);
-    assert_eq!(rejection, RequestRejection::TooManyRequestsInFlight);
-    assert_eq!(field, None);
+    assert_eq!(*request, RequestKind::ListDomains);
+    assert_eq!(*rejection, RequestRejection::TooManyRequestsInFlight);
+    assert_eq!(*field, None);
     assert_eq!(message, "too many requests in flight");
 }
 
@@ -2702,26 +2748,32 @@ async fn list_domains_is_served_from_a_domain_list_request() {
     assert!(outcome.succeeded());
     assert_eq!(
         outcome.message,
-        "domains:\norders pace=UNPACED status=RUNNING"
+        "domains:\norders pace=UNPACED status=RUNNING start_version=1"
     );
 }
 
 #[nervix_primitives::test]
 async fn event_streams_end_with_a_session_that_no_known_server_can_reopen() {
     let client = test_client("tenant_a");
-    client.inner.events.sinks.subscriptions.close_current();
-    client.inner.events.sinks.notices.close_current();
+    client.inner.events.emitters.subscriptions.close_current();
+    client.inner.events.emitters.notices.close_current();
     let subscription_error = client
         .next_subscription()
         .await
         .expect_err("must fail once channel is closed");
-    assert!(matches!(subscription_error, ClientError::SessionClosed));
+    assert!(matches!(
+        subscription_error.current_context(),
+        ClientError::SessionClosed
+    ));
 
     let server_error = client
         .next_server_event()
         .await
         .expect_err("must fail once channel is closed");
-    assert!(matches!(server_error, ClientError::SessionClosed));
+    assert!(matches!(
+        server_error.current_context(),
+        ClientError::SessionClosed
+    ));
 }
 
 #[nervix_primitives::test]
@@ -2750,7 +2802,12 @@ async fn an_acknowledged_subscription_that_no_known_server_can_restore_ends_afte
         .generation
         .clone();
     loopback.pending.lock().close();
-    loopback.client.inner.events.sinks.close_generation(&ended);
+    loopback
+        .client
+        .inner
+        .events
+        .emitters
+        .close_generation(&ended);
 
     let SubscriptionEvent::Interrupted(interrupted) = loopback
         .client
@@ -2766,7 +2823,10 @@ async fn an_acknowledged_subscription_that_no_known_server_can_restore_ends_afte
         .next_subscription()
         .await
         .expect_err("no known server can reopen the session");
-    assert!(matches!(error, ClientError::SessionClosed), "{error:?}");
+    assert!(
+        matches!(error.current_context(), ClientError::SessionClosed),
+        "{error:?}"
+    );
 }
 
 #[nervix_primitives::test]
@@ -2777,7 +2837,7 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
         level: NoticeLevel::Warning,
         message: message.to_string(),
     };
-    let notices = &client.inner.events.sinks.notices;
+    let notices = &client.inner.events.emitters.notices;
     notices.push(&generation, notice("dropped"), 1);
     notices.push(&generation, notice("too large"), SERVER_NOTICE_BYTES + 1);
     notices.push(&generation, notice("after the gap"), 1);
@@ -2788,7 +2848,7 @@ async fn the_client_reports_a_notice_gap_once_and_returns_the_notices_after_it()
         .expect_err("the dropped notices are reported as a gap");
     assert!(
         matches!(
-            gap,
+            gap.current_context(),
             ClientError::EventOverflow {
                 stream: crate::EventStreamKind::ServerNotice
             }
@@ -2810,7 +2870,10 @@ async fn suggest_returns_session_closed_when_request_channel_is_closed() {
         .suggest("CREATE ", 7, 64, None)
         .await
         .expect_err("must fail");
-    assert!(matches!(error, ClientError::SessionClosed));
+    assert!(matches!(
+        error.current_context(),
+        ClientError::SessionClosed
+    ));
 }
 
 #[cfg(feature = "autocomplete")]
@@ -2822,7 +2885,7 @@ async fn suggest_refuses_a_cursor_inside_a_character() {
         .await
         .expect_err("must fail");
     assert!(matches!(
-        error,
+        error.current_context(),
         ClientError::InvalidCursor {
             cursor: 1,
             length: 2

@@ -4,11 +4,11 @@ Feature: Altering relay materialized state
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
@@ -18,8 +18,8 @@ Feature: Altering relay materialized state
       CREATE RELAY events SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}-materialized-add.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant
@@ -27,7 +27,7 @@ Feature: Altering relay materialized state
       CREATE SUBSCRIPTION events_subscription TO events;
       START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER RELAY events SET MATERIALIZED STATE LAST BY TIMESTAMP;
       """
@@ -67,12 +67,12 @@ Feature: Altering relay materialized state
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( tenant STRING, seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( tenant string, seq integer );
@@ -83,8 +83,8 @@ Feature: Altering relay materialized state
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       CREATE VHOST edge http-{{test_id}}-materialized-schema.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant
@@ -107,7 +107,7 @@ Feature: Altering relay materialized state
       """
       key={"tenant":"initech"} payload={"seq":2,"tenant":"initech"}
       """
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       BEGIN;
       ALTER WIRE JSON SCHEMA event_wire ADD FIELD note string OPTIONAL;
@@ -162,11 +162,11 @@ Feature: Altering relay materialized state
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -176,8 +176,8 @@ Feature: Altering relay materialized state
       CREATE RELAY projected SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-materialized-drop.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -187,15 +187,15 @@ Feature: Altering relay materialized state
       CREATE SUBSCRIPTION events_subscription TO events;
       START;
       """
-    When these NSPL commands fail with "must declare materialized state"
+    When these Plexus commands fail with "must declare materialized state"
       """
       ALTER RELAY events DROP MATERIALIZED STATE;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       DROP JUNCTION materialized_consumer;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       ALTER RELAY events DROP MATERIALIZED STATE;
       """
@@ -203,7 +203,7 @@ Feature: Altering relay materialized state
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION events_after_drop TO events;
       """
@@ -215,7 +215,7 @@ Feature: Altering relay materialized state
       """
       "seq":9
       """
-    When these NSPL commands fail with "is not materialized"
+    When these Plexus commands fail with "is not materialized"
       """
       SHOW RELAY events MATERIALIZED STATE;
       """

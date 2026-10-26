@@ -4,7 +4,7 @@ Feature: Web console visual codec and signaling protocol creation
   Scenario Outline: A schema codec created from exact wire and internal schema choices is usable
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA visual_payload (message STRING);
@@ -31,12 +31,12 @@ Feature: Web console visual codec and signaling protocol creation
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE CODEC visual_payload_codec"
     And selector ".terminal" contains "FROM WIRE JSON SCHEMA visual_payload_wire"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RELAY visual_inbox SCHEMA visual_payload UNBRANCHED;
       CREATE VHOST visual_edge http-{{test_id}}.example.com;
       CREATE ENDPOINT visual_ingest ON visual_edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR visual_source FROM ENDPOINT visual_ingest MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR visual_source FROM visual_ingest MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING visual_payload_codec TO visual_inbox INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
     Examples:
@@ -48,7 +48,7 @@ Feature: Web console visual codec and signaling protocol creation
   Scenario: A multi-step signaling protocol retains its order and program text
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """
@@ -80,7 +80,7 @@ Feature: Web console visual codec and signaling protocol creation
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "CREATE SIGNALING PROTOCOL visual_handshake"
     And selector ".terminal" contains "WAIT JAQ"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE VHOST visual_edge ws-{{test_id}}.example.com;
       CREATE ENDPOINT visual_socket ON visual_edge PATH '/ws' TYPE WEBSOCKETS WITH SIGNALING PROTOCOL visual_handshake;
@@ -90,7 +90,7 @@ Feature: Web console visual codec and signaling protocol creation
   Scenario: A jaq codec keeps decode, encode and batch programs through canonical creation
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA visual_payload (message STRING);
@@ -129,7 +129,7 @@ Feature: Web console visual codec and signaling protocol creation
         "payload.proto": "syntax = \"proto3\"; package visual; message Payload { string message = 1; }"
       }
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA visual_payload (message STRING);
@@ -167,7 +167,7 @@ Feature: Web console visual codec and signaling protocol creation
   Scenario: An invalid jaq program keeps the editable draft and never reports completion
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA visual_payload (message STRING);
@@ -195,7 +195,7 @@ Feature: Web console visual codec and signaling protocol creation
   Scenario: A codec can choose a wire schema staged earlier in its transaction
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA visual_payload (message STRING);
@@ -252,7 +252,7 @@ Feature: Web console visual codec and signaling protocol creation
   Scenario: Selected codec references survive a leader reconnection
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA visual_payload (message STRING);

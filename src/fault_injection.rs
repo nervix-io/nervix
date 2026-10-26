@@ -4,9 +4,9 @@
 //!
 //! - **Owns.** The shared state used to arm deterministic server failures, pauses, timing
 //!   overrides, listener-address overrides, and test scheduling.
-//! - **Depends on.** Vocabulary identities, Tokio notification primitives, and the decision
-//!   layer's test scheduler mode.
-//! - **Must not know.** Product configuration, NSPL syntax, connector implementations, or runtime
+//! - **Depends on.** Vocabulary identities, connector test-control contracts, execution-sensitive
+//!   notification primitives, and the decision layer's test scheduler mode.
+//! - **Must not know.** Product configuration, Plexus syntax, connector drivers, or runtime
 //!   ownership beyond the typed values needed to select a seam.
 
 #![cfg_attr(
@@ -26,24 +26,61 @@ use std::{
 use ahash::RandomState;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_execution::{CpuClass, Executor, MemoryClass};
+use nervix_connector_syslog::SyslogListenerFault;
+use nervix_execution::Executor;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
-    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
-    RestoreStep,
+    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RelayName,
+    RemoteRuntimeField, RestoreStep,
 };
 use nervix_primitives::{
     collections::DashMap,
     sync::{
-        Arc, CancellationToken,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        blocking::{Mutex, RwLock},
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        blocking::RwLock,
         broadcast, mpsc, oneshot, watch,
     },
 };
-use nervix_recovery::{Discarded as _, NoReceiver as _};
+use nervix_recovery::NoReceiver as _;
 
 use crate::registry::SchedulerMode;
+
+mod backup_cut;
+mod consensus;
+mod domain_clock;
+mod domain_resume;
+mod execution;
+mod handoff_gate_link;
+mod model_publication;
+mod pause;
+mod relay_memory;
+mod relocation_commit;
+mod restarted_voter;
+mod restore_publication;
+#[cfg(test)]
+mod restore_publication_tests;
+mod shutdown_handoff;
+mod standalone_transaction;
+#[cfg(test)]
+mod syslog_tests;
+mod transaction_cleanup;
+mod wasm_reset_publication;
+
+pub use backup_cut::BackupCutBoundary;
+use domain_clock::DomainClockProgressPausePoint;
+pub use domain_resume::DomainResumeBoundary;
+use execution::NodeExecution;
+use handoff_gate_link::HandoffGateLink;
+use model_publication::ModelPublicationRefusal;
+pub use model_publication::ModelPublicationRefusalKind;
+use pause::TestPause;
+use relay_memory::RelayMemoryFill;
+use relocation_commit::RelocationCommitRefusal;
+use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
+use restore_publication::RestorePublicationFailure;
+pub use standalone_transaction::StandaloneTransactionBoundary;
+use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitterFaultMode {
@@ -65,6 +102,23 @@ enum StartupConsensusFault {
     Armed,
 }
 
+/// Whether a node moves what its node database holds in memory into on-disk tables as it stops.
+///
+/// A scenario arms the move before a node stops and reads afterwards whether the stopping node
+/// performed it, so a restart that proves nothing because the move never happened cannot pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeDatabaseFlush {
+    Armed,
+    Flushed,
+}
+
+/// The entity of one domain whose state a backup captures.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CapturedStateOwner {
+    domain: DomainName,
+    entity: ModelName,
+}
+
 /// One cloneable handle for every fault and override a server test can inject.
 ///
 /// Every clone points at the same state, so a Cucumber world can arm a seam after handing the
@@ -78,13 +132,30 @@ pub struct FaultInjection {
 struct FaultInjectionState {
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
-    unavailable_sink_clients: DashMap<String, (), RandomState>,
-    /// One-shot, emitter-scoped sink stalls: the next write of the emitter keeps the sink's answers
+    unavailable_emitter_clients: DashMap<String, (), RandomState>,
+    /// One-shot, emitter-scoped emitter stalls: the next write of the emitter keeps the emitter's answers
     /// for this many of its records, and the answers for the rest are lost.
-    stalled_emitter_sinks: DashMap<String, usize, RandomState>,
+    stalled_emitter_connectors: DashMap<String, usize, RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
+    wasm_reset_publication_authority_losses:
+        DashMap<DomainName, WasmResetPublicationAuthorityLoss, RandomState>,
+    failed_wasm_reset_publications: DashMap<DomainName, WasmResetPublicationFailure, RandomState>,
     /// One-shot, domain-scoped rejections consumed before any entity gate engages.
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
+    /// One-shot, domain-scoped transport failures of the next ownership-handoff gate engagement
+    /// request a coordinator sends to a remote node. Each keeps whether it was delivered, so a
+    /// scenario proves the failure happened instead of assuming it.
+    handoff_engagement_transport_failures:
+        DashMap<DomainName, HandoffEngagementTransportFailure, RandomState>,
+    /// Coordinator-to-node links that lose every ownership-handoff gate engagement request sent
+    /// over them, each with how many requests it lost.
+    lost_handoff_gate_engagements: DashMap<HandoffGateLink, usize, RandomState>,
+    /// One-shot, domain-scoped leader refusals of the next relocation commit, each keeping whether
+    /// it was delivered.
+    refused_relocation_commits: DashMap<DomainName, RelocationCommitRefusal, RandomState>,
+    /// One-shot, domain-scoped leader refusals of the next transaction model step publication and
+    /// of the pause release after it, each keeping how far it was delivered.
+    refused_model_publications: DashMap<DomainName, ModelPublicationRefusal, RandomState>,
     /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
     /// A stale drain observation on one node omits already buffered relay-owner batches.
@@ -94,19 +165,48 @@ struct FaultInjectionState {
     /// One-shot entity-swap failures consumed by the selected runtime node and domain.
     failed_entity_schedule_swaps: DashMap<EntityScheduleSwapFailureKey, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
+    /// One-shot waits, keyed by a stopping node, that the leader spends before it releases the
+    /// cordon that node's own graceful shutdown drain set.
+    delayed_shutdown_cordon_releases: DashMap<ClusterNodeName, Duration, RandomState>,
+    /// Waits, keyed by an ingestor, that its source hosts spend between learning that a batch was
+    /// acknowledged through the graph and letting the source confirm the batch's positions on its
+    /// transport, as a transport slow to answer an acknowledgement would.
+    delayed_source_confirmations: DashMap<DomainNodeRef, Duration, RandomState>,
+    /// Waits, keyed by a deduplicator or window processor, that the snapshot task of each of its
+    /// branches spends after the branch stopped before it writes what the branch published last,
+    /// as storage slow to take a large checkpoint would.
+    delayed_stopped_branch_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
+    /// One-shot failures after earlier restore checkpoints have reached the receiving node.
+    failed_restore_state_installations: DashMap<DomainName, RestoreStagingFailure, RandomState>,
+    /// Failures of every durable publication of a restored domain's state until cleared, each
+    /// keeping whether a publication met it.
+    failed_restore_state_publications: DashMap<DomainName, RestorePublicationFailure, RandomState>,
+    /// One-shot interruptions of a backup's next native metadata section of an entity, after
+    /// this many of its entries.
+    native_metadata_interruptions: DashMap<CapturedStateOwner, u64, RandomState>,
+    /// One-shot interruptions of a backup's next guest save after this many transfer chunks.
+    guest_save_interruptions: DashMap<CapturedStateOwner, u64, RandomState>,
     /// One-shot failures, consumed by the next HTTPS listener configuration a node installs.
     failed_https_listener_installations: DashMap<ClusterNodeName, (), RandomState>,
     consensus_probes: DashMap<ClusterNodeName, ConsensusProbeState, RandomState>,
     /// Consensus storage failures armed as each named node builds its storage, before it answers
     /// any Raft traffic.
     startup_consensus_faults: DashMap<ClusterNodeName, StartupConsensusFault, RandomState>,
+    /// Nodes armed to move their node database into on-disk tables as they stop, and whether
+    /// they did.
+    node_database_flushes: DashMap<ClusterNodeName, NodeDatabaseFlush, RandomState>,
     executions: DashMap<ClusterNodeName, NodeExecution, RandomState>,
     failed_health_responders: DashMap<ClusterNodeName, (), RandomState>,
     failed_health_links: DashMap<HealthResponsePauseKey, (), RandomState>,
     /// A blocked peer drops gossip requests until the scenario restores its links.
     blocked_gossip_nodes: DashMap<ClusterNodeName, Duration, RandomState>,
+    /// Restart regressions retain one relayed heartbeat until the first scheduling pass finishes.
+    startup_voter_gossip: DashMap<ClusterNodeName, StartupVoterGossip, RandomState>,
+    /// Whether a restart fixture waits for the restarted cluster's leader to end its startup voter
+    /// observation, and whether one has.
+    startup_observation_end: watch::Sender<StartupObservationEnd>,
     /// Application health handlers clone a pause so it remains alive after its map guard drops.
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
@@ -126,8 +226,17 @@ struct FaultInjectionState {
     /// assuming it.
     lost_remote_acknowledgements:
         DashMap<RemoteAcknowledgementLink, watch::Sender<RemoteAcknowledgementLoss>, RandomState>,
+    /// Nodes whose relay memory a scenario fills, at once or just before their relay work reaches
+    /// an armed point, and the memory each fill holds.
+    relay_memory_fills: DashMap<ClusterNodeName, RelayMemoryFill, RandomState>,
+    /// The execution budgets each node's relay work charges, registered as the node joins its
+    /// cluster so a scenario can fill its relay memory at once.
+    relay_memory_owners: DashMap<ClusterNodeName, Executor, RandomState>,
     /// The owner pauses one buffered batch before it acquires a dispatch permit and loads routes.
     owner_relay_fanout_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// The owner waits this long before it fans out each buffered batch of a domain's relays, so
+    /// the rows its sources admitted reach their consumers slowly, as on a loaded node.
+    owner_relay_fanout_delays: DashMap<String, Duration, RandomState>,
     /// A local schedule swap pauses after removing one attached emitter from its relay.
     emitter_swap_after_detach_pauses:
         DashMap<(DomainName, EmitterName), Arc<TestPause>, RandomState>,
@@ -141,6 +250,9 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
+    /// One-shot, node-scoped refusals of the next domain-clock authority reconciliation the node
+    /// proposes as leader, consumed before the proposal reaches Raft.
+    domain_clock_authority_proposal_rejections: DashMap<ClusterNodeName, (), RandomState>,
     /// A WASM processor branch holds its next guest-state checkpoint at one window, so a scenario
     /// can end the node while the checkpoint is exactly that far.
     wasm_checkpoint_pauses: DashMap<WasmCheckpointPausePoint, Arc<TestPause>, RandomState>,
@@ -157,6 +269,10 @@ struct FaultInjectionState {
     /// While set, every node refuses to install a runtime-state checkpoint it replicates.
     state_replica_installation_failing: AtomicBool,
     syslog_ingestor_bind_ips: DashMap<ClusterNodeName, IpAddr, RandomState>,
+    /// A scenario can fail one stream accept on a selected bound address, and observe that the
+    /// source consumed the fault before checking its established connections. The armed request
+    /// remains available until acknowledged; another request cannot overwrite it before then.
+    syslog_listener_faults: watch::Sender<Option<SyslogListenerFault>>,
     branch_instance_expiration_scan_interval: RwLock<Option<Duration>>,
     domain_drain_timeout: RwLock<Option<Duration>>,
     entity_gate_deadline: RwLock<Option<Duration>>,
@@ -209,28 +325,6 @@ impl std::fmt::Debug for ConsensusProbe {
     }
 }
 
-#[derive(Debug)]
-struct NodeExecution {
-    executor: Executor,
-    /// Occupying jobs outlive the map guard while they run, so their release senders are shared.
-    holders: Arc<Mutex<Vec<nervix_primitives::sync::blocking::mpsc::Sender<()>>>>,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct TestPauseState {
-    reached: bool,
-    released: bool,
-    delivered: bool,
-}
-
-#[derive(Debug)]
-struct TestPause {
-    state: watch::Sender<TestPauseState>,
-    /// Command pauses are one-shot: later matching requests must be able to drive the failure
-    /// while the selected request remains at its barrier.
-    claimed: AtomicBool,
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct RemoteRelayAdmissionPauseKey {
     domain: String,
@@ -270,13 +364,39 @@ enum RemoteAcknowledgementLoss {
     Lost,
 }
 
+/// Whether the transport failure a scenario armed for a domain's next ownership-handoff gate
+/// engagement request was delivered yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HandoffEngagementTransportFailure {
+    Armed,
+    Delivered,
+}
+
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
+    TransactionCleanup {
+        node: ClusterNodeName,
+        domain: DomainName,
+    },
+    StandaloneTransaction {
+        node: ClusterNodeName,
+        domain: DomainName,
+        boundary: StandaloneTransactionBoundary,
+    },
+    DomainResume {
+        node: ClusterNodeName,
+        domain: DomainName,
+        boundary: DomainResumeBoundary,
+    },
     Admission(ClusterNodeName),
+    RuntimeInstallation(ClusterNodeName),
+    ForcedRecoveryMissingSchedule(ClusterNodeName),
     RuntimePreparation(ClusterNodeName),
+    ApplicationRevisionResponse(ClusterNodeName),
     ReferenceLookup(ClusterNodeName),
     DurableAdmission(ClusterNodeName),
+    Finalization(ClusterNodeName),
     RelocationPublication(DomainName),
     ResponseDelivery(ClusterNodeName),
     ResourceInstallation(ClusterNodeName),
@@ -284,6 +404,20 @@ enum CommandPausePoint {
         node_id: ClusterNodeName,
         step: RestoreStep,
     },
+    BackupCut {
+        domain: DomainName,
+        boundary: BackupCutBoundary,
+    },
+    BackupDownload(ClusterNodeName),
+    RestoreStatePublication {
+        domain: DomainName,
+        coordinator: ClusterNodeName,
+    },
+    RestoreBranchStateConversion(DomainName),
+    IngestorRoutePoll(DomainNodeRef),
+    OwnershipHandoffFlush(DomainName),
+    OwnershipHandoffActivation(DomainName),
+    GracefulDrain(ClusterNodeName),
     TransactionCommit {
         node_id: ClusterNodeName,
         domain: String,
@@ -318,12 +452,6 @@ struct WasmCheckpointPausePoint {
     window: WasmCheckpointWindow,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct DomainClockProgressPausePoint {
-    domain: String,
-    node: Option<ClusterNodeName>,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct LeadershipTransferRequest {
     pub from_node_id: ClusterNodeName,
@@ -333,27 +461,45 @@ pub(crate) struct LeadershipTransferRequest {
 impl Default for FaultInjection {
     fn default() -> Self {
         let (leadership_transfers, _) = broadcast::channel(16);
+        let (syslog_listener_faults, _) = watch::channel(None);
+        let (startup_observation_end, _) = watch::channel(StartupObservationEnd::Unarmed);
         Self {
             inner: Arc::new(FaultInjectionState {
                 emitter_faults: DashMap::default(),
                 failed_ingestors: DashMap::default(),
-                unavailable_sink_clients: DashMap::default(),
-                stalled_emitter_sinks: DashMap::default(),
+                unavailable_emitter_clients: DashMap::default(),
+                stalled_emitter_connectors: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
+                wasm_reset_publication_authority_losses: DashMap::default(),
+                failed_wasm_reset_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
+                handoff_engagement_transport_failures: DashMap::default(),
+                lost_handoff_gate_engagements: DashMap::default(),
+                refused_relocation_commits: DashMap::default(),
+                refused_model_publications: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
                 stale_owner_buffer_drain_reports: DashMap::default(),
                 forced_domain_drain_timeouts: DashMap::default(),
                 failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
+                delayed_shutdown_cordon_releases: DashMap::default(),
+                delayed_source_confirmations: DashMap::default(),
+                delayed_stopped_branch_state_writes: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
+                failed_restore_state_installations: DashMap::default(),
+                failed_restore_state_publications: DashMap::default(),
+                native_metadata_interruptions: DashMap::default(),
+                guest_save_interruptions: DashMap::default(),
                 failed_https_listener_installations: DashMap::default(),
                 consensus_probes: DashMap::default(),
                 startup_consensus_faults: DashMap::default(),
+                node_database_flushes: DashMap::default(),
                 executions: DashMap::default(),
                 failed_health_responders: DashMap::default(),
                 failed_health_links: DashMap::default(),
                 blocked_gossip_nodes: DashMap::default(),
+                startup_voter_gossip: DashMap::default(),
+                startup_observation_end,
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
@@ -361,12 +507,16 @@ impl Default for FaultInjection {
                 remote_relay_admission_pauses: DashMap::default(),
                 remote_relay_dispatch_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
+                relay_memory_fills: DashMap::default(),
+                relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
+                owner_relay_fanout_delays: DashMap::default(),
                 emitter_swap_after_detach_pauses: DashMap::default(),
                 ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
+                domain_clock_authority_proposal_rejections: DashMap::default(),
                 wasm_checkpoint_pauses: DashMap::default(),
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
@@ -375,6 +525,7 @@ impl Default for FaultInjection {
                 wasm_state_reset_fresh_initialization_failing: AtomicBool::new(false),
                 state_replica_installation_failing: AtomicBool::new(false),
                 syslog_ingestor_bind_ips: DashMap::default(),
+                syslog_listener_faults,
                 branch_instance_expiration_scan_interval: RwLock::new(None),
                 domain_drain_timeout: RwLock::new(None),
                 entity_gate_deadline: RwLock::new(None),
@@ -386,7 +537,225 @@ impl Default for FaultInjection {
     }
 }
 
+/// One precise checkpoint staging boundary of a stopped-domain restore installation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreStagingFailure {
+    Guest,
+    Materialized,
+    BranchState,
+}
+
 impl FaultInjection {
+    pub fn fail_restored_materialized_checkpoint(&self, domain: DomainName) {
+        self.inner
+            .failed_restore_state_installations
+            .insert(domain, RestoreStagingFailure::Materialized);
+    }
+    pub fn fail_restored_wasm_checkpoint(&self, domain: DomainName) {
+        self.inner
+            .failed_restore_state_installations
+            .insert(domain, RestoreStagingFailure::Guest);
+    }
+
+    pub fn fail_restored_branch_state_checkpoint(&self, domain: DomainName) {
+        self.inner
+            .failed_restore_state_installations
+            .insert(domain, RestoreStagingFailure::BranchState);
+    }
+
+    /// Interrupt the next branch lifecycle or Kafka offset section of `entity` that a backup of
+    /// `domain` streams, once, after it has asked for `entries` of its entries.
+    pub fn interrupt_native_metadata_capture(
+        &self,
+        domain: DomainName,
+        entity: ModelName,
+        entries: u64,
+    ) {
+        self.inner
+            .native_metadata_interruptions
+            .insert(CapturedStateOwner { domain, entity }, entries);
+    }
+
+    /// Interrupt the next guest save of `entity` that a backup of `domain` streams, once, after
+    /// writing `chunks` of its bytes.
+    pub fn interrupt_guest_save_capture(&self, domain: DomainName, entity: ModelName, chunks: u64) {
+        self.inner
+            .guest_save_interruptions
+            .insert(CapturedStateOwner { domain, entity }, chunks);
+    }
+
+    /// Hold the restore of `domain` after its models are applied and its branch lifecycles are
+    /// staged, before it converts its first archived deduplicator keyspace or window.
+    pub fn pause_restore_branch_state_conversion(&self, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::RestoreBranchStateConversion(domain));
+    }
+
+    pub async fn wait_for_restore_branch_state_conversion_pause(&self, domain: &DomainName) {
+        self.wait_for_command_pause(&CommandPausePoint::RestoreBranchStateConversion(
+            domain.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_restore_branch_state_conversion_pause(&self, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::RestoreBranchStateConversion(
+            domain.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_restore_branch_state_conversion_if_armed(&self, domain: &DomainName) {
+        self.pause_command_if_armed(CommandPausePoint::RestoreBranchStateConversion(
+            domain.clone(),
+        ))
+        .await;
+    }
+
+    pub fn pause_restore_state_publication(
+        &self,
+        domain: DomainName,
+        coordinator: ClusterNodeName,
+    ) {
+        self.arm_command_pause(CommandPausePoint::RestoreStatePublication {
+            domain,
+            coordinator,
+        });
+    }
+
+    pub async fn wait_for_restore_state_publication(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        self.wait_for_command_pause(&CommandPausePoint::RestoreStatePublication {
+            domain: domain.clone(),
+            coordinator: coordinator.clone(),
+        })
+        .await;
+    }
+
+    pub fn release_restore_state_publication(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        self.release_command_pause(&CommandPausePoint::RestoreStatePublication {
+            domain: domain.clone(),
+            coordinator: coordinator.clone(),
+        });
+    }
+
+    pub(crate) async fn pause_restore_state_publication_if_armed(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        let point = CommandPausePoint::RestoreStatePublication {
+            domain: domain.clone(),
+            coordinator: coordinator.clone(),
+        };
+        let Some(pause) = self
+            .inner
+            .command_pauses
+            .get(&point)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        pause.wait_until_released().await;
+        // Retain the observation until the scenario sees the authority refusal after release.
+    }
+
+    pub(crate) fn mark_restore_state_publication_refused(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        if let Some(pause) =
+            self.inner
+                .command_pauses
+                .get(&CommandPausePoint::RestoreStatePublication {
+                    domain: domain.clone(),
+                    coordinator: coordinator.clone(),
+                })
+        {
+            pause.mark_delivered();
+        }
+    }
+
+    pub async fn wait_for_restore_state_publication_refusal(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        let point = CommandPausePoint::RestoreStatePublication {
+            domain: domain.clone(),
+            coordinator: coordinator.clone(),
+        };
+        let pause = self
+            .inner
+            .command_pauses
+            .get(&point)
+            .assured("the scenario armed this publication pause")
+            .clone();
+        pause.wait_until_delivered().await;
+        self.inner.command_pauses.remove(&point);
+    }
+
+    pub(crate) fn native_metadata_capture_interruption(
+        &self,
+        domain: &DomainName,
+        entity: &ModelName,
+    ) -> Option<u64> {
+        let owner = CapturedStateOwner {
+            domain: domain.clone(),
+            entity: entity.clone(),
+        };
+        let (_, entries) = self.inner.native_metadata_interruptions.remove(&owner)?;
+        Some(entries)
+    }
+
+    pub(crate) fn guest_save_capture_interruption(
+        &self,
+        domain: &DomainName,
+        entity: &ModelName,
+    ) -> Option<u64> {
+        let owner = CapturedStateOwner {
+            domain: domain.clone(),
+            entity: entity.clone(),
+        };
+        let (_, chunks) = self.inner.guest_save_interruptions.remove(&owner)?;
+        Some(chunks)
+    }
+
+    pub(crate) fn restored_wasm_checkpoint_fails(&self, domain: &DomainName) -> bool {
+        self.inner
+            .failed_restore_state_installations
+            .remove_if(domain, |_, fault| *fault == RestoreStagingFailure::Guest)
+            .is_some()
+    }
+
+    pub(crate) fn restored_materialized_checkpoint_fails(&self, domain: &DomainName) -> bool {
+        self.inner
+            .failed_restore_state_installations
+            .remove_if(domain, |_, fault| {
+                *fault == RestoreStagingFailure::Materialized
+            })
+            .is_some()
+    }
+
+    pub(crate) fn restored_branch_state_checkpoint_fails(&self, domain: &DomainName) -> bool {
+        self.inner
+            .failed_restore_state_installations
+            .remove_if(domain, |_, fault| {
+                *fault == RestoreStagingFailure::BranchState
+            })
+            .is_some()
+    }
+
     pub(crate) fn register_wasm_state_reset_coordinator(
         &self,
         node: ClusterNodeName,
@@ -640,6 +1009,57 @@ impl FaultInjection {
         !state.test_probe.storage_fault().is_armed()
     }
 
+    /// Arm `node` to move everything its node database holds in memory into on-disk tables the next
+    /// time it stops, once every owner of that database has stopped. A long-running node reaches the
+    /// same layout when journal rotation flushes its memtables, so the next start reads every record
+    /// back from a table rather than from the journal.
+    pub fn flush_node_database_on_stop(&self, node: ClusterNodeName) {
+        self.inner
+            .node_database_flushes
+            .insert(node, NodeDatabaseFlush::Armed);
+    }
+
+    /// Whether `node` moved its node database into on-disk tables when it last stopped while armed.
+    pub fn node_database_flushed(&self, node: &ClusterNodeName) -> bool {
+        let flush = self.inner.node_database_flushes.get(node);
+        matches!(flush.as_deref(), Some(NodeDatabaseFlush::Flushed))
+    }
+
+    /// Called by a stopping node with its node database once every owner of the database has
+    /// stopped. An armed node moves every keyspace's memtable into an on-disk table and records
+    /// that it did; a failure leaves the node armed, which the scenario reports.
+    pub(crate) fn flush_node_database_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        database: &fjall::Database,
+    ) {
+        let armed = self.inner.node_database_flushes.get(node);
+        let Some(NodeDatabaseFlush::Armed) = armed.as_deref() else {
+            return;
+        };
+        drop(armed);
+        for name in database.list_keyspace_names() {
+            if let Err(error) = Self::flush_keyspace(database, &name) {
+                tracing::error!(
+                    node = %node,
+                    keyspace = %&*name,
+                    error = %error,
+                    "failed to move a node database keyspace into an on-disk table"
+                );
+                return;
+            }
+        }
+        self.inner
+            .node_database_flushes
+            .insert(node.clone(), NodeDatabaseFlush::Flushed);
+    }
+
+    /// Moves the memtable of the keyspace `name` into an on-disk table and waits until it is there.
+    fn flush_keyspace(database: &fjall::Database, name: &str) -> Result<(), fjall::Error> {
+        let keyspace = database.keyspace(name, fjall::KeyspaceCreateOptions::default)?;
+        keyspace.rotate_memtable_and_wait()
+    }
+
     pub fn fail_emitter(&self, emitter: &str) {
         self.inner
             .emitter_faults
@@ -674,27 +1094,27 @@ impl FaultInjection {
             .remove(&ingestor.to_ascii_lowercase());
     }
 
-    pub fn fail_sink_client_unavailable(&self, emitter: &str) {
+    pub fn fail_emitter_client_unavailable(&self, emitter: &str) {
         self.inner
-            .unavailable_sink_clients
+            .unavailable_emitter_clients
             .insert(emitter.to_ascii_lowercase(), ());
     }
 
-    pub fn clear_sink_client_fault(&self, emitter: &str) {
+    pub fn clear_emitter_client_fault(&self, emitter: &str) {
         self.inner
-            .unavailable_sink_clients
+            .unavailable_emitter_clients
             .remove(&emitter.to_ascii_lowercase());
     }
 
-    /// Makes the sink of `emitter` stall after it resolved `resolved` records of its next write.
+    /// Makes the emitter of `emitter` stall after it resolved `resolved` records of its next write.
     ///
-    /// The sink still writes every record, but the emitter receives only its answers for the first
+    /// The emitter still writes every record, but the emitter receives only its answers for the first
     /// `resolved` records in the order it handed them over, as it does from a broker that stops
     /// answering after it accepted the rest. The write then fails the way an unanswered one does,
     /// so the emitter cannot tell which of the other records landed.
-    pub fn stall_emitter_sink_after_resolving(&self, emitter: &str, resolved: usize) {
+    pub fn stall_emitter_connector_after_resolving(&self, emitter: &str, resolved: usize) {
         self.inner
-            .stalled_emitter_sinks
+            .stalled_emitter_connectors
             .insert(emitter.to_ascii_lowercase(), resolved);
     }
 
@@ -709,6 +1129,23 @@ impl FaultInjection {
     /// Rejects the next entity gate before any node can engage it.
     pub fn fail_next_entity_gate_engagement(&self, domain: DomainName) {
         self.inner.failed_entity_gate_engagements.insert(domain, ());
+    }
+
+    /// Fails the next ownership-handoff gate engagement request a coordinator sends to a remote
+    /// node in `domain` in transport, as a broken interconnect stream would, without sending it.
+    pub fn break_next_handoff_engagement_transport(&self, domain: DomainName) {
+        self.inner
+            .handoff_engagement_transport_failures
+            .insert(domain, HandoffEngagementTransportFailure::Armed);
+    }
+
+    /// Whether the transport failure armed for `domain`'s next ownership-handoff gate engagement
+    /// request was delivered.
+    pub fn handoff_engagement_transport_failure_delivered(&self, domain: &DomainName) -> bool {
+        let Some(failure) = self.inner.handoff_engagement_transport_failures.get(domain) else {
+            return false;
+        };
+        *failure == HandoffEngagementTransportFailure::Delivered
     }
 
     /// Forces the next entity drain in `domain` to report its normal timeout outcome after one
@@ -746,6 +1183,39 @@ impl FaultInjection {
         self.inner.transaction_binding_drops.insert(node_id, ());
     }
 
+    /// Makes the leader wait `delay` before it releases the cordon that `stopping_node`'s own
+    /// graceful shutdown drain set, the next time it releases one, as a loaded worker whose
+    /// consensus writes take longer than usual would.
+    pub fn delay_shutdown_cordon_release_of(
+        &self,
+        stopping_node: ClusterNodeName,
+        delay: Duration,
+    ) {
+        self.inner
+            .delayed_shutdown_cordon_releases
+            .insert(stopping_node, delay);
+    }
+
+    /// Makes every source host of `ingestor` wait `delay` after a batch was acknowledged through
+    /// the graph before its source confirms the batch's positions on its transport, as a transport
+    /// slow to answer an acknowledgement would. A host reads the delay as it starts, so a scenario
+    /// arms it before the ingestor starts.
+    pub fn delay_source_confirmation(&self, ingestor: DomainNodeRef, delay: Duration) {
+        self.inner
+            .delayed_source_confirmations
+            .insert(ingestor, delay);
+    }
+
+    /// Makes the snapshot task of every branch of `processor`, a deduplicator or window
+    /// processor, wait `delay` after its branch stops before it writes what the branch published
+    /// last, as storage slow to take a large checkpoint would. A wait longer than a branch's stop
+    /// grace leaves that write running after the branch's task was ended.
+    pub fn delay_stopped_branch_state_writes(&self, processor: DomainNodeRef, delay: Duration) {
+        self.inner
+            .delayed_stopped_branch_state_writes
+            .insert(processor, delay);
+    }
+
     /// Fails the next resource version `node_id` installs, after the node installed and published
     /// the version and before the upload is promoted, so a scenario can produce a failed version
     /// whose archive is present.
@@ -761,99 +1231,6 @@ impl FaultInjection {
             .insert(node_id, ());
     }
 
-    /// Fill every worker of `class` on `node_id` and return once every occupying job is running.
-    pub async fn occupy_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
-        let node = self
-            .inner
-            .executions
-            .get(node_id)
-            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"));
-        let executor = node.executor.clone();
-        let holders = node.holders.clone();
-        drop(node);
-        let workers = executor.snapshot().cpu_class(class).workers;
-        let started = Arc::new(AtomicUsize::new(0));
-        for _ in 0..workers {
-            let reservation = executor
-                .try_reserve(MemoryClass::Bulk, 0)
-                .unwrap_or_else(|error| {
-                    panic!("bulk admission must accept a zero charge: {error}")
-                });
-            let (holder, held) = nervix_primitives::sync::blocking::mpsc::channel();
-            holders.lock().push(holder);
-            let executor = executor.clone();
-            let started = started.clone();
-            nervix_primitives::task::spawn(async move {
-                executor
-                    .run_cpu(class, reservation, move |_charge, _cancellation| {
-                        started.fetch_add(1, Ordering::AcqRel);
-                        // Park until the scenario drops the holder so occupancy consumes no
-                        // CPU. Nothing is ever sent, so the disconnect is the wake-up rather
-                        // than a failure.
-                        held.recv().discarded(
-                            "dropping the holder is how the scenario releases this worker",
-                        );
-                    })
-                    .await
-                    .discarded(
-                        "this job exists to hold a worker until the scenario releases it; its \
-                         outcome is not what the scenario reads",
-                    );
-            });
-        }
-        while started.load(Ordering::Acquire) < workers {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-    }
-
-    /// Fill every worker of `class` on `node_id`, then every place in its wait queue, and return
-    /// once the class refuses the next job it is handed.
-    pub async fn saturate_execution(&self, node_id: &ClusterNodeName, class: CpuClass) {
-        self.occupy_execution(node_id, class).await;
-        let executor = self
-            .inner
-            .executions
-            .get(node_id)
-            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
-            .executor
-            .clone();
-        let capacity = executor.snapshot().cpu_class(class).queue_capacity;
-        for _ in 0..capacity {
-            let reservation = executor
-                .try_reserve(MemoryClass::Bulk, 0)
-                .unwrap_or_else(|error| {
-                    panic!("bulk admission must accept a zero charge: {error}")
-                });
-            let waiter = executor.clone();
-            nervix_primitives::task::spawn(async move {
-                waiter
-                    .run_cpu(class, reservation, |_charge, _cancellation| ())
-                    .await
-                    .discarded(
-                        "this job exists to hold a place in the wait queue; once the scenario \
-                         releases the workers it runs empty",
-                    );
-            });
-        }
-        while executor.snapshot().cpu_class(class).pending < capacity {
-            nervix_primitives::task::consume_budget().await;
-            nervix_primitives::task::yield_now().await;
-        }
-    }
-
-    /// Release every worker a scenario occupied on `node_id`, of every class. The jobs that waited
-    /// behind them then run empty.
-    pub fn release_execution(&self, node_id: &ClusterNodeName) {
-        self.inner
-            .executions
-            .get(node_id)
-            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
-            .holders
-            .lock()
-            .clear();
-    }
-
     pub fn arm_health_response_pause(
         &self,
         probing_node: ClusterNodeName,
@@ -866,6 +1243,42 @@ impl FaultInjection {
             },
             Arc::new(TestPause::default()),
         );
+    }
+
+    /// Holds every revision-query reply from this node until the scenario releases it. Local
+    /// revision publication and gossip continue while the replies retain their sampled values.
+    pub fn pause_application_revision_responses_from(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ApplicationRevisionResponse(node_id));
+    }
+
+    pub async fn wait_for_application_revision_response_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub fn release_application_revision_responses_from(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::ApplicationRevisionResponse(
+            node_id.clone(),
+        ));
+    }
+
+    pub(crate) async fn pause_application_revision_response_if_armed(
+        &self,
+        node_id: &ClusterNodeName,
+    ) {
+        let point = CommandPausePoint::ApplicationRevisionResponse(node_id.clone());
+        let Some(pause) = self
+            .inner
+            .command_pauses
+            .get(&point)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        pause.reach();
+        pause.wait_until_released().await;
     }
 
     pub fn fail_health_responses_from(&self, responding_node: ClusterNodeName) {
@@ -916,6 +1329,7 @@ impl FaultInjection {
     ) -> bool {
         self.inner.blocked_gossip_nodes.contains_key(sending_node)
             || self.inner.blocked_gossip_nodes.contains_key(receiving_node)
+            || self.startup_voter_gossip_exchange_is_blocked(sending_node, receiving_node)
     }
 
     pub(crate) fn gossip_send_delay(&self, destination: &ClusterNodeName) -> Option<Duration> {
@@ -953,6 +1367,49 @@ impl FaultInjection {
 
     pub fn pause_command_admission_on(&self, node_id: ClusterNodeName) {
         self.arm_command_pause(CommandPausePoint::Admission(node_id));
+    }
+
+    /// Holds the next runtime installation the node begins, inside its installation sequence and
+    /// before it synchronizes any domain lifecycle or schedule of the admitted revision.
+    pub fn pause_runtime_installation_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::RuntimeInstallation(node_id));
+    }
+
+    pub async fn wait_for_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_runtime_installation_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::RuntimeInstallation(node_id.clone()));
+    }
+
+    /// Resume a held initial installation only after forced recovery observes its missing
+    /// schedule. The observation precedes release, so the fixture never races two scenario steps
+    /// against the recovery budget.
+    pub fn resume_installation_after_missing_recovery_schedule(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::ForcedRecoveryMissingSchedule(node_id));
+    }
+
+    pub async fn wait_for_missing_recovery_schedule(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::ForcedRecoveryMissingSchedule(
+            node_id.clone(),
+        ))
+        .await;
+    }
+
+    pub(crate) fn missing_recovery_schedule_if_armed(&self, node_id: &ClusterNodeName) {
+        let point = CommandPausePoint::ForcedRecoveryMissingSchedule(node_id.clone());
+        let pause = match self.inner.command_pauses.get(&point) {
+            Some(pause) => pause.value().clone(),
+            None => return,
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        self.release_runtime_installation_pause(node_id);
+        // Keep the one-shot observation until the scenario observes it or finishes cleanup.
     }
 
     pub fn pause_runtime_preparation_on(&self, node_id: ClusterNodeName) {
@@ -1004,6 +1461,21 @@ impl FaultInjection {
 
     pub fn release_command_durable_admission_pause(&self, node_id: &ClusterNodeName) {
         self.release_command_pause(&CommandPausePoint::DurableAdmission(node_id.clone()));
+    }
+
+    /// Holds the next persistent command whose effects returned a terminal result, before the
+    /// node proposes that outcome for its execution reference.
+    pub fn pause_command_finalization_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::Finalization(node_id));
+    }
+
+    pub async fn wait_for_command_finalization_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::Finalization(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_command_finalization_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::Finalization(node_id.clone()));
     }
 
     /// Holds a relocation after it has computed its target schedule but before it validates and
@@ -1074,6 +1546,21 @@ impl FaultInjection {
             node_id: node_id.clone(),
             step: step.clone(),
         });
+    }
+
+    /// Holds the next backup archive download on `node_id`, once, after the node opened the
+    /// retained archive and before it streams any frame of it, so the archive is not collected.
+    pub fn pause_backup_download_on(&self, node_id: ClusterNodeName) {
+        self.arm_command_pause(CommandPausePoint::BackupDownload(node_id));
+    }
+
+    pub async fn wait_for_backup_download_pause(&self, node_id: &ClusterNodeName) {
+        self.wait_for_command_pause(&CommandPausePoint::BackupDownload(node_id.clone()))
+            .await;
+    }
+
+    pub fn release_backup_download_pause(&self, node_id: &ClusterNodeName) {
+        self.release_command_pause(&CommandPausePoint::BackupDownload(node_id.clone()));
     }
 
     pub fn pause_transaction_commit_after(
@@ -1279,6 +1766,13 @@ impl FaultInjection {
         );
     }
 
+    /// Makes the owner of each of `domain`'s relays wait `delay` before it fans out every batch.
+    pub fn delay_owner_relay_fanout(&self, domain: impl Into<String>, delay: Duration) {
+        self.inner
+            .owner_relay_fanout_delays
+            .insert(domain.into().to_ascii_lowercase(), delay);
+    }
+
     pub async fn wait_for_owner_relay_fanout_pause(&self, domain: &str) {
         let pause = self.owner_relay_fanout_pause(&domain.to_ascii_lowercase());
         pause.wait_until_reached().await;
@@ -1318,6 +1812,50 @@ impl FaultInjection {
     ) {
         let pause = self.emitter_swap_after_detach_pause(domain, emitter);
         pause.release();
+    }
+
+    /// Holds one route after accepting its input and before observing handoff or flush state.
+    pub fn pause_ingestor_route_poll(&self, ingestor: DomainNodeRef) {
+        self.arm_command_pause(CommandPausePoint::IngestorRoutePoll(ingestor));
+    }
+
+    pub async fn wait_for_ingestor_route_poll_pause(&self, ingestor: &DomainNodeRef) {
+        self.wait_for_command_pause(&CommandPausePoint::IngestorRoutePoll(ingestor.clone()))
+            .await;
+    }
+
+    pub fn release_ingestor_route_poll_pause(&self, ingestor: &DomainNodeRef) {
+        self.release_command_pause(&CommandPausePoint::IngestorRoutePoll(ingestor.clone()));
+    }
+
+    pub(crate) async fn pause_ingestor_route_poll_if_armed(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        source: &RelayName,
+    ) {
+        let ingestor = DomainNodeRef::node_in(domain.clone(), kind, ModelName::from(source));
+        self.pause_command_if_armed(CommandPausePoint::IngestorRoutePoll(ingestor))
+            .await;
+    }
+
+    /// Holds handoff after publishing its force-flush generation, before declaring the hold ready.
+    pub fn pause_ownership_handoff_flush(&self, domain: DomainName) {
+        self.arm_command_pause(CommandPausePoint::OwnershipHandoffFlush(domain));
+    }
+
+    pub async fn wait_for_ownership_handoff_flush_pause(&self, domain: &DomainName) {
+        self.wait_for_command_pause(&CommandPausePoint::OwnershipHandoffFlush(domain.clone()))
+            .await;
+    }
+
+    pub fn release_ownership_handoff_flush_pause(&self, domain: &DomainName) {
+        self.release_command_pause(&CommandPausePoint::OwnershipHandoffFlush(domain.clone()));
+    }
+
+    pub(crate) async fn pause_ownership_handoff_flush_if_armed(&self, domain: &DomainName) {
+        self.pause_command_if_armed(CommandPausePoint::OwnershipHandoffFlush(domain.clone()))
+            .await;
     }
 
     pub fn pause_ingestor_dispatch(&self, ingestor: DomainNodeRef) {
@@ -1382,40 +1920,6 @@ impl FaultInjection {
     pub fn release_ownership_handoff_prepare_response_pause(&self, domain: &str) {
         let pause = self.ownership_handoff_prepare_response_pause(&domain.to_ascii_lowercase());
         pause.release();
-    }
-
-    pub fn pause_domain_clock_progress(&self, domain: impl Into<String>) {
-        self.inner.domain_clock_progress_pauses.insert(
-            DomainClockProgressPausePoint {
-                domain: domain.into().to_ascii_lowercase(),
-                node: None,
-            },
-            Arc::new(TestPause::default()),
-        );
-    }
-
-    pub fn set_domain_clock_initial_elapsed(&self, domain: DomainName, elapsed: Duration) {
-        self.inner
-            .domain_clock_initial_elapsed
-            .insert(domain, elapsed);
-    }
-
-    pub(crate) fn take_domain_clock_initial_elapsed(
-        &self,
-        domain: &DomainName,
-    ) -> Option<Duration> {
-        let (_, elapsed) = self.inner.domain_clock_initial_elapsed.remove(domain)?;
-        Some(elapsed)
-    }
-
-    pub fn pause_domain_clock_progress_on(&self, domain: impl Into<String>, node: ClusterNodeName) {
-        self.inner.domain_clock_progress_pauses.insert(
-            DomainClockProgressPausePoint {
-                domain: domain.into().to_ascii_lowercase(),
-                node: Some(node),
-            },
-            Arc::new(TestPause::default()),
-        );
     }
 
     /// Hold the next guest-state checkpoint of `processor` at `window`, on whichever node and branch
@@ -1515,59 +2019,30 @@ impl FaultInjection {
             .store(false, Ordering::Release);
     }
 
-    pub async fn wait_for_domain_clock_progress_pause(&self, domain: &str) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: None,
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.wait_until_reached().await;
-    }
-
-    pub async fn wait_for_domain_clock_progress_pause_on(
-        &self,
-        domain: &str,
-        node: &ClusterNodeName,
-    ) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.wait_until_reached().await;
-    }
-
-    pub async fn release_domain_clock_progress(&self, domain: &str) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: None,
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.release();
-        pause.wait_until_delivered().await;
-        self.inner.domain_clock_progress_pauses.remove(&point);
-    }
-
-    pub async fn release_domain_clock_progress_on(&self, domain: &str, node: &ClusterNodeName) {
-        let point = DomainClockProgressPausePoint {
-            domain: domain.to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let pause = self.domain_clock_progress_pause(&point);
-        pause.release();
-        pause.wait_until_delivered().await;
-        self.inner.domain_clock_progress_pauses.remove(&point);
-    }
-
-    pub fn release_all_domain_clock_progress(&self) {
-        for pause in &self.inner.domain_clock_progress_pauses {
-            pause.release();
-        }
-        self.inner.domain_clock_progress_pauses.clear();
-    }
-
     pub fn set_syslog_ingestor_bind_ip(&self, node_id: ClusterNodeName, host: IpAddr) {
         self.inner.syslog_ingestor_bind_ips.insert(node_id, host);
+    }
+
+    pub fn fail_next_syslog_stream_accept(&self, bind_addr: String) -> watch::Receiver<bool> {
+        let (fired, observed) = watch::channel(false);
+        assert!(
+            self.inner.syslog_listener_faults.receiver_count() > 0,
+            "a Syslog source must be subscribed before its listener fault is armed"
+        );
+        self.inner.syslog_listener_faults.send_modify(|pending| {
+            if let Some(fault) = pending {
+                assert!(
+                    *fault.fired.borrow(),
+                    "observe the armed Syslog listener fault before arming another"
+                );
+            }
+            *pending = Some(SyslogListenerFault { bind_addr, fired });
+        });
+        observed
+    }
+
+    pub(crate) fn syslog_listener_faults(&self) -> watch::Sender<Option<SyslogListenerFault>> {
+        self.inner.syslog_listener_faults.clone()
     }
 
     pub fn set_branch_instance_expiration_scan_interval(&self, interval: Duration) {
@@ -1651,31 +2126,31 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "the scenario selects one retained sink unavailability seam",
+            reason = "the scenario selects one retained emitter unavailability seam",
             key = "one test emitter",
             bound = "one keyed presence read with no retained guard"
         )
     )]
-    pub(crate) fn sink_client_is_unavailable(&self, emitter: &EmitterName) -> bool {
+    pub(crate) fn emitter_client_is_unavailable(&self, emitter: &EmitterName) -> bool {
         self.inner
-            .unavailable_sink_clients
+            .unavailable_emitter_clients
             .contains_key(&emitter.as_str().to_ascii_lowercase())
     }
 
-    /// Consumes the sink stall armed for the next write of `emitter`: how many of its records the
-    /// sink resolves before it stalls.
+    /// Consumes the emitter stall armed for the next write of `emitter`: how many of its records the
+    /// emitter resolves before it stalls.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "the scenario consumes its single armed sink-write stall",
+            reason = "the scenario consumes its single armed emitter-write stall",
             key = "one test emitter",
             bound = "one keyed removal; no guard survives the operation"
         )
     )]
-    pub(crate) fn take_emitter_sink_stall(&self, emitter: &EmitterName) -> Option<usize> {
+    pub(crate) fn take_emitter_connector_stall(&self, emitter: &EmitterName) -> Option<usize> {
         self.inner
-            .stalled_emitter_sinks
+            .stalled_emitter_connectors
             .remove(&emitter.as_str().to_ascii_lowercase())
             .map(|(_, resolved)| resolved)
     }
@@ -1693,6 +2168,23 @@ impl FaultInjection {
             .failed_entity_gate_engagements
             .remove(domain)
             .is_some()
+    }
+
+    /// Delivers the armed transport failure of `domain`'s next ownership-handoff gate engagement
+    /// request once, and records that it was delivered.
+    pub(crate) fn take_handoff_engagement_transport_failure(&self, domain: &DomainName) -> bool {
+        let Some(mut failure) = self
+            .inner
+            .handoff_engagement_transport_failures
+            .get_mut(domain)
+        else {
+            return false;
+        };
+        if *failure != HandoffEngagementTransportFailure::Armed {
+            return false;
+        }
+        *failure = HandoffEngagementTransportFailure::Delivered;
+        true
     }
 
     /// Consumes the domain-scoped timeout only at the coordinator's drain-observation seam.
@@ -1764,15 +2256,36 @@ impl FaultInjection {
             .is_some()
     }
 
-    /// Record the executor whose workers a scenario may fill.
-    pub(crate) fn register_executor(&self, node_id: ClusterNodeName, executor: Executor) {
-        self.inner.executions.insert(
-            node_id,
-            NodeExecution {
-                executor,
-                holders: Arc::default(),
-            },
-        );
+    /// Consumes the wait armed for the release of `stopping_node`'s shutdown drain cordon, when
+    /// the leader is about to release it.
+    pub(crate) fn take_shutdown_cordon_release_delay(
+        &self,
+        stopping_node: &ClusterNodeName,
+    ) -> Option<Duration> {
+        let (_, delay) = self
+            .inner
+            .delayed_shutdown_cordon_releases
+            .remove(stopping_node)?;
+        Some(delay)
+    }
+
+    pub(crate) fn source_confirmation_delay(&self, ingestor: &DomainNodeRef) -> Option<Duration> {
+        let delay = self.inner.delayed_source_confirmations.get(ingestor)?;
+        Some(*delay)
+    }
+
+    pub(crate) fn stopped_branch_state_write_delay(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        entity: &ModelName,
+    ) -> Option<Duration> {
+        let processor = DomainNodeRef::node_in(domain.clone(), kind, entity.clone());
+        let delay = self
+            .inner
+            .delayed_stopped_branch_state_writes
+            .get(&processor)?;
+        Some(*delay)
     }
 
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(
@@ -1791,6 +2304,11 @@ impl FaultInjection {
 
     pub(crate) async fn pause_command_admission_if_armed(&self, node_id: &ClusterNodeName) {
         self.pause_command_if_armed(CommandPausePoint::Admission(node_id.clone()))
+            .await;
+    }
+
+    pub(crate) async fn pause_runtime_installation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::RuntimeInstallation(node_id.clone()))
             .await;
     }
 
@@ -1817,6 +2335,11 @@ impl FaultInjection {
             .await;
     }
 
+    pub(crate) async fn pause_command_finalization_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::Finalization(node_id.clone()))
+            .await;
+    }
+
     pub(crate) async fn pause_relocation_publication_if_armed(&self, domain: &DomainName) {
         self.pause_command_if_armed(CommandPausePoint::RelocationPublication(domain.clone()))
             .await;
@@ -1837,6 +2360,11 @@ impl FaultInjection {
             step: step.clone(),
         })
         .await;
+    }
+
+    pub(crate) async fn pause_backup_download_if_armed(&self, node_id: &ClusterNodeName) {
+        self.pause_command_if_armed(CommandPausePoint::BackupDownload(node_id.clone()))
+            .await;
     }
 
     pub(crate) async fn pause_health_response_if_armed(
@@ -2101,13 +2629,22 @@ impl FaultInjection {
         nervix_lint,
         nervix::context(
             bounded,
-            reason = "one scenario-owned relay fanout pause is claimed once",
+            reason = "a scenario-owned relay fanout delay is read for every batch, and one \
+                      scenario-owned relay fanout pause is claimed once",
             key = "one test domain",
-            bound = "one keyed read; its guard ends before the test-controlled wait"
+            bound = "two keyed reads; each guard ends before its test-controlled wait"
         )
     )]
     pub(crate) async fn pause_owner_relay_fanout_if_armed(&self, domain: &DomainName) {
         let key = domain.as_str().to_ascii_lowercase();
+        let delay = self
+            .inner
+            .owner_relay_fanout_delays
+            .get(&key)
+            .map(|delay| *delay.value());
+        if let Some(delay) = delay {
+            nervix_primitives::time::sleep(delay).await;
+        }
         let Some(pause) = self
             .inner
             .owner_relay_fanout_pauses
@@ -2188,57 +2725,6 @@ impl FaultInjection {
         self.inner
             .ownership_handoff_prepare_response_pauses
             .remove(&key);
-    }
-
-    pub(crate) async fn pause_domain_clock_progress_if_armed(
-        &self,
-        domain: &DomainName,
-        node: &ClusterNodeName,
-        shutdown: &CancellationToken,
-    ) -> bool {
-        let exact = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let any_node = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: None,
-        };
-        let pause = if let Some(pause) = self.inner.domain_clock_progress_pauses.get(&exact) {
-            pause.value().clone()
-        } else if let Some(pause) = self.inner.domain_clock_progress_pauses.get(&any_node) {
-            pause.value().clone()
-        } else {
-            return false;
-        };
-        pause.reach();
-        nervix_primitives::select! {
-            _ = shutdown.cancelled() => false,
-            _ = pause.wait_until_released() => true,
-        }
-    }
-
-    pub(crate) fn mark_domain_clock_progress_delivered(
-        &self,
-        domain: &DomainName,
-        node: &ClusterNodeName,
-    ) {
-        let exact = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: Some(node.clone()),
-        };
-        let any_node = DomainClockProgressPausePoint {
-            domain: domain.as_str().to_ascii_lowercase(),
-            node: None,
-        };
-        if let Some(pause) = self
-            .inner
-            .domain_clock_progress_pauses
-            .get(&exact)
-            .or_else(|| self.inner.domain_clock_progress_pauses.get(&any_node))
-        {
-            pause.mark_delivered();
-        }
     }
 
     pub(crate) fn syslog_ingestor_bind_addr(
@@ -2455,59 +2941,5 @@ impl FaultInjection {
             panic!("WASM checkpoint pause at {point:?} is not armed");
         };
         pause.value().clone()
-    }
-
-    fn domain_clock_progress_pause(&self, point: &DomainClockProgressPausePoint) -> Arc<TestPause> {
-        let Some(pause) = self.inner.domain_clock_progress_pauses.get(point) else {
-            panic!("domain clock progress pause for '{point:?}' is not armed");
-        };
-        pause.value().clone()
-    }
-}
-
-impl Default for TestPause {
-    fn default() -> Self {
-        Self {
-            state: watch::channel(TestPauseState::default()).0,
-            claimed: AtomicBool::new(false),
-        }
-    }
-}
-
-impl TestPause {
-    fn reach(&self) {
-        self.state.send_modify(|state| state.reached = true);
-    }
-
-    async fn wait_until_reached(&self) {
-        self.state
-            .subscribe()
-            .wait_for(|state| state.reached)
-            .await
-            .assured("the pause owns its state sender for the full wait");
-    }
-
-    async fn wait_until_released(&self) {
-        self.state
-            .subscribe()
-            .wait_for(|state| state.released)
-            .await
-            .assured("the pause owns its state sender for the full wait");
-    }
-
-    async fn wait_until_delivered(&self) {
-        self.state
-            .subscribe()
-            .wait_for(|state| state.delivered)
-            .await
-            .assured("the pause owns its state sender for the full wait");
-    }
-
-    fn release(&self) {
-        self.state.send_modify(|state| state.released = true);
-    }
-
-    fn mark_delivered(&self) {
-        self.state.send_modify(|state| state.delivered = true);
     }
 }

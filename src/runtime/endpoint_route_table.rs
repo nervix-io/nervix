@@ -5,6 +5,11 @@
 //! - **Depends on.** Typed domain identities, prepared endpoint metadata, and publication primitives.
 //! - **Must not know.** Decoding, request transport, graph planning, or source task scheduling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use ahash::{HashMap, HashMapExt as _};
@@ -12,7 +17,7 @@ use meticulous::OptionExt as _;
 use nervix_connector_websockets::CompiledSignalingProtocol;
 use nervix_primitives::{
     publication::{ArcSwap, ArcSwapOption, Guard},
-    sync::{Arc, StdArc},
+    sync::{Arc, CancellationToken, StdArc},
 };
 
 use super::{
@@ -26,8 +31,13 @@ pub(super) struct EndpointBinding<T> {
 }
 
 struct EndpointBindingLifetime<T> {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::identity(node, reason = "endpoint intake belongs to this domain node")
+    )]
     identity: DomainNodeRef,
     intake: ArcSwapOption<T>,
+    ending: CancellationToken,
 }
 
 impl<T> Clone for EndpointBinding<T> {
@@ -49,7 +59,13 @@ impl<T> EndpointBinding<T> {
     }
 
     fn end(&self) {
+        self.inner.ending.cancel();
         self.inner.intake.store(None);
+    }
+
+    /// Resolves when this exact source lifetime ends, including through a retained route.
+    pub(super) async fn ended(&self) {
+        self.inner.ending.cancelled().await;
     }
 }
 
@@ -215,6 +231,7 @@ impl<T> EndpointIntakeRoutes<T> {
             inner: Arc::new(EndpointBindingLifetime {
                 identity,
                 intake: ArcSwapOption::from(Some(StdArc::new(intake))),
+                ending: CancellationToken::new(),
             }),
         };
         self.current.rcu(|current| {

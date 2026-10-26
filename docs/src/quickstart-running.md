@@ -1,5 +1,7 @@
 # Running Nervix
 
+*Plexus, the Nervix graph definition language.*
+
 This page starts everything the tutorial needs on your local machine: one Nervix node, a Kafka
 broker, and a Redis server.
 
@@ -28,7 +30,11 @@ nervix-server \
 - `--init-default-user-password` seeds the `default` user's password on the very first startup.
   Once the user exists, remove the flag from normal startup.
 
-Every flag has a `NERVIX_*` environment variable twin, such as `NERVIX_NODE_ID`. Control-plane
+Every flag has a `NERVIX_*` environment variable twin, such as `NERVIX_NODE_ID`.
+`nervix-server --help` lists every option by area, with its default and environment variable, and
+the [nervix-server Reference](nervix-server-reference.md) is that same output for this release. A
+node checks every setting, and the relationships between settings, before it opens a store or binds
+a listener, and refuses to start with an error that names the settings involved. Control-plane
 state is persisted under `./.nervix-db` by default; use `--db-path` to relocate it. The directory
 contains the node database for registry and runtime state and a separate `consensus` database whose
 journal carries only Raft state.
@@ -71,7 +77,7 @@ what each ending preserves, and how to read a shutdown that did not finish.
 
 ## Connect A Client
 
-[`nervix-cli`](client-tools-cli.md) is the interactive NSPL client. With no arguments it connects
+[`nervix-cli`](client-tools-cli.md) is the interactive Plexus client. With no arguments it connects
 to `http://127.0.0.1:47391` as user `default` and prompts for the password:
 
 ```bash
@@ -85,8 +91,8 @@ nervix[default]> SHOW CLUSTER STATUS;
 Statements end with `;`, and the prompt shows the active domain. The same statements can be typed
 into the web console's command line, or executed one-shot with
 `nervix-cli --command "<statements>"`. There is no file-execution mode: to run a saved script,
-paste it into the client or pass it through `--command "$(cat pipeline.nspl)"`. To format a saved
-script, use [`nervix-nspl-format`](client-tools-nspl-format.md).
+paste it into the client or pass it through `--command "$(cat pipeline.plexus)"`. To format a saved
+script, use [`nervix-plexus-format`](client-tools-plexus-format.md).
 
 ## Start Kafka And Redis
 
@@ -101,8 +107,10 @@ docker run -d --name redis -p 6379:6379 redis:7
 If you work from a repository clone, `just deps` starts a complete local dependency stack instead
 ([Developing Nervix](developing-nervix.md#start-local-broker-dependencies)).
 
-Nervix never creates topics, queues, or any other external entities as a side effect of running a
-graph. Missing entities surface as initialization or publish errors, so the tutorial provisions
-its Kafka topic explicitly before ingesting from it.
+Provision external entities before starting a graph. This tutorial creates its Kafka topic
+explicitly before ingesting from it: Nervix's consumers disable topic auto-creation and report a
+missing topic as a transient source failure. Kafka emitters keep librdkafka's producer default, so a
+broker that allows auto-creation can create a missing output topic on the first publish. Do not
+rely on that broker behavior to provision topics with the intended partitions and settings.
 
 Continue to [Your First Pipeline: Kafka To Redis](./quickstart-first-pipeline.md).

@@ -54,7 +54,7 @@ pub struct RestoreStart {
     pub request_id: RequestId,
     /// The durable identity of the restore across retries, reconnects and leader changes.
     pub execution_reference: CommandExecutionReference,
-    /// One `RESTORE` statement, as NSPL.
+    /// One `RESTORE` statement, as Plexus.
     pub statement: String,
     /// The archive's exact size and digest.
     pub archive: RestoreArchive,
@@ -372,6 +372,8 @@ fn encode_restored_domain<'fbb>(
             domain: Some(name),
             resource_versions: domain.resource_versions,
             models: domain.models,
+            status: Some(domain.status.clone().into()),
+            start_version: Some(domain.start_version),
             planned_models,
         },
     ))
@@ -445,6 +447,8 @@ fn decode_restored_domain(
         domain: decoder.name("RestoredDomain.domain", domain.domain())?,
         resource_versions: domain.resource_versions(),
         models: domain.models(),
+        status: decoder.required_enumeration("RestoredDomain.status", domain.status())?,
+        start_version: decoder.required("RestoredDomain.start_version", domain.start_version())?,
         planned_models,
     })
 }

@@ -3,8 +3,13 @@
 //! Layer: data plane.
 //! - **Owns.** Branch instance identity, incarnation assignment, activity order, and eviction.
 //! - **Depends on.** Typed branch keys, domain timestamps, and branch-owned runtime handles.
-//! - **Must not know.** NSPL parsing, control-plane transactions, connector protocols, or
+//! - **Must not know.** Plexus parsing, control-plane transactions, connector protocols, or
 //!   persisted payloads.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use std::{hash::Hash, num::NonZeroUsize, time::Duration};
 
@@ -273,6 +278,10 @@ where
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::{num::NonZeroUsize, time::Duration};
 

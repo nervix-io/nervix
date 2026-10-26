@@ -1,10 +1,18 @@
 # Only these compiled configurations are claimed by the synchronization gate. Primitive provenance
 # in authored macros and inactive cfg continues to be enforced by the mandatory source validator.
 [[configuration]]
+features = ["nervix-deadlock/report-tool"]
 kinds = ["lib", "bin"]
 manifest = "Cargo.toml"
 name = "ordinary"
 packages = []
+
+[[configuration]]
+kinds = ["lib", "bin"]
+manifest = "Cargo.toml"
+name = "browser"
+packages = ["nervix-web-console"]
+target = "wasm32-unknown-unknown"
 
 [[configuration]]
 features = ["testing"]
@@ -29,3 +37,77 @@ features = ["native", "turmoil"]
 manifest = "Cargo.toml"
 name = "turmoil"
 packages = ["nervix-primitives", "nervix-interconnect"]
+
+[[configuration]]
+features = ["native", "deloxide", "testing"]
+kinds = ["lib"]
+manifest = "Cargo.toml"
+name = "deloxide"
+packages = [
+  "nervix-primitives",
+  "nervix-deadlock",
+  "nervix-paced-simulation",
+  "nervix-server",
+]
+
+[[configuration]]
+features = ["native", "deloxide-order", "testing"]
+kinds = ["lib"]
+manifest = "Cargo.toml"
+name = "deloxide-order"
+packages = [
+  "nervix-primitives",
+  "nervix-deadlock",
+  "nervix-paced-simulation",
+  "nervix-server",
+]
+
+[[configuration]]
+features = ["native", "deloxide-stress", "testing"]
+kinds = ["lib"]
+manifest = "Cargo.toml"
+name = "deloxide-stress"
+packages = [
+  "nervix-primitives",
+  "nervix-deadlock",
+  "nervix-paced-simulation",
+  "nervix-server",
+]
+
+# The local report tool is an ordinary product binary. Diagnostic binaries are checked separately
+# from the reporting library, so these configurations never enable its report-tool capability.
+[[configuration]]
+features = ["native", "deloxide", "testing"]
+kinds = ["bin"]
+manifest = "Cargo.toml"
+name = "deloxide-binaries"
+packages = ["nervix-primitives", "nervix-paced-simulation", "nervix-server"]
+
+[[configuration]]
+features = ["native", "deloxide-order", "testing"]
+kinds = ["bin"]
+manifest = "Cargo.toml"
+name = "deloxide-order-binaries"
+packages = ["nervix-primitives", "nervix-paced-simulation", "nervix-server"]
+
+[[configuration]]
+features = ["native", "deloxide-stress", "testing"]
+kinds = ["bin"]
+manifest = "Cargo.toml"
+name = "deloxide-stress-binaries"
+packages = ["nervix-primitives", "nervix-paced-simulation", "nervix-server"]
+
+# Host memory admission: docs/src/architecture-enforcement.md#host-memory-admission. A compilation
+# with a reservation waits, before its driver starts, until the reservation fits in what the host
+# and its limited cgroups have left beside the other admitted analysis compilations, until no other
+# is admitted, or for at most the wait limit. A compilation that peaks above the threshold needs a
+# reservation, and a reservation covers the peak its compilation measures. The server library's
+# analysis peaks at about 13.5 GiB; no other analysis compilation reaches 2 GiB.
+[admission]
+threshold_gib = 4
+wait_limit_minutes = 30
+
+[[admission.reservation]]
+crate = "nervix_server"
+gib = 16
+kind = "lib"

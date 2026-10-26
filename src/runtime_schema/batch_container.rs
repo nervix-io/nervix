@@ -18,6 +18,14 @@
 //! output instead, because their container is written, or transformed, as one value. These values
 //! exist only while one buffered batch is being encoded; the retained records stay Arrow rows.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     io::{self, Write as _},
     num::NonZeroUsize,
@@ -169,7 +177,7 @@ impl CompiledCodecBatchEncoder<'_> {
                     MemberValue::Value(value),
                 )))
             }
-            CompiledWireSchema::Syslog => {
+            CompiledWireSchema::Syslog(_) => {
                 self.check_row(row_index)?;
                 let row = ArrowCodecRow::new(codec, self.batch, row_index);
                 let member = SyslogBatchMember::from_row(&row)?;
@@ -316,7 +324,7 @@ impl CompiledCodec {
                     .write_value_into(&value, output)
                     .map_err(|_| Report::new(BatchContainerError::Unwritable { encoding }))
             }
-            CompiledWireSchema::Syslog => {
+            CompiledWireSchema::Syslog(_) => {
                 let mut syslog_members = Vec::with_capacity(members.len());
                 for member in members.iter().copied() {
                     let MemberValue::Syslog(member) = &member.0 else {
@@ -346,7 +354,7 @@ impl CompiledCodec {
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => None,
+            | CompiledWireSchema::Syslog(_) => None,
         }
     }
 }
@@ -399,12 +407,16 @@ fn run_batch_transformation(
         };
         values.push(value.clone());
     }
-    program
-        .run_single(JsonValue::Array(values))
-        .map_err(|error| {
-            let context = BatchContainerError::from(error.current_context());
-            error.change_context(context)
-        })
+    {
+        let mapping_input = program.run_single(JsonValue::Array(values));
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let context = BatchContainerError::from(error.current_context());
+                error.change_context(context)
+            }),
+        }
+    }
 }
 
 /// The default container of a jaq-native format: an array for the formats with a top-level
@@ -761,7 +773,7 @@ mod tests {
             ),
             (
                 CodecJaqFormat::Yaml,
-                "[{seq: 1, note: a}, {seq: 2, note: b}, {seq: 3, note: c}]\n",
+                r#"[{"seq": 1, "note": "a"}, {"seq": 2, "note": "b"}, {"seq": 3, "note": "c"}]"#,
                 event_values(),
             ),
             (

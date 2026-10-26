@@ -6,7 +6,7 @@ Feature: Client emitters
   Scenario Outline: A client emitter keeps two source relays and two concrete branches distinct
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64, tenant STRING);
@@ -15,8 +15,8 @@ Feature: Client emitters
       CREATE BRANCH tenants SCHEMA tenant_key TTL 5m;
       CREATE RELAY orders SCHEMA incoming BRANCHED BY tenants;
       CREATE RELAY invoices SCHEMA incoming BRANCHED BY tenants;
-      CREATE INGESTOR source_in
-        FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR source_in
+        FROM SCHEMA incoming
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -25,8 +25,8 @@ Feature: Client emitters
         TO invoices INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders, invoices
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders, invoices
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -63,25 +63,25 @@ Feature: Client emitters
   Scenario Outline: Two client emitters deliver independent copies before attached input completes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA incoming
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER first_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER first_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER second_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER second_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -110,23 +110,23 @@ Feature: Client emitters
       | 1            | client "app"                |
       | 3            | WebSocket session "browser" |
 
-  @client_emitter @client_io_03_emitter @client_io_03_consumer_restore
+  @client_emitter @client_io_03_emitter @client_io_03_consumer_restore @deloxide_stress
   Scenario Outline: A producer and consumer resume their unchanged endpoint after a session restart
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA incoming
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -137,7 +137,7 @@ Feature: Client emitters
     When client "app" opens consumer "output" on emitter "app_output" expecting fields "id STRING, cents I64"
     And client "app" opens producer "input" on ingestor "orders_in" expecting fields "id STRING, amount I64" with 1 batch and "32MiB" of credit
     Then client "app" cannot open a producer on ingestor "orders_in" expecting fields "id STRING, amount I64" because "session capacity exhausted"
-    When client "app" executes these NSPL commands
+    When client "app" executes these Plexus commands
       """
       ATTACH DOMAIN CLOCK;
       """
@@ -164,23 +164,23 @@ Feature: Client emitters
       | 1            |
       | 3            |
 
-  @client_emitter @client_io_03_emitter @client_io_03_generation
+  @client_emitter @client_io_03_emitter @client_io_03_generation @deloxide_stress
   Scenario Outline: Stopping and restarting a domain closes the consumer and creates a new endpoint
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA incoming
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -189,13 +189,13 @@ Feature: Client emitters
       """
     And <session> is connected to the leader node
     When <session> opens consumer "before stop" on emitter "app_output" expecting fields "id STRING, cents I64"
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       STOP;
       """
     Then consumer "before stop" eventually ends
     And <session> cannot open a consumer on emitter "app_output" expecting fields "id STRING, cents I64" because "domain stopped"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -219,14 +219,14 @@ Feature: Client emitters
   Scenario Outline: A client emitter declares its output schema, acknowledgement and batch contract
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id
         SET cents = input.amount * 100
@@ -234,19 +234,19 @@ Feature: Client emitters
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER app_output;
       """
     Then the last command output contains
       """
-      TO CLIENT SCHEMA outgoing
+      TO SCHEMA outgoing
       """
     And the last command output contains
       """
       MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER app_output;
       """
@@ -256,11 +256,11 @@ Feature: Client emitters
       """
     And the last command output contains
       """
-      sink: CLIENT schema=outgoing
+      to: CLIENT CONSUMER SCHEMA outgoing
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER app_output SET TO CLIENT SCHEMA outgoing
+      ALTER CLIENT CONSUMER EMITTER app_output SET TO SCHEMA outgoing
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s;
       SHOW CREATE EMITTER app_output;
       """
@@ -268,7 +268,7 @@ Feature: Client emitters
       """
       MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DROP EMITTER app_output;
       """
@@ -283,21 +283,21 @@ Feature: Client emitters
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA incoming
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -306,7 +306,7 @@ Feature: Client emitters
       """
     Then the current leader node is saved as placeholder "entry"
     And a node other than placeholder "entry" is saved as placeholder "owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE EMITTER app_output ONTO NODE {{owner}} IGNORE PREFERENCES;
       """
@@ -338,7 +338,7 @@ Feature: Client emitters
       retained batches: 0
       application ACKs: 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE EMITTER app_output ONTO NODE {{entry}} IGNORE PREFERENCES;
       """
@@ -355,7 +355,7 @@ Feature: Client emitters
   Scenario: Client output requires explicit leakage of sensitive input
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, secret STRING SENSITIVE);
@@ -363,10 +363,10 @@ Feature: Client emitters
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
       """
     And client "app" is connected to the leader node
-    When client "app" fails to execute these NSPL commands
+    When client "app" fails to execute these Plexus commands
       """
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET secret = input.secret
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -376,10 +376,10 @@ Feature: Client emitters
       """
       sensitive
       """
-    When client "app" executes these NSPL commands
+    When client "app" executes these Plexus commands
       """
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET secret = leak_sensitive(input.secret)
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -390,14 +390,14 @@ Feature: Client emitters
   Scenario Outline: An attached producer completes after a consumer acknowledges constructed output
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA incoming
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -407,8 +407,8 @@ Feature: Client emitters
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id
         SET cents = input.amount * 100
@@ -451,14 +451,14 @@ Feature: Client emitters
   Scenario Outline: Retrying an output batch revokes its first attempt before another consumer receives it
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA incoming
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
@@ -468,8 +468,8 @@ Feature: Client emitters
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id
         SET cents = input.amount * 100
@@ -506,19 +506,19 @@ Feature: Client emitters
   Scenario Outline: A detached client emitter releases its source before the application ACK
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA incoming
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE DETACHED CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -553,19 +553,19 @@ Feature: Client emitters
   Scenario Outline: An ACK timeout revokes a reference and redelivers unchanged output
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA incoming
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -598,19 +598,19 @@ Feature: Client emitters
   Scenario Outline: Application rejection finishes the batch through the message error policy
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA incoming
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -641,19 +641,19 @@ Feature: Client emitters
   Scenario: One Arrow row larger than the client batch byte limit follows the message error policy
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA incoming
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1KiB FLUSH IMMEDIATE
@@ -673,19 +673,19 @@ Feature: Client emitters
   Scenario Outline: A pending output read and saturated input keep commands and domain time moving
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA incoming
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -695,7 +695,7 @@ Feature: Client emitters
     And client "app" is connected to the leader node
     When client "app" opens producer "input" on ingestor "orders_in" expecting fields "id STRING, amount I64" with 2 batches and "1MiB" of credit
     And client "app" opens consumer "output" on emitter "app_output" expecting fields "id STRING, cents I64"
-    And client "app" executes these NSPL commands
+    And client "app" executes these Plexus commands
       """
       ATTACH DOMAIN CLOCK;
       """
@@ -714,13 +714,13 @@ Feature: Client emitters
     Then producer "input" holds batches "b1, b2"
     And batch "b1" remains pending for "200ms"
     And within "10s" client "app" receives a tick for its attached domain clock
-    When client "app" executes these NSPL commands
+    When client "app" executes these Plexus commands
       """
       SHOW CREATE EMITTER app_output;
       """
     Then the last command output contains
       """
-      TO CLIENT SCHEMA outgoing
+      TO SCHEMA outgoing
       """
     When output batch "first output" is acknowledged
     And consumer "output" finishes waiting for output batch "second output"
@@ -742,19 +742,19 @@ Feature: Client emitters
   Scenario Outline: Failed and successful emitter alterations preserve the right consumer contract
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA incoming
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -770,12 +770,12 @@ Feature: Client emitters
     And consumer "original" reads output batch "held output"
     Then batch "held input" remains pending for "200ms"
     Given the next pending entity drain in domain "{{domain}}" is forced to time out
-    When these NSPL commands fail with "timed out draining domain"
+    When these Plexus commands fail with "timed out draining domain"
       """
-      ALTER EMITTER app_output SET TO CLIENT SCHEMA outgoing
+      ALTER CLIENT CONSUMER EMITTER app_output SET TO SCHEMA outgoing
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CREATE EMITTER app_output;
       """
@@ -785,9 +785,9 @@ Feature: Client emitters
       """
     When output batch "held output" is acknowledged
     Then batch "held input" completes
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER app_output SET FLUSH EACH 10ms MAX BATCH SIZE 1MiB;
+      ALTER CLIENT CONSUMER EMITTER app_output SET FLUSH EACH 10ms MAX BATCH SIZE 1MiB;
       """
     And producer "input" submits batch "after flush input" with rows
       | id  | amount |
@@ -796,9 +796,9 @@ Feature: Client emitters
     Then output batch "after flush output" contains id "o-2" and cents 200
     When output batch "after flush output" is acknowledged
     Then batch "after flush input" completes
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER app_output SET TO CLIENT SCHEMA outgoing
+      ALTER CLIENT CONSUMER EMITTER app_output SET TO SCHEMA outgoing
         MODE ACK PARALLEL MAX 2 ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s;
       """
     Then consumer "original" eventually ends
@@ -820,14 +820,14 @@ Feature: Client emitters
   Scenario Outline: Consumer credit is reserved per session and returned on close
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE
@@ -855,19 +855,19 @@ Feature: Client emitters
   @client_emitter
   Scenario: A killed client emitter owner restarts with a fresh consumer endpoint
     Given a nervix-server process is started
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA incoming (id STRING, amount I64);
       CREATE SCHEMA outgoing (id STRING, cents I64);
       CREATE RELAY orders SCHEMA incoming UNBRANCHED;
-      CREATE INGESTOR orders_in FROM CLIENT SCHEMA incoming
+      CREATE CLIENT PRODUCER INGESTOR orders_in FROM SCHEMA incoming
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER app_output FROM orders
-        TO CLIENT SCHEMA outgoing
+      CREATE CLIENT CONSUMER EMITTER app_output FROM orders
+        TO SCHEMA outgoing
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         INHERIT id SET cents = input.amount * 100
         BATCH MAX MESSAGES 16 MAX SIZE 1MiB FLUSH IMMEDIATE

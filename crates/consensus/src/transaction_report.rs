@@ -5,6 +5,14 @@
 //! - **Depends on.** Transaction-impact vocabulary and consensus keyed records.
 //! - **Must not know.** Parsing, planning, sessions, runtime execution or presentation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
@@ -378,6 +386,33 @@ struct TransactionReportRevisionIndex {
     identities: Vec<TransactionPreviewIdentity>,
 }
 
+impl crate::records::StoredUnder<TransactionPreviewIdentity> for TransactionReportHeader {
+    fn is_stored_under(&self, identity: &TransactionPreviewIdentity) -> bool {
+        self.identity == *identity
+    }
+}
+
+/// Declares report records whose values name no key of their own. The revision index is checked
+/// against the report headers once every family is loaded.
+macro_rules! report_records_under_any_key {
+    ($($key:ty => $value:ty),+ $(,)?) => {
+        $(impl crate::records::StoredUnder<$key> for $value {
+            fn is_stored_under(&self, _: &$key) -> bool {
+                true
+            }
+        })+
+    };
+}
+
+report_records_under_any_key!(
+    TransactionReportItemKey => StoredOperationImpactReport,
+    TransactionReportItemKey => StoredExecutionStepImpactReport,
+    String => TransactionReportRevisionIndex,
+    ImpactTopologyId => ImpactTopologyHeader,
+    ImpactTopologyItemKey => AttributedImpactNode,
+    ImpactTopologyItemKey => ImpactTopologyEdge,
+);
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TransactionReportRecords {
     headers: Records<TransactionPreviewIdentity, TransactionReportHeader>,
@@ -404,6 +439,24 @@ impl TransactionReportRecords {
             return Err(io::Error::other(StorageFailure::InvalidState));
         }
         Ok(records)
+    }
+
+    /// How many keyed records the reports and their topologies store.
+    pub(crate) fn stored_records(&self) -> Option<usize> {
+        let families = [
+            self.headers.len(),
+            self.operations.len(),
+            self.execution_steps.len(),
+            self.revisions.len(),
+            self.topology_headers.len(),
+            self.topology_nodes.len(),
+            self.topology_edges.len(),
+        ];
+        let mut records = 0_usize;
+        for family in families {
+            records = records.checked_add(family)?;
+        }
+        Some(records)
     }
 
     fn has_consistent_revision_index(&self) -> bool {

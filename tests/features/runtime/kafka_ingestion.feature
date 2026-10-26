@@ -5,11 +5,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ingestor delivers JSON payloads to a subscribed relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -23,14 +23,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -65,14 +64,14 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka emitter forwards a multi-chunk unbranched batch with exact count parity
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "forwarding_input_{{test_id}}" exists with 1 partitions
     And Kafka topic "forwarding_output_{{test_id}}" exists with 1 partitions
     And Kafka topic "forwarding_output_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA forwarding_event (
         user_id I64
@@ -84,16 +83,15 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA forwarding_event_wire
         TO SCHEMA forwarding_event;
       CREATE RELAY forwarding_events SCHEMA forwarding_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR kafka_forwarding_source
-        FROM KAFKA kafka_main TOPIC forwarding_input_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_forwarding_{{test_id}}
-        MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR kafka_forwarding_source
+        FROM kafka_main TOPIC 'forwarding_input_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_forwarding_{{test_id}}'
+        MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING forwarding_event_codec
         TO forwarding_events
         INHERIT ALL
@@ -101,10 +99,10 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER kafka_forward
+      CREATE ATTACHED KAFKA TOPIC EMITTER kafka_forward
         FROM forwarding_events
-        TO KAFKA kafka_main TOPIC forwarding_output_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO kafka_main TOPIC 'forwarding_output_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING forwarding_event_codec
         INHERIT ALL
         FLUSH EACH 500ms MAX BATCH SIZE 1MiB
@@ -121,15 +119,15 @@ Feature: Kafka ingestion
       | 3            |
 
   @ingestor_group_programs
-  Scenario Outline: Kafka NO_ACK executes ingestor programs once for a collected ingest group
+  Scenario Outline: Kafka NO ACK executes ingestor programs once for a collected ingest group
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "grouped_program_input_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA grouped_event (
         user_id I64
@@ -145,16 +143,15 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA grouped_event_wire
         TO SCHEMA grouped_event;
       CREATE RELAY grouped_events SCHEMA routed_grouped_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR grouped_event_source
-        FROM KAFKA kafka_main TOPIC grouped_program_input_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_grouped_program_{{test_id}}
-        MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR grouped_event_source
+        FROM kafka_main TOPIC 'grouped_program_input_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_grouped_program_{{test_id}}'
+        MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING grouped_event_codec
         FILTER WHERE now() = now()
         TO grouped_events
@@ -167,7 +164,7 @@ Feature: Kafka ingestion
       CREATE SUBSCRIPTION grouped_events_subscription TO grouped_events;
       """
     And 16 JSON messages with user id 42 are rapidly published to "KAFKA" input "grouped_program_input_{{test_id}}"
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -178,15 +175,15 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
-  Scenario Outline: Kafka NO_ACK keeps the rest of a collected ingest group when one message fails to decode
+  Scenario Outline: Kafka NO ACK keeps the rest of a collected ingest group when one message fails to decode
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "mixed_group_input_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA mixed_event (
         tenant STRING,
@@ -200,16 +197,15 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA mixed_event_wire
         TO SCHEMA mixed_event;
       CREATE RELAY mixed_events SCHEMA mixed_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR mixed_event_source
-        FROM KAFKA kafka_main TOPIC mixed_group_input_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_mixed_group_{{test_id}}
-        MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR mixed_event_source
+        FROM kafka_main TOPIC 'mixed_group_input_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_mixed_group_{{test_id}}'
+        MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING mixed_event_codec
         TO mixed_events
         INHERIT ALL
@@ -226,7 +222,7 @@ Feature: Kafka ingestion
       {"tenant":"beta","user_id":3}
       {"tenant":"beta","user_id":4}
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -243,15 +239,298 @@ Feature: Kafka ingestion
       | 1            |
       | 3            |
 
+  Scenario Outline: Kafka NO ACK keeps the nested lists of a collected ingest group exact when a <wire_format> message is refused inside one
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "nested_group_input_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA nested_event (
+        tenant STRING,
+        matrix <matrix_type>
+      );
+      CREATE WIRE <wire_format> SCHEMA nested_event_wire MODE STRICT (
+        tenant string,
+        matrix array
+      );
+      CREATE CODEC nested_event_codec
+        FROM WIRE <wire_format> SCHEMA nested_event_wire
+        TO SCHEMA nested_event;
+      CREATE SCHEMA nested_tenant ( tenant STRING );
+      CREATE BRANCH by_nested_tenant SCHEMA nested_tenant TTL 5m;
+      CREATE RELAY nested_events SCHEMA nested_event BRANCHED BY by_nested_tenant;
+      CREATE KAFKA CLIENT kafka_main
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE KAFKA TOPIC INGESTOR nested_event_source
+        FROM kafka_main TOPIC 'nested_group_input_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_nested_group_{{test_id}}'
+        MODE NO ACK
+        ON QUIESCE SUSPEND DECODE USING nested_event_codec
+        TO nested_events
+        INHERIT ALL
+        BRANCHED BY by_nested_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION nested_events_subscription TO nested_events;
+      """
+    And these Kafka messages encoded as "<wire_format>" are rapidly published to topic "nested_group_input_{{test_id}}"
+      """
+      {"tenant":"acme","matrix":[[1,2],[3]]}
+      {"tenant":"beta","matrix":[[4],[5,300]]}
+      {"tenant":"acme","matrix":[[6],[7,8]]}
+      {"tenant":"beta","matrix":[[9],[10,11]]}
+      """
+    And these Plexus commands are executed
+      """
+      START;
+      """
+    Then within "20s" the relay subscription receives payloads
+      """
+      payload={"matrix":[[1,2],[3]],"tenant":"acme"}
+      payload={"matrix":[[6],[7,8]],"tenant":"acme"}
+      payload={"matrix":[[9],[10,11]],"tenant":"beta"}
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | wire_format | matrix_type  |
+      | 1            | JSON        | VEC<VEC<U8>> |
+      | 3            | JSON        | VEC<VEC<U8>> |
+      | 1            | CBOR        | VEC<VEC<U8>> |
+      | 3            | CBOR        | VEC<VEC<U8>> |
+
+  @decode_rejection
+  Scenario Outline: A Kafka <mode_name> ingestor consumes a payload its codec refuses, reports its record and delivers the next one
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "poison_input_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA poison_event (
+        tenant STRING,
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA poison_event_wire MODE STRICT (
+        tenant string,
+        user_id integer
+      );
+      CREATE CODEC poison_event_codec
+        FROM WIRE JSON SCHEMA poison_event_wire
+        TO SCHEMA poison_event;
+      CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE KAFKA TOPIC INGESTOR poison_source
+        FROM kafka_main TOPIC 'poison_input_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_poison_{{test_id}}'
+        MODE <mode>
+        ON QUIESCE SUSPEND DECODE USING poison_event_codec
+        TO poison_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION poison_events_subscription TO poison_events;
+      """
+    And these Kafka messages are rapidly published to topic "poison_input_{{test_id}}"
+      """
+      {"tenant":"acme","user_id":"one"}
+      {"tenant":"acme","user_id":2}
+      """
+    And these Plexus commands are executed
+      """
+      START;
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "tenant":"acme","user_id":2
+      """
+    And within "30s" the active session observes a server error containing
+      """
+      ingestor 'poison_source' general error in domain '{{domain}}': decode rejection
+      """
+    And the last server error contains
+      """
+      codec 'poison_event_codec' refused the payload from Kafka topic 'poison_input_{{test_id}}' partition 0 offset 0: codec 'poison_event_codec' failed to parse field 'user_id'
+      """
+    And within "30s" DESCRIBE INGESTOR "poison_source" on the leader node contains
+      """
+      nervix_ingestor_decode_rejections_total: 1
+      """
+    And within "30s" DESCRIBE INGESTOR "poison_source" on the leader node contains
+      """
+      codec 'poison_event_codec' refused the payload from Kafka topic 'poison_input_{{test_id}}' partition 0 offset 0
+      """
+    And within "30s" Kafka consumer group "nervix_cucumber_poison_{{test_id}}" next offset for topic "poison_input_{{test_id}}" partition 0 is "at least 2"
+
+    Examples:
+      | cluster_size | mode_name      | mode                                                                                     |
+      | 1            | ACK SEQUENTIAL | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s                         |
+      | 3            | ACK SEQUENTIAL | ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s                         |
+      | 1            | ACK PARALLEL   | ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s |
+      | 3            | ACK PARALLEL   | ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s |
+
+  @decode_rejection
+  Scenario Outline: A Kafka ingestor that ignores general errors consumes a payload its codec refuses without reporting it, and counts it
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "ignored_poison_input_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA poison_event (
+        tenant STRING,
+        user_id I64
+      );
+      CREATE WIRE JSON SCHEMA poison_event_wire MODE STRICT (
+        tenant string,
+        user_id integer
+      );
+      CREATE CODEC poison_event_codec
+        FROM WIRE JSON SCHEMA poison_event_wire
+        TO SCHEMA poison_event;
+      CREATE RELAY poison_events SCHEMA poison_event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE KAFKA TOPIC INGESTOR ignored_poison_source
+        FROM kafka_main TOPIC 'ignored_poison_input_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_ignored_poison_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING poison_event_codec
+        TO poison_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR IGNORE;
+      CREATE SUBSCRIPTION poison_events_subscription TO poison_events;
+      """
+    And these Kafka messages are rapidly published to topic "ignored_poison_input_{{test_id}}"
+      """
+      {"tenant":"acme","user_id":"one"}
+      {"tenant":"acme","user_id":2}
+      """
+    And these Plexus commands are executed
+      """
+      START;
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "tenant":"acme","user_id":2
+      """
+    And within "30s" DESCRIBE INGESTOR "ignored_poison_source" on the leader node contains
+      """
+      nervix_ingestor_decode_rejections_total: 1
+      """
+    And within "30s" DESCRIBE INGESTOR "ignored_poison_source" on the leader node contains
+      """
+      codec 'poison_event_codec' refused the payload from Kafka topic 'ignored_poison_input_{{test_id}}' partition 0 offset 0
+      """
+    And within "30s" Kafka consumer group "nervix_cucumber_ignored_poison_{{test_id}}" next offset for topic "ignored_poison_input_{{test_id}}" partition 0 is "at least 2"
+    And the active session observes no server error containing "decode rejection" within "2s"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @decode_rejection
+  Scenario Outline: A Kafka ACK SEQUENTIAL ingestor presents again a payload the node could not unfold, and counts no decode rejection
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "unfolded_input_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA unfolded_event ( user_id I64 );
+      CREATE CODEC unfolded_codec FROM JSON TO SCHEMA unfolded_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY unfolded_events SCHEMA unfolded_event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+      CREATE KAFKA TOPIC INGESTOR unfolded_source
+        FROM kafka_main TOPIC 'unfolded_input_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_unfolded_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING unfolded_codec
+        TO unfolded_events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION unfolded_events_subscription TO unfolded_events;
+      """
+    And extension execution is saturated on every node
+    And these Kafka messages are rapidly published to topic "unfolded_input_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    And these Plexus commands are executed
+      """
+      START;
+      """
+    Then within "30s" the active session observes a server error containing
+      """
+      the node's bounded execution did not unfold the payload
+      """
+    When extension execution is released on every node
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    And within "30s" DESCRIBE INGESTOR "unfolded_source" on the leader node contains
+      """
+      nervix_ingestor_decode_rejections_total: 0
+      """
+    And within "30s" DESCRIBE INGESTOR "unfolded_source" on the leader node contains
+      """
+      last decode rejection: -
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Kafka ingestor reports transient source failures and recovers
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     When ingestor "kafka_notifications" enters fault mode
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -265,14 +544,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_reconnect_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_reconnect_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_reconnect_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_reconnect_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -307,14 +585,201 @@ Feature: Kafka ingestion
       | 1            | 0             |
       | 3            | 1             |
 
-  Scenario Outline: Kafka ACK PARALLEL applies FILTER WHERE and route WHERE across a whole batch of interleaved branches
-    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+  @kafka_no_ack_reconnect
+  Scenario Outline: A NO ACK Kafka ingestor whose broker is down reconnects on the doubling reconnect cadence on <cluster_size> nodes
+    Given a mock Kafka broker serves topic "no_ack_down_{{test_id}}"
+    And the mock Kafka broker goes down
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the active domain is "{{domain}}"
+    # The broker is down when the ingestor starts, so every attempt to take up the topic's
+    # partitions fails within the client's half-second socket timeout.
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA down_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA down_wire MODE STRICT ( seq integer );
+      CREATE CODEC down_codec FROM WIRE JSON SCHEMA down_wire TO SCHEMA down_event;
+      CREATE RELAY down_events SCHEMA down_event UNBRANCHED;
+      CREATE KAFKA CLIENT down_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'auto.offset.reset' = 'earliest',
+        'socket.timeout.ms' = '500'
+      };
+      CREATE KAFKA TOPIC INGESTOR down_source
+        FROM down_kafka TOPIC 'no_ack_down_{{test_id}}'
+        OFFSET BY DOMAIN MODE NO ACK
+        ON QUIESCE SUSPEND DECODE USING down_codec
+        TO down_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION down_subscription TO down_events;
+      START;
+      """
+    # Without a declared retry policy the ingestor waits 250 ms after its first failure and doubles
+    # the wait after each one, so the wait reaches two seconds after four failures.
+    Then within "60s" DESCRIBE INGESTOR "down_source" on the leader node reports a reconnect backoff of at least "2s"
+    When the mock Kafka broker comes back up
+    And mock Kafka message is published to topic "no_ack_down_{{test_id}}"
+      """
+      {"seq":1}
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @kafka_refused_commit
+  Scenario Outline: A Kafka ingestor on <cluster_size> nodes reports a commit its broker refuses as a transient status and reports progress only once the broker commits
+    Given a mock Kafka broker serves topic "refused_commit_{{test_id}}"
+    And the mock Kafka broker refuses every offset commit
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA refused_commit_event ( event_id I64 );
+      CREATE WIRE JSON SCHEMA refused_commit_wire MODE STRICT ( event_id integer );
+      CREATE CODEC refused_commit_codec
+        FROM WIRE JSON SCHEMA refused_commit_wire TO SCHEMA refused_commit_event;
+      CREATE RELAY refused_commit_records SCHEMA refused_commit_event UNBRANCHED;
+      CREATE KAFKA CLIENT refused_commit_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR refused_commit_source
+        FROM refused_commit_kafka TOPIC 'refused_commit_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'refused_commit_group_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING refused_commit_codec
+        TO refused_commit_records INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION refused_commit_subscription TO refused_commit_records;
+      START;
+      """
+    And mock Kafka message is published to topic "refused_commit_{{test_id}}"
+      """
+      {"event_id":1}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "event_id":1
+      """
+    And within "30s" DESCRIBE INGESTOR "refused_commit_source" on the leader node contains
+      """
+      transient error: GroupAuthorizationFailed (Broker: Group authorization failed)
+      """
+    And within "2s" mock Kafka consumer group "refused_commit_group_{{test_id}}" next offset for topic "refused_commit_{{test_id}}" partition 0 is "below 1"
+    When the mock Kafka broker accepts offset commits again
+    Then within "30s" mock Kafka consumer group "refused_commit_group_{{test_id}}" next offset for topic "refused_commit_{{test_id}}" partition 0 is "at least 1"
+    And within "30s" DESCRIBE INGESTOR "refused_commit_source" on the leader node contains
+      """
+      transient error: -
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # Each of the eight instances joined the group, so destroying its consumer waits for an answer to
+  # its LeaveGroup request, which librdkafka gives five seconds. The retirements hold the node's two
+  # connector workers for as long as the broker holds that answer.
+  @kafka_consumer_retirement
+  Scenario Outline: A Kafka ingestor dropped on <cluster_size> nodes retires its consumers on the connector workers while another ingestor delivers
+    Given a mock Kafka broker serves topic "retired_{{test_id}}"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA retired_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA retired_event_wire MODE STRICT ( seq integer );
+      CREATE CODEC retired_event_codec
+        FROM WIRE JSON SCHEMA retired_event_wire TO SCHEMA retired_event;
+      CREATE RELAY retired_events SCHEMA retired_event UNBRANCHED;
+      CREATE KAFKA CLIENT retiring_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR retiring_source
+        FROM retiring_kafka TOPIC 'retired_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'retired_group_{{test_id}}' INSTANCES 8
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+          RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING retired_event_codec
+        TO retired_events INHERIT ALL UNBRANCHED
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE VHOST edge retire-{{test_id}}.example.com;
+      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR healthy_source
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retired_event_codec
+        TO retired_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION retirement_subscription TO retired_events;
+      START;
+      """
+    And mock Kafka message is published to topic "retired_{{test_id}}"
+      """
+      {"seq":1}
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "retiring_source" is saved as placeholder "kafka_owner"
+    Given the mock Kafka broker holds every answer
+    When these Plexus statements are executed on the leader node
+      """
+      DROP INGESTOR retiring_source;
+      """
+    Then within "30s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually reaches at least 1
+      """
+      class="connector_storage"
+      """
+    When http payload is posted to host "retire-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":42}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "seq":42
+      """
+    When the mock Kafka broker releases its answers
+    Then within "60s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_pending" with labels eventually equals 0
+      """
+      class="connector_storage"
+      """
+    And within "60s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually equals 0
+      """
+      class="connector_storage"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Kafka ACK PARALLEL applies FILTER WHERE and route WHERE across a whole batch of interleaved branches
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
       """
       CREATE SCHEMA event (
         user_id I64,
@@ -338,14 +803,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant I64 );
         CREATE IF NOT EXISTS BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
         CREATE RELAY events SCHEMA routed_event BRANCHED BY by_tenant;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR event_source
-        FROM KAFKA kafka_main TOPIC events_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR event_source
+        FROM kafka_main TOPIC 'events_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING event_codec
         FILTER WHERE input.level > 0
         TO events
@@ -386,7 +850,7 @@ Feature: Kafka ingestion
     # ACK PARALLEL poll fills one batch of six rather than six batches of one. That is
     # what puts records from both branches, both filter stages and both surviving and
     # dropped rows into a single dispatched group.
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -408,12 +872,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK PARALLEL reads source metadata and headers for every message of a batch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "sourced_events_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA sourced_event (
         user_id I64
@@ -433,15 +897,14 @@ Feature: Kafka ingestion
         FROM WIRE JSON SCHEMA sourced_event_wire
         TO SCHEMA sourced_event;
       CREATE RELAY sourced_events SCHEMA routed_sourced_event UNBRANCHED;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR sourced_event_source
-        FROM KAFKA kafka_main TOPIC sourced_events_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_sourced_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR sourced_event_source
+        FROM kafka_main TOPIC 'sourced_events_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_sourced_{{test_id}}'
         MODE ACK PARALLEL MAX 8 BATCH TIMEOUT 500ms ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING sourced_event_codec
         TO sourced_events
@@ -472,7 +935,7 @@ Feature: Kafka ingestion
     # The whole corpus is already on the topic when the consumer joins, so one ACK PARALLEL
     # poll holds all three messages at once and every metadata row is appended from the
     # batch of source messages the group still owns.
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       START;
       """
@@ -492,12 +955,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK PARALLEL blocks downstream publish after immediate NoAck
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -511,14 +974,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -527,7 +989,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -553,12 +1015,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK PARALLEL blocks downstream publish after ack timeout
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -572,14 +1034,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -588,7 +1049,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -615,12 +1076,12 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK ingestor waits while an attached emitter is stalled
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -634,14 +1095,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -650,7 +1110,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -678,11 +1138,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK PARALLEL waits for batch timeout before dispatching a partial batch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -696,14 +1156,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 3s ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 3s ACK TIMEOUT 10s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -732,11 +1191,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK SEQUENTIAL ignores detached emitter failures
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -750,14 +1209,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -766,7 +1224,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE DETACHED EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE DETACHED KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -793,11 +1251,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK SEQUENTIAL replays on attached emitter failure
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -811,14 +1269,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -827,7 +1284,7 @@ Feature: Kafka ingestion
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -857,11 +1314,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK SEQUENTIAL ignores detached deduplicator branch failures
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -876,14 +1333,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -900,7 +1356,7 @@ Feature: Kafka ingestion
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM forwarded_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM forwarded_notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -931,11 +1387,11 @@ Feature: Kafka ingestion
   Scenario Outline: Kafka ACK SEQUENTIAL replays on attached deduplicator branch failure
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -950,14 +1406,13 @@ Feature: Kafka ingestion
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
         CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -974,7 +1429,7 @@ Feature: Kafka ingestion
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM forwarded_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM forwarded_notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1010,3 +1465,169 @@ Feature: Kafka ingestion
       | 1            | 0             |
       | 3            | 0             |
       | 3            | 1             |
+
+  @kafka_owned_broker_state
+  Scenario Outline: Kafka ingestor reports a missing topic by name, never creates it, and starts once it is provisioned
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+        CREATE KAFKA CLIENT kafka_main
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'unprovisioned_{{test_id}}' OFFSET BY <offsets> MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
+      """
+      transient error: KAFKA topic 'unprovisioned_{{test_id}}' does not exist
+      """
+    And Kafka topic "unprovisioned_{{test_id}}" does not exist
+    When the operator provisions Kafka topic "unprovisioned_{{test_id}}" with 1 partitions
+    And Kafka message is published to topic "unprovisioned_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+
+    Examples:
+      | cluster_size | offsets                                           |
+      | 1            | CONSUMER GROUP 'nervix_unprovisioned_{{test_id}}' |
+      | 1            | DOMAIN                                            |
+      | 3            | CONSUMER GROUP 'nervix_unprovisioned_{{test_id}}' |
+      | 3            | DOMAIN                                            |
+
+  @kafka_owned_broker_state
+  Scenario Outline: CREATE KAFKA CLIENT refuses a Kafka CONFIG that lets a consumer create topics
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements fail with "client config key 'allow.auto.create.topics' is reserved for Nervix"
+      """
+      CREATE KAFKA CLIENT kafka_main
+      CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'allow.auto.create.topics' = 'true'
+      };
+      """
+    And these Plexus statements are executed on the leader node
+      """
+      CREATE KAFKA CLIENT kafka_main
+      CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}'
+      };
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @kafka_owned_broker_state
+  Scenario Outline: A Kafka ingestor with domain-owned offsets keeps no consumer group on the broker, running or dropped
+    Given a <cluster_size> node nervix cluster is started
+    And Kafka topic "dropped_{{test_id}}" exists with 1 partitions
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE RELAY notifications SCHEMA notification UNBRANCHED;
+        CREATE KAFKA CLIENT kafka_main
+        CONFIG {
+          'bootstrap.servers' = '{{kafka_addr}}',
+          'auto.offset.reset' = 'earliest'
+        };
+        CREATE KAFKA TOPIC INGESTOR kafka_dropped
+        FROM kafka_main TOPIC 'dropped_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE KAFKA TOPIC INGESTOR kafka_grouped
+        FROM kafka_main TOPIC 'dropped_{{test_id}}' OFFSET BY CONSUMER GROUP 'operator_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        START;
+      """
+    And Kafka message is published to topic "dropped_{{test_id}}"
+      """
+      {"user_id":42}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    And within "30s" Kafka lists these consumer groups
+      """
+      operator_{{test_id}}
+      """
+    And Kafka lists none of these consumer groups
+      """
+      nervix_domain_{{domain}}_kafka_dropped
+      nervix_domain_watch_{{domain}}_kafka_dropped
+      nervix_schedule_watch_{{domain}}_kafka_dropped
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      DROP INGESTOR kafka_dropped;
+      """
+    Then Kafka lists none of these consumer groups
+      """
+      nervix_domain_{{domain}}_kafka_dropped
+      nervix_domain_watch_{{domain}}_kafka_dropped
+      nervix_schedule_watch_{{domain}}_kafka_dropped
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

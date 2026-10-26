@@ -1,8 +1,12 @@
 //! Layer: data plane.
 //! Owns: persistence and replica polling tasks for runtime state.
 //! May depend on: runtime state carriers, the state store, interconnect, and vocabulary models.
-//! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
+//! Must not know: control-plane transactions, Plexus parsing, or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -12,7 +16,84 @@
     )
 )]
 
+use std::future::Future;
+
 use super::*;
+
+/// The snapshot tasks of this node's deduplicator and window branches.
+///
+/// A snapshot task outlives the branch task that started it: once that task is gone, whether it
+/// stopped or was ended at its stop grace, the snapshot task still writes what the branch
+/// published last. No branch task can therefore own it to its end, so the runtime does, and none
+/// outlives the runtime with the node's storage open. Closing the owner tells every task to write
+/// that state now and end; waiting for it returns once each of them has finished.
+///
+/// Each task is also counted for the domain of its branch. A domain's stop ends every branch task
+/// of the domain, which leaves each of their snapshot tasks making its last write, and waits for
+/// the domain's tasks before it returns, so a stopped domain's checkpoints are on disk when its
+/// stop completes.
+#[derive(Default)]
+pub(in crate::runtime) struct BranchSnapshotTasks {
+    tracker: TaskTracker,
+    stopping: CancellationToken,
+    /// The snapshot tasks of every domain that has one. Each tracker is closed as it is created,
+    /// so waiting for it returns as soon as it counts no task.
+    domains: DashMap<DomainName, TaskTracker, RandomState>,
+}
+
+/// A tracker that counts its domain's snapshot tasks, closed so that waiting for it ends when no
+/// task is left rather than when an owner closes it.
+fn closed_domain_tracker() -> TaskTracker {
+    let tracker = TaskTracker::new();
+    tracker.close();
+    tracker
+}
+
+impl BranchSnapshotTasks {
+    /// The signal a snapshot task waits for beside its own branch's stop.
+    pub(in crate::runtime) fn stopping(&self) -> CancellationToken {
+        self.stopping.clone()
+    }
+
+    /// Start `task`, the snapshot task of a branch of `domain`.
+    pub(in crate::runtime) fn spawn(
+        &self,
+        domain: &DomainName,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> JoinHandle<()> {
+        // The task counts for its domain while the domain's entry is held, so a stop that finds the
+        // domain's tracker empty and removes it never removes a tracker this task joins.
+        let domain_tasks = self
+            .domains
+            .entry(domain.clone())
+            .or_insert_with(closed_domain_tracker);
+        let task = domain_tasks.track_future(task);
+        drop(domain_tasks);
+        self.tracker.spawn(task)
+    }
+
+    pub(in crate::runtime) fn close(&self) {
+        self.stopping.cancel();
+        self.tracker.close();
+    }
+
+    pub(in crate::runtime) async fn wait(&self) {
+        self.tracker.wait().await;
+    }
+
+    /// Wait until no snapshot task of `domain` is left. The caller has ended every branch task of
+    /// the domain, so each task this waits for is making its last write.
+    pub(in crate::runtime) async fn wait_for_domain(&self, domain: &DomainName) {
+        let Some(domain_tasks) = self.domains.get(domain) else {
+            return;
+        };
+        let tasks = domain_tasks.value().clone();
+        // The shard is released before the wait, which lasts as long as the slowest write.
+        drop(domain_tasks);
+        tasks.wait().await;
+        self.domains.remove_if(domain, |_, tasks| tasks.is_empty());
+    }
+}
 
 impl Runtime {
     pub(in crate::runtime) fn spawn_kafka_offset_snapshot_task(
@@ -28,7 +109,7 @@ impl Runtime {
             let flush_latest_snapshot =
                 |state: &KafkaOffsetStatePersistence,
                  store: &RuntimeStateStore|
-                 -> Result<Option<u64>, RuntimePersistenceError> {
+                 -> error_stack::Result<Option<u64>, RuntimePersistenceError> {
                     if !state.is_dirty() {
                         return Ok(None);
                     }
@@ -57,7 +138,7 @@ impl Runtime {
                                     );
                                 }
                                 Ok(None) => {}
-                                Err(error) => warn!(error = %error, "failed to flush kafka offset snapshot during shutdown"),
+                                Err(error) => warn!(error = format!("{error:#}"), "failed to flush kafka offset snapshot during shutdown"),
                             }
                             break;
                         }
@@ -71,7 +152,7 @@ impl Runtime {
                                 );
                             }
                             Ok(None) => {}
-                            Err(error) => warn!(error = %error, "failed to persist kafka offset snapshot"),
+                            Err(error) => warn!(error = format!("{error:#}"), "failed to persist kafka offset snapshot"),
                         }
                     }
                 }
@@ -85,6 +166,10 @@ impl Runtime {
     /// changed, so replicas follow the branch without anything reading its live state. On every
     /// snapshot interval, and once more when the branch stops, it also persists what was published
     /// last, including when the branch task is gone and can no longer publish.
+    ///
+    /// The task runs under the runtime's [`BranchSnapshotTasks`], not under its branch task, so a
+    /// runtime that stops waits for that last write. The handle this returns only lets a branch
+    /// that stops in time wait for it too; dropping it leaves the task with the runtime.
     pub(in crate::runtime) fn spawn_published_branch_state_snapshot_task(
         &self,
         shutdown_tx: &watch::Sender<bool>,
@@ -97,7 +182,9 @@ impl Runtime {
             snapshot_interval.min(self.inner.state_replication_poll_interval);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        Some(nervix_primitives::task::spawn(async move {
+        let runtime_stopping = self.inner.branch_snapshot_tasks.stopping();
+        let domain = state.placement().domain.clone();
+        Some(self.inner.branch_snapshot_tasks.spawn(&domain, async move {
             let mut next_persist = Instant::now() + snapshot_interval;
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -107,29 +194,25 @@ impl Runtime {
                             if let Err(error) = state.request_publication(&snapshot_requests).await {
                                 warn!(
                                     kind = state.placement().kind.as_str(),
-                                    error = %error,
+                                    error = %format_args!("{error:#}"),
                                     "failed to publish branch state during shutdown"
                                 );
                             }
-                            match state.persist_published(&store, &runtime.inner.executor).await {
-                                Ok(Some(lsm)) => runtime.announce_checkpoint(
-                                    state.placement(), state.replication(), lsm,
-                                ),
-                                Ok(None) => {}
-                                Err(error) => warn!(
-                                    kind = state.placement().kind.as_str(),
-                                    error = %error,
-                                    "failed to flush branch state snapshot during shutdown"
-                                ),
-                            }
+                            runtime.persist_stopped_branch_state(&state, &store).await;
                             break;
                         }
+                    }
+                    // A stopping runtime has ended its branch tasks, so nothing publishes for this
+                    // state any more and what was published last is what a restart restores.
+                    _ = runtime_stopping.cancelled() => {
+                        runtime.persist_stopped_branch_state(&state, &store).await;
+                        break;
                     }
                     _ = sleep(publication_interval) => {
                         if let Err(error) = state.request_publication(&snapshot_requests).await {
                             warn!(
                                 kind = state.placement().kind.as_str(),
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "failed to publish branch state"
                             );
                         }
@@ -137,14 +220,21 @@ impl Runtime {
                             continue;
                         }
                         next_persist = Instant::now() + snapshot_interval;
-                        match state.persist_published(&store, &runtime.inner.executor).await {
+                        match state
+                            .persist_published(
+                                &store,
+                                &runtime.inner.executor,
+                                &runtime.inner.snapshot_staging,
+                            )
+                            .await
+                        {
                             Ok(Some(lsm)) => runtime.announce_checkpoint(
                                 state.placement(), state.replication(), lsm,
                             ),
                             Ok(None) => {}
                             Err(error) => warn!(
                                 kind = state.placement().kind.as_str(),
-                                error = %error,
+                                error = %format_args!("{error:#}"),
                                 "failed to persist branch state snapshot"
                             ),
                         }
@@ -152,6 +242,35 @@ impl Runtime {
                 }
             }
         }))
+    }
+
+    /// Write what a branch that has stopped published last, and offer the checkpoint to its
+    /// replicas.
+    async fn persist_stopped_branch_state(
+        &self,
+        state: &PublishedBranchState,
+        store: &RuntimeStateStore,
+    ) {
+        let placement = state.placement();
+        if let Some(delay) = self.inner.fault_injection.stopped_branch_state_write_delay(
+            &placement.domain,
+            placement.kind,
+            &placement.identifier,
+        ) {
+            sleep(delay).await;
+        }
+        let persisted = state
+            .persist_published(store, &self.inner.executor, &self.inner.snapshot_staging)
+            .await;
+        match persisted {
+            Ok(Some(lsm)) => self.announce_checkpoint(state.placement(), state.replication(), lsm),
+            Ok(None) => {}
+            Err(error) => warn!(
+                kind = state.placement().kind.as_str(),
+                error = %format_args!("{error:#}"),
+                "failed to flush branch state snapshot during shutdown"
+            ),
+        }
     }
 
     pub(in crate::runtime) fn spawn_materialized_stream_snapshot_task(
@@ -174,42 +293,26 @@ impl Runtime {
                     let last_persisted = state.last_persisted_lsm();
                     let sealed = state
                         .read()
-                        .seal_after(&executor, Some(last_persisted))
+                        .seal_after(
+                            &executor,
+                            &runtime.inner.snapshot_staging,
+                            Some(last_persisted),
+                        )
                         .await;
                     let sealed = match sealed {
                         Ok(Some(sealed)) => sealed,
                         Ok(None) => return Ok(None),
                         Err(error) => {
-                            return Err(RuntimePersistenceError::EncodeState(error.to_string()));
+                            return Err(error.change_context(RuntimePersistenceError::EncodeState));
                         }
                     };
                     let revision = sealed.descriptor.revision;
                     let placement = state.read().placement().clone();
-                    let store = store.clone();
-                    // Publishing a generation is filesystem work with a durability barrier, so it
-                    // runs on the storage workers rather than on the async worker this task holds.
-                    let reservation = executor
-                        .reserve(nervix_execution::MemoryClass::Bulk, 1)
-                        .await
-                        .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-                    executor
-                        .run_storage(
-                            nervix_execution::StorageClass::Filesystem,
-                            reservation,
-                            move |_charge, _cancellation| {
-                                store.publish_sealed_snapshot(
-                                    &placement,
-                                    revision,
-                                    sealed.bytes.as_ref(),
-                                )
-                            },
-                        )
-                        .await
-                        .map_err(|error| {
-                            RuntimePersistenceError::EncodeState(error.to_string())
-                        })??;
+                    store
+                        .publish_checkpoint_artifact(&placement, revision, sealed.artifact)
+                        .await?;
                     state.record_persisted(revision);
-                    Ok::<Option<u64>, RuntimePersistenceError>(Some(revision))
+                    Ok::<Option<u64>, Report<RuntimePersistenceError>>(Some(revision))
                 };
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -224,7 +327,7 @@ impl Runtime {
                                     );
                                 }
                                 Ok(None) => {}
-                                Err(error) => warn!(error = %error, "failed to flush materialized relay snapshot during shutdown"),
+                                Err(error) => warn!(error = format!("{error:#}"), "failed to flush materialized relay snapshot during shutdown"),
                             }
                             break;
                         }
@@ -238,7 +341,7 @@ impl Runtime {
                                 );
                             }
                             Ok(None) => {}
-                            Err(error) => warn!(error = %error, "failed to persist materialized relay snapshot"),
+                            Err(error) => warn!(error = format!("{error:#}"), "failed to persist materialized relay snapshot"),
                         }
                     }
                 }
@@ -261,23 +364,16 @@ impl Runtime {
                 |state: &ReplicatedBranchAggregatedState,
                  metrics: &RuntimeMetrics,
                  store: &RuntimeStateStore| {
-                    if !state.dirty.load(Ordering::SeqCst) {
+                    let Some(snapshot) = state.snapshot_to_persist(metrics)? else {
                         return Ok(None);
-                    }
-                    let snapshot = state.latest_snapshot(metrics)?;
-                    if snapshot.lsm <= state.last_persisted_lsm.load(Ordering::SeqCst) {
-                        return Ok(None);
-                    }
+                    };
                     store.persist_latest_snapshot(
                         &state.placement,
                         snapshot.lsm,
                         &snapshot.payload,
                     )?;
-                    state
-                        .last_persisted_lsm
-                        .store(snapshot.lsm, Ordering::SeqCst);
-                    state.dirty.store(false, Ordering::SeqCst);
-                    Ok::<Option<u64>, RuntimePersistenceError>(Some(snapshot.lsm))
+                    state.persisted(snapshot.lsm);
+                    Ok::<Option<u64>, Report<RuntimePersistenceError>>(Some(snapshot.lsm))
                 };
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -289,7 +385,7 @@ impl Runtime {
                                     &state.placement, state.replication(), lsm,
                                 ),
                                 Ok(None) => {}
-                                Err(error) => warn!(error = %error, "failed to flush branch-aggregated state snapshot during shutdown"),
+                                Err(error) => warn!(error = %format_args!("{error:#}"), "failed to flush branch-aggregated state snapshot during shutdown"),
                             }
                             break;
                         }
@@ -300,7 +396,7 @@ impl Runtime {
                                 &state.placement, state.replication(), lsm,
                             ),
                             Ok(None) => {}
-                            Err(error) => warn!(error = %error, "failed to persist branch-aggregated state snapshot"),
+                            Err(error) => warn!(error = %format_args!("{error:#}"), "failed to persist branch-aggregated state snapshot"),
                         }
                     }
                 }
@@ -337,21 +433,19 @@ impl Runtime {
                 }
                 initial_sync_pending = false;
                 let after_lsm = offsets.current_lsm();
-                match runtime
-                    .request_state_sync_with_timeout(
-                        &primary_node,
-                        &placement,
-                        Some(after_lsm),
-                        poll_interval,
-                    )
-                    .await
-                {
-                    Ok(Some(snapshot)) => {
-                        if let Err(error) = state.install_snapshot(snapshot.lsm, &snapshot.payload)
-                        {
-                            warn!(error = %error, "failed to apply replicated kafka offset snapshot");
+                let synchronized = nervix_primitives::select! {
+                    changed = shutdown_rx.changed() => {
+                        if changed.is_err() || *shutdown_rx.borrow() {
                             break;
                         }
+                        continue;
+                    }
+                    synchronized = runtime.sync_kafka_offsets_from(
+                        &primary_node, &state, after_lsm,
+                    ) => synchronized,
+                };
+                match synchronized {
+                    Ok(lsm) => {
                         let dispatcher = runtime.inner.remote_dispatcher.load_full();
                         if let Some(dispatcher) = dispatcher
                             && let Err(error) = dispatcher
@@ -361,19 +455,18 @@ impl Runtime {
                                         nervix_interconnect::ControlEnvelope::StateReplicationAck(
                                             nervix_interconnect::StateReplicationAck {
                                                 placement: placement.to_remote(),
-                                                lsm: snapshot.lsm,
+                                                lsm,
                                             },
                                         ),
                                     ),
                                 )
                                 .await
                         {
-                            warn!(node_id = %dispatcher.local_node_id(), error = %error, "failed to acknowledge replicated kafka offset snapshot");
+                            warn!(node_id = %dispatcher.local_node_id(), error = %format_args!("{error:#}"), "failed to acknowledge replicated kafka offset snapshot");
                         }
                     }
-                    Ok(None) => {}
                     Err(error) => {
-                        warn!(error = %error, "failed to sync replicated kafka offsets");
+                        warn!(error = %format_args!("{error:#}"), "failed to sync replicated kafka offsets");
                     }
                 }
             }
@@ -423,9 +516,9 @@ impl Runtime {
         let mut shutdown_rx = shutdown_tx.subscribe();
         Ok(Some(nervix_primitives::task::spawn(async move {
             if let Err(error) = runtime.restore_replica_branch_lifecycle(&branch_lru, &lifecycle) {
-                warn!(error = %error, "failed to read the stored replicated branch lifecycle");
+                warn!(error = %format_args!("{error:#}"), "failed to read the stored replicated branch lifecycle");
             }
-            let owner = RemoteStateOwner::new(runtime.clone(), primary_node, poll_interval);
+            let owner = RemoteStateOwner::new(runtime.clone(), primary_node);
             let mut checkpoints = ReplicaBranchCheckpoints::default();
             let mut initial_sync_pending = true;
             loop {
@@ -509,12 +602,12 @@ impl Runtime {
                                 )
                                 .await
                         {
-                            warn!(node_id = %dispatcher.local_node_id(), error = %error, "failed to acknowledge replicated materialized relay snapshot");
+                            warn!(node_id = %dispatcher.local_node_id(), error = %format_args!("{error:#}"), "failed to acknowledge replicated materialized relay snapshot");
                         }
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        warn!(error = %error, "failed to sync replicated materialized relay state");
+                        warn!(error = %format_args!("{error:#}"), "failed to sync replicated materialized relay state");
                     }
                 }
             }
@@ -552,7 +645,7 @@ impl Runtime {
                         &primary_node,
                         &state.placement,
                         Some(after_lsm),
-                        poll_interval,
+                        nervix_interconnect::StateSyncRequest::TIMEOUT,
                     )
                     .await
                 {
@@ -562,7 +655,10 @@ impl Runtime {
                             snapshot.lsm,
                             &snapshot.payload,
                         ) {
-                            warn!(error = %error, "failed to apply replicated branch-aggregated state snapshot");
+                            warn!(
+                                error = format!("{error:#}"),
+                                "failed to apply replicated branch-aggregated state snapshot"
+                            );
                             continue;
                         }
                         let dispatcher = runtime.inner.remote_dispatcher.load_full();
@@ -581,12 +677,12 @@ impl Runtime {
                                 )
                                 .await
                         {
-                            warn!(node_id = %dispatcher.local_node_id(), error = %error, "failed to acknowledge replicated branch-aggregated state snapshot");
+                            warn!(node_id = %dispatcher.local_node_id(), error = %format_args!("{error:#}"), "failed to acknowledge replicated branch-aggregated state snapshot");
                         }
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        warn!(error = %error, "failed to sync replicated branch-aggregated state");
+                        warn!(error = %format_args!("{error:#}"), "failed to sync replicated branch-aggregated state");
                     }
                 }
             }
@@ -614,6 +710,9 @@ impl Runtime {
         self.inner
             .state_identities
             .insert(node.clone(), slot.clone());
+        self.inner
+            .state_replication_routing
+            .register_assignment(node, &slot);
         slot
     }
 
@@ -657,7 +756,8 @@ impl Runtime {
                         schema_fingerprint: Self::state_schema_fingerprint(node, start_version),
                         wasm_state_generations: node.wasm_state_generations().cloned(),
                     },
-                    checkpoint_owners: Some(WasmCheckpointOwners {
+                    checkpoint_owners: Some(CheckpointOwners {
+                        primary: node.execution_node().cloned(),
                         executors,
                         replicas,
                     }),
@@ -744,11 +844,7 @@ impl Runtime {
         if !node.materialized_relay {
             return node.schema_fingerprint;
         }
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"nervix/materialized-state/start-version");
-        hasher.update(node.schema_fingerprint.as_digest());
-        hasher.update(&start_version.to_be_bytes());
-        SchemaFingerprint::from_digest(*hasher.finalize().as_bytes())
+        node.schema_fingerprint.materialized_at(start_version)
     }
 
     pub(in crate::runtime) fn clear_state_identities(&self, domain: &DomainName) {
@@ -771,6 +867,7 @@ impl Runtime {
                 slot.store(None);
             }
             self.inner.state_identities.remove(&key);
+            self.inner.state_replication_routing.withdraw_entity(&key);
         }
     }
 
@@ -812,13 +909,11 @@ impl Runtime {
             | RuntimeStateKind::WindowProcessor
             | RuntimeStateKind::BranchLru => {
                 let node = DomainNodeRef::node_in(domain.clone(), kind, identifier.clone());
-                let assignment = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain the published \
-                     state placement before recurring branch work",
-                    self.inner.state_identities.get(&node)
-                )
-                .and_then(|slot| slot.load_full());
+                let assignment = self
+                    .inner
+                    .state_replication_routing
+                    .assignment_for_entity(&node)
+                    .and_then(|slot| slot.load_full());
                 let Some(assignment) = assignment else {
                     return Err(Report::new(
                         StateIdentityError::SchemaFingerprintUnpublished {
@@ -861,30 +956,20 @@ impl Runtime {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> bool {
-        let node = DomainNodeRef::node_in(
-            placement.domain.clone(),
-            placement.kind,
-            placement.identifier.clone(),
-        );
-        let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
-        let Some(identity) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 15 https://app.clickup.com/t/86bca1web: retain the current assignment \
-             generation for frame admission",
-            self.inner.state_identities.get(&node)
-        ) else {
+        let Some(slot) = self.inner.state_replication_routing.assignment(placement) else {
             return false;
         };
-        let Some(assignment) = identity.load_full() else {
+        let Some(assignment) = slot.load_full() else {
             return false;
         };
-        assignment.identity.names(placement.state, branch.as_ref())
+        assignment.names(placement)
     }
 
     pub(in crate::runtime) fn purge_stale_runtime_state(
         &self,
         domain: &DomainName,
     ) -> Result<(), error_stack::Report<RuntimePersistenceError>> {
+        self.inner.state_replication_routing.purge_stale(domain);
         let stale_deduplicators = self
             .inner
             .replicated_deduplicator_states
@@ -1005,6 +1090,7 @@ impl Runtime {
     }
 
     pub(in crate::runtime) fn clear_runtime_state_for_domain(&self, domain: &DomainName) {
+        self.inner.state_replication_routing.retire_domain(domain);
         let placements = self
             .inner
             .replicated_deduplicator_states
@@ -1081,3 +1167,7 @@ impl Runtime {
             .retain(|placement, _| &placement.domain != domain);
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "tasks_shuttle_tests.rs"]
+mod shuttle_tests;

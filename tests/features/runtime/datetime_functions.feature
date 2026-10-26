@@ -2,11 +2,11 @@ Feature: Datetime functions
   Scenario Outline: Datetime functions compute from event timestamps and the domain execution time
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         id STRING,
@@ -50,8 +50,8 @@ Feature: Datetime functions
       CREATE RELAY reading_times SCHEMA reading_time UNBRANCHED;
       CREATE VHOST edge datetime-functions-{{test_id}}.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TIMESTAMP NOW
         TO readings
@@ -99,7 +99,7 @@ Feature: Datetime functions
       "id":"leap-day" | "hour_of_day":23 | "day_of_year":60 | "iso_week":9 | "day_start":"2000-02-29T00:00:00+00:00" | "week_start":"2000-02-28T00:00:00+00:00" | "quarter_hour":"2000-02-29T23:50:00+00:00" | "delayed":"2000-03-01T00:00:00.250+00:00" | "elapsed_seconds":85650 | "unix_milliseconds":951868350250 | "from_epoch":"2000-03-01T00:00:00+00:00" | "execution_day":"2000-02-29T00:00:00+00:00" | "execution_day_of_year":60 | "offset_week_start":"2000-02-27T18:30:00+00:00" | "offset_day_start":"2000-02-29T18:30:00+00:00" | "offset_hour_start":"2000-02-29T23:30:00+00:00" | "offset_minute_start":"2000-02-29T23:52:00+00:00"
       "id":"before-epoch" | "hour_of_day":23 | "day_of_year":365 | "iso_week":1 | "day_start":"1969-12-31T00:00:00+00:00" | "week_start":"1969-12-29T00:00:00+00:00" | "quarter_hour":"1969-12-31T23:45:00+00:00" | "delayed":"1969-12-31T23:59:59.998999999+00:00" | "elapsed_seconds":0 | "unix_milliseconds":-1 | "from_epoch":"1969-12-31T23:59:59.999+00:00" | "execution_day":"2000-02-29T00:00:00+00:00" | "execution_day_of_year":60 | "offset_week_start":"1969-12-28T18:30:00+00:00" | "offset_day_start":"1969-12-31T18:30:00+00:00" | "offset_hour_start":"1969-12-31T23:30:00+00:00" | "offset_minute_start":"1969-12-31T23:59:00+00:00"
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       START AT '1999-12-31T12:00:00Z' TIME RATE <time_rate>;
@@ -123,11 +123,11 @@ Feature: Datetime functions
   Scenario Outline: Datetime results outside their types fail only their own messages
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA boundary_event (
         id STRING,
@@ -158,8 +158,8 @@ Feature: Datetime functions
       CREATE RELAY datetime_errors SCHEMA datetime_error UNBRANCHED;
       CREATE VHOST edge datetime-boundaries-{{test_id}}.example.com;
       CREATE ENDPOINT boundary_ingress ON edge PATH '/boundaries' TYPE HTTP;
-      CREATE INGESTOR boundary_source
-        FROM ENDPOINT boundary_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR boundary_source
+        FROM boundary_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING boundary_event_batch_codec
         TO boundary_events
           INHERIT ALL
@@ -207,11 +207,11 @@ Feature: Datetime functions
 
   Scenario Outline: Datetime function arguments are validated when the statement is applied
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (
         occurred_at DATETIME,
@@ -224,7 +224,7 @@ Feature: Datetime functions
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY summaries SCHEMA summary UNBRANCHED;
       """
-    When these NSPL commands fail with "function 'date_trunc' does not accept time unit 'fortnight'"
+    When these Plexus commands fail with "function 'date_trunc' does not accept time unit 'fortnight'"
       """
       CREATE JUNCTION truncate_to_fortnight
         FROM events
@@ -234,7 +234,7 @@ Feature: Datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'date_part' does not accept date part 'weekday'"
+    And these Plexus commands fail with "function 'date_part' does not accept date part 'weekday'"
       """
       CREATE JUNCTION extract_weekday
         FROM events
@@ -244,7 +244,7 @@ Feature: Datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'date_bin' requires its time unit to be a STRING literal"
+    And these Plexus commands fail with "function 'date_bin' requires its time unit to be a STRING literal"
       """
       CREATE JUNCTION bin_by_unit_field
         FROM events
@@ -254,7 +254,7 @@ Feature: Datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'date_bin' requires a positive width, found 0"
+    And these Plexus commands fail with "function 'date_bin' requires a positive width, found 0"
       """
       CREATE JUNCTION bin_without_width
         FROM events
@@ -264,7 +264,7 @@ Feature: Datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'from_unix' expects 2 arguments, found 1"
+    And these Plexus commands fail with "function 'from_unix' expects 2 arguments, found 1"
       """
       CREATE JUNCTION convert_without_unit
         FROM events
@@ -274,7 +274,7 @@ Feature: Datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'date_add' requires integer input, found Float64"
+    And these Plexus commands fail with "function 'date_add' requires integer input, found Float64"
       """
       CREATE JUNCTION add_fractional_seconds
         FROM events

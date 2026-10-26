@@ -1,8 +1,12 @@
 //! Layer: data plane.
 //! Owns: lifecycle invalidation and persisted-state removal for runtime state.
 //! May depend on: runtime state carriers, the state store, and vocabulary models.
-//! Must not know: control-plane transactions, NSPL parsing, or edge protocols.
+//! Must not know: control-plane transactions, Plexus parsing, or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -37,6 +41,7 @@ impl Runtime {
             processor,
             branch.clone(),
         )?;
+        self.inner.state_replication_routing.retire(&placement);
         self.inner
             .replicated_window_processor_states
             .remove(&placement);
@@ -46,20 +51,16 @@ impl Runtime {
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
+            lifecycle,
+            reason = "domain routing installation retains its materialized membership epoch"
         )
     )]
     pub(in crate::runtime) fn relay_state_epoch(&self, domain: &DomainName) -> Arc<AtomicU64> {
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 04 https://app.clickup.com/t/86bc9eqp3: retain the branch relay state \
-             epoch instead of looking up its shared table",
-            self.inner.relay_state_epochs.entry(domain.clone())
-        )
-        .or_insert_with(|| Arc::new(AtomicU64::new(0)))
-        .clone()
+        self.inner
+            .relay_state_epochs
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AtomicU64::new(0)))
+            .clone()
     }
 
     pub(in crate::runtime) fn bump_relay_state_epoch(&self, domain: &DomainName) {
@@ -71,7 +72,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), ExecutionBuildError> {
         let placements = self
             .inner
             .replicated_materialized_stream_states
@@ -84,6 +85,7 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for placement in placements {
+            self.inner.state_replication_routing.retire(&placement);
             self.inner
                 .replicated_materialized_stream_states
                 .remove(&placement);
@@ -96,12 +98,8 @@ impl Runtime {
                     ModelKind::Relay,
                     relay,
                 )
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "failed to purge materialized state for relay '{}': {error}",
-                        relay.as_str()
-                    ),
+                .change_context_lazy(|| ExecutionBuildError::PurgeNodeState {
+                    node: NodeRef::new(ModelKind::Relay, ModelName::from(relay)),
                 })?;
         }
         Ok(())
@@ -111,7 +109,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         deduplicator: &DeduplicatorName,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), ExecutionBuildError> {
         let placements = self
             .inner
             .replicated_deduplicator_states
@@ -124,6 +122,7 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>();
         for placement in placements {
+            self.inner.state_replication_routing.retire(&placement);
             self.inner.replicated_deduplicator_states.remove(&placement);
         }
         if let Some(store) = &self.inner.state_store {
@@ -134,12 +133,8 @@ impl Runtime {
                     ModelKind::Deduplicator,
                     deduplicator,
                 )
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!(
-                        "failed to purge state for deduplicator '{}': {error}",
-                        deduplicator.as_str()
-                    ),
+                .change_context_lazy(|| ExecutionBuildError::PurgeNodeState {
+                    node: NodeRef::new(ModelKind::Deduplicator, ModelName::from(deduplicator)),
                 })?;
         }
         Ok(())

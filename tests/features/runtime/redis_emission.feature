@@ -5,12 +5,12 @@ Feature: Redis emission
     And MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Redis channel "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -24,14 +24,13 @@ Feature: Redis emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -40,13 +39,12 @@ Feature: Redis emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT redis_main
-        TYPE REDIS
+        CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
-        CREATE EMITTER redis_notifications FROM notifications TO REDIS PUBSUB redis_main CHANNEL notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE REDIS PUBSUB EMITTER redis_notifications FROM notifications TO redis_main CHANNEL 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

@@ -1,7 +1,7 @@
 # VM function public qualification matrix
 
 This ledger maps the function contracts in [Expression Functions](../docs/src/filter-map-functions.md)
-to public Cucumber scenarios. A family scenario proves its values and failures through an NSPL
+to public Cucumber scenarios. A family scenario proves its values and failures through a Plexus
 graph and session subscription. The context and client scenarios below exercise the common
 compiler, execution, and transport boundaries. Scenario outlines run on one and three nodes unless
 the cited feature explicitly tests a topology-specific event.
@@ -61,8 +61,8 @@ one- and three-node clusters together with the other checked numeric and numeric
 (20 scenarios, 90 steps).
 
 The full `just test` run passed 1,986 scenarios and 21,628 steps, including the client conformance
-suite. The standalone client conformance run passed 19 scenarios; client wire tests, the NSPL
+suite. The standalone client conformance run passed 19 scenarios; client wire tests, the Plexus
 completion walk, `just ratchet`, and `just validate` passed.
 The focused `just test-coverage-feature` run passed the new qualification, expression semantics,
 and client conformance features and produced `lcov.info`. This patch changes Cucumber specifications
-and Markdown only; it has no modified Rust source lines for Codecov patch coverage to measure.
+and Markdown only; it has no modified Rust source lines for patch coverage to measure.

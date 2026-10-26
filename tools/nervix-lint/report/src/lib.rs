@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 use indexmap::{IndexMap, map::Entry};
 use serde::{Deserialize, Serialize};
 
+pub mod audit;
 pub mod rules;
+pub mod source;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReportError {
@@ -193,6 +195,8 @@ pub struct CompilerReport {
     pub crate_source: String,
     pub arguments: Vec<String>,
     pub findings: Vec<Finding>,
+    /// Review candidates for lint workarounds; aggregation of acquisitions ignores them.
+    pub audit: Vec<audit::AuditCandidate>,
     pub excluded_generated: u32,
     pub excluded_external: u32,
     pub complete: bool,

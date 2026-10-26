@@ -79,7 +79,7 @@ fn parse_program_with_namespaces(
     source: &str,
     scope_policy: SemanticScopePolicy<'_>,
 ) -> BenchmarkProgramResult<SpannedNode<Program>> {
-    let construction = nervix_nspl::parse_route_construction(source)
+    let construction = nervix_plexus::parse_route_construction(source)
         .change_context(BenchmarkProgramError::ParseRouteConstruction)?;
     lower_route_construction(&construction, scope_policy)
         .change_context(BenchmarkProgramError::LowerRouteConstruction)
@@ -821,7 +821,7 @@ fn compile_multi_pattern_search(constant: bool) -> Arc<CompiledProgram> {
         "contains_any(input.text, vec(input.pattern, 'absent'))"
     };
     let source = format!("SET matched = {expression}");
-    let program = parse_program(&source).assured("the benchmark expression is valid NSPL");
+    let program = parse_program(&source).assured("the benchmark expression is valid Plexus");
     let output = with_output_fields(&regex_schema(), &[("matched", DataType::Boolean)]);
     compile_program_with_options_for_bindings(
         &program,

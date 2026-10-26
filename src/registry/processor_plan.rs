@@ -7,6 +7,11 @@
 //! - **Depends on.** Vocabulary Models and the guarantees established by registry validation.
 //! - **Must not know.** Runtime tasks, Arrow batches, relay services or node-local resources.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use ahash::{HashMap, HashSet};

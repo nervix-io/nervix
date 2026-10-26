@@ -1,8 +1,20 @@
+//! Durable checkpoints and their placement-qualified storage boundary.
+//!
+//! Layer: infrastructure.
+//! - **Owns.** Checkpoint persistence, durable generation selection and recovery records.
+//! - **Depends on.** Typed vocabulary and state envelopes, Fjall, and the bounded executor.
+//! - **Must not know.** Models, graph decisions or how consensus admits a restore.
+//!
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(engine, reason = "owns the infrastructure boundary declared above")
+)]
+
 use std::{collections::BTreeSet, fmt, str::FromStr};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
-use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 pub(crate) use nervix_interconnect::{RuntimeState, RuntimeStateKind, StateSchema};
@@ -12,7 +24,7 @@ use nervix_models::{
     WasmStateGeneration, WasmStateGenerations,
 };
 use nervix_primitives::{
-    publication::{ArcSwap, Guard},
+    publication::{ArcSwap, ArcSwapOption, Guard},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -20,9 +32,47 @@ use thiserror::Error;
 
 use super::{Arc, BranchKey, StdArc, WasmGuestState};
 
+mod backup;
+pub(super) mod checkpoint_reader;
+mod checkpoint_stream;
 mod durability;
+pub(super) mod generation;
+mod maintenance;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod identity_properties;
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod key_properties;
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod snapshot_properties;
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod store_properties;
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod wasm_properties;
 
 use durability::DurabilityBarrier;
+use generation::{StoredCheckpoint, index_key, physical_placement, read_checkpoint};
+pub(crate) use maintenance::DEFAULT_RESTORE_STAGING_MAX_BYTES;
 
 /// The byte that opens the generation segment of a WASM guest state key. A key without it was not
 /// written in the current shape and fails to decode instead of addressing the current lifetime.
@@ -335,10 +385,12 @@ impl StateAdmissions {
         }
     }
 
+    /// Counts one operation in under `generation`. The read-modify-write acquires the read of a
+    /// rebind that came before it, so the operation then observes the binding that rebind published.
     fn admit(&self, generation: u64) -> StateAdmission<'_> {
         let admitted = self.of_generation(generation);
         admitted
-            .fetch_add(1, Ordering::SeqCst)
+            .fetch_add(1, Ordering::AcqRel)
             .checked_add(1)
             .assured(
                 "every admitted operation occupies a running stack frame, so fewer than \
@@ -349,14 +401,21 @@ impl StateAdmissions {
 
     /// Wait until every operation admitted under `generation` has finished.
     ///
+    /// The count is read with a read-modify-write, which reads its newest value. An operation
+    /// counted in before the read is waited for, and one counted in after it acquires the read and
+    /// observes the binding the rebind published before waiting, so it is refused. A plain load
+    /// could miss both: it may return a count from before an admission that preceded it, while that
+    /// operation's load of the binding returns the superseded one. Reading the count also acquires
+    /// every operation that finished, so what it did happens before the rebind returns.
+    ///
     /// Admitted operations are synchronous and never take the barrier, so the wait lasts only as
-    /// long as the operations already running. The spin yields through the execution crate, whose
-    /// yield a deterministic scheduler sees, so that scheduler runs the operations this waits for
-    /// instead of the spin.
+    /// long as the operations already running. The spin yields through the primitive boundary,
+    /// whose yield a deterministic scheduler sees, so that scheduler runs the operations this waits
+    /// for instead of the spin.
     fn wait_until_finished(&self, generation: u64) {
         let admitted = self.of_generation(generation);
         let mut spins = 0_u32;
-        while admitted.load(Ordering::SeqCst) != 0 {
+        while admitted.fetch_add(0, Ordering::AcqRel) != 0 {
             if spins < ADMISSION_SPINS_BEFORE_YIELD {
                 spins = spins
                     .checked_add(1)
@@ -376,9 +435,10 @@ struct StateAdmission<'a> {
 }
 
 impl Drop for StateAdmission<'_> {
+    /// Counts the operation out, releasing what it did to the rebind that waits for it.
     fn drop(&mut self) {
         self.admitted
-            .fetch_sub(1, Ordering::SeqCst)
+            .fetch_sub(1, Ordering::Release)
             .checked_sub(1)
             .verified("an admission releases only the count it added");
     }
@@ -395,8 +455,9 @@ impl Drop for StateAdmission<'_> {
 /// consistent generation, serialize on the barrier. A per-message operation never takes it: it is
 /// admitted instead, counting itself in before it compares the binding and out when it finishes,
 /// while `rebind` publishes the new binding under the barrier and then waits for the operations
-/// admitted under the one it replaced. An admitted operation therefore either observes the new
-/// binding and is refused, or finishes before `rebind` returns.
+/// admitted under the one it replaced. Both sides reach the admission count by read-modify-write,
+/// which are totally ordered, so an admitted operation either observes the new binding and is
+/// refused, or finishes before `rebind` returns.
 #[derive(Debug)]
 #[cfg_attr(
     nervix_lint,
@@ -437,14 +498,15 @@ impl StateAssignmentAuthority {
         let superseded = self.current_binding();
         let binding = superseded.successor(roles.local_capability(local_node));
         self.roles.store(StdArc::new(roles));
-        self.binding.store(binding.packed, Ordering::SeqCst);
+        // Release: a reader that loads this binding also observes the roles published with it.
+        self.binding.store(binding.packed, Ordering::Release);
         self.admissions.wait_until_finished(superseded.generation());
         binding
     }
 
     pub(in crate::runtime) fn current_binding(&self) -> StateAssignmentBinding {
         StateAssignmentBinding {
-            packed: self.binding.load(Ordering::SeqCst),
+            packed: self.binding.load(Ordering::Acquire),
         }
     }
 
@@ -509,7 +571,7 @@ impl StateAssignmentAuthority {
             }));
         }
         let _admission = self.admissions.admit(token.binding.generation());
-        if self.binding.load(Ordering::SeqCst) != token.binding.packed {
+        if self.binding.load(Ordering::Acquire) != token.binding.packed {
             return Err(Report::new(StateAuthorityError {
                 operation: required,
             }));
@@ -536,7 +598,7 @@ impl StateAssignmentAuthority {
     ) -> Result<T, Report<StateAuthorityError>> {
         let _barrier = self.barrier.lock();
         if !token.binding.grants(required)
-            || self.binding.load(Ordering::SeqCst) != token.binding.packed
+            || self.binding.load(Ordering::Acquire) != token.binding.packed
         {
             return Err(Report::new(StateAuthorityError {
                 operation: required,
@@ -579,12 +641,28 @@ pub(in crate::runtime) enum StateIdentityError {
     },
 }
 
+/// Why an operation over one runtime state failed. The assignment's refusal and the storage
+/// failure each keep their own report beneath [`Self::Authority`] and [`Self::Persistence`].
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum RuntimeStateOperationError {
-    #[error(transparent)]
-    Authority(#[from] StateAuthorityError),
-    #[error(transparent)]
-    Persistence(#[from] RuntimePersistenceError),
+    #[error("the runtime state's assignment refused the operation")]
+    Authority,
+    #[error("runtime state storage failed")]
+    Persistence,
+    #[error(
+        "refused materialized snapshot revision {received} while revision {current} is installed"
+    )]
+    MaterializedSnapshotRevision { received: u64, current: u64 },
+    #[error(
+        "refused a materialized relay snapshot from branch generation {received} while branch \
+         generation {current} is installed"
+    )]
+    MaterializedSnapshotBranchGeneration { received: u64, current: u64 },
+    #[error(
+        "refused a materialized relay snapshot sealed under ownership fence {received} while \
+         fence {current} is installed"
+    )]
+    MaterializedSnapshotFence { received: u64, current: u64 },
     #[error("runtime state checkpoint failed: {0}")]
     Checkpoint(String),
     #[error("runtime state replication failed: {0}")]
@@ -613,16 +691,6 @@ impl RuntimeStateOperationError {
     pub(in crate::runtime) fn replication(reason: impl Into<String>) -> Report<Self> {
         Report::new(Self::Replication(reason.into()))
     }
-
-    pub(in crate::runtime) fn persistence(error: RuntimePersistenceError) -> Report<Self> {
-        Report::new(Self::Persistence(error))
-    }
-}
-
-impl From<Report<StateAuthorityError>> for RuntimeStateOperationError {
-    fn from(error: Report<StateAuthorityError>) -> Self {
-        Self::Authority(*error.current_context())
-    }
 }
 
 /// One checkpoint of the state a placement names. It is stored under that placement and carried
@@ -648,27 +716,50 @@ impl PersistedRuntimeStateEntry {
         }
         None
     }
-
-    fn decode(raw: &[u8]) -> error_stack::Result<Self, RuntimePersistenceError> {
-        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
-        aligned.extend_from_slice(raw);
-        rkyv::from_bytes::<Self, rkyv::rancor::Error>(&aligned)
-            .map_err(|error| Report::new(RuntimePersistenceError::DecodeState(error.to_string())))
-    }
 }
 
-#[derive(Debug, Clone, Error)]
+/// Why the node's runtime state storage failed an operation. An encoding or decoding failure keeps
+/// the serializer's error, or the [`StoredStateIssue`] the stored bytes have, as its cause.
+#[derive(Debug, Error)]
 pub(crate) enum RuntimePersistenceError {
+    #[error("runtime state storage has an invalid format; recreate the node state directory")]
+    InvalidStorageFormat,
+    #[error("checkpoint placement exceeds the bounded storage key size")]
+    CheckpointPlacementTooLarge,
+    #[error("checkpoint chunks are incomplete or differ from their declared length and digest")]
+    InvalidCheckpointChunks,
+    #[error("restore checkpoint staging byte accounting overflowed")]
+    RestoreStagingSize,
+    #[error(
+        "restore checkpoint staging quota of {limit} bytes cannot hold {requested} more bytes \
+         with {used} bytes already staged"
+    )]
+    RestoreStagingQuota {
+        limit: u64,
+        used: u64,
+        requested: u64,
+    },
+    #[error("restore storage work was cancelled between bounded units")]
+    Cancelled,
+    #[error("failed to read the restore checkpoint stream")]
+    RestoreRead,
     #[error("failed to open runtime state keyspace")]
     OpenKeyspace,
     #[error("failed to read runtime state value")]
     ReadValue,
     #[error("failed to write runtime state value")]
     WriteValue,
-    #[error("failed to encode runtime state: {0}")]
-    EncodeState(String),
-    #[error("failed to decode runtime state: {0}")]
-    DecodeState(String),
+    #[error("failed to encode runtime state")]
+    EncodeState,
+    #[error("failed to encode a native {} checkpoint", .state.as_str())]
+    NativeEncoding { state: RuntimeStateKind },
+    #[error("failed to decode runtime state")]
+    DecodeState,
+    #[error(
+        "restore installation generation {requested} cannot replace published generation \
+         {published}"
+    )]
+    RestoreGeneration { requested: u64, published: u64 },
     #[error("failed to seal or restore a window snapshot")]
     WindowSnapshot,
     #[error("deduplicator snapshot has an invalid format header")]
@@ -695,16 +786,74 @@ pub(crate) enum RuntimePersistenceError {
     Synchronize,
 }
 
+/// What stored runtime-state bytes get wrong: a key that does not spell a placement, a restore
+/// whose staged inventory is incomplete, or a snapshot that repeats a key. It is the cause beneath
+/// [`RuntimePersistenceError::DecodeState`], which names no bytes of the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub(crate) enum StoredStateIssue {
+    #[error("runtime state key has no domain separator")]
+    KeyDomainSeparator,
+    #[error("runtime state key has an invalid state kind")]
+    KeyStateKind,
+    #[error("runtime state key has no state-kind separator")]
+    KeyStateKindSeparator,
+    #[error("runtime state key has no model-kind separator")]
+    KeyModelKindSeparator,
+    #[error("runtime state key has an invalid model kind")]
+    KeyModelKind,
+    #[error("runtime state key has no identifier separator")]
+    KeyIdentifierSeparator,
+    #[error("runtime state key has an invalid identifier")]
+    KeyIdentifier,
+    #[error("runtime state key continues after its unbranched scope")]
+    KeyAfterUnbranchedScope,
+    #[error("runtime state key has an invalid branch key")]
+    KeyBranchKey,
+    #[error("runtime state key has an invalid branch scope")]
+    KeyBranchScope,
+    #[error("runtime state key has no schema fingerprint")]
+    KeySchemaFingerprint,
+    #[error("runtime state key has a truncated schema fingerprint")]
+    KeySchemaFingerprintTruncated,
+    #[error("runtime state key has no schema fingerprint separator")]
+    KeySchemaFingerprintSeparator,
+    #[error("runtime state key has no state generation")]
+    KeyStateGeneration,
+    #[error("runtime state key has a truncated state generation")]
+    KeyStateGenerationTruncated,
+    #[error("runtime state key has an invalid state generation")]
+    KeyStateGenerationInvalid,
+    #[error("runtime state key has no state generation separator")]
+    KeyStateGenerationSeparator,
+    #[error("restored state installation is incomplete: staged inventory differs")]
+    StagedInventoryDiffers,
+    #[error("deduplicator snapshot contains a duplicate key")]
+    DuplicateDeduplicatorKey,
+}
+
+impl StoredStateIssue {
+    /// This issue as the decoding failure it causes.
+    pub(crate) fn decode_failure(self) -> Report<RuntimePersistenceError> {
+        Report::new(self).change_context(RuntimePersistenceError::DecodeState)
+    }
+}
+
 pub(in crate::runtime) struct RuntimeStateStore {
     db: Database,
     latest: Keyspace,
     lsm_index: Keyspace,
+    restore_staging: Keyspace,
+    restore_publications: Keyspace,
+    checkpoint_chunks: Keyspace,
+    restore_staging_max_bytes: u64,
+    /// What the unpublished restore namespaces held when they were last measured, kept while that
+    /// stays exact. Read and changed only under the installation barrier.
+    restore_staging_usage: maintenance::StagedUsageMeasurement,
     handoff_preparations: Keyspace,
     handoff_activations: Keyspace,
     forced_recovery_preparations: Keyspace,
     forced_recovery_completions: Keyspace,
-    /// Held by every replica installation, which compares with the stored snapshot before it
-    /// replaces it. The storage job that installs a replica holds its own handle.
+    /// Serializes checkpoint writes, replica installation and complete restore publication.
     replica_installs: Arc<nervix_primitives::sync::blocking::Mutex<()>>,
     /// Makes applied writes durable, one synchronization for every writer waiting at once. The
     /// storage job that synchronizes holds its own handle.
@@ -718,16 +867,19 @@ pub(in crate::runtime) struct RuntimeStateStore {
     nervix_lint,
     nervix::context(
         bounded,
-        key = "replica state placement and checkpoint LSM",
-        bound = "one compare-and-install storage job at a time under the retained replica-install \
-                 barrier",
-        reason = "the admitted writer retains the exact store and installation barrier"
+        key = "one node state store installation barrier",
+        bound = "one admitted checkpoint write or bounded restore storage job; never held across \
+                 await",
+        reason = "the writer serializes revision comparison, checkpoint writes and complete \
+                  restore publication"
     )
 )]
 struct LatestSnapshotWriter {
     db: Database,
     latest: Keyspace,
     lsm_index: Keyspace,
+    restore_publications: Keyspace,
+    namespace_view: fjall::Snapshot,
     replica_installs: Arc<nervix_primitives::sync::blocking::Mutex<()>>,
 }
 
@@ -738,20 +890,69 @@ impl LatestSnapshotWriter {
         lsm: u64,
         payload: &[u8],
     ) -> error_stack::Result<(), RuntimePersistenceError> {
-        let entry = PersistedRuntimeStateEntry {
-            lsm,
-            payload: payload.to_vec(),
-        };
-        let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&entry)
-            .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-        let placement_key = placement.as_storage_key();
-        self.latest
-            .insert(placement_key.clone(), encoded.to_vec())
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.lsm_index
-            .insert(placement.as_lsm_index_key(lsm), placement_key)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        Ok(())
+        self.write_latest_snapshot_checked(placement, lsm, payload, false)
+            .map(|_| ())
+    }
+
+    fn write_latest_snapshot_checked(
+        &self,
+        placement: &RuntimeStatePlacement,
+        lsm: u64,
+        payload: &[u8],
+        require_newer: bool,
+    ) -> error_stack::Result<bool, RuntimePersistenceError> {
+        self.with_installation(|| {
+            let namespace = backup::active_namespace(
+                &self.namespace_view,
+                &self.restore_publications,
+                &placement.domain,
+            )?;
+            if namespace
+                != backup::active_namespace(
+                    &self.db.snapshot(),
+                    &self.restore_publications,
+                    &placement.domain,
+                )?
+            {
+                return Ok(false);
+            }
+            let placement_key = namespace.key(placement)?;
+            // A periodic encode can finish after the backup's forced publication. Preserve the
+            // greater revision even when storage workers complete in the opposite order.
+            if self
+                .latest_lsm(placement)?
+                .is_some_and(|current| current > lsm || require_newer && current == lsm)
+            {
+                return Ok(false);
+            }
+            let entry = PersistedRuntimeStateEntry {
+                lsm,
+                payload: payload.to_vec(),
+            };
+            let encoded = StoredCheckpoint::Inline(entry).encode()?;
+            self.latest
+                .insert(placement_key.clone(), encoded)
+                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+            self.lsm_index
+                .insert(index_key(&placement_key, lsm), placement_key)
+                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+            Ok(true)
+        })
+    }
+
+    /// Serializes every publication that replaces stored checkpoints, including a restored set.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "the admitted storage caller supplies one synchronous \
+                                   checkpoint write or bounded restore generation work; local \
+                                   callbacks remain analyzed")
+    )]
+    fn with_installation<T>(
+        &self,
+        operation: impl FnOnce() -> error_stack::Result<T, RuntimePersistenceError>,
+    ) -> error_stack::Result<T, RuntimePersistenceError> {
+        let _installation = self.replica_installs.lock();
+        operation()
     }
 
     fn persist(&self, mode: PersistMode) -> error_stack::Result<(), RuntimePersistenceError> {
@@ -764,14 +965,16 @@ impl LatestSnapshotWriter {
         &self,
         placement: &RuntimeStatePlacement,
     ) -> error_stack::Result<Option<u64>, RuntimePersistenceError> {
-        let Some(raw) = self
-            .latest
-            .get(placement.as_storage_key())
+        let view = self.db.snapshot();
+        let namespace =
+            backup::active_namespace(&view, &self.restore_publications, &placement.domain)?;
+        let Some(raw) = view
+            .get(&self.latest, namespace.key(placement)?)
             .map_err(|_| RuntimePersistenceError::ReadValue)?
         else {
             return Ok(None);
         };
-        Ok(Some(PersistedRuntimeStateEntry::decode(raw.as_ref())?.lsm))
+        Ok(Some(StoredCheckpoint::decode(&raw)?.lsm()))
     }
 
     /// Replace the stored snapshot of `placement` with `snapshot` unless the stored one is as new,
@@ -781,14 +984,9 @@ impl LatestSnapshotWriter {
         placement: &RuntimeStatePlacement,
         snapshot: PersistedRuntimeStateEntry,
     ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, RuntimePersistenceError> {
-        let _install = self.replica_installs.lock();
-        if let Some(stored_lsm) = self.latest_lsm(placement)?
-            && stored_lsm >= snapshot.lsm
-        {
-            return Ok(None);
-        }
-        self.write_latest_snapshot(placement, snapshot.lsm, &snapshot.payload)?;
-        Ok(Some(snapshot))
+        let installed =
+            self.write_latest_snapshot_checked(placement, snapshot.lsm, &snapshot.payload, true)?;
+        Ok(installed.then_some(snapshot))
     }
 }
 
@@ -983,13 +1181,6 @@ impl RuntimeStatePlacement {
         }
     }
 
-    fn as_lsm_index_key(&self, lsm: u64) -> Vec<u8> {
-        let mut key = self.as_storage_key();
-        key.push(0);
-        key.extend_from_slice(&lsm.to_be_bytes());
-        key
-    }
-
     pub(in crate::runtime) fn to_remote(&self) -> nervix_interconnect::StatePlacementEnvelope {
         nervix_interconnect::StatePlacementEnvelope {
             domain: self.domain.clone(),
@@ -1026,41 +1217,96 @@ impl RuntimeStateStore {
     pub(in crate::runtime) fn from_database(
         db: Database,
         executor: Executor,
-    ) -> Result<Self, RuntimePersistenceError> {
+        restore_staging_max_bytes: u64,
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
         let latest = db
             .keyspace("runtime_state_latest", KeyspaceCreateOptions::default)
-            .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+            .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let lsm_index = db
             .keyspace("runtime_state_lsm", KeyspaceCreateOptions::default)
-            .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+            .change_context(RuntimePersistenceError::OpenKeyspace)?;
+        let restore_staging = db
+            .keyspace(
+                "runtime_state_restore_staging",
+                KeyspaceCreateOptions::default,
+            )
+            .change_context(RuntimePersistenceError::OpenKeyspace)?;
+        let restore_publications = db
+            .keyspace(
+                "runtime_state_restore_publications",
+                KeyspaceCreateOptions::default,
+            )
+            .change_context(RuntimePersistenceError::OpenKeyspace)?;
+        let checkpoint_chunks = db
+            .keyspace(
+                "runtime_state_checkpoint_chunks",
+                KeyspaceCreateOptions::default,
+            )
+            .change_context(RuntimePersistenceError::OpenKeyspace)?;
+        let format = db
+            .keyspace("runtime_state_format", KeyspaceCreateOptions::default)
+            .change_context(RuntimePersistenceError::OpenKeyspace)?;
+        match format
+            .get(b"encoding")
+            .change_context(RuntimePersistenceError::ReadValue)?
+        {
+            Some(value) if value.as_ref() == generation::STORAGE_FORMAT => {}
+            Some(_) => return Err(Report::new(RuntimePersistenceError::InvalidStorageFormat)),
+            None => {
+                for keyspace in [
+                    &latest,
+                    &lsm_index,
+                    &restore_staging,
+                    &restore_publications,
+                    &checkpoint_chunks,
+                ] {
+                    if !keyspace
+                        .is_empty()
+                        .change_context(RuntimePersistenceError::ReadValue)?
+                    {
+                        return Err(Report::new(RuntimePersistenceError::InvalidStorageFormat));
+                    }
+                }
+                format
+                    .insert(b"encoding", generation::STORAGE_FORMAT)
+                    .change_context(RuntimePersistenceError::WriteValue)?;
+                db.persist(PersistMode::SyncAll)
+                    .change_context(RuntimePersistenceError::Synchronize)?;
+            }
+        }
         let handoff_preparations = db
             .keyspace(
                 "runtime_state_handoff_preparations",
                 KeyspaceCreateOptions::default,
             )
-            .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+            .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let handoff_activations = db
             .keyspace(
                 "runtime_state_handoff_activations",
                 KeyspaceCreateOptions::default,
             )
-            .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+            .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let forced_recovery_preparations = db
             .keyspace(
                 "runtime_state_forced_recovery_preparations",
                 KeyspaceCreateOptions::default,
             )
-            .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+            .change_context(RuntimePersistenceError::OpenKeyspace)?;
         let forced_recovery_completions = db
             .keyspace(
                 "runtime_state_forced_recovery_completions",
                 KeyspaceCreateOptions::default,
             )
-            .map_err(|_| RuntimePersistenceError::OpenKeyspace)?;
+            .change_context(RuntimePersistenceError::OpenKeyspace)?;
         Ok(Self {
             db,
             latest,
             lsm_index,
+            restore_staging,
+            restore_publications,
+            checkpoint_chunks,
+            restore_staging_max_bytes,
+            restore_staging_usage: maintenance::StagedUsageMeasurement::default(),
             handoff_preparations,
             handoff_activations,
             forced_recovery_preparations,
@@ -1076,6 +1322,8 @@ impl RuntimeStateStore {
             db: self.db.clone(),
             latest: self.latest.clone(),
             lsm_index: self.lsm_index.clone(),
+            restore_publications: self.restore_publications.clone(),
+            namespace_view: self.db.snapshot(),
             replica_installs: self.replica_installs.clone(),
         }
     }
@@ -1139,9 +1387,9 @@ impl RuntimeStateStore {
                 })
                 .collect(),
         };
-        Ok(rkyv::to_bytes::<rkyv::rancor::Error>(&stored)
+        rkyv::to_bytes::<rkyv::rancor::Error>(&stored)
             .map(|bytes| bytes.to_vec())
-            .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?)
+            .change_context(RuntimePersistenceError::EncodeState)
     }
 
     fn decode_handoff_preparation(
@@ -1150,7 +1398,7 @@ impl RuntimeStateStore {
         let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
         aligned.extend_from_slice(raw);
         let stored = rkyv::from_bytes::<StoredHandoffPreparation, rkyv::rancor::Error>(&aligned)
-            .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+            .change_context(RuntimePersistenceError::DecodeState)?;
         Ok(PersistedRuntimeStateHandoffPreparation {
             coordination: stored.coordination,
             operation_id: stored.operation_id,
@@ -1187,9 +1435,9 @@ impl RuntimeStateStore {
                 })
                 .collect(),
         };
-        Ok(rkyv::to_bytes::<rkyv::rancor::Error>(&stored)
+        rkyv::to_bytes::<rkyv::rancor::Error>(&stored)
             .map(|bytes| bytes.to_vec())
-            .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?)
+            .change_context(RuntimePersistenceError::EncodeState)
     }
 
     fn decode_forced_recovery_preparation(
@@ -1199,14 +1447,14 @@ impl RuntimeStateStore {
         aligned.extend_from_slice(raw);
         let stored =
             rkyv::from_bytes::<StoredForcedRecoveryPreparation, rkyv::rancor::Error>(&aligned)
-                .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+                .change_context(RuntimePersistenceError::DecodeState)?;
         let checkpoints = stored
             .checkpoints
             .into_iter()
             .map(|checkpoint| {
                 RuntimeStatePlacement::from_remote(checkpoint.placement)
                     .map(|placement| (placement, checkpoint.snapshot))
-                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))
+                    .change_context(RuntimePersistenceError::DecodeState)
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(PersistedForcedRecoveryPreparation {
@@ -1220,11 +1468,9 @@ impl RuntimeStateStore {
     fn encode_forced_recovery_completion(
         transition: &ForcedRuntimeStateRecoveryTransition<'_>,
     ) -> Result<Vec<u8>, Report<RuntimePersistenceError>> {
-        Ok(
-            rkyv::to_bytes::<rkyv::rancor::Error>(&transition.identity())
-                .map(|bytes| bytes.to_vec())
-                .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?,
-        )
+        rkyv::to_bytes::<rkyv::rancor::Error>(&transition.identity())
+            .map(|bytes| bytes.to_vec())
+            .change_context(RuntimePersistenceError::EncodeState)
     }
 
     fn decode_forced_recovery_completion(
@@ -1233,7 +1479,7 @@ impl RuntimeStateStore {
         let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(raw.len());
         aligned.extend_from_slice(raw);
         rkyv::from_bytes::<ForcedRuntimeStateRecoveryIdentity, rkyv::rancor::Error>(&aligned)
-            .map_err(|error| Report::new(RuntimePersistenceError::DecodeState(error.to_string())))
+            .change_context(RuntimePersistenceError::DecodeState)
     }
 
     pub(in crate::runtime) fn persist_handoff_preparation(
@@ -1459,11 +1705,24 @@ impl RuntimeStateStore {
         Ok(Some(preparation))
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one admitted ownership handoff activates its stored checkpoints"
+        )
+    )]
     pub(in crate::runtime) fn activate_handoff_preparation(
         &self,
         transition: &RuntimeStateHandoffTransition<'_>,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<(), Report<RuntimePersistenceError>> {
+        let _installation = self.replica_installs.lock();
+        let namespace = backup::active_namespace(
+            &self.db.snapshot(),
+            &self.restore_publications,
+            &transition.entity.domain,
+        )?;
         let preparation_key = Self::handoff_preparation_key(
             transition.coordination,
             transition.operation_id,
@@ -1483,23 +1742,24 @@ impl RuntimeStateStore {
             ));
         }
 
-        let mut domain_prefix = transition.entity.domain.as_str().as_bytes().to_vec();
-        domain_prefix.push(0);
+        let domain_prefix = namespace.prefix(&transition.entity.domain);
         let latest_keys = self
             .latest
             .prefix(domain_prefix)
             .map(|item| {
-                let key = item
-                    .key()
-                    .map(|key| key.as_ref().to_vec())
-                    .map_err(|_| RuntimePersistenceError::ReadValue)?;
-                let stored = stored_placement(&key)
-                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+                let key = {
+                    let mapping_input = item.key().map(|key| key.as_ref().to_vec());
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(_) => Err(RuntimePersistenceError::ReadValue),
+                    }
+                }?;
+                let (_, stored) = physical_placement(&key)?;
                 Ok((stored.kind == transition.entity.kind()
                     && stored.identifier == *transition.entity.identifier())
                 .then_some(key))
             })
-            .collect::<Result<Vec<_>, RuntimePersistenceError>>()?
+            .collect::<Result<Vec<_>, Report<RuntimePersistenceError>>>()?
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
@@ -1511,9 +1771,10 @@ impl RuntimeStateStore {
                 self.lsm_index
                     .prefix(lsm_prefix)
                     .map(|item| {
-                        item.key()
-                            .map(|key| key.as_ref().to_vec())
-                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                        let key = item
+                            .key()
+                            .change_context(RuntimePersistenceError::ReadValue)?;
+                        Ok::<_, Report<RuntimePersistenceError>>(key.as_ref().to_vec())
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
@@ -1527,13 +1788,12 @@ impl RuntimeStateStore {
             batch.remove(&self.lsm_index, key);
         }
         for (placement, snapshot) in checkpoints {
-            let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(snapshot)
-                .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-            let placement_key = placement.as_storage_key();
-            batch.insert(&self.latest, placement_key.clone(), encoded.to_vec());
+            let placement_key = namespace.key(placement)?;
+            let encoded = StoredCheckpoint::Inline(snapshot.clone()).encode()?;
+            batch.insert(&self.latest, placement_key.clone(), encoded);
             batch.insert(
                 &self.lsm_index,
-                placement.as_lsm_index_key(snapshot.lsm),
+                index_key(&placement_key, snapshot.lsm),
                 placement_key,
             );
         }
@@ -1569,14 +1829,10 @@ impl RuntimeStateStore {
         placement: &RuntimeStatePlacement,
         revision: u64,
         payload: &[u8],
-    ) -> Result<(), RuntimePersistenceError> {
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
         let writer = self.latest_snapshot_writer();
-        writer
-            .write_latest_snapshot(placement, revision, payload)
-            .map_err(|error| error.current_context().clone())?;
-        writer
-            .persist(PersistMode::SyncAll)
-            .map_err(|error| error.current_context().clone())
+        writer.write_latest_snapshot(placement, revision, payload)?;
+        writer.persist(PersistMode::SyncAll)
     }
 
     pub(in crate::runtime) fn persist_latest_snapshot(
@@ -1584,14 +1840,10 @@ impl RuntimeStateStore {
         placement: &RuntimeStatePlacement,
         lsm: u64,
         payload: &[u8],
-    ) -> Result<(), RuntimePersistenceError> {
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
         let writer = self.latest_snapshot_writer();
-        writer
-            .write_latest_snapshot(placement, lsm, payload)
-            .map_err(|error| error.current_context().clone())?;
-        writer
-            .persist(PersistMode::Buffer)
-            .map_err(|error| error.current_context().clone())
+        writer.write_latest_snapshot(placement, lsm, payload)?;
+        writer.persist(PersistMode::Buffer)
     }
 
     /// Write the guest state a WASM processor branch checkpointed under `placement`, and return
@@ -1626,6 +1878,13 @@ impl RuntimeStateStore {
         self.synchronize().await
     }
 
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "one admitted forced recovery replaces an entity's stored checkpoints"
+        )
+    )]
     fn replace_entity_snapshots(
         &self,
         domain: &DomainName,
@@ -1633,21 +1892,25 @@ impl RuntimeStateStore {
         identifier: &ModelName,
         checkpoints: &[(RuntimeStatePlacement, PersistedRuntimeStateEntry)],
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        let mut domain_prefix = domain.as_str().as_bytes().to_vec();
-        domain_prefix.push(0);
+        let _installation = self.replica_installs.lock();
+        let namespace =
+            backup::active_namespace(&self.db.snapshot(), &self.restore_publications, domain)?;
+        let domain_prefix = namespace.prefix(domain);
         let latest_keys = self
             .latest
             .prefix(domain_prefix)
             .map(|item| {
-                let key = item
-                    .key()
-                    .map(|key| key.as_ref().to_vec())
-                    .map_err(|_| RuntimePersistenceError::ReadValue)?;
-                let stored = stored_placement(&key)
-                    .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+                let key = {
+                    let mapping_input = item.key().map(|key| key.as_ref().to_vec());
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(_) => Err(RuntimePersistenceError::ReadValue),
+                    }
+                }?;
+                let (_, stored) = physical_placement(&key)?;
                 Ok((stored.kind == kind && stored.identifier == *identifier).then_some(key))
             })
-            .collect::<Result<Vec<_>, RuntimePersistenceError>>()?
+            .collect::<Result<Vec<_>, Report<RuntimePersistenceError>>>()?
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
@@ -1659,9 +1922,10 @@ impl RuntimeStateStore {
                 self.lsm_index
                     .prefix(lsm_prefix)
                     .map(|item| {
-                        item.key()
-                            .map(|key| key.as_ref().to_vec())
-                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                        let key = item
+                            .key()
+                            .change_context(RuntimePersistenceError::ReadValue)?;
+                        Ok::<_, Report<RuntimePersistenceError>>(key.as_ref().to_vec())
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
@@ -1674,13 +1938,12 @@ impl RuntimeStateStore {
             batch.remove(&self.lsm_index, key);
         }
         for (placement, snapshot) in checkpoints {
-            let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(snapshot)
-                .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-            let placement_key = placement.as_storage_key();
-            batch.insert(&self.latest, placement_key.clone(), encoded.to_vec());
+            let placement_key = namespace.key(placement)?;
+            let encoded = StoredCheckpoint::Inline(snapshot.clone()).encode()?;
+            batch.insert(&self.latest, placement_key.clone(), encoded);
             batch.insert(
                 &self.lsm_index,
-                placement.as_lsm_index_key(snapshot.lsm),
+                index_key(&placement_key, snapshot.lsm),
                 placement_key,
             );
         }
@@ -1727,69 +1990,41 @@ impl RuntimeStateStore {
     pub(in crate::runtime) fn latest_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
-    ) -> Result<Option<PersistedRuntimeStateEntry>, RuntimePersistenceError> {
-        let Some(raw) = self
-            .latest
-            .get(placement.as_storage_key())
+    ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, RuntimePersistenceError> {
+        let view = self.db.snapshot();
+        let namespace =
+            backup::active_namespace(&view, &self.restore_publications, &placement.domain)?;
+        let key = namespace.key(placement)?;
+        let Some(raw) = view
+            .get(&self.latest, &key)
             .map_err(|_| RuntimePersistenceError::ReadValue)?
         else {
             return Ok(None);
         };
-        let decoded = PersistedRuntimeStateEntry::decode(raw.as_ref())
-            .map_err(|error| error.current_context().clone())?;
+        let decoded = read_checkpoint(&view, &self.checkpoint_chunks, &key, &raw)?;
         Ok(Some(decoded))
     }
 
-    #[cfg(test)]
-    pub(in crate::runtime) fn purge_domain(
-        &self,
-        domain: &DomainName,
-    ) -> Result<(), RuntimePersistenceError> {
-        let mut domain_prefix = domain.as_str().as_bytes().to_vec();
-        domain_prefix.push(0);
-        let latest_keys = self
-            .latest
-            .prefix(domain_prefix.clone())
-            .map(|item| {
-                item.key()
-                    .map(|key| key.as_ref().to_vec())
-                    .map_err(|_| RuntimePersistenceError::ReadValue)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let lsm_keys = self
-            .lsm_index
-            .prefix(domain_prefix)
-            .map(|item| {
-                item.key()
-                    .map(|key| key.as_ref().to_vec())
-                    .map_err(|_| RuntimePersistenceError::ReadValue)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if latest_keys.is_empty() && lsm_keys.is_empty() {
-            return Ok(());
-        }
-
-        let mut batch = self.db.batch();
-        for key in latest_keys {
-            batch.remove(&self.latest, key);
-        }
-        for key in lsm_keys {
-            batch.remove(&self.lsm_index, key);
-        }
-        batch
-            .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)
-    }
-
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "domain activation resets the selected entity's persisted state"
+        )
+    )]
     pub(in crate::runtime) fn purge_entity(
         &self,
         domain: &DomainName,
         state: RuntimeStateKind,
         kind: ModelKind,
         identifier: impl Into<ModelName>,
-    ) -> Result<(), RuntimePersistenceError> {
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
+        let _installation = self.replica_installs.lock();
+        let namespace =
+            backup::active_namespace(&self.db.snapshot(), &self.restore_publications, domain)?;
         let identifier = identifier.into();
-        let mut prefix = domain.as_str().as_bytes().to_vec();
+        let mut prefix = namespace.prefix(domain);
+        prefix.extend_from_slice(domain.as_str().as_bytes());
         prefix.push(0);
         prefix.push(u8::from(state));
         prefix.push(0);
@@ -1803,7 +2038,7 @@ impl RuntimeStateStore {
             .map(|item| {
                 item.key()
                     .map(|key| key.as_ref().to_vec())
-                    .map_err(|_| RuntimePersistenceError::ReadValue)
+                    .change_context(RuntimePersistenceError::ReadValue)
             })
             .collect::<Result<Vec<_>, _>>()?;
         if latest_keys.is_empty() {
@@ -1819,7 +2054,7 @@ impl RuntimeStateStore {
                     .map(|item| {
                         item.key()
                             .map(|key| key.as_ref().to_vec())
-                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                            .change_context(RuntimePersistenceError::ReadValue)
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
@@ -1833,27 +2068,39 @@ impl RuntimeStateStore {
         }
         batch
             .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)
+            .change_context(RuntimePersistenceError::WriteValue)
     }
 
     /// Remove every stored state of `domain` that `current` no longer names: state of a node the
     /// schedule dropped, schema-bound state written under another schema fingerprint, and WASM guest
     /// state of a generation the committed schedule has moved past. State that depends on no schema
     /// stays for as long as its node is scheduled.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            lifecycle,
+            reason = "a committed execution revision retires its unscheduled state identities"
+        )
+    )]
     pub(in crate::runtime) fn purge_stale_state_identities(
         &self,
         domain: &DomainName,
         current: &HashMap<NodeRef, ScheduledStateIdentity>,
     ) -> Result<(), Report<RuntimePersistenceError>> {
-        let mut domain_prefix = domain.as_str().as_bytes().to_vec();
-        domain_prefix.push(0);
+        let _installation = self.replica_installs.lock();
+        let namespace =
+            backup::active_namespace(&self.db.snapshot(), &self.restore_publications, domain)?;
+        let domain_prefix = namespace.prefix(domain);
         let mut stale_latest_keys = Vec::new();
         for item in self.latest.prefix(domain_prefix) {
-            let key = item
-                .key()
-                .map(|key| key.as_ref().to_vec())
-                .map_err(|_| RuntimePersistenceError::ReadValue)?;
-            let stored = stored_placement(&key)?;
+            let key = {
+                let mapping_input = item.key().map(|key| key.as_ref().to_vec());
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(_) => Err(RuntimePersistenceError::ReadValue),
+                }
+            }?;
+            let (_, stored) = physical_placement(&key)?;
             let node = NodeRef {
                 kind: stored.kind,
                 identifier: stored.identifier,
@@ -1878,9 +2125,10 @@ impl RuntimeStateStore {
                 self.lsm_index
                     .prefix(lsm_prefix)
                     .map(|item| {
-                        item.key()
-                            .map(|key| key.as_ref().to_vec())
-                            .map_err(|_| RuntimePersistenceError::ReadValue)
+                        let key = item
+                            .key()
+                            .change_context(RuntimePersistenceError::ReadValue)?;
+                        Ok::<_, Report<RuntimePersistenceError>>(key.as_ref().to_vec())
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
@@ -1901,19 +2149,18 @@ impl RuntimeStateStore {
 
 /// The placement a stored runtime-state key encodes: which state and lifetime it is, including the
 /// schema fingerprint of schema-bound state, which model owns it, and the branch it belongs to.
-struct StoredPlacement {
-    state: RuntimeState,
-    kind: ModelKind,
-    identifier: ModelName,
-    branch: Option<BranchKeyFingerprint>,
+pub(in crate::runtime) struct StoredPlacement {
+    pub(in crate::runtime) state: RuntimeState,
+    pub(in crate::runtime) kind: ModelKind,
+    pub(in crate::runtime) identifier: ModelName,
+    pub(in crate::runtime) branch: Option<BranchKeyFingerprint>,
 }
 
 fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersistenceError>> {
-    let domain_end = key.iter().position(|byte| *byte == 0).ok_or_else(|| {
-        RuntimePersistenceError::DecodeState(
-            "runtime state key has no domain separator".to_string(),
-        )
-    })?;
+    let domain_end = key
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| StoredStateIssue::KeyDomainSeparator.decode_failure())?;
     let state_offset = domain_end
         .checked_add(1)
         .verified("the separator position is an index into this key");
@@ -1922,32 +2169,28 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
         .copied()
         .and_then(RuntimeStateKind::from_repr);
     let Some(state_kind) = state_kind else {
-        return Err(Report::new(RuntimePersistenceError::DecodeState(
-            "runtime state key has an invalid state kind".to_string(),
-        )));
+        return Err(StoredStateIssue::KeyStateKind.decode_failure());
     };
-    let kind_start = state_offset
-        .checked_add(2)
+    let separator = state_offset
+        .checked_add(1)
         .verified("the state-kind byte position is an index into this key");
+    if key.get(separator) != Some(&0) {
+        return Err(StoredStateIssue::KeyStateKindSeparator.decode_failure());
+    }
+    let kind_start = separator
+        .checked_add(1)
+        .verified("the state-kind separator read above is inside this key");
     let kind_end = key
         .get(kind_start..)
         .and_then(|rest| rest.iter().position(|byte| *byte == 0));
     let kind_end = kind_end.and_then(|offset| kind_start.checked_add(offset));
     let Some(kind_end) = kind_end else {
-        return Err(Report::new(RuntimePersistenceError::DecodeState(
-            "runtime state key has no model-kind separator".to_string(),
-        )));
+        return Err(StoredStateIssue::KeyModelKindSeparator.decode_failure());
     };
-    let kind = std::str::from_utf8(&key[kind_start..kind_end]).map_err(|_| {
-        RuntimePersistenceError::DecodeState(
-            "runtime state key has an invalid model kind".to_string(),
-        )
-    })?;
-    let kind = ModelKind::from_str(kind).map_err(|_| {
-        RuntimePersistenceError::DecodeState(
-            "runtime state key has an invalid model kind".to_string(),
-        )
-    })?;
+    let kind = std::str::from_utf8(&key[kind_start..kind_end])
+        .map_err(|_| StoredStateIssue::KeyModelKind.decode_failure())?;
+    let kind =
+        ModelKind::from_str(kind).map_err(|_| StoredStateIssue::KeyModelKind.decode_failure())?;
     let identifier_start = kind_end
         .checked_add(1)
         .verified("the model-kind separator position is an index into this key");
@@ -1956,20 +2199,12 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
         .and_then(|rest| rest.iter().position(|byte| *byte == 0));
     let identifier_end = identifier_end.and_then(|offset| identifier_start.checked_add(offset));
     let Some(identifier_end) = identifier_end else {
-        return Err(Report::new(RuntimePersistenceError::DecodeState(
-            "runtime state key has no identifier separator".to_string(),
-        )));
+        return Err(StoredStateIssue::KeyIdentifierSeparator.decode_failure());
     };
-    let identifier = std::str::from_utf8(&key[identifier_start..identifier_end]).map_err(|_| {
-        RuntimePersistenceError::DecodeState(
-            "runtime state key has an invalid identifier".to_string(),
-        )
-    })?;
-    let identifier = ModelName::parse(identifier).map_err(|_| {
-        RuntimePersistenceError::DecodeState(
-            "runtime state key has an invalid identifier".to_string(),
-        )
-    })?;
+    let identifier = std::str::from_utf8(&key[identifier_start..identifier_end])
+        .map_err(|_| StoredStateIssue::KeyIdentifier.decode_failure())?;
+    let identifier = ModelName::decode(identifier)
+        .map_err(|_| StoredStateIssue::KeyIdentifier.decode_failure())?;
     let lifetime_start = identifier_end
         .checked_add(1)
         .verified("the identifier separator position is an index into this key");
@@ -1983,9 +2218,7 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
                 .checked_add(1)
                 .verified("the branch flag read above is inside this key");
             if key.len() != scope_end {
-                return Err(Report::new(RuntimePersistenceError::DecodeState(
-                    "runtime state key continues after its unbranched scope".to_string(),
-                )));
+                return Err(StoredStateIssue::KeyAfterUnbranchedScope.decode_failure());
             }
             None
         }
@@ -1993,17 +2226,12 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
             let text_start = branch_start
                 .checked_add(1)
                 .verified("the branch flag read above is inside this key");
-            let text = std::str::from_utf8(&key[text_start..]).map_err(|_| {
-                RuntimePersistenceError::DecodeState(
-                    "runtime state key has an invalid branch key".to_string(),
-                )
-            })?;
+            let text = std::str::from_utf8(&key[text_start..])
+                .map_err(|_| StoredStateIssue::KeyBranchKey.decode_failure())?;
             Some(BranchKeyFingerprint::of_canonical_text(text))
         }
         _ => {
-            return Err(Report::new(RuntimePersistenceError::DecodeState(
-                "runtime state key has an invalid branch scope".to_string(),
-            )));
+            return Err(StoredStateIssue::KeyBranchScope.decode_failure());
         }
     };
     Ok(StoredPlacement {
@@ -2091,9 +2319,7 @@ fn stored_schema_fingerprint(
     start: usize,
 ) -> Result<(SchemaFingerprint, usize), Report<RuntimePersistenceError>> {
     if key.get(start) != Some(&STATE_SCHEMA_KEY_MARKER) {
-        return Err(Report::new(RuntimePersistenceError::DecodeState(
-            "runtime state key has no schema fingerprint".to_string(),
-        )));
+        return Err(StoredStateIssue::KeySchemaFingerprint.decode_failure());
     }
     let fingerprint_start = start
         .checked_add(1)
@@ -2102,16 +2328,12 @@ fn stored_schema_fingerprint(
         .checked_add(32)
         .assured("a key index is below isize::MAX, so 32 more bytes stay within usize");
     let Some(fingerprint) = key.get(fingerprint_start..fingerprint_end) else {
-        return Err(Report::new(RuntimePersistenceError::DecodeState(
-            "runtime state key has a truncated schema fingerprint".to_string(),
-        )));
+        return Err(StoredStateIssue::KeySchemaFingerprintTruncated.decode_failure());
     };
     let fingerprint = <[u8; 32]>::try_from(fingerprint)
         .verified("the fingerprint slice above is exactly 32 bytes long");
     if key.get(fingerprint_end) != Some(&0) {
-        return Err(Report::new(RuntimePersistenceError::DecodeState(
-            "runtime state key has no schema fingerprint separator".to_string(),
-        )));
+        return Err(StoredStateIssue::KeySchemaFingerprintSeparator.decode_failure());
     }
     let next = fingerprint_end
         .checked_add(1)
@@ -2126,9 +2348,7 @@ fn stored_state_generation(
     start: usize,
 ) -> Result<(WasmStateGeneration, usize), Report<RuntimePersistenceError>> {
     if key.get(start) != Some(&STATE_GENERATION_KEY_MARKER) {
-        return Err(Report::new(RuntimePersistenceError::DecodeState(
-            "runtime state key has no state generation".to_string(),
-        )));
+        return Err(StoredStateIssue::KeyStateGeneration.decode_failure());
     }
     let generation_start = start
         .checked_add(1)
@@ -2137,22 +2357,14 @@ fn stored_state_generation(
         .checked_add(8)
         .assured("a key index is below isize::MAX, so eight more bytes stay within usize");
     let Some(generation) = key.get(generation_start..generation_end) else {
-        return Err(Report::new(RuntimePersistenceError::DecodeState(
-            "runtime state key has a truncated state generation".to_string(),
-        )));
+        return Err(StoredStateIssue::KeyStateGenerationTruncated.decode_failure());
     };
     let generation = <[u8; 8]>::try_from(generation)
         .verified("the generation slice above is exactly eight bytes long");
-    let generation =
-        WasmStateGeneration::try_from(u64::from_be_bytes(generation)).map_err(|_| {
-            RuntimePersistenceError::DecodeState(
-                "runtime state key has an invalid state generation".to_string(),
-            )
-        })?;
+    let generation = WasmStateGeneration::try_from(u64::from_be_bytes(generation))
+        .map_err(|_| StoredStateIssue::KeyStateGenerationInvalid.decode_failure())?;
     if key.get(generation_end) != Some(&0) {
-        return Err(Report::new(RuntimePersistenceError::DecodeState(
-            "runtime state key has no state generation separator".to_string(),
-        )));
+        return Err(StoredStateIssue::KeyStateGenerationSeparator.decode_failure());
     }
     let branch_start = generation_end
         .checked_add(1)
@@ -2167,3 +2379,7 @@ mod tests;
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "state_store_shuttle_tests.rs"]
 mod shuttle_tests;
+
+#[cfg(all(test, feature = "loom"))]
+#[path = "state_store_loom_models.rs"]
+mod loom_models;

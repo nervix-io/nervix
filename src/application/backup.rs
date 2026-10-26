@@ -1,48 +1,78 @@
-//! Backing up the cluster's configuration into a public archive.
+//! Capturing domain configuration and runtime checkpoints into a public archive.
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** Executing an admitted `BACKUP`: reading one coherent applied revision of the
-//!   replicated configuration, planning the archive's sections from it, measuring every section,
-//!   assembling the archive into this node's staging area under the staging quota, retaining it for
-//!   download under the backup's execution reference, and the summary the backup reports.
+//! - **Owns.** Executing an admitted `BACKUP`: establishing each domain cut, reading its coherent
+//!   applied configuration and owner checkpoints, planning and measuring archive sections,
+//!   assembling the archive under the staging quota, retaining it for download under the backup's
+//!   execution reference, and reporting the resulting cut and archive summary.
 //! - **Depends on.** Consensus for the capture and the command execution record, the registry's
 //!   creation order, the resource store for version archives, the runtime's staging area, the
-//!   archive format, and the language layer to parse the rendered NSPL back.
+//!   archive format, and the language layer to parse the rendered Plexus back.
 //! - **Must not know.** How a download travels to a client, or how a client stores the archive.
 //!
-//! A configuration backup takes no domain lease and pauses nothing. Every part of it is read from
-//! one applied revision, so a change committed while the backup runs appears in every part of the
-//! archive or in none, and the manifest records that revision and its Raft log entry per domain.
+//! A normal backup leases one domain at a time and pauses a running one for its state cut. It
+//! resumes and releases the lease before transferring that domain's staged sections into the
+//! final archive. Configuration-only and live captures have their own explicit cut semantics.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
 
 mod assembly;
+mod branch_state_sections;
+pub(in crate::application) mod cut_reach;
+pub(in crate::application) mod interconnect;
+mod materialized_sections;
+mod native_metadata_sections;
+pub(in crate::application) mod restore_storage;
 pub(in crate::application) mod retained;
+mod state_sections;
+mod stored_materialized_sections;
 
-use std::{collections::BTreeMap, num::NonZeroU64};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+    time::Duration,
+};
 
 use arch_into::ArchInto as _;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_backup::{
     ArchiveLayout, ArchivePiece, ArchiveScope, BackupManifest, DomainCapture, RaftLogPosition,
-    SectionContent, SectionDigester, SectionEntry,
+    SectionContent, SectionDigest, SectionDigester, SectionEntry, SectionPath,
 };
 use nervix_consensus::{CommandExecution, ConfigurationCapture};
 use nervix_execution::{ChargedBytes, Executor, MemoryClass};
+use nervix_interconnect::InterconnectStreamRequest as _;
 use nervix_models::{
-    ArchiveDigest, Backup, BackupArchiveSummary, BackupDomainSummary, BackupResources, BackupScope,
-    DomainName, NSPL_LANGUAGE_VERSION, ResourceId, ResourceName, Timestamp,
+    ArchiveDigest, Backup, BackupArchiveSummary, BackupCapture, BackupCut, BackupDomainSummary,
+    BackupQuiesceCounters, BackupResources, BackupScope, ClusterNodeName, CoordinationIdentity,
+    DomainName, DomainSchedule, DomainStatus, IngestorName, ModelKind, NodeRef,
+    PLEXUS_LANGUAGE_VERSION, ResourceId, ResourceName, Timestamp,
 };
+use nervix_primitives::sync::Arc;
 use thiserror::Error;
 use tracing::info;
 
 use self::{
     assembly::{PlannedContent, PlannedScope, PlannedSection, plan_sections},
+    cut_reach::{CutReach, RequiredNode},
+    interconnect::{
+        CaptureDomainStateRequest, CaptureInventoryRequest, CapturedSectionInventory,
+        FetchCapturedSection,
+    },
     retained::{ArchiveBytes, ArchiveReadFailure, RetainedArtifact, RetainedBackups},
 };
 use super::{
     command_result::{CommandDiagnostic, CommandResult},
     domain_clock::current_timestamp,
+    domain_lifecycle::DomainDrainMode,
     model_mutation::{command_error, command_ok},
     session_service::SessionServiceImpl,
 };
@@ -50,6 +80,27 @@ use crate::runtime::{StagedArtifact, StagedArtifactReader, StagedSnapshotWriter}
 
 /// The archives this node's backups retain, as the server stages them.
 pub(in crate::application) type ServerRetainedBackups = RetainedBackups<StagedArtifact>;
+
+/// One node-owned state section staged for an authenticated coordinator's bulk fetch.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(in crate::application) struct CaptureSectionKey {
+    pub(in crate::application) coordination: CoordinationIdentity,
+    pub(in crate::application) domain: DomainName,
+    pub(in crate::application) path: String,
+}
+
+/// One captured section's publication key, content kind, and quota-owned staged bytes.
+pub(super) struct CapturedSection {
+    key: CaptureSectionKey,
+    content: SectionContent,
+    artifact: StagedArtifact,
+}
+
+pub(in crate::application) struct CapturedSectionStage {
+    pub(in crate::application) artifact: Arc<StagedArtifact>,
+    pub(in crate::application) content: SectionContent,
+    pub(in crate::application) expires_at: nervix_primitives::time::Instant,
+}
 
 /// Why a backup failed. No variant carries archive contents: an archive holds secrets, password
 /// hashes and payload data, and a diagnostic names only where the failure is.
@@ -63,9 +114,11 @@ pub(in crate::application) enum BackupError {
     DomainNotFound { domain: DomainName },
     #[error("the committed models of domain '{domain}' do not form a valid graph")]
     InvalidModels { domain: DomainName },
-    #[error("the committed models of domain '{domain}' could not be rendered as NSPL")]
+    #[error("the committed models of domain '{domain}' could not be rendered as Plexus")]
     Rendering { domain: DomainName },
-    #[error("the NSPL rendered for domain '{domain}' does not parse back to its committed models")]
+    #[error(
+        "the Plexus rendered for domain '{domain}' does not parse back to its committed models"
+    )]
     Verification { domain: DomainName },
     #[error("the clock mapping of domain '{domain}' cannot be projected to the capture time")]
     ClockProjection { domain: DomainName },
@@ -100,6 +153,70 @@ pub(in crate::application) enum BackupError {
     RetryWindow,
     #[error("the backup's command execution no longer names its owner")]
     MissingOwner,
+    #[error("the backup's command execution has no request digest")]
+    MissingRequestDigest,
+    #[error("timed out waiting to capture domain '{domain}': {reason}")]
+    CaptureTimeout { domain: DomainName, reason: String },
+    #[error("failed to capture domain '{domain}': {reason}")]
+    CaptureDomain { domain: DomainName, reason: String },
+    #[error(
+        "node '{node}', the scheduled owner of {kind} '{name}' in domain '{domain}', is not live, \
+         so the cut cannot capture its state",
+        kind = .entity.kind.as_str(),
+        name = .entity.identifier.as_str()
+    )]
+    StateOwnerUnreachable {
+        domain: DomainName,
+        entity: NodeRef,
+        node: ClusterNodeName,
+    },
+    #[error(
+        "node '{node}', which runs {kind} '{name}' of domain '{domain}', is not live, so the \
+         quiesced cut cannot drain its work",
+        kind = .entity.kind.as_str(),
+        name = .entity.identifier.as_str()
+    )]
+    ExecutorUnreachable {
+        domain: DomainName,
+        entity: NodeRef,
+        node: ClusterNodeName,
+    },
+    #[error(
+        "{kind} '{name}' of domain '{domain}' is placed on no node, so the cut cannot capture its \
+         state",
+        kind = .entity.kind.as_str(),
+        name = .entity.identifier.as_str()
+    )]
+    StateUnplaced { domain: DomainName, entity: NodeRef },
+    #[error("backup coordinator lost its leader tenure while capturing domain '{domain}'")]
+    CoordinatorChanged { domain: DomainName },
+    #[error("quiesce counters of domain '{domain}' overflowed or regressed during its cut")]
+    QuiesceCounters { domain: DomainName },
+}
+
+impl BackupError {
+    fn state_owner_unreachable(domain: &DomainName, unreached: RequiredNode) -> Self {
+        Self::StateOwnerUnreachable {
+            domain: domain.clone(),
+            entity: unreached.entity,
+            node: unreached.node,
+        }
+    }
+
+    fn executor_unreachable(domain: &DomainName, unreached: RequiredNode) -> Self {
+        Self::ExecutorUnreachable {
+            domain: domain.clone(),
+            entity: unreached.entity,
+            node: unreached.node,
+        }
+    }
+
+    fn state_unplaced(domain: &DomainName, entity: &NodeRef) -> Self {
+        Self::StateUnplaced {
+            domain: domain.clone(),
+            entity: entity.clone(),
+        }
+    }
 }
 
 impl RetainedArtifact for StagedArtifact {
@@ -136,6 +253,43 @@ struct MeasuredSection {
 enum SectionSource {
     Held(Vec<u8>),
     ResourceArchive(ResourceId),
+    Captured(Arc<StagedArtifact>),
+}
+
+/// What holds a domain still while its owners capture it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CaptureHold {
+    /// The cut's lease and pause: each owner forces its publications and closes the capture fence.
+    Quiesced,
+    /// The cut's lease over a stopped domain: each owner reads its stored checkpoints.
+    Stopped,
+    /// Nothing: the latest published checkpoints, while the schedule may move a placement.
+    Live,
+}
+
+impl CaptureHold {
+    /// Whether the owners capture a quiesced cut.
+    fn is_quiesced(self) -> bool {
+        match self {
+            Self::Quiesced => true,
+            Self::Stopped | Self::Live => false,
+        }
+    }
+
+    /// Whether the cut's mutation lease keeps the domain's schedule from moving a placement.
+    fn holds_schedule(self) -> bool {
+        match self {
+            Self::Quiesced | Self::Stopped => true,
+            Self::Live => false,
+        }
+    }
+}
+
+struct StateInventory {
+    node: ClusterNodeName,
+    coordination: CoordinationIdentity,
+    domain: DomainName,
+    sections: Vec<CapturedSectionInventory>,
 }
 
 impl SessionServiceImpl {
@@ -173,33 +327,70 @@ impl SessionServiceImpl {
             return Err(Report::new(BackupError::MissingOwner));
         };
         let retained_until = self.backup_retained_until(execution)?;
-        let Some(capture) = self.inner.consensus.configuration_capture().await else {
+        let Some(initial_capture) = self.inner.consensus.configuration_capture().await else {
             return Err(Report::new(BackupError::NoConfiguration));
         };
         let captured_at = current_timestamp();
-        let planned_scope = resolve_scope(&backup.scope, execution, &capture)?;
-        let planned = plan_sections(&capture, &planned_scope, backup.resources, captured_at)?;
-        let sections = self.measure_sections(planned).await?;
-
+        let planned_scope = resolve_scope(&backup.scope, execution, &initial_capture)?;
+        let mut sections = Vec::new();
+        if planned_scope.with_users() {
+            sections.extend(
+                self.measure_sections(plan_sections(
+                    &initial_capture,
+                    &PlannedScope {
+                        scope: ArchiveScope::Cluster,
+                        domains: Vec::new(),
+                    },
+                    backup.resources,
+                    captured_at,
+                )?)
+                .await?,
+            );
+        }
+        let mut captures = Vec::with_capacity(planned_scope.domains.len());
+        for domain in &planned_scope.domains {
+            let (capture, cut, domain_captured_at, inventories) = self
+                .capture_backup_domain(
+                    execution,
+                    backup.capture,
+                    domain,
+                    &initial_capture,
+                    captured_at,
+                )
+                .await?;
+            let planned = plan_sections(
+                &capture,
+                &PlannedScope {
+                    scope: ArchiveScope::Domain(domain.clone()),
+                    domains: vec![domain.clone()],
+                },
+                backup.resources,
+                domain_captured_at,
+            )?;
+            sections.extend(self.measure_sections(planned).await?);
+            for inventory in inventories {
+                for section in &inventory.sections {
+                    sections.push(self.fetch_captured_section(&inventory, section).await?);
+                }
+            }
+            captures.push(DomainCapture {
+                domain: domain.clone(),
+                revision: capture.applied.index,
+                raft_log: RaftLogPosition {
+                    term: capture.applied.term,
+                    index: capture.applied.index,
+                },
+                cut,
+            });
+        }
         let manifest = BackupManifest {
             producer_version: env!("CARGO_PKG_VERSION").to_string(),
-            language_version: NSPL_LANGUAGE_VERSION.to_string(),
+            language_version: PLEXUS_LANGUAGE_VERSION.to_string(),
             cluster_id: self.inner.cluster.cluster_id().await,
             captured_at,
             scope: planned_scope.scope.clone(),
             resources: backup.resources,
-            domains: planned_scope
-                .domains
-                .iter()
-                .map(|domain| DomainCapture {
-                    domain: domain.clone(),
-                    revision: capture.applied.index,
-                    raft_log: RaftLogPosition {
-                        term: capture.applied.term,
-                        index: capture.applied.index,
-                    },
-                })
-                .collect(),
+            domains: captures.clone(),
             sections: sections
                 .iter()
                 .map(|section| section.entry.clone())
@@ -216,8 +407,8 @@ impl SessionServiceImpl {
             captured_at,
             retained_until,
             resources: backup.resources,
-            users: users_count(&planned_scope, &capture),
-            domains: domain_summaries(&planned_scope, capture.applied.index, &sections),
+            users: users_count(&planned_scope, &initial_capture),
+            domains: domain_summaries(&captures, &sections),
         };
         info!(
             execution_reference = %execution.reference,
@@ -232,6 +423,594 @@ impl SessionServiceImpl {
             artifact,
         );
         Ok(summary)
+    }
+
+    /// Reads one domain while its mutation lease prevents a concurrent configuration change.
+    /// A stopped domain has no intake to quiesce; a live cut reads the current checkpoint without
+    /// touching its lifecycle. The quiesced path resumes before archive transfer begins.
+    async fn capture_backup_domain(
+        &self,
+        execution: &CommandExecution,
+        mode: BackupCapture,
+        domain: &DomainName,
+        initial: &ConfigurationCapture,
+        initial_captured_at: Timestamp,
+    ) -> error_stack::Result<
+        (
+            ConfigurationCapture,
+            BackupCut,
+            Timestamp,
+            Vec<StateInventory>,
+        ),
+        BackupError,
+    > {
+        match mode {
+            BackupCapture::ConfigurationOnly => {
+                return Ok((
+                    initial.clone(),
+                    BackupCut::ConfigurationOnly,
+                    initial_captured_at,
+                    Vec::new(),
+                ));
+            }
+            BackupCapture::Live => {
+                let capture = self
+                    .inner
+                    .consensus
+                    .configuration_capture()
+                    .await
+                    .ok_or_else(|| Report::new(BackupError::NoConfiguration))?;
+                let domain_captured_at = current_timestamp();
+                // A live capture has no cut of its own to bound it, and takes the budget a
+                // quiesced cut without TIMEOUT has.
+                let deadline = nervix_primitives::time::Instant::now()
+                    + self.inner.runtime.domain_drain_timeout();
+                let inventories = self
+                    .capture_owner_state(domain, &capture, CaptureHold::Live, deadline)
+                    .await?;
+                return Ok((capture, BackupCut::Live, domain_captured_at, inventories));
+            }
+            BackupCapture::Quiesced { .. } => {}
+        }
+        let BackupCapture::Quiesced { timeout } = mode else {
+            unreachable!()
+        };
+        let timeout = timeout.unwrap_or_else(|| self.inner.runtime.domain_drain_timeout());
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
+        let owner = execution
+            .owner()
+            .cloned()
+            .ok_or_else(|| Report::new(BackupError::MissingOwner))?;
+        let digest = execution
+            .request_digest()
+            .ok_or_else(|| Report::new(BackupError::MissingRequestDigest))?;
+        let coordinator_tenure = match self.inner.consensus.current_leader_tenure() {
+            Some(tenure) if tenure.leader_id() == self.inner.consensus.local_node_id() => tenure,
+            _ => {
+                return Err(Report::new(BackupError::CoordinatorChanged {
+                    domain: domain.clone(),
+                }));
+            }
+        };
+        let acquired = loop {
+            match self
+                .inner
+                .consensus
+                .acquire_command_domain_mutation(
+                    execution.reference.clone(),
+                    owner.clone(),
+                    digest,
+                    domain.clone(),
+                )
+                .await
+            {
+                Ok(acquired) => break acquired,
+                Err(error) if nervix_primitives::time::Instant::now() < deadline => {
+                    tracing::debug!(domain = %domain, error = %error, "waiting for backup domain mutation lease");
+                    nervix_primitives::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => {
+                    return Err(Report::new(BackupError::CaptureTimeout {
+                        domain: domain.clone(),
+                        reason: error.to_string(),
+                    }));
+                }
+            }
+        };
+        let Some(mutation) = acquired.domain_mutation(domain).cloned() else {
+            return Err(Report::new(BackupError::CaptureDomain {
+                domain: domain.clone(),
+                reason: "mutation lease was not recorded".to_string(),
+            }));
+        };
+        let captured = async {
+            let before_cut = self
+                .inner
+                .consensus
+                .configuration_capture()
+                .await
+                .ok_or_else(|| Report::new(BackupError::NoConfiguration))?;
+            let Some(domain_state) = before_cut.domains.get(domain) else {
+                return Err(Report::new(BackupError::DomainNotFound {
+                    domain: domain.clone(),
+                }));
+            };
+            if domain_state.status == DomainStatus::Stopped {
+                #[cfg(feature = "testing")]
+                self.inner
+                    .runtime
+                    .pause_backup_cut_if_armed(
+                        domain,
+                        crate::fault_injection::BackupCutBoundary::Capture,
+                    )
+                    .await;
+                let domain_captured_at = current_timestamp();
+                let inventories = self
+                    .capture_owner_state(domain, &before_cut, CaptureHold::Stopped, deadline)
+                    .await?;
+                return Ok((
+                    before_cut,
+                    BackupCut::Stopped,
+                    domain_captured_at,
+                    inventories,
+                ));
+            }
+            let _alter_guard = loop {
+                if let Some(guard) = self.inner.runtime.try_begin_domain_alter(domain) {
+                    break guard;
+                }
+                if nervix_primitives::time::Instant::now() >= deadline {
+                    return Err(Report::new(BackupError::CaptureTimeout {
+                        domain: domain.clone(),
+                        reason: "domain alteration guard is busy".to_string(),
+                    }));
+                }
+                nervix_primitives::time::sleep(std::time::Duration::from_millis(50)).await;
+            };
+            #[cfg(feature = "testing")]
+            self.inner
+                .runtime
+                .pause_backup_cut_if_armed(domain, crate::fault_injection::BackupCutBoundary::Lease)
+                .await;
+            let schedule = self.inner.consensus.current_schedule().await;
+            self.refuse_unreached_quiesced_cut(domain, schedule.domain(domain))
+                .await?;
+            let timed_out = || {
+                Report::new(BackupError::CaptureTimeout {
+                    domain: domain.clone(),
+                    reason: "quiesced cut exceeded its timeout".to_string(),
+                })
+            };
+            let before = nervix_primitives::time::timeout_at(
+                deadline,
+                self.read_backup_quiesce_counters(domain, schedule.domain(domain)),
+            )
+            .await
+            .map_err(|_| timed_out())??;
+            let engaged_at = current_timestamp();
+            let now = nervix_primitives::time::Instant::now();
+            let remaining = if deadline > now {
+                deadline - now
+            } else {
+                std::time::Duration::ZERO
+            };
+            if remaining.is_zero() {
+                return Err(timed_out());
+            }
+            self.pause_and_drain_domain_for_alter_with_timeout(
+                domain,
+                Some(&mutation),
+                None,
+                remaining,
+                DomainDrainMode::Backup,
+            )
+            .await
+            .map_err(|error| {
+                Report::new(BackupError::CaptureDomain {
+                    domain: domain.clone(),
+                    reason: format!("{error:#}"),
+                })
+            })?;
+            let cut_result = nervix_primitives::time::timeout_at(deadline, async {
+                #[cfg(feature = "testing")]
+                self.inner
+                    .runtime
+                    .pause_backup_cut_if_armed(
+                        domain,
+                        crate::fault_injection::BackupCutBoundary::Capture,
+                    )
+                    .await;
+                if self.inner.consensus.current_leader_tenure().as_ref()
+                    != Some(&coordinator_tenure)
+                {
+                    return Err(Report::new(BackupError::CoordinatorChanged {
+                        domain: domain.clone(),
+                    }));
+                }
+                let capture = self
+                    .inner
+                    .consensus
+                    .configuration_capture()
+                    .await
+                    .ok_or_else(|| Report::new(BackupError::NoConfiguration))?;
+                let domain_captured_at = current_timestamp();
+                let inventories = self
+                    .capture_owner_state(domain, &capture, CaptureHold::Quiesced, deadline)
+                    .await?;
+                let after = self
+                    .read_backup_quiesce_counters(domain, schedule.domain(domain))
+                    .await?;
+                if self.inner.consensus.current_leader_tenure().as_ref()
+                    != Some(&coordinator_tenure)
+                {
+                    return Err(Report::new(BackupError::CoordinatorChanged {
+                        domain: domain.clone(),
+                    }));
+                }
+                Ok::<_, Report<BackupError>>((capture, domain_captured_at, inventories, after))
+            })
+            .await
+            .map_err(|_| timed_out());
+            let resumed = self
+                .resume_domain_after_alter(domain, Some(&mutation))
+                .await
+                .map_err(|error| {
+                    Report::new(BackupError::CaptureDomain {
+                        domain: domain.clone(),
+                        reason: format!("{error:#}"),
+                    })
+                });
+            let (capture, domain_captured_at, inventories, after) = cut_result??;
+            resumed?;
+            if self.inner.consensus.current_leader_tenure().as_ref() != Some(&coordinator_tenure) {
+                return Err(Report::new(BackupError::CoordinatorChanged {
+                    domain: domain.clone(),
+                }));
+            }
+            Ok((
+                capture,
+                BackupCut::Quiesced {
+                    engaged_at,
+                    released_at: current_timestamp(),
+                    quiesce: BackupQuiesceCounters {
+                        buffered_records: after.buffered_records,
+                        buffered_bytes: after.buffered_bytes,
+                        dropped_records: backup_counter_delta(
+                            after.dropped_records,
+                            before.dropped_records,
+                            domain,
+                        )?,
+                        rejected_records: backup_counter_delta(
+                            after.rejected_records,
+                            before.rejected_records,
+                            domain,
+                        )?,
+                    },
+                },
+                domain_captured_at,
+                inventories,
+            ))
+        }
+        .await;
+        self.inner
+            .consensus
+            .release_command_domain_mutation(
+                execution.reference.clone(),
+                owner,
+                digest,
+                domain.clone(),
+            )
+            .await
+            .map_err(|error| {
+                Report::new(BackupError::CaptureDomain {
+                    domain: domain.clone(),
+                    reason: format!("failed to release mutation lease: {error}"),
+                })
+            })?;
+        if captured.is_ok()
+            && self.inner.consensus.current_leader_tenure().as_ref() != Some(&coordinator_tenure)
+        {
+            return Err(Report::new(BackupError::CoordinatorChanged {
+                domain: domain.clone(),
+            }));
+        }
+        captured
+    }
+
+    async fn read_backup_quiesce_counters(
+        &self,
+        domain: &DomainName,
+        schedule: Option<&nervix_models::DomainSchedule>,
+    ) -> error_stack::Result<BackupQuiesceCounters, BackupError> {
+        let mut totals = BackupQuiesceCounters::default();
+        let Some(schedule) = schedule else {
+            return Ok(totals);
+        };
+        for (reference, node) in &schedule.nodes {
+            if reference.kind != ModelKind::Ingestor {
+                continue;
+            }
+            let name = IngestorName::from(&reference.identifier);
+            let (summary, _) =
+                self.ingestor_summary(domain, &name, node)
+                    .await
+                    .map_err(|error| {
+                        Report::new(BackupError::CaptureDomain {
+                            domain: domain.clone(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+            let counters = summary.quiesce_counters;
+            let buffered_records = u64::try_from(counters.buffered_records).map_err(|_| {
+                Report::new(BackupError::QuiesceCounters {
+                    domain: domain.clone(),
+                })
+            })?;
+            let buffered_bytes = u64::try_from(counters.buffered_bytes).map_err(|_| {
+                Report::new(BackupError::QuiesceCounters {
+                    domain: domain.clone(),
+                })
+            })?;
+            add_backup_counter(&mut totals.buffered_records, buffered_records, domain)?;
+            add_backup_counter(&mut totals.buffered_bytes, buffered_bytes, domain)?;
+            add_backup_counter(&mut totals.dropped_records, counters.dropped_total, domain)?;
+            add_backup_counter(
+                &mut totals.rejected_records,
+                counters.rejected_total,
+                domain,
+            )?;
+        }
+        Ok(totals)
+    }
+
+    /// The nodes a cut can reach: every node the cluster reports live, and this coordinator.
+    pub(in crate::application) async fn cut_live_nodes(&self) -> BTreeSet<ClusterNodeName> {
+        let mut live = BTreeSet::new();
+        live.extend(self.inner.cluster.live_node_ids().await);
+        live.insert(self.inner.consensus.local_node_id().clone());
+        live
+    }
+
+    /// Refuses a quiesced cut, before it pauses anything, when it could not capture or drain all
+    /// of the domain: the schedule places an entity whose state the archive captures on no node, or
+    /// the cluster does not report live a scheduled state owner, whose state the archive would
+    /// lack, or a node that runs the domain's work, whose admitted work the drain could not observe.
+    async fn refuse_unreached_quiesced_cut(
+        &self,
+        domain: &DomainName,
+        schedule: Option<&DomainSchedule>,
+    ) -> error_stack::Result<(), BackupError> {
+        let reach = CutReach::of(schedule);
+        if let Some(entity) = reach.unplaced_state() {
+            return Err(Report::new(BackupError::state_unplaced(domain, entity)));
+        }
+        let live = self.cut_live_nodes().await;
+        if let Some(unreached) = reach.unreached_state_owner(&live) {
+            return Err(Report::new(BackupError::state_owner_unreachable(
+                domain, unreached,
+            )));
+        }
+        if let Some(unreached) = reach.unreached_executor(&live) {
+            return Err(Report::new(BackupError::executor_unreachable(
+                domain, unreached,
+            )));
+        }
+        Ok(())
+    }
+
+    /// Makes every scheduled state owner stage its state at the revision `capture` read, and for
+    /// a live cut every other live node too. Inventory arrives in the same publication round;
+    /// transfer waits until after resume. A remote owner's capture shares the cut's budget, which
+    /// ends at `deadline`, rather than a request deadline of its own: staging a domain's state
+    /// takes as long as that state is large. A scheduled owner the cluster does not report live,
+    /// or state the schedule places on no node, refuses the cut, because the archive would lack it.
+    async fn capture_owner_state(
+        &self,
+        domain: &DomainName,
+        capture: &ConfigurationCapture,
+        hold: CaptureHold,
+        deadline: nervix_primitives::time::Instant,
+    ) -> error_stack::Result<Vec<StateInventory>, BackupError> {
+        let reach = CutReach::of(capture.schedule.domain(domain));
+        if let Some(entity) = reach.unplaced_state() {
+            return Err(Report::new(BackupError::state_unplaced(domain, entity)));
+        }
+        let live = self.cut_live_nodes().await;
+        if let Some(unreached) = reach.unreached_state_owner(&live) {
+            return Err(Report::new(BackupError::state_owner_unreachable(
+                domain, unreached,
+            )));
+        }
+        let mut nodes = BTreeSet::new();
+        nodes.extend(reach.state_owners().cloned());
+        if !hold.holds_schedule() {
+            // Nothing keeps a live cut's schedule from moving a placement while its owners capture,
+            // so every live node is asked and stages what its own applied schedule assigns it.
+            nodes.extend(live);
+        }
+        let revision = capture.applied.index;
+        let quiesced = hold.is_quiesced();
+        let coordination = self
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .map_err(|error| {
+                Report::new(BackupError::CaptureDomain {
+                    domain: domain.clone(),
+                    reason: error.to_string(),
+                })
+            })?;
+        let results = futures_util::future::join_all(nodes.into_iter().map(|node| {
+            let coordination = coordination.clone();
+            let domain = domain.clone();
+            async move {
+                let failed = |reason: String| {
+                    Report::new(BackupError::CaptureDomain {
+                        domain: domain.clone(),
+                        reason,
+                    })
+                };
+                let capture_request = CaptureDomainStateRequest {
+                    coordination: coordination.clone(),
+                    domain: domain.clone(),
+                    revision,
+                    quiesced,
+                };
+                let captured = if &node == self.inner.consensus.local_node_id() {
+                    self.handle_backup_capture_request(&node, capture_request)
+                        .await
+                } else {
+                    let now = nervix_primitives::time::Instant::now();
+                    let remaining = if deadline > now {
+                        deadline - now
+                    } else {
+                        Duration::ZERO
+                    };
+                    self.inner
+                        .interconnect
+                        .request_with_timeout(&node, capture_request, remaining)
+                        .await
+                        .map_err(|error| failed(error.to_string()))?
+                };
+                captured.map_err(|error| failed(error.to_string()))?;
+                let inventory_request = CaptureInventoryRequest {
+                    coordination: coordination.clone(),
+                    domain: domain.clone(),
+                };
+                let inventory = if &node == self.inner.consensus.local_node_id() {
+                    self.handle_backup_inventory_request(&node, inventory_request)
+                        .await
+                } else {
+                    self.inner
+                        .interconnect
+                        .request(&node, inventory_request)
+                        .await
+                        .map_err(|error| failed(error.to_string()))?
+                };
+                let sections = inventory.map_err(|error| failed(error.to_string()))?;
+                Ok::<_, Report<BackupError>>(StateInventory {
+                    node,
+                    coordination,
+                    domain,
+                    sections,
+                })
+            }
+        }))
+        .await;
+        results.into_iter().collect()
+    }
+
+    /// Fetches one owner-staged section over the bulk pool, staging and verifying it before its
+    /// bytes become part of the assembled archive.
+    async fn fetch_captured_section(
+        &self,
+        inventory: &StateInventory,
+        section: &CapturedSectionInventory,
+    ) -> error_stack::Result<MeasuredSection, BackupError> {
+        let error = |reason: String| {
+            Report::new(BackupError::CaptureDomain {
+                domain: inventory.domain.clone(),
+                reason,
+            })
+        };
+        let path = SectionPath::parse(&section.path)
+            .map_err(|error_read| error(error_read.to_string()))?;
+        let entry = SectionEntry {
+            path,
+            content: interconnect::section_content(section.kind),
+            length: section.length,
+            digest: SectionDigest::from_bytes(section.digest),
+        };
+        if &inventory.node == self.inner.consensus.local_node_id() {
+            let artifact = self
+                .take_captured_backup_section(
+                    &inventory.node,
+                    &FetchCapturedSection {
+                        coordination: inventory.coordination.clone(),
+                        domain: inventory.domain.clone(),
+                        path: section.path.clone(),
+                    },
+                )
+                .ok_or_else(|| error("locally captured section is unavailable".to_string()))?;
+            if artifact.length() != section.length || artifact.digest() != section.digest {
+                return Err(error(
+                    "locally captured section differs from its inventory".to_string(),
+                ));
+            }
+            return Ok(MeasuredSection {
+                entry,
+                domain: Some(inventory.domain.clone()),
+                source: SectionSource::Captured(artifact),
+            });
+        }
+        // The immutable owner stage has not been consumed when admission refuses the opening, so
+        // a refusal for capacity alone waits within the opening's one deadline rather than losing
+        // a completed cut. The fetch takes the bulk pool's shared stream and admission, apart
+        // from the Snapshot subquota that the replica catch-up this cut started fills.
+        let opening = async {
+            loop {
+                match self
+                    .inner
+                    .interconnect
+                    .request_stream(
+                        &inventory.node,
+                        FetchCapturedSection {
+                            coordination: inventory.coordination.clone(),
+                            domain: inventory.domain.clone(),
+                            path: section.path.clone(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(body) => break Ok(body),
+                    Err(refused) if refused.current_context().is_capacity_exhaustion() => {
+                        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(failure) => break Err(failure),
+                }
+            }
+        };
+        let mut body = nervix_primitives::time::timeout(FetchCapturedSection::TIMEOUT, opening)
+            .await
+            .map_err(|_| error("captured section opening exceeded its deadline".to_string()))?
+            .map_err(|reason| error(reason.to_string()))?;
+        if body.content_length() != section.length {
+            return Err(error(
+                "captured section length differs from its inventory".to_string(),
+            ));
+        }
+        let mut writer = self
+            .inner
+            .runtime
+            .try_stage_artifact(section.length)
+            .await
+            .map_err(|reason| error(reason.to_string()))?;
+        while let Some(chunk) = body
+            .next_chunk()
+            .await
+            .map_err(|reason| error(reason.to_string()))?
+        {
+            nervix_primitives::task::consume_budget().await;
+            writer
+                .write_chunk(chunk)
+                .await
+                .map_err(|reason| error(reason.to_string()))?;
+        }
+        drop(body);
+        let artifact = writer
+            .finish_artifact()
+            .await
+            .map_err(|reason| error(reason.to_string()))?;
+        if artifact.length() != section.length || artifact.digest() != section.digest {
+            return Err(error(
+                "captured section digest differs from its inventory".to_string(),
+            ));
+        }
+        Ok(MeasuredSection {
+            entry,
+            domain: Some(inventory.domain.clone()),
+            source: SectionSource::Captured(Arc::new(artifact)),
+        })
     }
 
     /// The instant the backup's archive stops being downloadable: when the retry validity of its
@@ -340,25 +1119,30 @@ impl SessionServiceImpl {
             .await
             .change_context(BackupError::Staging)?;
         let executor = self.inner.runtime.executor().clone();
-        let mut sink = StagingSink::new(writer, executor);
+        let mut connector = StagingEmitter::new(writer, executor);
         for piece in layout.pieces() {
             nervix_primitives::task::consume_budget().await;
             match piece {
-                ArchivePiece::Bytes(bytes) => sink.write(bytes).await?,
+                ArchivePiece::Bytes(bytes) => connector.write(bytes).await?,
                 ArchivePiece::Section(entry) => {
                     let Some(source) = sources.get(&entry.path) else {
                         return Err(Report::new(BackupError::Encoding));
                     };
                     match source {
-                        SectionSource::Held(bytes) => sink.write(bytes).await?,
+                        SectionSource::Held(bytes) => connector.write(bytes).await?,
                         SectionSource::ResourceArchive(id) => {
-                            self.copy_resource_archive(id, entry, &mut sink).await?;
+                            self.copy_resource_archive(id, entry, &mut connector)
+                                .await?;
+                        }
+                        SectionSource::Captured(artifact) => {
+                            self.copy_captured_section(artifact, entry, &mut connector)
+                                .await?;
                         }
                     }
                 }
             }
         }
-        sink.finish().await
+        connector.finish().await
     }
 
     /// Copies a resource version's original archive into the staged archive, refusing it if it
@@ -367,7 +1151,7 @@ impl SessionServiceImpl {
         &self,
         id: &ResourceId,
         entry: &SectionEntry,
-        sink: &mut StagingSink,
+        connector: &mut StagingEmitter,
     ) -> error_stack::Result<(), BackupError> {
         let mut reader = self
             .inner
@@ -389,7 +1173,7 @@ impl SessionServiceImpl {
             if digester.length() > entry.length {
                 return Err(resource_mismatch(id));
             }
-            sink.write_charged(chunk).await?;
+            connector.write_charged(chunk).await?;
         }
         if digester.length() != entry.length || digester.finish() != entry.digest {
             return Err(resource_mismatch(id));
@@ -397,9 +1181,42 @@ impl SessionServiceImpl {
         Ok(())
     }
 
+    async fn copy_captured_section(
+        &self,
+        artifact: &StagedArtifact,
+        entry: &SectionEntry,
+        connector: &mut StagingEmitter,
+    ) -> error_stack::Result<(), BackupError> {
+        let mut reader = artifact
+            .open_reader()
+            .await
+            .change_context(BackupError::Staging)?;
+        let mut digest = SectionDigester::new();
+        while let Some(chunk) = reader
+            .next_chunk(
+                self.inner
+                    .runtime
+                    .executor()
+                    .limits()
+                    .bulk_chunk_bytes
+                    .as_u64(),
+            )
+            .await
+            .change_context(BackupError::Staging)?
+        {
+            digest.update(chunk.as_ref());
+            connector.write_charged(chunk).await?;
+        }
+        if digest.length() != entry.length || digest.finish() != entry.digest {
+            return Err(Report::new(BackupError::Staging));
+        }
+        Ok(())
+    }
+
     /// Releases every retained archive whose retry validity has ended.
     pub(in crate::application) fn sweep_retained_backups(&self) {
         self.inner.retained_backups.sweep(current_timestamp());
+        self.sweep_captured_backup_sections();
     }
 }
 
@@ -441,13 +1258,12 @@ fn users_count(scope: &PlannedScope, capture: &ConfigurationCapture) -> Option<u
 
 /// The sections and bytes the archive holds for each domain, in name order.
 fn domain_summaries(
-    scope: &PlannedScope,
-    revision: u64,
+    captures: &[DomainCapture],
     sections: &[MeasuredSection],
 ) -> Vec<BackupDomainSummary> {
     let mut totals: BTreeMap<&DomainName, DomainTotals> = BTreeMap::new();
-    for domain in &scope.domains {
-        totals.insert(domain, DomainTotals::default());
+    for capture in captures {
+        totals.insert(&capture.domain, DomainTotals::default());
     }
     for section in sections {
         let Some(domain) = &section.domain else {
@@ -459,9 +1275,14 @@ fn domain_summaries(
     }
     let mut summaries = Vec::with_capacity(totals.len());
     for (domain, total) in totals {
+        let capture = captures
+            .iter()
+            .find(|capture| &capture.domain == domain)
+            .assured("every total was initialized from a domain capture");
         summaries.push(BackupDomainSummary {
             domain: domain.clone(),
-            revision,
+            revision: capture.revision,
+            cut: capture.cut,
             sections: total.sections,
             section_bytes: total.bytes,
         });
@@ -535,16 +1356,41 @@ fn resource_mismatch(id: &ResourceId) -> Report<BackupError> {
     })
 }
 
+fn add_backup_counter(
+    total: &mut u64,
+    value: u64,
+    domain: &DomainName,
+) -> error_stack::Result<(), BackupError> {
+    *total = total.checked_add(value).ok_or_else(|| {
+        Report::new(BackupError::QuiesceCounters {
+            domain: domain.clone(),
+        })
+    })?;
+    Ok(())
+}
+
+fn backup_counter_delta(
+    after: u64,
+    before: u64,
+    domain: &DomainName,
+) -> error_stack::Result<u64, BackupError> {
+    after.checked_sub(before).ok_or_else(|| {
+        Report::new(BackupError::QuiesceCounters {
+            domain: domain.clone(),
+        })
+    })
+}
+
 /// Writes an archive into its staging file in chunks of the executor's bulk size, however small
 /// the pieces it is handed.
-struct StagingSink {
+struct StagingEmitter {
     writer: StagedSnapshotWriter,
     executor: Executor,
     buffer: Vec<u8>,
     chunk_bytes: usize,
 }
 
-impl StagingSink {
+impl StagingEmitter {
     fn new(writer: StagedSnapshotWriter, executor: Executor) -> Self {
         let chunk_bytes: usize = executor.limits().bulk_chunk_bytes.as_u64().arch_into();
         let chunk_bytes = chunk_bytes.max(1);

@@ -672,8 +672,7 @@ dependencies = [
 [[package]]
 name = "async-nats"
 version = "0.49.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fad3cd6df81292728e2a8cb1f1dcb4d7e7a1ab59b80c14fbbcba2baf9d5cf86a"
+source = "git+https://github.com/glebpom/nats.rs.git?rev=d131b7bc954fc57b8447e0d402a896b4b67010b1#d131b7bc954fc57b8447e0d402a896b4b67010b1"
 dependencies = [
  "aws-lc-rs",
  "base64 0.22.1",
@@ -3311,6 +3310,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "deloxide"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f838613d2f0f110f8f3c9bf5623338e094da4d27ec42783b318a659a4e050506"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "flate2",
+ "fxhash",
+ "lazy_static",
+ "parking_lot",
+ "rand 0.9.5",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "webbrowser",
+]
+
+[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3495,6 +3516,16 @@ dependencies = [
  "option-ext",
  "redox_users",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "dispatch2"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
+dependencies = [
+ "bitflags 2.13.2",
+ "objc2",
 ]
 
 [[package]]
@@ -3821,8 +3852,7 @@ checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 [[package]]
 name = "fjall"
 version = "3.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd201c93927cdf4712e8f7d4c9c8d34d68c7534380c05d4a58864a309f91c33f"
+source = "git+https://github.com/glebpom/fjall.git?rev=f2fad4eeb774943c0ed03af6f1db0319b6af7db5#f2fad4eeb774943c0ed03af6f1db0319b6af7db5"
 dependencies = [
  "byteorder-lite",
  "byteview",
@@ -4058,6 +4088,15 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "fxhash"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c31b6d751ae2c7f11320402d34e41349dd1016f8d5d45e48c4312bc8625af50c"
+dependencies = [
+ "byteorder",
 ]
 
 [[package]]
@@ -6469,6 +6508,10 @@ checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 [[package]]
 name = "nervix-approx-into"
 version = "0.1.0-dev"
+dependencies = [
+ "bolero",
+ "meticulous",
+]
 
 [[package]]
 name = "nervix-arbitrary"
@@ -6476,6 +6519,8 @@ version = "0.1.0-dev"
 dependencies = [
  "meticulous",
  "nervix-models",
+ "nervix-wasm-protocol",
+ "rkyv",
  "strum 0.26.3",
 ]
 
@@ -6483,12 +6528,18 @@ dependencies = [
 name = "nervix-backup"
 version = "0.1.0-dev"
 dependencies = [
+ "alloc_count",
  "arch-into",
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-schema",
  "blake3",
  "bolero",
  "error-stack",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-models",
+ "nervix-primitives",
  "rkyv",
  "rstest",
  "strum 0.26.3",
@@ -6531,6 +6582,7 @@ dependencies = [
 name = "nervix-bounded-write"
 version = "0.1.0-dev"
 dependencies = [
+ "bolero",
  "meticulous",
  "thiserror 2.0.21",
 ]
@@ -6570,12 +6622,13 @@ dependencies = [
  "clap",
  "clap_complete",
  "error-stack",
+ "humantime",
  "meticulous",
  "nervix-backup",
  "nervix-client-core",
  "nervix-dns",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-recovery",
  "reedline",
@@ -6597,9 +6650,10 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
- "async-tar",
+ "astral-tokio-tar",
  "base64 0.22.1",
  "blake3",
+ "bolero",
  "bytes",
  "error-stack",
  "hyper-util",
@@ -6609,13 +6663,14 @@ dependencies = [
  "nervix-dns",
  "nervix-model-harness",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-recovery",
  "nervix-test-environment",
  "rustls",
  "shuttle",
  "strum 0.26.3",
+ "tar",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -6639,6 +6694,7 @@ dependencies = [
  "bytes",
  "error-stack",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-client-core",
  "nervix-models",
  "nervix-primitives",
@@ -6661,6 +6717,7 @@ dependencies = [
  "flatc-rust",
  "futures-util",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-models",
  "nervix-primitives",
  "serde_json",
@@ -6677,8 +6734,10 @@ name = "nervix-columnar-json"
 version = "0.1.0-dev"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-schema",
  "base64-simd",
+ "bolero",
  "chrono",
  "criterion 0.5.1",
  "error-stack",
@@ -6698,10 +6757,13 @@ version = "0.1.0-dev"
 dependencies = [
  "arrow-array",
  "async-trait",
+ "bolero",
  "error-stack",
+ "humantime",
  "meticulous",
  "nervix-dns",
  "nervix-execution",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
@@ -6711,6 +6773,7 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "shuttle",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -6746,10 +6809,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-fake"
+version = "0.1.0-dev"
+dependencies = [
+ "arrow-array",
+ "async-trait",
+ "error-stack",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "nervix-primitives",
+]
+
+[[package]]
 name = "nervix-connector-http"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "error-stack",
  "httparse",
  "httpdate",
@@ -6761,6 +6838,7 @@ dependencies = [
  "reqwest 0.13.5",
  "rustls",
  "rustls-pki-types",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
@@ -6774,10 +6852,12 @@ dependencies = [
  "ahash",
  "arch-into",
  "arrow-array",
+ "arrow-buffer",
  "arrow-ipc",
  "arrow-schema",
  "arrow-select",
  "async-trait",
+ "bolero",
  "bytes",
  "error-stack",
  "fastrand",
@@ -6801,9 +6881,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "typetag",
+ "ubyte",
  "url",
  "uuid",
  "webpki-roots 1.0.9",
@@ -6813,15 +6895,22 @@ dependencies = [
 name = "nervix-connector-kafka"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "async-trait",
+ "bolero",
+ "criterion 0.5.1",
  "error-stack",
- "futures-util",
  "humantime",
  "meticulous",
  "nervix-connector",
+ "nervix-execution",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "rdkafka",
+ "shuttle",
+ "strum 0.26.3",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -6830,10 +6919,10 @@ dependencies = [
 name = "nervix-connector-mongodb"
 version = "0.1.0-dev"
 dependencies = [
- "ahash",
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "bolero",
  "chrono",
  "error-stack",
  "meticulous",
@@ -6841,6 +6930,7 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "strum 0.26.3",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -6851,6 +6941,8 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "async-trait",
+ "bolero",
+ "bytes",
  "error-stack",
  "futures-util",
  "humantime",
@@ -6858,12 +6950,15 @@ dependencies = [
  "nervix-connector",
  "nervix-dns",
  "nervix-execution",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-test-environment",
  "nonzero_ext",
  "rumqttc-core-next",
  "rumqttc-next",
+ "shuttle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -6900,12 +6995,13 @@ dependencies = [
  "bytes",
  "error-stack",
  "futures-util",
- "humantime",
  "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "serde_json",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -6916,8 +7012,10 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "bolero",
  "chrono",
  "error-stack",
+ "faster-hex",
  "flate2",
  "hyper-util",
  "meticulous",
@@ -6949,6 +7047,7 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "base64 0.22.1",
+ "bolero",
  "chrono",
  "error-stack",
  "faster-hex",
@@ -6989,20 +7088,23 @@ dependencies = [
 name = "nervix-connector-pulsar"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "async-trait",
+ "bolero",
  "error-stack",
  "futures-util",
- "humantime",
  "meticulous",
  "nervix-connector",
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "pulsar",
  "tempfile",
  "thiserror 2.0.21",
  "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -7018,9 +7120,13 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-dns",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-test-environment",
+ "shuttle",
+ "socket2 0.6.5",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7033,12 +7139,15 @@ version = "0.1.0-dev"
 dependencies = [
  "async-trait",
  "bb8",
+ "combine",
  "error-stack",
  "futures-util",
+ "meticulous",
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-test-environment",
  "redis",
  "rustls",
@@ -7054,8 +7163,10 @@ name = "nervix-connector-sentry"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "chrono",
  "error-stack",
+ "meticulous",
  "nervix-connector",
  "nervix-dns",
  "nervix-models",
@@ -7065,6 +7176,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -7077,13 +7189,18 @@ dependencies = [
  "aws-credential-types",
  "aws-sdk-sqs",
  "aws-smithy-http-client",
+ "bolero",
  "error-stack",
  "meticulous",
  "nervix-connector",
  "nervix-dns",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
+ "nervix-simd-kernels",
  "nervix-test-environment",
+ "shuttle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7095,16 +7212,24 @@ version = "0.1.0-dev"
 dependencies = [
  "ahash",
  "async-trait",
+ "bolero",
+ "bytes",
+ "criterion 0.5.1",
  "error-stack",
+ "memchr",
  "meticulous",
  "nervix-connector",
  "nervix-dns",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-test-environment",
  "nonzero_ext",
+ "rcgen",
  "rustls",
  "rustls-pki-types",
+ "shuttle",
+ "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7118,18 +7243,22 @@ name = "nervix-connector-websockets"
 version = "0.1.0-dev"
 dependencies = [
  "async-trait",
+ "bolero",
  "error-stack",
  "futures-util",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-connector",
  "nervix-dns",
  "nervix-jaq",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-test-environment",
  "prost 0.13.5",
  "prost-reflect",
  "serde_json",
+ "shuttle",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7143,6 +7272,7 @@ version = "0.1.0-dev"
 dependencies = [
  "async-trait",
  "error-stack",
+ "meticulous",
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
@@ -7154,6 +7284,7 @@ dependencies = [
 name = "nervix-consensus"
 version = "0.1.0-dev"
 dependencies = [
+ "alloc_count",
  "arch-into",
  "blake3",
  "bolero",
@@ -7163,12 +7294,15 @@ dependencies = [
  "imbl",
  "meticulous",
  "nervix-arbitrary",
+ "nervix-dns",
  "nervix-execution",
  "nervix-interconnect",
+ "nervix-model-harness",
  "nervix-models",
  "nervix-primitives",
  "nervix-recovery",
  "openraft",
+ "rcgen",
  "rkyv",
  "serde",
  "sorted-vec",
@@ -7194,11 +7328,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-deadlock"
+version = "0.1.0-dev"
+dependencies = [
+ "alloc_count",
+ "bolero",
+ "clap",
+ "error-stack",
+ "humantime",
+ "meticulous",
+ "nervix-arbitrary",
+ "nervix-model-harness",
+ "nervix-primitives",
+ "nix",
+ "rkyv",
+ "signal-hook 0.4.4",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nervix-dns"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "aws-smithy-runtime-api",
+ "bolero",
  "bytes",
  "error-stack",
  "hickory-resolver 0.26.3",
@@ -7230,6 +7385,7 @@ dependencies = [
  "error-stack",
  "meticulous",
  "nervix-model-harness",
+ "nervix-models",
  "nervix-primitives",
  "shuttle",
  "thiserror 2.0.21",
@@ -7241,6 +7397,8 @@ name = "nervix-expiry-map"
 version = "0.1.0-dev"
 dependencies = [
  "ahash",
+ "bolero",
+ "indexmap 2.14.2",
  "intrusive-collections",
  "meticulous",
  "nervix-primitives",
@@ -7256,13 +7414,16 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "blake3",
+ "bolero",
  "bytes",
  "error-stack",
- "fastrand",
  "futures-util",
  "h2",
  "http",
+ "imbl",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-dns",
  "nervix-execution",
  "nervix-model-harness",
@@ -7279,6 +7440,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "shuttle",
+ "sorted-vec",
  "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.21",
@@ -7295,6 +7457,7 @@ dependencies = [
 name = "nervix-jaq"
 version = "0.1.0-dev"
 dependencies = [
+ "bolero",
  "bytes",
  "ciborium",
  "error-stack",
@@ -7302,6 +7465,7 @@ dependencies = [
  "jaq-fmts",
  "jaq-json",
  "jaq-std",
+ "meticulous",
  "nervix-models",
  "serde",
  "serde_json",
@@ -7314,6 +7478,7 @@ name = "nervix-model-harness"
 version = "0.1.0-dev"
 dependencies = [
  "loom",
+ "meticulous",
  "nervix-primitives",
  "shuttle",
  "tracing",
@@ -7347,12 +7512,37 @@ dependencies = [
  "sorted-vec",
  "strum 0.26.3",
  "thiserror 2.0.21",
+ "toml 0.8.2",
  "url",
  "uuid",
 ]
 
 [[package]]
-name = "nervix-nspl"
+name = "nervix-paced-simulation"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "arrow-array",
+ "arrow-schema",
+ "bolero",
+ "clap",
+ "error-stack",
+ "meticulous",
+ "nervix-client-core",
+ "nervix-deadlock",
+ "nervix-models",
+ "nervix-primitives",
+ "nervix-recovery",
+ "serde",
+ "serde_json",
+ "strum 0.26.3",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "nervix-plexus"
 version = "0.1.0-dev"
 dependencies = [
  "ahash",
@@ -7381,7 +7571,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nervix-nspl-format"
+name = "nervix-plexus-format"
 version = "0.1.0-dev"
 dependencies = [
  "ariadne 0.5.1",
@@ -7392,7 +7582,7 @@ dependencies = [
  "meticulous",
  "nervix-arbitrary",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-recovery",
  "tempfile",
@@ -7405,12 +7595,16 @@ version = "0.1.0-dev"
 dependencies = [
  "arc-swap",
  "concurrent-queue",
+ "criterion 0.5.1",
  "dashmap 6.2.1",
+ "deloxide",
+ "error-stack",
  "futures-channel",
  "futures-util",
  "loom",
  "meticulous",
  "nervix-primitives-macros",
+ "nix",
  "parking_lot",
  "shuttle",
  "shuttle-dashmap",
@@ -7418,6 +7612,7 @@ dependencies = [
  "shuttle-tokio",
  "shuttle-tokio-stream",
  "shuttle-tokio-util",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -7523,6 +7718,7 @@ dependencies = [
  "imbl",
  "indexmap 2.14.2",
  "lapin",
+ "memmap2",
  "meticulous",
  "mongodb",
  "multer",
@@ -7539,6 +7735,7 @@ dependencies = [
  "nervix-columnar-json",
  "nervix-connector",
  "nervix-connector-clickhouse",
+ "nervix-connector-fake",
  "nervix-connector-http",
  "nervix-connector-iceberg",
  "nervix-connector-kafka",
@@ -7559,6 +7756,7 @@ dependencies = [
  "nervix-connector-zeromq",
  "nervix-consensus",
  "nervix-dataflow-graph",
+ "nervix-deadlock",
  "nervix-dns",
  "nervix-execution",
  "nervix-expiry-map",
@@ -7566,7 +7764,7 @@ dependencies = [
  "nervix-jaq",
  "nervix-model-harness",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-recovery",
  "nervix-roto",
@@ -7599,6 +7797,7 @@ dependencies = [
  "rumqttc-next",
  "rustls",
  "rustls-pki-types",
+ "ryu",
  "serde",
  "serde_json",
  "shuttle",
@@ -7616,6 +7815,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
+ "tokio-util",
  "tonic 0.13.1",
  "tonic 0.14.6",
  "tower-service",
@@ -7645,6 +7845,7 @@ dependencies = [
  "meticulous",
  "nervix-approx-into",
  "nervix-primitives",
+ "simdutf8",
  "thiserror 2.0.21",
 ]
 
@@ -7657,11 +7858,14 @@ dependencies = [
  "clap",
  "error-stack",
  "hickory-proto 0.26.3",
+ "memchr",
  "meticulous",
  "nervix-primitives",
  "nervix-recovery",
  "reqwest 0.13.5",
  "serde_json",
+ "sqlx",
+ "strum 0.26.3",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.21",
@@ -7685,6 +7889,7 @@ dependencies = [
  "arrow-select",
  "arrow-string",
  "base64-simd",
+ "bolero",
  "chrono",
  "criterion 0.5.1",
  "error-stack",
@@ -7698,7 +7903,7 @@ dependencies = [
  "nervix-approx-into",
  "nervix-execution",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-simd-kernels",
  "nonzero_ext",
@@ -7725,10 +7930,12 @@ dependencies = [
  "arrow-array",
  "arrow-ipc",
  "arrow-schema",
+ "bolero",
  "bytes",
  "error-stack",
  "flatbuffers",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-execution",
  "nervix-models",
  "nervix-primitives",
@@ -7744,10 +7951,12 @@ dependencies = [
 name = "nervix-wasm-protocol"
 version = "0.1.0-dev"
 dependencies = [
+ "bolero",
  "error-stack",
  "flatbuffers",
  "flatc-rust",
  "meticulous",
+ "nervix-arbitrary",
  "thiserror 2.0.21",
 ]
 
@@ -7756,10 +7965,13 @@ name = "nervix-wasm-sdk"
 version = "0.1.0-dev"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-ipc",
  "arrow-schema",
+ "bolero",
  "error-stack",
  "meticulous",
+ "nervix-arbitrary",
  "nervix-wasm-protocol",
  "thiserror 2.0.21",
 ]
@@ -7770,6 +7982,8 @@ version = "0.1.0-dev"
 dependencies = [
  "any_spawner",
  "base64 0.22.1",
+ "blake3",
+ "bolero",
  "bytes",
  "console_error_panic_hook",
  "error-stack",
@@ -7779,10 +7993,11 @@ dependencies = [
  "leptos",
  "meticulous",
  "nervix-approx-into",
+ "nervix-arbitrary",
  "nervix-client-wire",
  "nervix-dataflow-graph",
  "nervix-models",
- "nervix-nspl",
+ "nervix-plexus",
  "nervix-primitives",
  "nervix-recovery",
  "strum 0.26.3",
@@ -7982,6 +8197,54 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "objc2"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a12a8ed07aefc768292f076dc3ac8c48f3781c8f2d5851dd3d98950e8c5a89f"
+dependencies = [
+ "objc2-encode",
+]
+
+[[package]]
+name = "objc2-app-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
+dependencies = [
+ "bitflags 2.13.2",
+ "objc2",
+ "objc2-foundation",
+]
+
+[[package]]
+name = "objc2-core-foundation"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
+dependencies = [
+ "bitflags 2.13.2",
+ "dispatch2",
+ "objc2",
+]
+
+[[package]]
+name = "objc2-encode"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef25abbcd74fb2609453eb695bd2f860d389e457f67dc17cafc8b8cbc89d0c33"
+
+[[package]]
+name = "objc2-foundation"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
+dependencies = [
+ "bitflags 2.13.2",
+ "objc2",
+ "objc2-core-foundation",
 ]
 
 [[package]]
@@ -9285,7 +9548,7 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "6.9.0"
-source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-max-message-size#37f70aa16d3a6cc0493d25e0ca73c0e7b0c07f80"
+source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-message-size-ack-receipts#1545163035670abe8996be7bd2610e45421c47ce"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -10161,8 +10424,7 @@ dependencies = [
 [[package]]
 name = "rkyv"
 version = "0.8.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9776093b7ca170454ab1406954f7b7d97a57c51dc6c0642957fb2ef25c2d399"
+source = "git+https://github.com/glebpom/rkyv.git?rev=868fa9c3c268560ad3459ddb95e271c7167bc097#868fa9c3c268560ad3459ddb95e271c7167bc097"
 dependencies = [
  "bytecheck",
  "bytes",
@@ -10180,12 +10442,30 @@ dependencies = [
 [[package]]
 name = "rkyv_derive"
 version = "0.8.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c25ef604ac7dd839d44d64648952ea23c97866f124ff671b0ed2cf3ad9bb06e"
+source = "git+https://github.com/glebpom/rkyv.git?rev=868fa9c3c268560ad3459ddb95e271c7167bc097#868fa9c3c268560ad3459ddb95e271c7167bc097"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "rmp"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ba8be72d372b2c9b35542551678538b562e7cf86c3315773cae48dfbfe7790c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "rmp-serde"
+version = "1.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
+dependencies = [
+ "rmp",
+ "serde",
 ]
 
 [[package]]
@@ -13562,6 +13842,22 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webbrowser"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62c35be770821a214dbc362fc26908c853e776c0004294d0b10b8a6bad582f94"
+dependencies = [
+ "jni",
+ "log",
+ "ndk-context",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "url",
+ "web-sys",
 ]
 
 [[package]]

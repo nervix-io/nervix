@@ -6,6 +6,11 @@
 //! - **Depends on.** The committed emitter schedule, node-local delivery owner and session wire.
 //! - **Must not know.** Arrow batch encoding, graph execution, or transport framing.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use ahash::HashMap;
 use nervix_client_wire::{
     CloseEmitterOutcome, CloseEmitterRequest, ConsumerId, EmitterBatchDecision,
@@ -15,8 +20,8 @@ use nervix_client_wire::{
     SettleEmitterBatchOutcome, SettleEmitterBatchRequest,
 };
 use nervix_models::{
-    CLIENT_CONSUMER_SESSION_BYTES, ClientEndpointContract, CreateEmitter, DomainStatus, EmitSink,
-    FlushPolicy, MAX_CLIENT_CONSUMERS_PER_SESSION, SchemaField,
+    CLIENT_CONSUMER_SESSION_BYTES, ClientEndpointContract, CreateEmitter, DomainStatus,
+    EmitterEntity, FlushPolicy, MAX_CLIENT_CONSUMERS_PER_SESSION, SchemaField,
 };
 use nervix_primitives::sync::{
     Arc, Mutex as AsyncMutex, StdArc, StdWeak,
@@ -24,6 +29,7 @@ use nervix_primitives::sync::{
     blocking::Mutex,
     mpsc,
 };
+use tracing::debug;
 
 use super::{QueuedReply, SessionShared};
 use crate::{
@@ -81,7 +87,7 @@ impl SessionConsumers {
         // A flush-only retuning keeps the endpoint; normalize that cadence before hashing the
         // construction, publishing and acknowledgement contract.
         model.flush_policy = FlushPolicy::Immediate;
-        let canonical = model.to_canonical_nspl().map_err(|_| {
+        let canonical = model.to_canonical_plexus().map_err(|_| {
             (
                 EmitterOpenRefusal::EndpointUnavailable,
                 "emitter contract could not be rendered".to_string(),
@@ -130,15 +136,34 @@ impl SessionConsumers {
         in_transaction: bool,
     ) {
         let consumer = ConsumerId::opened_by(request_id);
+        let domain = open.domain.clone();
+        let emitter = open.emitter.clone();
         let outcome = match self.attach(shared, consumer, open, in_transaction).await {
-            Ok(opened) => OpenEmitterOutcome {
-                disposition: OpenEmitterDisposition::Opened(Box::new(opened)),
-                message: "consumer attached".to_string(),
-            },
-            Err((refusal, message)) => OpenEmitterOutcome {
-                disposition: OpenEmitterDisposition::Refused(refusal),
-                message,
-            },
+            Ok(opened) => {
+                debug!(
+                    domain = domain.as_str(),
+                    emitter = emitter.as_str(),
+                    %consumer,
+                    "a consumer attached"
+                );
+                OpenEmitterOutcome {
+                    disposition: OpenEmitterDisposition::Opened(Box::new(opened)),
+                    message: "consumer attached".to_string(),
+                }
+            }
+            Err((refusal, message)) => {
+                debug!(
+                    domain = domain.as_str(),
+                    emitter = emitter.as_str(),
+                    refusal = ?refusal,
+                    message = message.as_str(),
+                    "a consumer open was refused"
+                );
+                OpenEmitterOutcome {
+                    disposition: OpenEmitterDisposition::Refused(refusal),
+                    message,
+                }
+            }
         };
         let announced = shared
             .finish_with(request_id, ReplyBody::OpenEmitter(outcome))
@@ -198,10 +223,10 @@ impl SessionConsumers {
                 "emitter is not scheduled",
             ));
         };
-        if !matches!(model.sink.as_ref(), EmitSink::Client { .. }) {
+        if !matches!(model.connector.as_ref(), EmitterEntity::Client(_)) {
             return Err(refuse(
                 EmitterOpenRefusal::NotClientEmitter,
-                "emitter has an external sink",
+                "emitter has an external emitter",
             ));
         }
         let Some(owner) = scheduled.execution_node() else {
@@ -315,6 +340,10 @@ impl SessionConsumers {
                 message: String::new(),
             },
             None => {
+                debug!(
+                    consumer = %request.consumer,
+                    "a consumer read found its delivery stream ended"
+                );
                 self.close_handle(request.consumer);
                 ReadEmitterBatchOutcome {
                     disposition: ReadEmitterDisposition::Ended,

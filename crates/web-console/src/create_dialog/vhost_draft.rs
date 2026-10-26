@@ -6,6 +6,11 @@
 //! - **Depends on.** Current VHOST Models and resource pin browser choices.
 //! - **Must not know.** Certificate validation or installation on live nodes.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{CreateVhost, RequestedResourceVersion, VhostName, VhostTlsResource};
 use thiserror::Error;
@@ -63,10 +68,16 @@ impl VhostDraft {
             return Err(Report::new(VhostDraftError::Hostname { entry: 1 }));
         }
         let tls = if self.tls_enabled {
-            let pin = self.tls.build().map_err(|error| {
-                let context = VhostDraftError::Tls(error.current_context().clone());
-                error.change_context(context)
-            })?;
+            let pin = {
+                let mapping_input = self.tls.build();
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let context = VhostDraftError::Tls(error.current_context().clone());
+                        error.change_context(context)
+                    }),
+                }
+            }?;
             Some(VhostTlsResource {
                 resource: pin.resource,
                 version: pin.version,
@@ -93,12 +104,16 @@ pub(super) enum VhostDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         CreateStatement, Model, RequestedResourceVersion, ResourceName, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{VhostDraft, VhostDraftError};
 
@@ -127,7 +142,7 @@ mod tests {
         let vhost = draft.build().assured("the TLS pin is complete");
         let statement =
             Statement::Create(CreateStatement::new(Box::new(Model::Vhost(vhost)), false));
-        let source = statement.to_canonical_nspl().assured("VHOST renders");
+        let source = statement.to_canonical_plexus().assured("VHOST renders");
         assert!(source.contains("api.example.com, ws.example.com"));
         assert!(source.contains("WITH TLS tls_bundle VERSION 3"));
         assert_eq!(

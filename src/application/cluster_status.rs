@@ -6,8 +6,18 @@
 //! - **Depends on.** The cluster handle and the consensus observer.
 //! - **Must not know.** How membership or a schedule is decided.
 
-use nervix_consensus::Observer;
-use nervix_models::ScheduledNode;
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
+use std::collections::BTreeSet;
+
+use nervix_consensus::{GossipState, Observer};
+use nervix_models::{ClusterNodeName, ScheduledNode};
 
 use crate::cluster;
 
@@ -37,22 +47,35 @@ pub(in crate::application) async fn render_cluster_status(
     lines.push(String::new());
     lines.push("[warnings]".to_string());
 
+    let membership = consensus.membership_nodes().await;
+    let raft_ids = membership.keys().cloned().collect::<BTreeSet<_>>();
+    let availability = cluster.availability_state().await;
+    let health_unavailable = cluster.peer_health_snapshot().unavailable_nodes();
+    lines.extend(render_membership_warnings(
+        &gossip,
+        &availability,
+        &raft_ids,
+        &health_unavailable,
+    ));
+
+    lines.join("\n")
+}
+
+fn render_membership_warnings(
+    gossip: &GossipState,
+    availability: &GossipState,
+    raft_ids: &BTreeSet<ClusterNodeName>,
+    health_unavailable: &BTreeSet<ClusterNodeName>,
+) -> Vec<String> {
     let gossip_ids = gossip
         .live_nodes
         .iter()
         .map(|node| node.node_id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    let membership = consensus.membership_nodes().await;
-    let raft_ids = membership
-        .keys()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
-    let health_unavailable = cluster.peer_health_snapshot().unavailable_nodes();
-    let mut unavailable = gossip.dead_node_ids.clone();
-    unavailable.extend(health_unavailable.iter().cloned());
-
+        .collect::<BTreeSet<_>>();
+    let unavailable = &availability.dead_node_ids;
+    let mut lines = Vec::new();
     let mut warned = false;
-    for missing in gossip_ids.difference(&raft_ids) {
+    for missing in gossip_ids.difference(raft_ids) {
         warned = true;
         lines.push(format!(
             "- gossip node '{missing}' is not present in raft membership"
@@ -64,7 +87,7 @@ pub(in crate::application) async fn render_cluster_status(
             "- raft member '{missing}' is not currently visible in gossip"
         ));
     }
-    for dead in unavailable.intersection(&raft_ids) {
+    for dead in unavailable.intersection(raft_ids) {
         warned = true;
         let source = if health_unavailable.contains(dead) {
             "application health"
@@ -79,7 +102,7 @@ pub(in crate::application) async fn render_cluster_status(
         lines.push("- none".to_string());
     }
 
-    lines.join("\n")
+    lines
 }
 
 fn render_cluster_schedule_lines(schedule: &nervix_models::ClusterSchedule) -> Vec<String> {
@@ -146,4 +169,87 @@ fn format_ownership_transition(node: &ScheduledNode) -> String {
         );
     }
     rendered
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_consensus::GossipNode;
+    use nervix_models::{ClusterNodeIncarnation, NodeEndpoint};
+
+    use super::*;
+
+    fn peer() -> GossipNode {
+        GossipNode {
+            node_id: ClusterNodeName::parse("node-3").expect("valid peer name"),
+            incarnation: ClusterNodeIncarnation::new(7),
+            terminating: false,
+            client_url: None,
+            console_url: None,
+            interconnect_endpoint: Some(NodeEndpoint::new("127.0.0.1", 33015)),
+            prerequisites: None,
+        }
+    }
+
+    #[test]
+    fn membership_warnings_preserve_a_health_retained_peer() {
+        let peer = peer();
+        let membership = BTreeSet::from([peer.node_id.clone()]);
+        let gossip = GossipState {
+            live_nodes: Vec::new(),
+            dead_node_ids: membership.clone(),
+            dead_node_identities: BTreeSet::from([peer.identity()]),
+        };
+        let availability = GossipState {
+            live_nodes: vec![peer],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: gossip.dead_node_identities.clone(),
+        };
+        assert_eq!(
+            render_membership_warnings(&gossip, &availability, &membership, &BTreeSet::new()),
+            vec!["- raft member 'node-3' is not currently visible in gossip"]
+        );
+    }
+
+    #[test]
+    fn membership_warnings_report_each_effective_unavailability_owner() {
+        let peer = peer();
+        let membership = BTreeSet::from([peer.node_id.clone()]);
+        let gossip = GossipState {
+            live_nodes: Vec::new(),
+            dead_node_ids: membership.clone(),
+            dead_node_identities: BTreeSet::from([peer.identity()]),
+        };
+        for (health_unavailable, owner) in [
+            (BTreeSet::new(), "chitchat"),
+            (membership.clone(), "application health"),
+        ] {
+            assert_eq!(
+                render_membership_warnings(&gossip, &gossip, &membership, &health_unavailable),
+                vec![
+                    "- raft member 'node-3' is not currently visible in gossip".to_string(),
+                    format!("- raft member 'node-3' is marked unavailable by {owner}"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn membership_warnings_report_health_exclusion_of_a_gossip_live_peer() {
+        let peer = peer();
+        let membership = BTreeSet::from([peer.node_id.clone()]);
+        let gossip = GossipState {
+            live_nodes: vec![peer.clone()],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let availability = GossipState {
+            live_nodes: vec![peer],
+            dead_node_ids: membership.clone(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        assert_eq!(
+            render_membership_warnings(&gossip, &availability, &membership, &membership),
+            vec!["- raft member 'node-3' is marked unavailable by application health"]
+        );
+    }
 }

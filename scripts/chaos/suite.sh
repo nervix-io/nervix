@@ -1,0 +1,1202 @@
+#!/usr/bin/env bash
+# Runs the suites of `just chaos suite`: named selections from suites.json, each entry executed as
+# the `just chaos run` command it lists, one after another, against one already-built image. Every
+# run keeps its own verdict and evidence in its own directory; the suite adds suite.json and
+# summary.md beside them. CI runs one shard of a suite per job with exactly these commands.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+suites_file="${script_dir}/suites.json"
+report_program="${script_dir}/suite-report.jq"
+# shellcheck source=require-jq.sh
+source "${script_dir}/require-jq.sh"
+# shellcheck source=verifier-self-check.sh
+source "${script_dir}/verifier-self-check.sh"
+# A run's teardown after its own --timeout is bounded on its own and fits this reserve, the
+# runner's teardown_reserve_seconds; a shard's step budget keeps it for the last run.
+teardown_reserve_minutes=15
+# The suite executes the verifier self-check once, before its first run, within its bound; a
+# shard's step budget funds that preparation beside its runs, in whole minutes.
+preparation_minutes=$(((chaos_verifier_self_check_seconds + 59) / 60))
+# How long cleanup waits by default for a suite controller or run that still executes to finish its
+# exit work, within the CI cleanup step's bound, before it kills what remains.
+cleanup_wait_seconds=300
+
+usage() {
+    cat <<'EOF'
+Usage:
+  just chaos suite list
+  just chaos suite SUITE --image IMAGE [--image-kind KIND] [--image-revision REVISION] [--shard N]
+      [--entry ID]... [--artifacts DIR] [--suite-id ID]
+  just chaos suite shards SUITE
+  just chaos suite cleanup [--wait SECONDS] SUITE_DIRECTORY
+  just chaos suite report [--expect-shards N] SUITE_JSON...
+
+SUITE names a suite of suites.json, such as smoke or soak. Before its first run the suite executes
+the verifier self-check, tests/self-test.sh, once, and every run adopts the record of that passing
+check instead of executing its own. Each entry runs as its own `just chaos run` command with the
+entry's budget as --timeout, and every entry runs even after one fails. --shard runs one shard of
+the suite and --entry the named entries; both may be combined.
+An image that declares a Deloxide diagnostic selection in its io.nervix.diagnostic.selection label
+runs as a diagnostic image: every run judges the deadlock evidence of every process its nodes
+started, and an entry passes only with a passing evidence verdict. --image-kind KIND refuses an
+image that is not of that kind: ordinary, or the diagnostic selection deloxide, deloxide-order or
+deloxide-stress. --image-revision REVISION refuses an image whose org.opencontainers.image.revision
+label names another revision, so suites of two images can show both were built from one. The suite
+writes ARTIFACTS/SUITE_ID/suite.json, summary.md, suite.log with its whole console, one
+directory per run and one console log per entry under logs/. It exits 0 when every entry passed,
+1 when any failed or did not run, 2 for a setup error before any run, and 128 plus the signal
+number when it was interrupted.
+
+shards prints the CI matrix of a suite: each shard's entries, its execution budget, the preparation
+budget of its one verifier self-check, the step budget that adds both and one run teardown reserve,
+and the job budget that adds the CI reserve for evidence, cleanup and upload.
+
+cleanup ends what a suite left behind. A suite controller that still executes receives one TERM,
+and a run whose controller is gone receives one itself; each has --wait seconds, 300 by default,
+to finish its exit work before cleanup kills what remains of the suite's processes. Then, for every
+run of the suite, cleanup captures bounded evidence of the Docker resources still carrying the
+run's label and removes them, and records the entries that never reported a verdict as interrupted.
+
+report renders the summary of one or more suite.json files, such as every shard of a suite, and
+exits nonzero when any of them did not pass or fewer than --expect-shards were given.
+EOF
+}
+
+suite_error() {
+    printf 'chaos suite setup error: %s\n' "$*" >&2
+    exit 2
+}
+
+for command_name in jq timeout date awk; do
+    command -v "${command_name}" >/dev/null 2>&1 \
+        || suite_error "required command is unavailable: ${command_name}"
+done
+
+now() {
+    date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
+# Prints the state of process PID and when it started, in clock ticks after boot, or nothing when no
+# process has that number. The start time tells a process apart from any later one given its number.
+process_stat() {
+    local pid="$1"
+    [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 0
+    local stat=""
+    stat="$(cat "/proc/${pid}/stat" 2>/dev/null)" || return 0
+    # The command name in the second field may hold spaces and parentheses, so the fields are read
+    # after its closing parenthesis: the state first and the start time twentieth.
+    local fields=()
+    read -r -a fields <<<"${stat##*) }"
+    printf '%s %s' "${fields[0]:-}" "${fields[19]:-}"
+}
+
+# Prints when process PID started, as process_executes compares it, or nothing when no process has
+# that number.
+process_start_ticks() {
+    local stat
+    stat="$(process_stat "$1")"
+    if [[ -n "${stat}" ]]; then
+        printf '%s' "${stat#* }"
+    fi
+}
+
+# True when process PID executes, not as a zombie, and is the process that started at START_TICKS.
+process_executes() {
+    local pid="$1"
+    local start_ticks="$2"
+    [[ -n "${start_ticks}" ]] || return 1
+    local stat
+    stat="$(process_stat "${pid}")"
+    [[ -n "${stat}" && "${stat% *}" != Z && "${stat#* }" == "${start_ticks}" ]]
+}
+
+# Refuses a definitions file that would give a suite an ambiguous selection, an unbounded run or an
+# option the suite sets itself.
+validate_definitions() {
+    [[ -s "${suites_file}" ]] || suite_error "the suite definitions do not exist: ${suites_file}"
+    jq -e 'type == "object"' "${suites_file}" >/dev/null 2>&1 \
+        || suite_error "the suite definitions are not a JSON object: ${suites_file}"
+    local problems
+    problems="$(jq -r '
+        def whole: type == "number" and . == floor;
+        def entry_problems($suite):
+            . as $entry
+            | ($entry.id | tostring) as $id
+            | (if ($entry.id | type == "string" and test("^[a-z0-9][a-z0-9-]{0,39}$")) | not
+               then "\($suite): entry id \($id) must be 1 to 40 lowercase letters, digits or hyphens" else empty end),
+              (if ($entry.shard | whole and . >= 1) | not
+               then "\($suite)/\($id): shard must be a positive integer" else empty end),
+              (if ($entry.budget_minutes | whole and . >= 2 and . <= 360) | not
+               then "\($suite)/\($id): budget_minutes must be an integer from 2 through 360" else empty end),
+              (if ($entry.run | type == "array" and length > 0 and all(.[]; type == "string")) | not
+               then "\($suite)/\($id): run must list the arguments of just chaos run" else empty end),
+              (if ($entry.run | type == "array")
+                  and any($entry.run[]; IN("--image", "--artifacts", "--run-id", "--timeout", "--verifier-self-check", "--keep"))
+               then "\($suite)/\($id): the suite sets --image, --artifacts, --run-id, --timeout and --verifier-self-check itself and never keeps resources" else empty end),
+              (if ($entry | has("note")) and ($entry.note | type != "string")
+               then "\($suite)/\($id): note must be a string" else empty end),
+              (($entry | keys) - ["id", "shard", "budget_minutes", "run", "note"] | .[]
+               | "\($suite)/\($id): unknown field \(.)");
+        [ (if (.ci_reserve_minutes | whole and . >= 1) | not
+           then "ci_reserve_minutes must be a positive integer" else empty end),
+          (if (.suites | type == "object" and length > 0) | not
+           then "suites must define at least one suite" else empty end),
+          ((keys) - ["ci_reserve_minutes", "suites"] | .[] | "unknown field \(.)"),
+          (if .suites | type == "object" then .suites | to_entries[] else empty end
+           | .key as $suite | .value as $definition
+           | (if ($suite | test("^[a-z][a-z0-9-]{0,23}$")) and ($suite | IN("list", "shards", "cleanup", "report") | not)
+              then empty
+              else "suite name \($suite) must be 1 to 24 lowercase letters, digits or hyphens and not a suite command" end),
+             (if ($definition.description | type == "string" and length > 0) | not
+              then "\($suite): description must be a non-empty string" else empty end),
+             (($definition | keys) - ["description", "entries"] | .[] | "\($suite): unknown field \(.)"),
+             (if ($definition.entries | type == "array" and length > 0) | not
+              then "\($suite): entries must list at least one entry"
+              else
+                ($definition.entries[] | entry_problems($suite)),
+                ([$definition.entries[].id] | group_by(.)[] | select(length > 1)
+                 | "\($suite): entry id \(.[0]) appears more than once"),
+                ([$definition.entries[].shard] as $shards
+                 | if all($shards[]; whole and . >= 1)
+                      and ($shards | unique) != [range(1; ($shards | unique | length) + 1)]
+                   then "\($suite): shards must be numbered from 1 without gaps" else empty end)
+              end))
+        ] | .[]' "${suites_file}")"
+    if [[ -n "${problems}" ]]; then
+        printf 'chaos suite setup error: the suite definitions in %s are invalid:\n' "${suites_file}" >&2
+        printf '  %s\n' "${problems}" >&2
+        exit 2
+    fi
+}
+
+require_suite() {
+    local suite="$1"
+    jq -e --arg suite "${suite}" '.suites | has($suite)' "${suites_file}" >/dev/null \
+        || suite_error "unknown chaos suite: ${suite}; the suites are $(jq -r '.suites | keys | join(", ")' "${suites_file}")"
+}
+
+list_suites() {
+    jq -r '
+        def command: "just chaos run " + (.run | map(if test("^[A-Za-z0-9_./:=@-]+$") then . else @sh end) | join(" "));
+        .suites | to_entries[] | .key as $suite | .value
+        | ([.entries[].shard] | unique) as $shards
+        | "\($suite)  \(.description)",
+          "  \($shards | length) shard(s), \([.entries[].budget_minutes] | add) budget minutes",
+          ($shards[] as $shard
+           | "  shard \($shard), \([.entries[] | select(.shard == $shard) | .budget_minutes] | add) budget minutes",
+             (.entries[] | select(.shard == $shard)
+              | "    \(.id)  \(.budget_minutes) min  \(command)",
+                (if .note then "      \(.note)" else empty end))),
+          ""' "${suites_file}"
+}
+
+print_shards() {
+    local suite="$1"
+    require_suite "${suite}"
+    jq -c --arg suite "${suite}" --argjson teardown "${teardown_reserve_minutes}" \
+        --argjson preparation "${preparation_minutes}" '
+        .ci_reserve_minutes as $reserve
+        | .suites[$suite].entries
+        | group_by(.shard)
+        | map({shard: .[0].shard,
+               entries: map(.id),
+               execution_minutes: (map(.budget_minutes) | add),
+               preparation_minutes: $preparation}
+              | .step_minutes = .execution_minutes + .preparation_minutes + $teardown
+              | .job_minutes = .step_minutes + $reserve)' "${suites_file}"
+}
+
+# The suite record is rewritten whole through a temporary file, so a reader never sees half of it.
+update_record() {
+    local filter="$1"
+    shift
+    local tmp_path
+    tmp_path="$(mktemp "${suite_dir}/.suite.XXXXXX")"
+    if jq "$@" "${filter}" "${suite_dir}/suite.json" >"${tmp_path}"; then
+        mv "${tmp_path}" "${suite_dir}/suite.json"
+    else
+        rm -f "${tmp_path}"
+        return 1
+    fi
+}
+
+render_summary() {
+    jq -r -f "${report_program}" --slurp "${suite_dir}/suite.json" >"${suite_dir}/summary.md"
+}
+
+# Prints PATH when it holds a JSON object, and otherwise /dev/null, which jq slurps as no record.
+optional_record() {
+    local path="$1"
+    if [[ -s "${path}" ]] && jq -e 'type == "object"' "${path}" >/dev/null 2>&1; then
+        printf '%s\n' "${path}"
+    else
+        printf '%s\n' /dev/null
+    fi
+}
+
+# Reads what run RUN_ID recorded in its directory and returns the entry's verdict as JSON. EXIT is
+# the command's exit status, or "unknown" when the suite ended before the command reported one.
+# SUITE_INTERRUPTED is true when a signal ended the suite while this run was executing.
+entry_verdict() {
+    local run_id="$1"
+    local exit_status="$2"
+    local suite_interrupted="$3"
+    local suite_image_id="$4"
+    local suite_selection="$5"
+    local run_dir="${suite_dir}/${run_id}"
+    local manifest finding ledger resources diagnostic
+    manifest="$(optional_record "${run_dir}/manifest.json")"
+    finding="$(optional_record "${run_dir}/results/finding.json")"
+    diagnostic="$(optional_record "${run_dir}/results/diagnostic-evidence.json")"
+    ledger="$(optional_record "${run_dir}/results/ledger.json")"
+    resources="$(optional_record "${run_dir}/results/mixed-resources.json")"
+    # The scenario's own result file, which embeds its progress record or names it.
+    local result=/dev/null progress=/dev/null
+    if [[ "${manifest}" != /dev/null ]]; then
+        local scenario result_name
+        scenario="$(jq -r '.scenario // ""' "${manifest}")"
+        result_name="${scenario}"
+        if [[ "${scenario}" == *-crash ]]; then
+            result_name=crash
+        fi
+        if [[ -n "${result_name}" ]]; then
+            result="$(optional_record "${run_dir}/results/${result_name}.json")"
+        fi
+        if [[ "${result}" != /dev/null ]]; then
+            local progress_path
+            progress_path="$(jq -r 'if (.progress | type) == "string" then .progress else "" end' "${result}")"
+            if [[ -n "${progress_path}" ]]; then
+                progress="$(optional_record "${run_dir}/${progress_path}")"
+            fi
+        fi
+    fi
+    local results_json='[]'
+    if [[ -d "${run_dir}/results" ]]; then
+        results_json="$(find "${run_dir}/results" -maxdepth 1 -type f -name '*.json' -size +0c -printf '%f\n' 2>/dev/null \
+            | sort | jq -Rsc --arg run_id "${run_id}" 'split("\n") | map(select(length > 0) | "\($run_id)/results/\(.)")')"
+    fi
+    # Each optional record is read only when it exists; a missing one is null, never a default.
+    jq -n \
+        --arg run_id "${run_id}" \
+        --arg exit "${exit_status}" \
+        --argjson suite_interrupted "${suite_interrupted}" \
+        --arg suite_image_id "${suite_image_id}" \
+        --arg suite_selection "${suite_selection}" \
+        --argjson results "${results_json}" \
+        --slurpfile manifest_input "${manifest}" \
+        --slurpfile finding_input "${finding}" \
+        --slurpfile ledger_input "${ledger}" \
+        --slurpfile result_input "${result}" \
+        --slurpfile progress_input "${progress}" \
+        --slurpfile resources_input "${resources}" \
+        --slurpfile diagnostic_input "${diagnostic}" '
+        ($manifest_input[0] // null) as $manifest
+        | ($diagnostic_input[0] // null) as $diagnostic
+        | ($finding_input[0] // null) as $finding
+        | ($ledger_input[0] // null) as $ledger
+        | ($result_input[0] // null) as $result
+        | (if ($result.progress | type) == "object" then $result.progress else ($progress_input[0] // null) end) as $progress
+        | ($resources_input[0] // null) as $resources
+        | (if $exit == "unknown" then null else ($exit | tonumber) end) as $command_exit
+        | ($manifest.exit_code // null) as $recorded_exit
+        | ($command_exit // $recorded_exit) as $exit_code
+        | (if $manifest == null and $command_exit == 2 then
+             {status: "failed", category: "setup",
+              reason: "the runner refused the entry before it created a run directory; its console log names the reason"}
+           elif $manifest == null then
+             {status: (if $command_exit == null or $suite_interrupted then "interrupted" else "failed" end),
+              category: "controller",
+              reason: "the run left no manifest.json, so it has no recorded verdict"}
+           elif $command_exit != null and $recorded_exit != null and $command_exit != $recorded_exit
+                and ($suite_interrupted | not) then
+             {status: "failed", category: "controller",
+              reason: "the run recorded exit status \($recorded_exit), but its command exited \($command_exit)"}
+           elif $exit_code == null then
+             {status: "interrupted", category: null,
+              reason: "the suite ended before the run reported its exit status"}
+           elif $exit_code == 0 and $manifest.status != "passed" then
+             {status: "failed", category: "controller",
+              reason: "the run exited 0, but its manifest records status \($manifest.status)"}
+           elif $exit_code == 0 and $suite_image_id != "" and $manifest.resolved_image_id != $suite_image_id then
+             {status: "failed", category: "controller",
+              reason: "the run resolved image \($manifest.resolved_image_id), not the suite image \($suite_image_id)"}
+           elif $exit_code == 0 and $suite_selection != "" and ($manifest.diagnostic.selection // "") != $suite_selection then
+             {status: "failed", category: "controller",
+              reason: "the suite image declares the \($suite_selection) diagnostic selection, but the run did not record its nodes as diagnostic nodes of it"}
+           elif $exit_code == 0 and $suite_selection != "" and ($diagnostic.verdict // null) != "passed" then
+             {status: "failed", category: "controller",
+              reason: "the run of a diagnostic image exited 0 without a passing diagnostic evidence verdict"}
+           elif $exit_code == 0 then
+             {status: "passed", category: null, reason: null}
+           elif $suite_interrupted then
+             {status: "interrupted", category: null,
+              reason: "a signal ended the suite while the run executed"}
+           elif $exit_code == 2 and ($manifest.setup_error // "") != "" then
+             {status: "failed", category: "setup", reason: $manifest.setup_error}
+           elif $manifest.status == "interrupted" then
+             {status: "interrupted", category: null,
+              reason: "a signal ended the run"}
+           else
+             {status: "failed",
+              category: ($finding.category // null),
+              reason: null}
+           end) as $verdict
+        | $verdict + {
+            exit_code: $exit_code,
+            run_status: ($manifest.status // null),
+            final_phase: ($manifest.final_phase // null),
+            timeout_seconds: ($manifest.timeout_seconds // null),
+            teardown_seconds: ($manifest.teardown_seconds // null),
+            image_id: ($manifest.resolved_image_id // null),
+            seed: ($manifest.mixed.seed // null),
+            policy: ($manifest.mixed.policy // null),
+            reproducer: ($finding.reproducer // null),
+            finding: (if $finding == null then null else "\($run_id)/results/finding.json" end),
+            ledger: (if $ledger == null then null else
+                       {verdict: $ledger.verdict,
+                        expected: $ledger.expected_records,
+                        observed: $ledger.observed_records,
+                        duplicates: $ledger.duplicate_records,
+                        missing: ($ledger.missing_ids | length),
+                        unexpected: ($ledger.unexpected_ids | length),
+                        incorrect: ($ledger.incorrect_content | length)} end),
+            recovery: (if $progress == null then null else
+                         ([ ($progress | to_entries[]
+                             | select(.key | IN("election_ms", "placement_ms", "listener_recovery_ms",
+                                                "settled_recovery_ms", "delivery_resume_ms"))
+                             | select(.value | type == "number")),
+                            ($progress.recovery_ms // {} | to_entries[]
+                             | select(.value | type == "object" and (.max | type == "number"))
+                             | {key: "\(.key)_max_ms", value: .value.max}) ]
+                          | if length == 0 then null else from_entries end) end),
+            resources: (if $resources == null then null else
+                          ($resources.summary // {})
+                          | {max_node_memory_bytes: ([.nodes[]?.max_memory_bytes | numbers] | max),
+                             max_backlog: .max_backlog,
+                             longest_output_stall_ms: .longest_output_stall_ms} end),
+            diagnostic: (if $diagnostic == null then null else
+                           {verdict: $diagnostic.verdict, category: $diagnostic.category,
+                            selection: $diagnostic.selection}
+                           + ($diagnostic.totals // {})
+                           + {problems: [$diagnostic.problems[]?.reason]} end),
+            results: $results
+          }'
+}
+
+# Records ENTRY_INDEX's verdict in the suite record from what its run left behind.
+record_entry() {
+    local entry_index="$1"
+    local exit_status="$2"
+    local suite_interrupted="$3"
+    local run_id finished_at duration verdict suite_image_id suite_selection started_epoch
+    run_id="$(jq -r --argjson index "${entry_index}" '.entries[$index].run_id' "${suite_dir}/suite.json")"
+    suite_image_id="$(jq -r '.image.id // ""' "${suite_dir}/suite.json")"
+    suite_selection="$(jq -r '.image.diagnostic_selection // ""' "${suite_dir}/suite.json")"
+    started_epoch="$(jq -r --argjson index "${entry_index}" '.entries[$index].started_epoch // empty' "${suite_dir}/suite.json")"
+    finished_at="$(now)"
+    duration=null
+    if [[ -n "${started_epoch}" && "${exit_status}" != unknown ]]; then
+        duration=$(($(date +%s) - started_epoch))
+    fi
+    verdict="$(entry_verdict "${run_id}" "${exit_status}" "${suite_interrupted}" "${suite_image_id}" \
+        "${suite_selection}")"
+    local artifacts=null
+    if [[ -d "${suite_dir}/${run_id}" ]]; then
+        artifacts="\"${run_id}\""
+    fi
+    # A run's own reproducer is the most precise one; any other entry repeats its suite command.
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.entries[$index] |= (. + $verdict
+            | .artifacts = $artifacts
+            | .finished_at = (if $exit == "unknown" then null else $finished_at end)
+            | .duration_seconds = $duration
+            | .reproducer = (.reproducer // .display))' \
+        --argjson index "${entry_index}" --argjson verdict "${verdict}" --argjson artifacts "${artifacts}" \
+        --arg exit "${exit_status}" --arg finished_at "${finished_at}" --argjson duration "${duration}"
+}
+
+finish_suite() {
+    local signal_name="$1"
+    local status
+    # The suite itself is interrupted only by a signal; an entry interrupted otherwise fails it.
+    status="$(jq -r 'if all(.entries[]; .status == "passed") then "passed" else "failed" end' \
+        "${suite_dir}/suite.json")"
+    if [[ -n "${signal_name}" ]]; then
+        status=interrupted
+    fi
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.status = $status
+        | .finished_at = $finished_at
+        | .duration_seconds = ($finished | tonumber) - .started_epoch
+        | if $signal == "" then . else .signal = $signal end' \
+        --arg status "${status}" --arg finished_at "$(now)" --arg finished "$(date +%s)" \
+        --arg signal "${signal_name}"
+    render_summary
+    printf '\n'
+    cat "${suite_dir}/summary.md"
+    printf '\nchaos suite %s %s\n' "${suite_name}" "${status}"
+    printf 'suite artifacts: %s\n' "${suite_dir}"
+}
+
+# Closes the console and gives its tee five seconds to write the rest, so the caller has the whole
+# console when the suite exits.
+console_pid=""
+close_console() {
+    exec >&- 2>&-
+    local attempt
+    for ((attempt = 0; attempt < 50; attempt++)); do
+        kill -0 "${console_pid}" 2>/dev/null || return 0
+        sleep 0.1
+    done
+}
+
+# A signal ends the run that is executing through its own exit trap, and no later entry starts. The
+# run receives one TERM: a second one would end its exit trap while it heals and captures evidence.
+suite_signal=""
+child_pid=""
+child_signalled=false
+on_suite_signal() {
+    suite_signal="$1"
+    if [[ -n "${child_pid}" && "${child_signalled}" == false ]]; then
+        child_signalled=true
+        kill -TERM "${child_pid}" 2>/dev/null || true
+    fi
+}
+
+# Executes the verifier self-check, tests/self-test.sh, once and within its bound, before the first
+# run. It leads a session of its own as a run does, so a signal reaches it only as the suite's one
+# TERM and cleanup can end what it leaves when the suite is gone. A check that passed for the
+# scripts it started with leaves verifier-self-check.json, the record every run adopts instead of
+# executing its own check. A check that failed, or whose scripts changed while it executed, fails
+# the suite as a controller failure before any run; a signal leaves the suite to end as it does
+# while a run executes.
+execute_verifier_self_check() {
+    local scripts boot started_at started_epoch
+    scripts="$(chaos_scripts_identity "${script_dir}")"
+    boot="$(chaos_boot_identity)"
+    started_at="$(now)"
+    started_epoch="$(date +%s)"
+    printf '\n==> chaos suite %s: verifier self-check\n' "${suite_name}"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.verifier_self_check = {status: "running", started_at: $started_at,
+                                          bound_seconds: $bound, output: "verifier-self-test.txt"}' \
+        --arg started_at "${started_at}" --argjson bound "${chaos_verifier_self_check_seconds}"
+    child_signalled=false
+    setsid timeout --kill-after=5s "${chaos_verifier_self_check_seconds}s" "${script_dir}/tests/self-test.sh" \
+        --evidence "${suite_dir}/verifier-self-test" >"${suite_dir}/verifier-self-test.txt" 2>&1 &
+    child_pid=$!
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.verifier_self_check.process = {pid: $pid,
+            start_ticks: (if $start == "" then null else ($start | tonumber) end)}' \
+        --argjson pid "${child_pid}" --arg start "$(process_start_ticks "${child_pid}")"
+    # A signal that arrived before the check's process was known still reaches it.
+    if [[ -n "${suite_signal}" ]]; then
+        on_suite_signal "${suite_signal}"
+    fi
+    local exit_status
+    while true; do
+        exit_status=0
+        wait "${child_pid}" || exit_status=$?
+        # A signal interrupts wait while the check still ends; wait again for its status.
+        if ((exit_status <= 128)) || ! kill -0 "${child_pid}" 2>/dev/null; then
+            break
+        fi
+    done
+    child_pid=""
+    local finished_at duration
+    finished_at="$(now)"
+    duration=$(($(date +%s) - started_epoch))
+    local status=passed
+    local message=""
+    if [[ -n "${suite_signal}" ]]; then
+        status=interrupted
+    elif [[ "${exit_status}" -ne 0 ]]; then
+        status=failed
+        message="the verifier self-check exited ${exit_status}; see verifier-self-test.txt"
+    elif [[ "$(chaos_scripts_identity "${script_dir}")" != "${scripts}" ]]; then
+        status=failed
+        message="the chaos scripts in ${script_dir} changed while the verifier self-check executed"
+    fi
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.verifier_self_check += {status: $status, exit_code: ($exit | tonumber),
+                                           finished_at: $finished_at, duration_seconds: $duration}' \
+        --arg status "${status}" --arg exit "${exit_status}" --arg finished_at "${finished_at}" \
+        --argjson duration "${duration}"
+    case "${status}" in
+        interrupted)
+            return 0
+            ;;
+        failed)
+            # The dollars in this jq filter are jq variables, not shell expansion.
+            # shellcheck disable=SC2016
+            update_record '.status = "failed"
+                | .entries |= map(. + {status: "not-started", reason: "the verifier self-check failed"})
+                | .error = {category: "controller", message: $message}' \
+                --arg message "${message}"
+            render_summary
+            printf 'chaos suite controller failure: %s\n' "${message}" >&2
+            exit 1
+            ;;
+    esac
+    local record_path="${suite_dir}/verifier-self-check.json"
+    local tmp_path
+    tmp_path="$(mktemp "${suite_dir}/.verifier-self-check.XXXXXX")"
+    jq -n \
+        --arg suite_id "${suite_id}" \
+        --arg started_at "${started_at}" \
+        --arg finished_at "${finished_at}" \
+        --argjson duration "${duration}" \
+        --argjson bound "${chaos_verifier_self_check_seconds}" \
+        --arg output_sha256 "$(openssl dgst -sha256 -r "${suite_dir}/verifier-self-test.txt" | awk '{ print $1 }')" \
+        --arg scripts "${scripts}" \
+        --arg boot "${boot}" \
+        '{status: "passed", exit_code: 0, suite_id: $suite_id,
+          started_at: $started_at, finished_at: $finished_at, duration_seconds: $duration,
+          bound_seconds: $bound, output: "verifier-self-test.txt", output_sha256: $output_sha256,
+          scripts_sha256: $scripts, boot_id: $boot}' >"${tmp_path}"
+    mv "${tmp_path}" "${record_path}"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.verifier_self_check += {record: "verifier-self-check.json", scripts_sha256: $scripts}' \
+        --arg scripts "${scripts}"
+    printf '==> chaos suite %s: verifier self-check passed in %d s; every run adopts its record\n' \
+        "${suite_name}" "${duration}"
+}
+
+run_suite() {
+    suite_name="$1"
+    shift
+    local image_ref=""
+    local artifact_root="target/chaos"
+    local suite_id=""
+    local shard=""
+    local image_kind=""
+    local image_revision=""
+    local selected_entries=()
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --image)
+                [[ "$#" -ge 2 ]] || suite_error '--image requires a value'
+                image_ref="$2"
+                shift 2
+                ;;
+            --image-kind)
+                [[ "$#" -ge 2 ]] || suite_error '--image-kind requires a kind'
+                image_kind="$2"
+                shift 2
+                ;;
+            --image-revision)
+                [[ "$#" -ge 2 && -n "$2" ]] || suite_error '--image-revision requires a revision'
+                image_revision="$2"
+                shift 2
+                ;;
+            --artifacts)
+                [[ "$#" -ge 2 ]] || suite_error '--artifacts requires a directory'
+                artifact_root="$2"
+                shift 2
+                ;;
+            --suite-id)
+                [[ "$#" -ge 2 ]] || suite_error '--suite-id requires a value'
+                suite_id="$2"
+                shift 2
+                ;;
+            --shard)
+                [[ "$#" -ge 2 ]] || suite_error '--shard requires a number'
+                shard="$2"
+                shift 2
+                ;;
+            --entry)
+                [[ "$#" -ge 2 ]] || suite_error '--entry requires an entry id'
+                selected_entries+=("$2")
+                shift 2
+                ;;
+            -h | --help)
+                usage
+                exit 0
+                ;;
+            *)
+                suite_error "unknown suite argument: $1"
+                ;;
+        esac
+    done
+    require_suite "${suite_name}"
+    [[ -n "${image_ref}" ]] || suite_error '--image is required and must name an already-built Nervix image'
+    if [[ -n "${shard}" && ! "${shard}" =~ ^[1-9][0-9]{0,2}$ ]]; then
+        suite_error '--shard must be a positive integer'
+    fi
+    case "${image_kind}" in
+        "" | ordinary | deloxide | deloxide-order | deloxide-stress) ;;
+        *) suite_error '--image-kind must be ordinary, deloxide, deloxide-order or deloxide-stress' ;;
+    esac
+    local entries_json
+    entries_json="$(printf '%s\n' ${selected_entries[@]+"${selected_entries[@]}"} \
+        | jq -Rsc 'split("\n") | map(select(length > 0))')"
+    local unknown_entries
+    unknown_entries="$(jq -r --arg suite "${suite_name}" --argjson wanted "${entries_json}" '
+        [.suites[$suite].entries[].id] as $ids | $wanted - $ids | join(", ")' "${suites_file}")"
+    [[ -z "${unknown_entries}" ]] \
+        || suite_error "the ${suite_name} suite has no entry ${unknown_entries}"
+    local selection
+    selection="$(jq -c --arg suite "${suite_name}" --arg shard "${shard}" --argjson wanted "${entries_json}" '
+        .suites[$suite].entries
+        | map(select(($shard == "" or .shard == ($shard | tonumber))
+                     and (($wanted | length) == 0 or (.id | IN($wanted[])))))' "${suites_file}")"
+    [[ "$(jq 'length' <<<"${selection}")" -gt 0 ]] \
+        || suite_error "the selection names no entry of the ${suite_name} suite${shard:+ in shard ${shard}}"
+    if [[ -z "${suite_id}" ]]; then
+        suite_id="${suite_name}-$(date -u +%Y%m%dt%H%M%Sz)-$$"
+    fi
+    # Every run id is the suite id and the entry id, within the runner's 96 characters.
+    [[ "${suite_id}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,47}$ ]] \
+        || suite_error '--suite-id must be 1 to 48 letters, numbers, dots, underscores or hyphens'
+    for command_name in docker openssl setsid tee; do
+        command -v "${command_name}" >/dev/null 2>&1 \
+            || suite_error "required command is unavailable: ${command_name}"
+    done
+    # The console and every run log go through a tee that outlives its reader, which -p asks of it.
+    tee -p </dev/null >/dev/null 2>&1 \
+        || suite_error 'the suite needs a tee that takes -p, as the tee of GNU coreutils does'
+    # Listing, planning, reporting and cleanup read the suite records with any jq; the runs need 1.8.
+    chaos_jq_supported || suite_error "the chaos scripts need jq 1.8 or later, not $(chaos_jq_found)"
+    # A verifier self-check record names the boot it ran on, so a run adopts it only on that boot.
+    chaos_boot_identity >/dev/null \
+        || suite_error 'the suite needs the boot identity of a Linux worker, /proc/sys/kernel/random/boot_id'
+    chaos_scripts_identity "${script_dir}" >/dev/null \
+        || suite_error "the identity of the chaos scripts in ${script_dir} cannot be computed"
+
+    mkdir -p "${artifact_root}"
+    artifact_root="$(cd "${artifact_root}" && pwd)"
+    suite_dir="${artifact_root}/${suite_id}"
+    [[ ! -e "${suite_dir}" ]] || suite_error "the suite directory already exists: ${suite_dir}"
+    mkdir -p "${suite_dir}/logs"
+
+    # The console reaches the caller through a tee that also writes suite.log. The tee ignores the
+    # interrupts and hangups a terminal sends its whole process group, and goes on writing the log
+    # when the caller stops reading, as a CI runner does once it has killed the step that started
+    # the suite, so the suite outlives its console and still records every verdict.
+    exec > >(trap '' INT HUP; exec tee -p "${suite_dir}/suite.log") 2>&1
+    console_pid=$!
+    trap close_console EXIT
+
+    local started_epoch
+    started_epoch="$(date +%s)"
+    jq -n \
+        --arg suite "${suite_name}" \
+        --arg suite_id "${suite_id}" \
+        --arg shard "${shard}" \
+        --arg description "$(jq -r --arg suite "${suite_name}" '.suites[$suite].description' "${suites_file}")" \
+        --arg requested "${image_ref}" \
+        --arg started_at "$(now)" \
+        --argjson started_epoch "${started_epoch}" \
+        --argjson controller_pid "$$" \
+        --arg controller_start "$(process_start_ticks "$$")" \
+        --argjson selection "${selection}" \
+        '{suite: $suite, suite_id: $suite_id,
+          shard: (if $shard == "" then null else ($shard | tonumber) end),
+          description: $description, status: "preparing",
+          started_at: $started_at, started_epoch: $started_epoch,
+          controller: {pid: $controller_pid,
+                       start_ticks: (if $controller_start == "" then null else ($controller_start | tonumber) end)},
+          image: {requested: $requested},
+          entries: [$selection[] | {id, shard, budget_minutes, note: (.note // null), run,
+                                   run_id: "\($suite_id)-\(.id)", status: "pending"}]}' \
+        >"${suite_dir}/suite.json"
+
+    trap 'on_suite_signal INT' INT
+    trap 'on_suite_signal TERM' TERM
+    trap 'on_suite_signal HUP' HUP
+
+    # The suite checks its own verdict logic before it relies on it, as every run checks its
+    # verifiers.
+    local self_check_status=0
+    timeout --kill-after=5s 120s "${script_dir}/tests/suite-self-test.sh" \
+        >"${suite_dir}/suite-self-test.txt" 2>&1 || self_check_status=$?
+    if [[ "${self_check_status}" -ne 0 ]]; then
+        # The dollars in this jq filter are jq variables, not shell expansion.
+        # shellcheck disable=SC2016
+        update_record '.status = "failed" | .self_check = "failed"
+            | .entries |= map(. + {status: "not-started", reason: "the suite self-check failed"})
+            | .error = {category: "controller", message: $message}' \
+            --arg message "the suite self-check exited ${self_check_status}; see suite-self-test.txt"
+        render_summary
+        printf 'chaos suite controller failure: the suite self-check exited %d; see %s\n' \
+            "${self_check_status}" "${suite_dir}/suite-self-test.txt" >&2
+        exit 1
+    fi
+    update_record '.self_check = "passed"'
+
+    # One immutable identity for every run: a digest reference stays as given, and any other
+    # reference is replaced by the local image ID it resolves to now.
+    if ! timeout --kill-after=5s 30s docker image inspect "${image_ref}" >/dev/null 2>&1; then
+        printf 'pulling %s\n' "${image_ref}"
+        if ! timeout --kill-after=10s 600s docker pull "${image_ref}" >"${suite_dir}/image-pull.txt" 2>&1; then
+            # The dollars in this jq filter are jq variables, not shell expansion.
+            # shellcheck disable=SC2016
+            update_record '.status = "failed"
+                | .entries |= map(. + {status: "not-started", reason: "the suite image is unavailable"})
+                | .error = {category: "setup", message: $message}' \
+                --arg message "the image ${image_ref} is neither local nor pullable; see image-pull.txt"
+            render_summary
+            suite_error "the image ${image_ref} is neither local nor pullable; see ${suite_dir}/image-pull.txt"
+        fi
+    fi
+    local image_id repo_digests run_image
+    image_id="$(timeout --kill-after=5s 30s docker image inspect --format '{{.Id}}' "${image_ref}")"
+    # The dollars in this Go template are template variables, not shell expansion.
+    # shellcheck disable=SC2016
+    repo_digests="$(timeout --kill-after=5s 30s docker image inspect \
+        --format '{{range $index, $digest := .RepoDigests}}{{if $index}},{{end}}{{$digest}}{{end}}' "${image_ref}")"
+    run_image="${image_id}"
+    if [[ "${image_ref}" == *@sha256:* ]]; then
+        run_image="${image_ref}"
+    fi
+    # A diagnostic image declares its Deloxide selection in a label, and every image may declare the
+    # revision it was built from; an ordinary image declares no selection.
+    local labels diagnostic_selection revision
+    labels="$(timeout --kill-after=5s 30s docker image inspect --format '{{json .Config.Labels}}' "${image_ref}")"
+    diagnostic_selection="$(jq -r '(. // {})["io.nervix.diagnostic.selection"] // ""' <<<"${labels}")"
+    revision="$(jq -r '(. // {})["org.opencontainers.image.revision"] // ""' <<<"${labels}")"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.image += {revision: (if $revision == "" then null else $revision end),
+                              diagnostic_selection: (if $selection == "" then null else $selection end)}' \
+        --arg revision "${revision}" --arg selection "${diagnostic_selection}"
+    local refusal=""
+    if [[ -n "${image_kind}" && "${image_kind}" != "${diagnostic_selection:-ordinary}" ]]; then
+        refusal="the suite was asked for a ${image_kind} image, but ${image_ref} declares ${diagnostic_selection:-no diagnostic selection, so it is ordinary}"
+    elif [[ -n "${image_revision}" && "${image_revision}" != "${revision}" ]]; then
+        refusal="the suite was asked for an image of revision ${image_revision}, but ${image_ref} declares ${revision:-no revision}"
+    fi
+    if [[ -n "${refusal}" ]]; then
+        # The dollars in this jq filter are jq variables, not shell expansion.
+        # shellcheck disable=SC2016
+        update_record '.status = "failed"
+            | .entries |= map(. + {status: "not-started", reason: "the suite image is not the requested one"})
+            | .error = {category: "setup", message: $message}' \
+            --arg message "${refusal}"
+        render_summary
+        suite_error "${refusal}"
+    fi
+
+    local kernel docker_version compose_version cpus memory_bytes
+    kernel="$(uname -sr)"
+    docker_version="$(timeout --kill-after=5s 30s docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
+    compose_version="$(timeout --kill-after=5s 30s docker compose version --short 2>/dev/null || true)"
+    cpus="$(getconf _NPROCESSORS_ONLN)"
+    memory_bytes="$(awk '/^MemTotal:/ { printf "%d", $2 * 1024 }' /proc/meminfo)"
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.status = "running"
+        | .image += {id: $id, repo_digests: $digests, run_reference: $run_image}
+        | .worker = {kernel: $kernel, docker: $docker, compose: $compose,
+                     cpus: ($cpus | tonumber), memory_bytes: ($memory | tonumber)}
+        | .entries |= map(. + {command: (["just", "chaos", "run"] + .run
+                                         + ["--image", $run_image, "--timeout", (.budget_minutes * 60 | tostring)])}
+                          | .display = (.command | map(if test("^[A-Za-z0-9_./:=@-]+$") then . else @sh end) | join(" ")))' \
+        --arg id "${image_id}" --arg digests "${repo_digests}" --arg run_image "${run_image}" \
+        --arg kernel "${kernel}" --arg docker "${docker_version}" --arg compose "${compose_version}" \
+        --arg cpus "${cpus}" --arg memory "${memory_bytes}"
+
+    # Every run judges with the same external verifiers on this worker; the suite proves them once
+    # here rather than in every run's own budget.
+    execute_verifier_self_check
+
+    local entry_count entry_index
+    entry_count="$(jq '.entries | length' "${suite_dir}/suite.json")"
+    for ((entry_index = 0; entry_index < entry_count; entry_index++)); do
+        if [[ -n "${suite_signal}" ]]; then
+            break
+        fi
+        local entry_id run_id budget_seconds
+        entry_id="$(jq -r --argjson index "${entry_index}" '.entries[$index].id' "${suite_dir}/suite.json")"
+        run_id="$(jq -r --argjson index "${entry_index}" '.entries[$index].run_id' "${suite_dir}/suite.json")"
+        budget_seconds="$(jq -r --argjson index "${entry_index}" '.entries[$index].budget_minutes * 60' "${suite_dir}/suite.json")"
+        local run_arguments=()
+        mapfile -t run_arguments < <(jq -r --argjson index "${entry_index}" '.entries[$index].run[]' "${suite_dir}/suite.json")
+        printf '\n==> chaos suite %s: %s (%d of %d)\n' "${suite_name}" "${entry_id}" \
+            "$((entry_index + 1))" "${entry_count}"
+        # The dollars in this jq filter are jq variables, not shell expansion.
+        # shellcheck disable=SC2016
+        update_record '.entries[$index] += {status: "running", started_at: $started_at,
+                                            started_epoch: ($epoch | tonumber),
+                                            log: "logs/\(.entries[$index].id).log"}' \
+            --argjson index "${entry_index}" --arg started_at "$(now)" --arg epoch "$(date +%s)"
+        # The run executes in the background so that a signal reaches the suite at once; the suite
+        # passes it on, and the run's own exit trap heals, captures and cleans up as on any exit.
+        # The run leads its own session, so an interrupt a terminal sends to the suite's process
+        # group never reaches it beside the suite's TERM, and cleanup finds every process it left.
+        # A background child of a shell without job control never leads a process group, so
+        # setsid makes it a session leader in place and $! stays the run's process. Its log's tee
+        # ignores the terminal's signals as the console's does.
+        local exit_status=0
+        child_signalled=false
+        setsid bash "${script_dir}/chaos.sh" run "${run_arguments[@]}" \
+            --image "${run_image}" --artifacts "${suite_dir}" --run-id "${run_id}" \
+            --timeout "${budget_seconds}" --verifier-self-check "${suite_dir}/verifier-self-check.json" \
+            > >(trap '' INT HUP; exec tee -p "${suite_dir}/logs/${entry_id}.log") 2>&1 &
+        child_pid=$!
+        # The dollars in this jq filter are jq variables, not shell expansion.
+        # shellcheck disable=SC2016
+        update_record '.entries[$index].process = {pid: $pid,
+                start_ticks: (if $start == "" then null else ($start | tonumber) end)}' \
+            --argjson index "${entry_index}" --argjson pid "${child_pid}" \
+            --arg start "$(process_start_ticks "${child_pid}")"
+        # A signal that arrived before the run's process was known still reaches it.
+        if [[ -n "${suite_signal}" ]]; then
+            on_suite_signal "${suite_signal}"
+        fi
+        while true; do
+            exit_status=0
+            wait "${child_pid}" || exit_status=$?
+            # A signal interrupts wait while the run still tears down; wait again for its status.
+            if ((exit_status <= 128)) || ! kill -0 "${child_pid}" 2>/dev/null; then
+                break
+            fi
+        done
+        child_pid=""
+        local suite_interrupted=false
+        if [[ -n "${suite_signal}" ]]; then
+            suite_interrupted=true
+        fi
+        record_entry "${entry_index}" "${exit_status}" "${suite_interrupted}"
+        printf '==> chaos suite %s: %s %s\n' "${suite_name}" "${entry_id}" \
+            "$(jq -r --argjson index "${entry_index}" '.entries[$index].status' "${suite_dir}/suite.json")"
+    done
+    if [[ -n "${suite_signal}" ]]; then
+        # The dollars in this jq filter are jq variables, not shell expansion.
+        # shellcheck disable=SC2016
+        update_record '.entries |= map(if .status == "pending"
+            then . + {status: "not-started", reason: "a signal ended the suite before this entry started"}
+            else . end)'
+    fi
+    finish_suite "${suite_signal}"
+    case "${suite_signal}" in
+        INT) exit 130 ;;
+        TERM) exit 143 ;;
+        HUP) exit 129 ;;
+    esac
+    if [[ "$(jq -r '.status' "${suite_dir}/suite.json")" == passed ]]; then
+        exit 0
+    fi
+    exit 1
+}
+
+# Kills what remains of the session that a run led as process PID, started at START_TICKS, and
+# prints how many processes it killed. A session's number stays reserved while any process belongs
+# to it, so once its leader is gone every process left in the session is the run's; a leader number
+# that now names another process means nothing of the run remains.
+kill_run_session() {
+    local pid="$1"
+    local start_ticks="$2"
+    local current_start
+    current_start="$(process_start_ticks "${pid}")"
+    if [[ -n "${current_start}" && "${current_start}" != "${start_ticks}" ]]; then
+        printf '0'
+        return 0
+    fi
+    local -A killed=()
+    local round member state
+    for ((round = 0; round < 10; round++)); do
+        local members=()
+        while read -r member state; do
+            if [[ -n "${member}" && "${state}" != Z* ]]; then
+                members+=("${member}")
+            fi
+        done < <(ps -o pid=,stat= -s "${pid}" 2>/dev/null || true)
+        ((${#members[@]} > 0)) || break
+        kill -KILL "${members[@]}" 2>/dev/null || true
+        for member in "${members[@]}"; do
+            killed["${member}"]=1
+        done
+        sleep 0.2
+    done
+    printf '%d' "${#killed[@]}"
+}
+
+# Ends the processes a suite left executing. A controller that still executes receives one TERM,
+# which it passes to its run or verifier self-check as on any signal, and a run or check whose
+# controller is gone receives one TERM itself. Each has until WAIT_SECONDS have passed to finish its
+# exit work; then the controller and whatever remains of each session are killed. Sets
+# cleanup_controller to absent, finished or killed, records in run_terminated and run_killed which
+# runs cleanup signalled and how many processes of each it killed, and in verifier_terminated and
+# verifier_killed the same for a verifier self-check that still executed.
+cleanup_controller=absent
+declare -A run_terminated=()
+declare -A run_killed=()
+verifier_terminated=false
+verifier_killed=""
+end_suite_processes() {
+    local wait_seconds="$1"
+    local deadline=$((SECONDS + wait_seconds))
+    local controller_pid controller_start
+    controller_pid="$(jq -r '.controller.pid // empty' "${suite_dir}/suite.json")"
+    controller_start="$(jq -r '.controller.start_ticks // empty' "${suite_dir}/suite.json")"
+    local runs=()
+    mapfile -t runs < <(jq -r '.entries[] | select(.process.pid != null)
+        | "\(.run_id) \(.process.pid) \(.process.start_ticks // "")"' "${suite_dir}/suite.json")
+    # The verifier self-check executes before every run, so it is the only process of the suite
+    # besides its controller while its record says it is running.
+    local verifier_pid verifier_start
+    verifier_pid="$(jq -r 'select(.verifier_self_check.status == "running")
+        | .verifier_self_check.process.pid // empty' "${suite_dir}/suite.json")"
+    verifier_start="$(jq -r 'select(.verifier_self_check.status == "running")
+        | .verifier_self_check.process.start_ticks // empty' "${suite_dir}/suite.json")"
+    local run run_id pid start_ticks
+    local controller_executed=false
+    if process_executes "${controller_pid}" "${controller_start}"; then
+        controller_executed=true
+        printf 'chaos suite cleanup: the suite controller %s still executes; it receives TERM and ends its run\n' \
+            "${controller_pid}"
+        kill -TERM "${controller_pid}" 2>/dev/null || true
+    else
+        for run in ${runs[@]+"${runs[@]}"}; do
+            read -r run_id pid start_ticks <<<"${run}"
+            if process_executes "${pid}" "${start_ticks}"; then
+                printf 'chaos suite cleanup: run %s outlived its controller; it receives TERM\n' "${run_id}"
+                kill -TERM "${pid}" 2>/dev/null || true
+                run_terminated["${run_id}"]=true
+            fi
+        done
+        if [[ -n "${verifier_pid}" ]] && process_executes "${verifier_pid}" "${verifier_start}"; then
+            printf 'chaos suite cleanup: the verifier self-check outlived its controller; it receives TERM\n'
+            kill -TERM "${verifier_pid}" 2>/dev/null || true
+            verifier_terminated=true
+        fi
+    fi
+    while ((SECONDS < deadline)); do
+        local executing=false
+        if [[ "${controller_executed}" == true ]] && process_executes "${controller_pid}" "${controller_start}"; then
+            executing=true
+        fi
+        for run in ${runs[@]+"${runs[@]}"}; do
+            read -r run_id pid start_ticks <<<"${run}"
+            if process_executes "${pid}" "${start_ticks}"; then
+                executing=true
+            fi
+        done
+        if [[ -n "${verifier_pid}" ]] && process_executes "${verifier_pid}" "${verifier_start}"; then
+            executing=true
+        fi
+        if [[ "${executing}" == false ]]; then
+            break
+        fi
+        sleep 1
+    done
+    if [[ "${controller_executed}" == true ]]; then
+        cleanup_controller=finished
+        if process_executes "${controller_pid}" "${controller_start}"; then
+            printf 'chaos suite cleanup: the suite controller %s did not finish within %d seconds; killing it\n' \
+                "${controller_pid}" "${wait_seconds}"
+            kill -KILL "${controller_pid}" 2>/dev/null || true
+            cleanup_controller=killed
+        fi
+    fi
+    for run in ${runs[@]+"${runs[@]}"}; do
+        read -r run_id pid start_ticks <<<"${run}"
+        local killed_count
+        killed_count="$(kill_run_session "${pid}" "${start_ticks}")"
+        run_killed["${run_id}"]="${killed_count}"
+        if ((killed_count > 0)); then
+            printf 'chaos suite cleanup: killed %d processes left of run %s\n' "${killed_count}" "${run_id}"
+        fi
+    done
+    if [[ -n "${verifier_pid}" ]]; then
+        verifier_killed="$(kill_run_session "${verifier_pid}" "${verifier_start}")"
+        if ((verifier_killed > 0)); then
+            printf 'chaos suite cleanup: killed %d processes left of the verifier self-check\n' "${verifier_killed}"
+        fi
+    fi
+}
+
+# Ends what a suite left behind, waiting for a controller or run that still executes before it
+# kills them, and then removes what remains of every run it started.
+cleanup_suite() {
+    local wait_seconds="${cleanup_wait_seconds}"
+    local directories=()
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --wait)
+                [[ "$#" -ge 2 ]] || suite_error '--wait requires a number of seconds'
+                wait_seconds="$2"
+                shift 2
+                ;;
+            -*)
+                suite_error "unknown cleanup argument: $1"
+                ;;
+            *)
+                directories+=("$1")
+                shift
+                ;;
+        esac
+    done
+    [[ "${#directories[@]}" -eq 1 ]] || suite_error 'cleanup requires one suite directory'
+    [[ "${wait_seconds}" =~ ^(0|[1-9][0-9]{0,3})$ ]] \
+        || suite_error '--wait must be a whole number of seconds from 0 through 9999'
+    command -v ps >/dev/null 2>&1 || suite_error 'required command is unavailable: ps'
+    suite_dir="${directories[0]}"
+    if [[ ! -s "${suite_dir}/suite.json" ]]; then
+        printf 'chaos suite cleanup: %s holds no suite record, so the suite started no run\n' "${suite_dir}"
+        exit 0
+    fi
+    suite_dir="$(cd "${suite_dir}" && pwd)"
+    suite_name="$(jq -r '.suite' "${suite_dir}/suite.json")"
+    end_suite_processes "${wait_seconds}"
+    local cleanup_failed=false
+    local cleanups='[]'
+    local run_id
+    while IFS= read -r run_id; do
+        [[ -n "${run_id}" ]] || continue
+        local cleanup_status=0
+        local evidence_dir="${suite_dir}/cleanup/${run_id}"
+        timeout --kill-after=10s 420s "${script_dir}/cleanup.sh" --run-id "${run_id}" \
+            --evidence "${evidence_dir}" || cleanup_status=$?
+        if [[ "${cleanup_status}" -ne 0 ]]; then
+            cleanup_failed=true
+        fi
+        local cleanup_record=null
+        if [[ -s "${evidence_dir}/cleanup.json" ]]; then
+            cleanup_record="$(jq -c --arg run_id "${run_id}" '. + {evidence: "cleanup/\($run_id)"}' "${evidence_dir}/cleanup.json")"
+        fi
+        cleanups="$(jq -c --arg run_id "${run_id}" --argjson status "${cleanup_status}" \
+            --argjson terminated "${run_terminated[${run_id}]:-false}" \
+            --argjson killed "${run_killed[${run_id}]:-0}" \
+            --argjson record "${cleanup_record}" \
+            '. + [{run_id: $run_id, exit_code: $status, terminated: $terminated,
+                   killed_processes: $killed, leftovers: $record}]' <<<"${cleanups}")"
+        # A run ended before its exit trap ran still holds the private keys of its TLS material.
+        if [[ -d "${suite_dir}/${run_id}/tls" ]]; then
+            rm -f "${suite_dir}/${run_id}/tls/ca-key.pem" "${suite_dir}/${run_id}/tls/"*-key.pem \
+                "${suite_dir}/${run_id}/tls/"*.csr "${suite_dir}/${run_id}/tls/"*.ext
+        fi
+    done < <(jq -r '.entries[] | select(.status != "pending" and .status != "not-started") | .run_id' "${suite_dir}/suite.json")
+
+    local entry_count entry_index
+    entry_count="$(jq '.entries | length' "${suite_dir}/suite.json")"
+    for ((entry_index = 0; entry_index < entry_count; entry_index++)); do
+        # A run that finished before its controller was killed keeps its own recorded verdict.
+        if [[ "$(jq -r --argjson index "${entry_index}" '.entries[$index].status' "${suite_dir}/suite.json")" == running ]]; then
+            record_entry "${entry_index}" unknown false
+        fi
+    done
+    # The dollars in this jq filter are jq variables, not shell expansion.
+    # shellcheck disable=SC2016
+    update_record '.entries |= map(if .status == "pending"
+            then . + {status: "not-started", reason: "the suite ended before this entry started"}
+            else . end)
+        | if .status == "preparing" or .status == "running" then .status = "interrupted" else . end
+        | if .verifier_self_check.status == "running" then .verifier_self_check.status = "interrupted" else . end
+        | .cleanup = {at: $at, controller: $controller, runs: $runs}
+        | if $verifier_killed == "" then .
+          else .cleanup.verifier_self_check = {terminated: $verifier_terminated,
+                                               killed_processes: ($verifier_killed | tonumber)} end' \
+        --arg at "$(now)" --arg controller "${cleanup_controller}" --argjson runs "${cleanups}" \
+        --argjson verifier_terminated "${verifier_terminated}" --arg verifier_killed "${verifier_killed}"
+    render_summary
+    printf 'chaos suite cleanup: %s\n' "${suite_dir}"
+    jq -r '
+        (if .cleanup.controller == "finished" then "  suite controller: finished after its TERM"
+         elif .cleanup.controller == "killed" then "  suite controller: killed after the wait"
+         else empty end),
+        (.cleanup.verifier_self_check // empty
+         | "  verifier self-check: interrupted"
+           + (if .terminated then ", ended by TERM" else "" end)
+           + (if .killed_processes > 0 then ", \(.killed_processes) processes killed" else "" end)),
+        (.cleanup.runs[]
+         | "  \(.run_id): exit \(.exit_code)"
+           + (if .terminated then ", ended by TERM" else "" end)
+           + (if .killed_processes > 0 then ", \(.killed_processes) processes killed" else "" end)
+           + (if .leftovers then ", removed \(.leftovers.containers) containers, \(.leftovers.networks) networks and \(.leftovers.volumes) volumes after capturing \(.leftovers.evidence)" else ", nothing left" end))' \
+        "${suite_dir}/suite.json"
+    if [[ "${cleanup_failed}" == true ]]; then
+        exit 1
+    fi
+}
+
+report_suites() {
+    local expected=""
+    local files=()
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --expect-shards)
+                [[ "$#" -ge 2 ]] || suite_error '--expect-shards requires a number'
+                expected="$2"
+                shift 2
+                ;;
+            *)
+                files+=("$1")
+                shift
+                ;;
+        esac
+    done
+    if [[ -n "${expected}" && ! "${expected}" =~ ^[1-9][0-9]{0,2}$ ]]; then
+        suite_error '--expect-shards must be a positive integer'
+    fi
+    local readable=()
+    local file
+    for file in ${files[@]+"${files[@]}"}; do
+        if [[ -s "${file}" ]] && jq -e 'type == "object" and (.entries | type == "array")' "${file}" >/dev/null 2>&1; then
+            readable+=("${file}")
+        else
+            printf 'chaos suite report: %s is not a suite record\n' "${file}" >&2
+        fi
+    done
+    if ((${#readable[@]} > 0)); then
+        jq -r -f "${report_program}" --slurp "${readable[@]}"
+    fi
+    local failed=false
+    if ((${#readable[@]} != ${#files[@]})); then
+        failed=true
+    fi
+    if [[ -n "${expected}" ]] && ((${#readable[@]} != expected)); then
+        printf '\n**Missing evidence:** %d of %d shard verdicts are present.\n' "${#readable[@]}" "${expected}"
+        failed=true
+    fi
+    if ((${#readable[@]} > 0)) && ! jq -e -s 'all(.[]; .status == "passed")' "${readable[@]}" >/dev/null; then
+        failed=true
+    fi
+    if ((${#readable[@]} == 0)); then
+        failed=true
+    fi
+    if [[ "${failed}" == true ]]; then
+        exit 1
+    fi
+}
+
+if [[ "$#" -eq 0 ]]; then
+    usage >&2
+    exit 2
+fi
+validate_definitions
+case "$1" in
+    list)
+        [[ "$#" -eq 1 ]] || suite_error 'list takes no arguments'
+        list_suites
+        ;;
+    shards)
+        [[ "$#" -eq 2 ]] || suite_error 'shards requires one suite'
+        print_shards "$2"
+        ;;
+    cleanup)
+        shift
+        cleanup_suite "$@"
+        ;;
+    report)
+        shift
+        report_suites "$@"
+        ;;
+    -h | --help | help)
+        usage
+        ;;
+    -*)
+        suite_error "a suite or suite command is required before $1"
+        ;;
+    *)
+        run_suite "$@"
+        ;;
+esac

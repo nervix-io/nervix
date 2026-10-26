@@ -8,6 +8,11 @@
 //! - **Depends on.** The endpoint task, its admission-worker protocol, and ACK roots.
 //! - **Must not know.** Sessions, the interconnect, or the graph behind the admission worker.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "tests client endpoint execution and admission")
+)]
+
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
 use nervix_models::{
@@ -22,6 +27,108 @@ use crate::runtime_ack::{AckCompletion, AckSet};
 
 /// Generously longer than any step here takes, so only a hang reaches it.
 const WAIT: Duration = Duration::from_secs(30);
+
+#[nervix_primitives::test]
+async fn runtime_report_chain_admitted_client_batch_log() {
+    use crate::{
+        runtime::report_observer::ReportLogObserver,
+        runtime_schema::{RuntimeValue, test_runtime_row},
+    };
+
+    let runtime = Runtime::default();
+    let domain = domain("tenant");
+    let ingestor = named::<IngestorName>("orders_in");
+    install_unpaced_test_domain(&runtime, &domain);
+    let handles = runtime
+        .ingest_task_handles(&domain, &ingestor)
+        .assured("the fixture ingestor attaches before its domain ends");
+    let schema = test_schema(&[("id", ParseAsType::U64)]);
+    let route = bind_ingestor_route_for_test(
+        &ModelName::from(&ingestor),
+        IngestorMetadataScope::Headers,
+        false,
+        &nervix_plexus::parse_route_construction("SET id = input.id")
+            .assured("the fixture route assigns its declared field"),
+        RuntimeVmSchemaPair {
+            input: schema.arrow_schema(),
+            input_sensitivity: schema.vm_sensitivity(),
+            output: schema.arrow_schema(),
+            output_sensitivity: schema.vm_sensitivity(),
+        },
+        RuntimeVmCompileContext {
+            available_materialized_streams: &HashMap::default(),
+            available_lookups: &HashMap::default(),
+            current_branching: &ResolvedBranching::unbranched(),
+            udfs: None,
+        },
+    )
+    .assured("the fixture route binds its one field");
+    let metrics = runtime.inner.metrics.clone();
+    let labels = metrics.register_ingestor_quiesce(&domain, &ingestor, None);
+    let intake = ClientIntake {
+        handles,
+        runtime: runtime.clone(),
+        domain: domain.clone(),
+        ingestor: ingestor.clone(),
+        schema,
+        timestamp_source: None,
+        output_routes: Arc::new(BoundIngestorRoutes {
+            routes: vec![BoundEntryRoute {
+                relay: named("orders"),
+                program: route,
+                branch: BoundRouteBranch::Unbranched,
+                message_error_policy: MessageErrorPolicy::Log,
+            }],
+        }),
+        filter_where: None,
+        branched_senders: HashMap::default(),
+        metrics: metrics.resolve_global_node_message_metrics(
+            &domain,
+            ModelKind::Ingestor,
+            &ModelName::from(&ingestor),
+            None,
+            "received",
+        ),
+        quiesce: Arc::new(IngestorQuiesceControl::new(
+            IngestQuiesceMode::Suspend,
+            metrics,
+            labels,
+        )),
+        trackers: IngestorAckRootTrackers::detached(),
+        ack_timeout: WAIT,
+    };
+    let body = test_runtime_row([("id".into(), RuntimeValue::U64(1))])
+        .one_row_batch()
+        .encode_arrow_ipc(runtime.executor())
+        .await
+        .assured("the fixture has a valid Arrow batch for client admission");
+    runtime
+        .domain_clock_lifecycle(&domain)
+        .assured("the fixture retains routing while withdrawing its clock publication")
+        .mark_missing();
+    let mut logs = ReportLogObserver::new();
+    let outcome = logs
+        .observe(
+            intake.admit(AdmissionJob {
+                attachment: ClientAttachmentId::from_u128(1),
+                submission: submission(1),
+                body: Bytes::copy_from_slice(body.as_ref()),
+                max_batch_bytes: NonZeroU64::new(1024 * 1024)
+                    .assured("the fixture grants a nonzero batch allowance"),
+            }),
+        )
+        .await;
+    let AdmissionResult::Admitted { completion, .. } = outcome else {
+        panic!("a decoded batch that fails during dispatch was already admitted");
+    };
+    assert!(matches!(completion.wait().await, AckOutcome::NoAck(_)));
+    assert_eq!(
+        logs.next("a client batch failed after it was admitted")
+            .fields["error"],
+        "failed to establish ingestion time for 'tenant.orders_in': domain 'tenant' clock is \
+         unavailable to ingestor 'orders_in': domain 'tenant' is missing from this runtime"
+    );
+}
 
 fn fields(names: &[&str]) -> Vec<SchemaField> {
     names
@@ -302,6 +409,49 @@ async fn an_open_needs_an_installed_execution_and_exactly_its_schema() {
         "one submission carries at most what the session's frame does"
     );
     assert_eq!(description.admission, ClientProducerAdmission::Open);
+}
+
+/// What a session asks this node for when it opens a producer on `ingestor` of `domain`.
+fn local_open(domain: &DomainName, ingestor: &IngestorName) -> ClientProducerOpenRequest {
+    ClientProducerOpenRequest {
+        domain: domain.clone(),
+        ingestor: ingestor.clone(),
+        expected_fields: fields(&["id"]),
+        limits: limits(4, 4096),
+        max_batch_bytes: NonZeroU64::new(1024).assured("a literal non-zero size"),
+        retention: ClientProducerRetention::Local,
+    }
+}
+
+/// A node that runs no endpoint of the ingestor, whether it has not installed the ingestor's domain
+/// since it started or not yet the domain's execution, refuses an open as temporarily unavailable.
+/// The serving node already checked the open against the committed domain and schedule, which this
+/// node's installation trails right after a restart; naming the domain missing would end a
+/// restored producer for good while its endpoint is about to start.
+#[nervix_primitives::test]
+async fn an_open_on_a_node_without_the_endpoint_installed_is_temporarily_unavailable() {
+    let runtime = Runtime::default();
+    let domain = domain("tenant");
+    let ingestor = named::<IngestorName>("orders_in");
+
+    let before_the_domain = runtime
+        .open_client_producer(local_open(&domain, &ingestor))
+        .await;
+    install_unpaced_test_domain(&runtime, &domain);
+    let before_the_execution = runtime
+        .open_client_producer(local_open(&domain, &ingestor))
+        .await;
+
+    assert_eq!(
+        before_the_domain.err(),
+        Some(ClientProducerRefusal::EndpointUnavailable),
+        "a node that has not installed the domain since it started classified the open"
+    );
+    assert_eq!(
+        before_the_execution.err(),
+        Some(ClientProducerRefusal::EndpointUnavailable),
+        "a node that has not installed the domain's execution classified the open"
+    );
 }
 
 #[nervix_primitives::test]

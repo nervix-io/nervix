@@ -2,11 +2,11 @@ Feature: Typed bytes and native encoding functions
   Scenario Outline: Binary values survive conversion and hashing across the public data path
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA text_input (
         id STRING,
@@ -33,8 +33,8 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_outputs SCHEMA binary_output UNBRANCHED;
       CREATE VHOST edge bytes-functions-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE INGESTOR text_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR text_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING text_input_codec
         TO text_inputs
           INHERIT ALL
@@ -75,11 +75,11 @@ Feature: Typed bytes and native encoding functions
   Scenario Outline: Invalid binary text takes the structured message error route
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA encoded_input (id STRING, encoded STRING);
       CREATE SCHEMA binary_output (id STRING, prefix BYTES, payload BYTES);
@@ -91,8 +91,8 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_errors SCHEMA binary_error UNBRANCHED;
       CREATE VHOST edge bytes-error-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE INGESTOR encoded_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR encoded_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING encoded_codec
         TO encoded_inputs
           INHERIT ALL
@@ -133,11 +133,11 @@ Feature: Typed bytes and native encoding functions
   Scenario Outline: Schemaful JSON bytes decode without text coercion
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA binary_input (id STRING, payload BYTES);
       CREATE SCHEMA binary_text (id STRING, hexadecimal STRING);
@@ -147,8 +147,8 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_texts SCHEMA binary_text UNBRANCHED;
       CREATE VHOST edge bytes-wire-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE INGESTOR binary_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR binary_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_codec
         TO binary_inputs
           INHERIT ALL
@@ -184,11 +184,11 @@ Feature: Typed bytes and native encoding functions
   Scenario Outline: Encoding and hashing sensitive bytes keeps subscription values masked
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA binary_input (id STRING, secret BYTES SENSITIVE);
       CREATE SCHEMA binary_output (id STRING, encoded STRING SENSITIVE, digest BYTES SENSITIVE, fast_hash U64 SENSITIVE);
@@ -198,8 +198,8 @@ Feature: Typed bytes and native encoding functions
       CREATE RELAY binary_outputs SCHEMA binary_output UNBRANCHED;
       CREATE VHOST edge bytes-sensitive-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/bytes' TYPE HTTP;
-      CREATE INGESTOR binary_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR binary_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING binary_codec
         TO binary_inputs
           INHERIT ALL

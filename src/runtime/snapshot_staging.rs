@@ -15,6 +15,18 @@
 //! they arrive and are read back one bounded section at a time, so no step of a transfer holds a
 //! whole snapshot in memory.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
+mod encoding;
+mod mapped;
+mod pieces;
+
 use std::{
     io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::PathBuf,
@@ -28,6 +40,9 @@ use nervix_execution::{BudgetedBuffer, ChargedBytes, Executor, MemoryClass, Stor
 use nervix_primitives::sync::OwnedSemaphorePermit;
 use thiserror::Error;
 
+pub(in crate::runtime) use self::mapped::MappedArtifact;
+pub(crate) use self::pieces::{StagedPieces, StagedPiecesMark};
+
 /// Why a snapshot or an artifact could not be staged or read back.
 #[derive(Debug, Error)]
 pub(crate) enum SnapshotStagingError {
@@ -35,14 +50,25 @@ pub(crate) enum SnapshotStagingError {
     Admission,
     #[error("staging this snapshot could not be admitted for execution")]
     Execution,
+    #[error("failed to encode the staged artifact")]
+    Encode,
     #[error("the staging area was cancelled before the snapshot was complete")]
     Cancelled,
-    #[error("failed to create a staging file for the snapshot: {reason}")]
-    Create { reason: String },
-    #[error("failed to write the staged snapshot: {reason}")]
-    Write { reason: String },
-    #[error("failed to read the staged snapshot: {reason}")]
-    Read { reason: String },
+    #[error("failed to create a staging file for the snapshot")]
+    Create,
+    #[error("failed to write the staged snapshot")]
+    Write,
+    #[error("failed to read the staged snapshot")]
+    Read,
+    #[error(
+        "the staged artifact window at {position} with {length} bytes exceeds its \
+         {artifact_length} bytes or the transfer bound"
+    )]
+    Window {
+        position: u64,
+        length: u64,
+        artifact_length: u64,
+    },
     #[error(
         "a staged snapshot of {actual} bytes exceeds the {limit} bytes of node staging quota that \
          remain"
@@ -194,16 +220,12 @@ impl SnapshotStaging {
                     if cancellation.is_cancelled() {
                         return Err(Report::new(SnapshotStagingError::Cancelled));
                     }
-                    std::fs::create_dir_all(&root).map_err(|error| {
-                        Report::new(SnapshotStagingError::Create {
-                            reason: error.to_string(),
-                        })
-                    })?;
-                    tempfile::NamedTempFile::new_in(&root).map_err(|error| {
-                        Report::new(SnapshotStagingError::Create {
-                            reason: error.to_string(),
-                        })
-                    })
+                    std::fs::create_dir_all(&root)
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Create)?;
+                    tempfile::NamedTempFile::new_in(&root)
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Create)
                 },
             )
             .await
@@ -284,14 +306,15 @@ impl StagedSnapshotWriter {
                     let result = if cancellation.is_cancelled() {
                         Err(Report::new(SnapshotStagingError::Cancelled))
                     } else {
-                        file.write_all(chunk.as_ref())
-                            .map(|()| hasher.update(chunk.as_ref()))
-                            .map(|_| ())
-                            .map_err(|error| {
-                                Report::new(SnapshotStagingError::Write {
-                                    reason: error.to_string(),
-                                })
-                            })
+                        match file.write_all(chunk.as_ref()) {
+                            Ok(()) => {
+                                hasher.update(chunk.as_ref());
+                                Ok(())
+                            }
+                            Err(error) => {
+                                Err(Report::new(error).change_context(SnapshotStagingError::Write))
+                            }
+                        }
                     };
                     StagedWrite {
                         file,
@@ -350,18 +373,14 @@ impl StagedSnapshotWriter {
                         return Err(Report::new(SnapshotStagingError::DigestMismatch));
                     }
                     let mut file = file;
-                    file.as_file_mut().sync_all().map_err(|error| {
-                        Report::new(SnapshotStagingError::Write {
-                            reason: error.to_string(),
-                        })
-                    })?;
+                    file.as_file_mut()
+                        .sync_all()
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Write)?;
                     file.as_file_mut()
                         .seek(SeekFrom::Start(0))
-                        .map_err(|error| {
-                            Report::new(SnapshotStagingError::Read {
-                                reason: error.to_string(),
-                            })
-                        })?;
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Read)?;
                     Ok(file)
                 },
             )
@@ -413,11 +432,10 @@ impl StagedSnapshotWriter {
                         return Err(Report::new(SnapshotStagingError::Cancelled));
                     }
                     let mut file = file;
-                    file.as_file_mut().sync_all().map_err(|error| {
-                        Report::new(SnapshotStagingError::Write {
-                            reason: error.to_string(),
-                        })
-                    })?;
+                    file.as_file_mut()
+                        .sync_all()
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Write)?;
                     Ok(file)
                 },
             )
@@ -435,6 +453,7 @@ impl StagedSnapshotWriter {
 
 /// One complete artifact this node assembled, held on disk under the staging quota until it is
 /// dropped, and read back by any number of independent readers.
+#[derive(Debug)]
 pub(crate) struct StagedArtifact {
     file: tempfile::NamedTempFile,
     length: u64,
@@ -479,11 +498,9 @@ impl StagedArtifact {
                     if cancellation.is_cancelled() {
                         return Err(Report::new(SnapshotStagingError::Cancelled));
                     }
-                    std::fs::File::open(path).map_err(|error| {
-                        Report::new(SnapshotStagingError::Read {
-                            reason: error.to_string(),
-                        })
-                    })
+                    std::fs::File::open(path)
+                        .map_err(Report::new)
+                        .change_context(SnapshotStagingError::Read)
                 },
             )
             .await
@@ -510,6 +527,38 @@ struct ArtifactRead {
 }
 
 impl StagedArtifactReader {
+    #[cfg(test)]
+    pub(in crate::runtime) fn remaining(&self) -> u64 {
+        self.remaining
+    }
+
+    /// Read exactly one bounded section, refusing a truncated artifact before allocation.
+    #[cfg(test)]
+    pub(in crate::runtime) async fn read(
+        &mut self,
+        length: u64,
+    ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
+        if length > self.remaining {
+            return Err(Report::new(SnapshotStagingError::LengthMismatch {
+                actual: self.remaining,
+                declared: length,
+            }));
+        }
+        if length == 0 {
+            return self
+                .executor
+                .charge_owned(MemoryClass::Bulk, Vec::new())
+                .await
+                .change_context(SnapshotStagingError::Admission);
+        }
+        self.next_chunk(length).await?.ok_or_else(|| {
+            Report::new(SnapshotStagingError::LengthMismatch {
+                actual: 0,
+                declared: length,
+            })
+        })
+    }
+
     /// Read the next chunk of at most `limit` bytes, charged to the bulk budget for as long as the
     /// caller holds it. Absent once every byte of the artifact was read.
     pub(crate) async fn next_chunk(
@@ -563,11 +612,9 @@ fn read_artifact_chunk(
 ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
     let size: usize = length.arch_into();
     let mut bytes = vec![0_u8; size];
-    file.read_exact(&mut bytes).map_err(|error| {
-        Report::new(SnapshotStagingError::Read {
-            reason: error.to_string(),
-        })
-    })?;
+    file.read_exact(&mut bytes)
+        .map_err(Report::new)
+        .change_context(SnapshotStagingError::Read)?;
     Ok(ChargedBytes::from_owned(bytes, charge))
 }
 
@@ -587,6 +634,12 @@ struct StagedRead {
 }
 
 impl StagedSnapshot {
+    pub(in crate::runtime) fn remaining(&self) -> u64 {
+        self.length
+            .checked_sub(self.offset)
+            .assured("a staged reader stays within its declared length")
+    }
+
     /// Read the next `length` bytes, charged to the bulk budget for as long as the caller holds
     /// them. Reading past the end of the staged snapshot is a truncation, not a short read.
     pub(in crate::runtime) async fn read(
@@ -610,6 +663,26 @@ impl StagedSnapshot {
             .reserve(MemoryClass::Bulk, length.max(1))
             .await
             .change_context(SnapshotStagingError::Admission)?;
+        self.read_admitted(length, reservation).await
+    }
+
+    /// Read a complete native checkpoint under the caller's conversion reservation. Transport
+    /// chunks keep their separate bulk charges; native materialization may exceed that budget.
+    pub(in crate::runtime) async fn read_admitted(
+        &mut self,
+        length: u64,
+        reservation: nervix_execution::Reservation,
+    ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
+        if length > self.remaining() {
+            return Err(Report::new(SnapshotStagingError::LengthMismatch {
+                actual: self.remaining(),
+                declared: length,
+            }));
+        }
+        let end = self
+            .offset
+            .checked_add(length)
+            .assured("a read within the remaining length stays inside the staged snapshot");
         let file = self
             .file
             .take()
@@ -624,7 +697,7 @@ impl StagedSnapshot {
                     let result = if cancellation.is_cancelled() {
                         Err(Report::new(SnapshotStagingError::Cancelled))
                     } else {
-                        read_exact(&mut file, charge, length)
+                        read_exact(&mut file, charge, length, cancellation)
                     };
                     StagedRead { file, result }
                 },
@@ -642,6 +715,7 @@ fn read_exact(
     file: &mut tempfile::NamedTempFile,
     charge: nervix_execution::Reservation,
     length: u64,
+    cancellation: &nervix_execution::Cancellation,
 ) -> Result<ChargedBytes, Report<SnapshotStagingError>> {
     let mut buffer = BudgetedBuffer::with_limit(charge, length.max(1));
     let mut remaining = length;
@@ -649,16 +723,16 @@ fn read_exact(
         .verified("the block size is capped at the read block, which fits every pointer width");
     let mut block = vec![0_u8; block_bytes];
     while remaining > 0 {
+        cancellation
+            .check()
+            .change_context(SnapshotStagingError::Cancelled)?;
         let wanted = usize::try_from(remaining.min(block.len().arch_into()))
             .verified("the wanted count is capped at the block length, which is a usize");
         let read = file
             .as_file_mut()
             .read(&mut block[..wanted])
-            .map_err(|error| {
-                Report::new(SnapshotStagingError::Read {
-                    reason: error.to_string(),
-                })
-            })?;
+            .map_err(Report::new)
+            .change_context(SnapshotStagingError::Read)?;
         if read == 0 {
             return Err(Report::new(SnapshotStagingError::LengthMismatch {
                 actual: length
@@ -667,11 +741,10 @@ fn read_exact(
                 declared: length,
             }));
         }
-        buffer.write_all(&block[..read]).map_err(|error| {
-            Report::new(SnapshotStagingError::Read {
-                reason: error.to_string(),
-            })
-        })?;
+        buffer
+            .write_all(&block[..read])
+            .map_err(Report::new)
+            .change_context(SnapshotStagingError::Read)?;
         let read: u64 = read.arch_into();
         remaining = remaining
             .checked_sub(read)

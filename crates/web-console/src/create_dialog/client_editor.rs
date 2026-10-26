@@ -6,6 +6,11 @@
 //! - **Depends on.** Client browser drafts and the shared typed choice component.
 //! - **Must not know.** Connector drivers, external credentials, or runtime startup.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{
@@ -33,12 +38,12 @@ pub(super) fn ClientEditor(
                 } />
         </label>
         <fieldset class="create-choice-group create-client-type">
-            <legend>"Transport"</legend>
+            <legend>"Connector"</legend>
             <div class="create-choice-buttons">
                 <For each=move || ClientTransport::ALL.to_vec()
                     key=|transport| transport.key()
                     children=move |transport| view! {
-                        <button type="button" data-type=transport.key()
+                        <button type="button" data-client-type=transport.key()
                             class:active=move || signals.client.get().transport == Some(transport)
                             disabled=pending
                             on:click=move |_| {
@@ -96,12 +101,25 @@ pub(super) fn ClientEditor(
         </Show>
         <div class="create-client-config">
             <p>"Connector CONFIG · key/value pairs; external services and objects must already exist"</p>
+            <datalist id="client-config-keys">
+                {move || {
+                    let draft = signals.client.get();
+                    let keys = match draft.transport {
+                        Some(transport) => match transport.connector().client() {
+                            Some(declaration) => declaration.config.keys(),
+                            None => &[],
+                        },
+                        None => &[],
+                    };
+                    keys.iter().map(|key| view! { <option value=key.name /> }).collect_view()
+                }}
+            </datalist>
             <For each=move || { (0..signals.client.get().config.len()).collect::<Vec<_>>() }
                 key=|index| *index
                 children=move |index| view! {
                     <div class="create-client-config-entry create-field-row">
                         <label class="create-field"><span>"Key"</span>
-                            <input class="create-client-config-key" type="text" autocomplete="off"
+                            <input class="create-client-config-key" type="text" autocomplete="off" list="client-config-keys"
                                 prop:value=move || match signals.client.get().config.get(index) {
                                     Some(entry) => entry.key.clone(), None => String::new(),
                                 }

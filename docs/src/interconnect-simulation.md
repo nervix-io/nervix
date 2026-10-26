@@ -1,5 +1,7 @@
 # Deterministic Interconnect Simulation
 
+*Plexus, the Nervix graph definition language.*
+
 The interconnect has a seeded network simulation built on [Turmoil](https://docs.rs/turmoil/0.7.2).
 Each Nervix transport runs on a simulated host with its own Tokio runtime, virtual clock, TCP stack,
 and DNS name. The hosts talk over simulated links that the test can delay, partition, hold, and
@@ -39,7 +41,7 @@ them substitutes for another.
 | Ordinary unit tests | `just test-interconnect`, `just test-execution` | Real Tokio runtime, paused or real time | Local logic of one owner: framing, codecs, quotas, identities | Behavior across a lossy network or between real processes |
 | Shuttle checks | `just test-shuttle` | Shuttle's scheduler over wrapped primitives; no elapsed time | That in-process protocols hold their invariant under every explored interleaving | Sockets, elapsed deadlines, or anything across hosts. See [Deterministic Concurrency Verification](./data-plane-concurrency.md#deterministic-concurrency-verification) |
 | Turmoil simulation | `just test-turmoil` | One Turmoil scheduler owns every host; each host has a paused Tokio clock that advances with simulated time | That the production transport keeps its deadlines, reconciliation, fencing, and resource bounds when links are delayed, partitioned, held, repaired, or a host restarts, and that the same seed replays the same decisions | Instruction-level races inside one job, kernel TCP behavior, durability, and whole-node behavior |
-| Cucumber scenarios | `just test-scenarios --input <feature>` | Real nodes, real sockets, real time | Public behavior through NSPL, HTTP, the CLI, and cluster state, including real-process SIGKILL recovery | Exhaustive fault timing; failures are observed, not scheduled |
+| Cucumber scenarios | `just test-scenarios --input <feature>` | Real nodes, real sockets, real time | Public behavior through Plexus, HTTP, the CLI, and cluster state, including real-process SIGKILL recovery | Exhaustive fault timing; failures are observed, not scheduled |
 
 ## Code Ownership
 
@@ -55,8 +57,10 @@ them substitutes for another.
 | `crates/interconnect/tests/simulation/scenario.rs` | Harness | Scenario identity, committed seeds, the seed sweep, fresh-process attempts, failure records, replay, and failure injection |
 | `crates/interconnect/tests/simulation.rs` | Harness | The `simulation` test target: runner checks, the DNS and CPU scenarios, and the fresh-process record and replay checks |
 | `crates/interconnect/tests/simulation/transport.rs` | Harness | The certificate authority fixture, typed Arrow requests, host synchronization, and the exchange and link-fault scenarios |
-| `crates/interconnect/tests/simulation/relay.rs` | Harness | Relay reply loss, cancellation, and receiver-restart scenarios |
+| `crates/interconnect/tests/simulation/relay.rs` | Harness | Relay reply loss, cancellation, receiver restart, and sender replacement with a retained intake |
+| `crates/interconnect/tests/simulation/backup.rs` | Harness | Authenticated backup capture and section fetch across a partition, repair, and owner restart during transfer |
 | `crates/interconnect/tests/simulation/isolation.rs` | Harness | The three-host stalled-peer scenario and the capacity bounds it checks |
+| `crates/interconnect/tests/simulation/materialized.rs` | Harness | Typed branch descriptions and 3 MiB Arrow payloads in 64 KiB bulk chunks across a partition, repair and serving transport replacement |
 | `crates/interconnect/src/authentication/simulation_tests.rs` | Harness | Certificate validity, expiry drain, handshake deadlines, and trace replay under the simulated clock |
 | `crates/interconnect/src/wire.rs`, module `simulation_checks` | Harness | Seeded rkyv round trips through the execution owner |
 | `crates/execution/src/workers.rs`, module `simulation_checks` | Harness | Queue slots, admission order, and charge ownership of the Turmoil CPU strategy |
@@ -71,6 +75,10 @@ through requests, snapshots, and outcomes.
 
 ## Build Modes
 
+[Execution Primitives](./execution-primitives.md) owns backend and target selection, permission
+contracts and the difference between compile-time probes and actual execution evidence. This
+chapter owns what the Turmoil hosts simulate, the faults and the completed scenario evidence.
+
 The simulation is its own build. Its scheduler replaces the real network, so it can never share a
 compilation with the production or Shuttle builds.
 
@@ -79,7 +87,7 @@ compilation with the production or Shuttle builds.
 | Normal | Default features | Tokio's operating-system sockets, which `nervix_primitives::net` selects, and the node's Hickory resolver | Tokio's blocking pool, through `task::spawn_cpu` | The ordinary primitives `nervix-primitives` re-exports: Tokio, Tokio Util, `parking_lot`, DashMap and the standard library's | Stable |
 | Shuttle | The `shuttle` feature of each owning package, forwarded to `nervix-primitives` | Tokio's, outside every model and never driven by the checks: a socket created inside a check fails it | `spawn_blocking` of Shuttle's modeled Tokio | The modeled primitives `nervix-primitives` selects: Shuttle's Tokio, timers, Tokio Util, `parking_lot`, DashMap and atomics, and its own scheduler-visible `Notify` and `watch` | Stable |
 | Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` and `nervix-primitives/turmoil` | Turmoil's simulated sockets and DNS table, which `nervix_primitives::net` selects | A task on the simulated host's scheduler, through `task::spawn_cpu`; storage jobs stay on the blocking pool | The ordinary primitives, on the simulated host that runs the caller, with timers that follow its clock | `--cfg tokio_unstable` |
-| Turmoil with Shuttle or Loom | Both modes in one dependency graph, from one package or two | Fails to compile in `nervix-primitives` with a diagnostic naming both modes | | | |
+| Turmoil with Shuttle, Loom or Deloxide | Both modes in one dependency graph, from one package or two | Fails to compile in `nervix-primitives` with a diagnostic naming both modes, so the deadlock detector never runs inside a simulation | | | |
 | Turmoil for the browser's target | The `turmoil` feature with `--target wasm32-unknown-unknown` | Fails to compile with the boundary's diagnostic that execution modes run on native targets only, before any simulator dependency is built | | | |
 
 Only the Turmoil recipes pass `--cfg tokio_unstable`, and `just validate-primitive-boundary` rejects
@@ -97,18 +105,18 @@ Validation keeps the modes apart:
 
 - `just validate-execution-mode-dependencies` fails when the normal dependency graph of the
   workspace, or of any package built on its own, with or without default features, contains
-  Turmoil, Loom, Shuttle or a Shuttle wrapper, or enables an execution mode on the primitive
-  boundary.
+  Turmoil, Loom, Shuttle, a Shuttle wrapper or Deloxide, or enables an execution mode on the
+  primitive boundary.
 - `just validate-primitive-boundary` rejects every path to Tokio's or Turmoil's sockets, Tokio's
   timers, or the standard library's monotonic clock and sockets outside `nervix-primitives`, and a
   `turmoil` dependency outside the boundary unless it is optional behind the package's own
   `turmoil` feature, as the interconnect's harness takes it. The simulated path therefore cannot
   name an operating-system socket or clock that would escape its host.
 - `just validate-execution-mode-conflicts` builds `nervix-primitives` with every pair of the
-  `loom`, `shuttle` and `turmoil` modes and with all three, and `nervix-interconnect` with Shuttle
+  `loom`, `shuttle`, `turmoil` and `deloxide` modes and with all four, and `nervix-interconnect` with Shuttle
   while its execution dependency selects Turmoil, and requires the diagnostic naming the modes in
   each. It builds each mode for the browser's target and requires the boundary's own diagnostic
-  first, and builds the NSPL formatter, a product binary, with each mode and requires the
+  first, and builds the Plexus formatter, a product binary, with each mode and requires the
   diagnostic that a modeled build is a test artifact.
 - `just lint` runs Clippy over every target of both packages with the `turmoil` feature, beside the
   production and Shuttle lints.
@@ -345,7 +353,8 @@ defect, committed with its fix, so the regression set records what the simulatio
 sweep explores beyond them: `just test-turmoil-sweep` runs sixty-four consecutive seeds from 1000
 through every case by default. A seed that fails in a sweep leaves an ordinary record, and once the
 defect it found is fixed, it joins the committed seeds of its case. Seed 1036 of the receiver
-restart with a delayed relay response is the first such seed.
+restart with a delayed relay response is the first such seed, and seed 7053 of the host isolation
+case, whose client dialled a host before the host had bound its port, the second.
 
 ### Fresh-Process Attempts
 
@@ -395,8 +404,8 @@ itself.
 | `just test-turmoil-simulation [args]` | The `simulation` target alone, with libtest arguments, such as a test name and `--exact` | The per-run bounds only; fails when the selection executes no test |
 | `just test-turmoil-replay <record>` | Exactly the recorded package, target, test, and case, once, with the recorded inputs, in a fresh process | Exits nonzero when the replay fails, including when it reproduces the record, and when no case in the recorded test matches |
 | `just test-turmoil-replay-check` | Injects a failure at five simulated seconds into the partition-before-connect case, requires exactly one record, and requires its replay to report `turmoil replay: reproduced the recorded outcome and trace` | Fails when any of those does not hold |
-| `just test-turmoil-sweep [first] [count] [budget_seconds]` | Every case over `count` seeds from `first`, 64 from 1000 by default, each seed twice in fresh processes | A real-time budget of 1,500 seconds by default; exits `124` when it expires, and fails when the sweep executes no test |
-| `just coverage-turmoil <output>` | The same tests as `just test-turmoil` under `cargo llvm-cov`, writing an LCOV report | None beyond the per-run bounds |
+| `just test-turmoil-sweep [first] [count] [budget_seconds] [filter]` | Every case over `count` seeds from `first`, 64 from 1000 by default, each seed twice in fresh processes; a nonempty `filter` selects the tests whose names contain it | A real-time budget of 1,500 seconds by default; exits `124` when it expires, and fails when the sweep executes no test |
+| `just coverage-turmoil <output>` | The canonical `just test-turmoil` suite through the native coverage collector, copying a complete product-source LCOV report to `output` and retaining its collection evidence | The same per-run bounds, inventory validation and 480-second post-build suite budget as `just test-turmoil`; failed or interrupted collection cannot produce a complete report |
 
 The replay prints a verdict for every run:
 
@@ -487,15 +496,40 @@ committed seed of that case.
 
 ## CI And Budgets
 
-CI runs the simulation as a job of its own, `turmoil`, beside the default tests and the
-dedicated `shuttle` job. Its build enables the `turmoil` feature and
-`tokio_unstable`, so it shares no compilation with them, and a failed case's record is its own
-artifact. The job runs `just test-turmoil`, then `just test-turmoil-replay-check`, and on failure
-uploads `target/turmoil-failures` as the `turmoil-failures` artifact. The coverage job does not run
-the simulation; `just coverage-turmoil` measures its lines locally.
+CI runs the simulation as a job of its own, `turmoil`, only for a pull request labeled
+`turmoil`, beside the default tests and the `shuttle` and `loom` jobs. Its build enables the
+`turmoil` feature and `tokio_unstable`, so it shares no compilation with them, and a failed
+case's record is its own artifact. The job runs `just coverage-native-extras test-turmoil`,
+which executes the canonical gating suite once under LLVM source instrumentation, then runs
+`just test-turmoil-replay-check` independently. Replay qualification contributes no counters.
+The instrumented build lives under `target/native-coverage-build-turmoil`; its failure records
+and suite logs, together with the ordinary replay's `target/turmoil-failures`, are uploaded as
+the `turmoil-failures` artifact when the job fails.
+
+The `coverage-turmoil` artifact retains the product-source report, `completion.json`,
+`executions.jsonl` and `export.log` from the collection's own attempt. Only a report beside a
+`complete` record establishes successful coverage; a failed or interrupted attempt retains its
+failure evidence. Each fresh simulation process inherits `LLVM_PROFILE_FILE` with `%p-%m`,
+so its counters are merged with the parent and the other attempts rather than overwritten.
+The exporter matches every raw profile to a retained executable by build ID and includes
+Turmoil-selected product paths in primitives, execution and interconnect. It excludes dependencies,
+generated files and harness files below `tests`, `examples` or `benches` directories.
+
+After the suite and replay qualification pass, the job publishes an advisory **Turmoil patch
+coverage** comment through `just coverage-patch --scope turmoil`. Its marker is independent of
+the ordinary coverage comment, and publication checks that the PR is open at the tested head.
+A fast simulation run cannot replace the ordinary report, and a failed collection never supplies
+a successful report. Coverage percentages and comment failures remain advisory; the simulation,
+replay and collection verdicts remain mandatory. The ordinary coverage/CRAP job uses ordinary
+reports only. For a pull request labeled `turmoil`, the `coverage-full` job requires this job's
+success and its complete collection, and adds the collection's lines, attributed to Turmoil, to the
+[full workspace union](./coverage-reports.md#the-full-workspace-union). `just coverage-turmoil
+<output>` uses this same collector for local inspection.
 
 The job uses the shared native [CI linker](./developing-nervix.md#validation-and-tests), so
-adding `--cfg tokio_unstable` to `RUSTFLAGS` preserves Wild linking.
+adding `--cfg tokio_unstable` to `RUSTFLAGS` preserves Wild linking. It installs `flatc`, because
+the interconnect's test build takes its generated vocabulary values from `nervix-arbitrary`, whose
+WASM protocol bindings are generated when that crate is built.
 
 Every bound nests inside the next, so the innermost expired bound names the stuck run, and the job
 still has time to upload what it found. This follows the convention of [The Suite
@@ -532,9 +566,10 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | Case | Test | Committed seeds | Simulated / steps / real | Main assertion |
 | --- | --- | --- | --- | --- |
 | peer resolution | `peer_resolution_uses_simulated_dns` | 41 | 1 s / 200 / 3 s | A peer endpoint resolves to its simulated address through Turmoil DNS |
-| host isolation | `simulated_hosts_keep_their_own_names_sockets_and_clocks` | 43 | 15 s / 20,000 / 60 s | Two hosts listening on one port are each reached at their own address, a name no host holds fails as not existing without time passing, and a ten-second wait completes only on the simulated clock |
+| host isolation | `simulated_hosts_keep_their_own_names_sockets_and_clocks` | 43, 7053 | 15 s / 20,000 / 60 s | Once both report that they listen, two hosts listening on one port are each reached at their own address, a name no host holds fails as not existing without time passing, and a ten-second wait completes only on the simulated clock |
 | bounded CPU worker | `bounded_cpu_job_runs_on_the_simulated_scheduler` | 1–12 | 1 s / 200 / 3 s | Every CPU and memory class runs its job on the scheduler thread, and every queue and reservation returns to zero |
-| typed Arrow exchange | `transport::production_transport_exchanges_typed_arrow_batch_over_simulated_tcp` | 49 | 30 s / 50,000 / 90 s | After a listener rebind, production TLS, HTTP/2, typed envelopes, and Arrow IPC carry a typed request and a relay payload |
+| typed Arrow exchange | `transport::production_transport_exchanges_typed_arrow_batch_and_state_frames_over_simulated_tcp` | 49 | 30 s / 50,000 / 90 s | After a listener rebind, production TLS, HTTP/2, typed envelopes, and Arrow IPC carry a typed request, a relay payload and generation-qualified state frames |
+| materialized state owner replacement | `transport::materialized::materialized_branch_state_transfers_reconnect_to_the_replacement_owner` | 51, 53 | 180 s / 200,000 / 120 s | Two branch placements describe and stream a 3 MiB Arrow payload at revision 1, then a partition after the first received frame interrupts another fetch. The partition drops what the first owner still had in flight under the bulk receive window, and the simulated TCP never resends it, so the bulk connection stays half-open after repair; like the description request, a revision-2 fetch that meets the replaced owner's reset on it is retried on a fresh connection. After repair and serving transport replacement, both branches transfer at revision 2. The client verifies exact length and digest at both revisions. This exercises the transport and typed checkpoint envelope; server installation, disk durability and whole-cluster recovery are covered separately. |
 | multiple authenticated peers preserve remote failure classes | `transport::multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication` | 57 | 30 s / 50,000 / 90 s | One client resolves and exchanges typed Arrow responses with two peers, each peer's rejected, unavailable, not-ready, and failed outcomes arrive as their own remote failure classes naming their subject, and a dial under a DNS identity the certificate does not name is rejected |
 | partition before connect | `transport::network_disruption_respects_deadlines_and_repairs_authenticated_service` | 61 | 85 s / 100,000 / 90 s | Setup fails and liveness times out through twelve seconds of partition; repair restores authenticated service |
 | one-way partition before connect | The same | 62 | 85 s / 100,000 / 90 s | The same, with only server-to-client messages dropped |
@@ -548,7 +583,14 @@ seeds twice each, in fresh processes; the sweep replaces the seeds without weake
 | receiver restart after relay body receipt | `transport::relay::relay_restart_fences_unresolved_delivery_and_accepts_fresh_work` | 81 | 90 s / 50,000 / 90 s | A new process epoch leaves the unresolved delivery indeterminate and admits fresh work |
 | receiver restart after runtime admission | The same | 83 | 90 s / 50,000 / 90 s | The same after runtime admission |
 | receiver restart with delayed relay response | The same | 85, 1036 | 90 s / 50,000 / 90 s | A released pre-crash reply confirms only historical receipt; admission stays indeterminate against the new epoch |
+| sender replacement with a retained admitted intake | `transport::relay::sender_retirement_reclaims_capacity_while_an_admitted_intake_is_retained` | 95 | 30 s / 50,000 / 90 s | Removing the sender releases a one-item receiver's capacity while its admitted intake remains borrowed; a recreated sender transport delivers three Arrow rows with a distinct full process identity |
+| backup section partition and repair | `transport::backup::backup_section_fetch_is_fenced_and_recovers_after_partition` | 101, 1000 | 320 s / 400,000 / 90 s | A forged process identity cannot capture or consume a section; a stalled fetch reaches its deadline; a partitioned fetch fails and succeeds after repair; six 6 MiB materialized column sections, 36 MiB in all, stream in 64 KiB chunks and install as one checkpoint |
+| window section partition and repair | `transport::backup::window_sections_larger_than_the_bulk_budget_stream_across_a_partition` | 103 | 320 s / 400,000 / 90 s | The same fences and faults for three window groups of input rows and argument columns, each section classified by its own kind; 36 MiB, beyond the 32 MiB bulk budget, streams in 64 KiB chunks and installs as one branched window checkpoint |
+| backup owner restart during transfer | `transport::backup::restart_during_backup_transfer_discards_the_process_stage` | 102 | 320 s / 400,000 / 90 s | An incomplete section cannot finish after owner restart, and the replacement process has no prior capture stage |
+| backup inventory partition and held link | `transport::backup::backup_inventory_is_bounded_across_a_partition_and_a_held_link` | 104 | 85 s / 100,000 / 90 s | An inventory request across a partition, and another across a held link, each fails at the request's five-second deadline; after repair and after release the capture owner lists its complete six-section stage unchanged, from its single capture |
 | stalled peer isolation | `transport::isolation::stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations` | 91–93 | 120 s / 120,000 / 120 s | A stalled peer holds only its own connection's slots, unrelated work progresses, and every reservation is released |
+| join refusal across a partition | `transport::prerequisites::a_joiner_beyond_the_heartbeat_bound_is_refused_once_a_partition_heals` | 111 | 30 s / 50,000 / 90 s | A joiner whose heartbeat is beyond the bound stays joining for three seconds of partition, is refused by its member naming the heartbeat and both values once the partition heals, and counts the refusal under its own reason; the member's own join is untouched, and a compatible latecomer joins through it |
+| rolling heartbeat change | `transport::prerequisites::a_rolling_heartbeat_change_joins_within_the_bound_and_is_refused_beyond_it` | 113 | 30 s / 50,000 / 90 s | Three hosts join; one crashes and restarts with a heartbeat within the bound and rejoins; another crashes and restarts with one beyond the bound and is refused by the first peer it reaches, while the two others stay joined and connected |
 
 The simulation target also holds 26 runner and driver checks, such as the supervision, bound, clock,
 entropy, and trace checks and the fresh-process record and replay checks, and two ignored scenarios
@@ -615,6 +657,22 @@ identity then crosses the rebound listener and is admitted. The fixture checks t
 both process identities at the protocol boundary, and that the receiver crashed and restarted
 exactly once.
 
+### Backup Section Transfer
+
+The backup cases send the production typed capture, inventory, and bulk fetch messages. A request
+that claims another process epoch is rejected before the capture or stream handler runs. The
+partition case bounds a stalled fetch by its request deadline, leaves the staged section available
+when the link is partitioned, repairs the link, and reads the verified section. The restart case
+ends an owner process after its first stream chunk;
+the incomplete stream fails, and the rebound owner has no stage from that process. The inventory
+case partitions the coordinator's link to the capture owner, and later holds it, while the
+coordinator asks for the staged section inventory. Each request fails at the inventory request's
+deadline, and a request over the repaired or released link lists the whole stage unchanged: a
+disrupted inventory request consumes and alters nothing, and the owner captured only once. These
+are transport and in-memory staging boundary checks; the Cucumber cluster scenarios verify the
+server's archive and restore behavior, and the external `backup-fault` chaos scenario the same
+boundaries between packaged processes.
+
 ### Stalled-Peer Isolation
 
 A hub and two peers run on three hosts. The stalled peer accepts shared management operations and
@@ -628,9 +686,11 @@ Key transitions assert exact values. The stalled peer holds all 32 shared manage
 connection while liveness, cancellation, and discovery still use the reserved streams, and one more
 shared operation waits until its own deadline. A burst fills the one bulk worker and its eight-job
 queue, the two submissions beyond them are refused without a charge, and control work is admitted in
-the same pass. Unread streams stop at one HTTP/2 window each and release their admission and memory
-at the five-second progress deadline. The held relay reserves its exact body, largest decoded batch,
-and scratch until cancellation.
+the same pass. Unread 2 MiB resource streams stop at one bulk receive window each, which the stalled
+peer backs with one `bulk_window` reservation per stream. They release their admission and memory at
+the five-second progress deadline, and the stalled peer returns every window once its streams end.
+The held relay reserves its exact body, largest decoded batch, and scratch, plus its retained grant
+metadata, until cancellation and release of the borrowed intake.
 
 The fixture then holds the stalled link. The hub's own liveness deadline ends its probe to the
 stalled peer while the healthy peer keeps exchanging every traffic class. Removing the stalled peer
@@ -640,6 +700,27 @@ connections the hub opened to it at once, together with the handlers still waiti
 releasing the link closes the hub's inbound connections from the torn-down peer. The [Traffic And
 Resource Isolation](./interconnect.md#traffic-and-resource-isolation) contract is what these values
 check.
+
+### Join Refusal And Rolling Timing Changes
+
+The prerequisite cases bind each host's transport with its own join terms and judge the handshake
+the production transport performs: the record each hello and acceptance carries, the refusal an
+acceptor answers with, and the join progress outbound connections move. The partition case dials a
+member across a partition for three simulated seconds: no handshake completes, so the joiner is still
+joining and has counted no prerequisite refusal. Once the link is repaired, the member answers the
+next hello with a refusal, and the joiner's progress becomes that refusal, seen from the joiner, with
+the heartbeat and both values. The member never dials anyone, and refusing the joiner leaves its own
+progress where it was; a latecomer within the bound then joins through the same member.
+
+The rolling case starts three hosts with one heartbeat and lets each join. The control then crashes
+one host and bounces it, and its new run carries a heartbeat within the bound of both others, as a
+rolling restart does, and rejoins. Once it has, the control crashes and bounces another host, whose
+new run carries a heartbeat beyond the bound of both, and whichever peer its first connection
+reaches refuses it, naming that peer's heartbeat. After each restart the hosts that kept running
+dial the restarted one from fresh targets, as gossip does once it sees a node's new run. They stay
+joined to each other and connected, and count the refusals of their own dials to the refused host. These cases
+cover the transport's judgment and join progress; the server's stop on a refusal, the membership's
+admission rule and the clock-skew probe are covered by the Cucumber prerequisites feature.
 
 ## Simulated Restart And Real Process Crash
 
@@ -677,7 +758,9 @@ A new case follows the same contract as the existing ones.
 5. **Build each host inside its host.** Bind a transport per host with `SimulatedEntropy` named
    after the host and a `SimulatedUtc` clock. Share only readiness and completion signals between
    hosts, run each host body under `HostSupervisor::run`, and have the `observer` client wait for
-   every host to finish.
+   every host to finish. A host or client whose first dial must succeed waits until the host it
+   dials reports that it listens: the seed orders hosts within each step, so an early dial can
+   reach a port its host has not bound yet.
 6. **Stay inside the simulated boundary.** Use `nervix_primitives::time` for every wait and instant
    and `nervix_primitives::net` for every socket, and call
    `nervix_primitives::task::consume_budget().await` at the top of every loop. Never sleep a real
@@ -714,6 +797,7 @@ qualification run found no further product defect and no behavior-affecting trac
 | A CPU queue refusal reaches a typed-request caller as `RequestError::Encode` when the first encode is refused, but as `RequestError::Transport` when an admitted request is refused at a later stage | The stalled-peer case asserts both shapes and counts every failure as exactly one queue refusal | The stalled-peer case |
 | Two runs of one seed in one process diverged after a simulated crash, because teardown order follows Tokio's process-wide task numbering | Every attempt and every replay runs in a fresh process | Seed 1036 of the receiver restart with a delayed relay response |
 | A panic in a host task surfaced only as Tokio's generic runtime-shutdown message | The runner reports the first panic of the scheduler thread, and supervises cleanup as its own phase | `simulation_host_task_panic_reports_its_own_message`, `simulation_cleanup_panic_fails_a_completed_run` |
+| The host isolation client dialled each host as soon as the client started. The seed orders hosts within a step, so under seed 7053 the first connection attempt reached `alpha` before `alpha` had bound its port, and the refused dial failed the run | Each host reports on a readiness signal once it listens, and the client dials only after both have reported | Seed 7053 of the host isolation case |
 
 ## Guarantees And Limits
 

@@ -16,6 +16,11 @@
 //! the one reference without an edge, so every kind that can hold an expression is ranked after the
 //! hash maps, and the rank breaks every remaining tie before the name does.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use ahash::{HashMap, HashMapExt as _};
@@ -215,14 +220,14 @@ mod tests {
     #[test]
     fn runnable_examples_order_their_models_by_dependency_then_rank() {
         for (name, source) in [
-            ("iot", include_str!("../../examples/iot/iot.nspl")),
+            ("iot", include_str!("../../examples/iot/iot.plexus")),
             (
                 "nats_factory_windows",
-                include_str!("../../examples/nats-factory-windows/nats_factory_windows.nspl"),
+                include_str!("../../examples/nats-factory-windows/nats_factory_windows.plexus"),
             ),
             (
                 "datalake",
-                include_str!("../../examples/datalake/datalake.nspl"),
+                include_str!("../../examples/datalake/datalake.plexus"),
             ),
         ] {
             let (domain, models) = example_graph_models(name, source);

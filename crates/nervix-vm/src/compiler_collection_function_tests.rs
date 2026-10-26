@@ -6,6 +6,11 @@
 //! - **Depends on.** The VM compiler and semantic program parser.
 //! - **Must not know.** Runtime Arrow kernel implementation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_schema::{DataType, Field, Schema};
 use nervix_primitives::sync::StdArc;
 
@@ -29,7 +34,7 @@ fn compile_assignment(
     result_type: DataType,
 ) -> error_stack::Result<CompiledProgram, CompileError> {
     let program = parse_program(&format!("SET result = {expression}"))
-        .verified("each case is syntactically valid NSPL");
+        .verified("each case is syntactically valid Plexus");
     let input = source_schema();
     let mut fields = input
         .fields()

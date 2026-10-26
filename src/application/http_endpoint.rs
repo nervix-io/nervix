@@ -7,11 +7,16 @@
 //! - **Depends on.** The runtime's endpoint dispatch and its signaling protocols.
 //! - **Must not know.** Transactions, scheduling or how an ingested payload is processed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{convert::Infallible, time::Duration};
 
 use error_stack::{Report, ResultExt};
 use futures_util::SinkExt;
-use http_body_util::{BodyExt, Empty, Full};
+use http_body_util::{BodyExt, Either, Empty, Full};
 use hyper::{
     Method, Request as HyperRequest, Response as HyperResponse, StatusCode,
     body::{Bytes, Incoming as HyperIncoming},
@@ -26,7 +31,7 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{IngestMessageHeaders, RetainedIngestHeaders};
-use nervix_connector_websockets::{SignalingDataSink, WebsocketSignalingSession};
+use nervix_connector_websockets::{SignalingDataEmitter, WebsocketSignalingSession};
 use nervix_models::EndpointType;
 use nervix_primitives::{net::TcpListener, sync::CancellationToken, task::JoinSet};
 use nervix_recovery::NoReceiver;
@@ -42,7 +47,11 @@ use tokio_tungstenite::{
 use tracing::warn;
 
 use super::{AppError, service_tasks::ServiceTasks, tls::HttpsListenerCertificates};
-use crate::runtime::{ResolvedEndpointRoute, Runtime};
+use crate::runtime::{
+    EndpointDispatchOutcome, EndpointRequestOutcome, ResolvedEndpointRoute, Runtime,
+};
+
+type EndpointResponseBody = Either<Empty<Bytes>, Full<Bytes>>;
 
 fn empty_body() -> Empty<Bytes> {
     Empty::new()
@@ -74,6 +83,34 @@ fn endpoint_rejection_response(retry_after: Option<Duration>) -> HyperResponse<E
         "the status and header values are typed constants or generated ASCII, which the http \
          builder always accepts",
     )
+}
+
+fn endpoint_dispatch_response(
+    outcome: EndpointDispatchOutcome,
+) -> HyperResponse<EndpointResponseBody> {
+    let Some(reply) = outcome.acknowledgement() else {
+        let response = if outcome.is_accepted() {
+            response_with_status(StatusCode::ACCEPTED)
+        } else {
+            endpoint_rejection_response(outcome.retry_after())
+        };
+        return response.map(Either::Left);
+    };
+    let status = match reply.outcome {
+        EndpointRequestOutcome::Completed => StatusCode::OK,
+        EndpointRequestOutcome::Refused => StatusCode::BAD_REQUEST,
+        EndpointRequestOutcome::NotAdmitted(_)
+        | EndpointRequestOutcome::ProcessingFailed(_)
+        | EndpointRequestOutcome::Interrupted => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    let mut response = response_with_bytes(status, reply.body(), "application/json");
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        let rejection = endpoint_rejection_response(Some(reply.retry_after));
+        if let Some(value) = rejection.headers().get(RETRY_AFTER) {
+            response.headers_mut().insert(RETRY_AFTER, value.clone());
+        }
+    }
+    response.map(Either::Right)
 }
 
 pub(in crate::application) fn response_with_bytes(
@@ -124,17 +161,55 @@ pub(in crate::application) fn is_websocket_upgrade_request(
 }
 
 /// Ingests data frames that arrive on a server-side endpoint while its handshake is running.
-struct EndpointSignalingDataSink<'a> {
+struct EndpointSignalingDataEmitter<'a> {
     runtime: &'a Runtime,
     route: &'a ResolvedEndpointRoute,
     headers: &'a RetainedIngestHeaders,
+    shutdown: &'a CancellationToken,
 }
 
-impl SignalingDataSink for EndpointSignalingDataSink<'_> {
-    async fn accept(&self, payload: Vec<u8>) {
+impl SignalingDataEmitter for EndpointSignalingDataEmitter<'_> {
+    async fn accept(&self, frame: nervix_connector_websockets::WebsocketDataFrame) {
         self.route
-            .dispatch(self.runtime, payload.as_slice(), self.headers)
+            .dispatch(self.runtime, frame.payload(), self.headers, self.shutdown)
             .await;
+    }
+
+    async fn accept_and_reply(
+        &self,
+        frame: nervix_connector_websockets::WebsocketDataFrame,
+    ) -> Option<Message> {
+        let outcome = self
+            .route
+            .dispatch(self.runtime, frame.payload(), self.headers, self.shutdown)
+            .await;
+        self.reply(outcome)
+    }
+}
+
+impl EndpointSignalingDataEmitter<'_> {
+    fn reply(&self, outcome: EndpointDispatchOutcome) -> Option<Message> {
+        let reply = outcome.acknowledgement()?;
+        let Some(protocol) = self.route.signaling_protocol() else {
+            warn!(
+                "the selected endpoint route cannot encode its acknowledgement without a \
+                 signaling protocol"
+            );
+            return Some(Message::Close(Some(CloseFrame {
+                code: CloseCode::Error,
+                reason: "acknowledgement protocol unavailable".into(),
+            })));
+        };
+        match protocol.encode_acknowledgement(reply.value()) {
+            Ok(frame) => Some(frame),
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "failed to encode an endpoint acknowledgement");
+                Some(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Error,
+                    reason: "acknowledgement encoding failed".into(),
+                })))
+            }
+        }
     }
 }
 
@@ -156,7 +231,10 @@ async fn handle_http_request(
     request_tasks: ServiceTasks,
     shutdown: CancellationToken,
     mut request: HyperRequest<HyperIncoming>,
-) -> Result<HyperResponse<Empty<Bytes>>, Infallible> {
+) -> Result<HyperResponse<EndpointResponseBody>, Infallible> {
+    if shutdown.is_cancelled() {
+        return Ok(endpoint_rejection_response(None).map(Either::Left));
+    }
     let mut host = String::new();
     if let Some(value) = request.headers().get(HOST)
         && let Ok(value) = value.to_str()
@@ -166,25 +244,24 @@ async fn handle_http_request(
     let path = request.uri().path().to_string();
 
     let Some(route) = runtime.resolve_endpoint(&host, &path) else {
-        return Ok(response_with_status(StatusCode::NOT_FOUND));
+        return Ok(response_with_status(StatusCode::NOT_FOUND).map(Either::Left));
     };
     if route.endpoint_type() == EndpointType::Websockets {
         if !is_websocket_upgrade_request(&request) {
-            return Ok(response_with_status(StatusCode::UPGRADE_REQUIRED));
+            return Ok(response_with_status(StatusCode::UPGRADE_REQUIRED).map(Either::Left));
         }
-        let admission = route.admission();
-        if !admission.is_accepted() {
-            return Ok(endpoint_rejection_response(admission.retry_after));
+        if let Some(refusal) = route.refusal() {
+            return Ok(endpoint_dispatch_response(refusal));
         }
         // The session outlives the upgrade request, so its handshake headers are copied
         // once here and appended from that copy for every later frame.
         let headers = RetainedIngestHeaders::capture(&HyperRequestHeaders(request.headers()));
 
         let Some(sec_websocket_key) = request.headers().get(SEC_WEBSOCKET_KEY) else {
-            return Ok(response_with_status(StatusCode::BAD_REQUEST));
+            return Ok(response_with_status(StatusCode::BAD_REQUEST).map(Either::Left));
         };
         let Ok(sec_websocket_key) = sec_websocket_key.to_str() else {
-            return Ok(response_with_status(StatusCode::BAD_REQUEST));
+            return Ok(response_with_status(StatusCode::BAD_REQUEST).map(Either::Left));
         };
         let sec_websocket_key = sec_websocket_key.to_owned();
 
@@ -214,16 +291,17 @@ async fn handle_http_request(
                     let mut websocket =
                         WebSocketStream::from_raw_socket(io, Role::Server, None).await;
 
+                    let connector = EndpointSignalingDataEmitter {
+                        runtime: &runtime,
+                        route: &route,
+                        headers: &headers,
+                        shutdown: &shutdown,
+                    };
                     if let Some(protocol) = route.signaling_protocol() {
                         let session = WebsocketSignalingSession::new(protocol.clone());
-                        let sink = EndpointSignalingDataSink {
-                            runtime: &runtime,
-                            route: &route,
-                            headers: &headers,
-                        };
                         let session_result = nervix_primitives::select! {
                             _ = shutdown.cancelled() => return,
-                            result = session.run(&mut websocket, &sink) => result,
+                            result = session.run(&mut websocket, &connector) => result,
                         };
                         if let Err(error) = session_result {
                             warn!(
@@ -246,24 +324,16 @@ async fn handle_http_request(
                             break;
                         };
                         match message {
-                            Ok(Message::Text(payload)) => {
-                                let outcome =
-                                    route.dispatch(&runtime, payload.as_bytes(), &headers).await;
-                                if !outcome.is_accepted() {
-                                    websocket
-                                        .send(Message::Close(Some(CloseFrame {
-                                            code: CloseCode::Again,
-                                            reason: "Try Again Later".into(),
-                                        })))
-                                        .await
-                                        .means_peer_left("websocket ingest client");
-                                    break;
-                                }
-                            }
-                            Ok(Message::Binary(payload)) => {
-                                let outcome =
-                                    route.dispatch(&runtime, payload.as_ref(), &headers).await;
-                                if !outcome.is_accepted() {
+                            Ok(message @ (Message::Text(_) | Message::Binary(_))) => {
+                                let payload = message.into_data();
+                                let outcome = route
+                                    .dispatch(&runtime, payload.as_ref(), &headers, &shutdown)
+                                    .await;
+                                if let Some(reply) = connector.reply(outcome) {
+                                    if websocket.send(reply).await.is_err() {
+                                        break;
+                                    }
+                                } else if !outcome.is_accepted() {
                                     websocket
                                         .send(Message::Close(Some(CloseFrame {
                                             code: CloseCode::Again,
@@ -294,36 +364,74 @@ async fn handle_http_request(
             }
         });
 
-        return Ok(response);
+        return Ok(response.map(Either::Left));
     }
 
     if route.endpoint_type() == EndpointType::Http {
         if request.method() != Method::POST {
-            return Ok(response_with_status(StatusCode::METHOD_NOT_ALLOWED));
+            return Ok(response_with_status(StatusCode::METHOD_NOT_ALLOWED).map(Either::Left));
+        }
+        if let Some(refusal) = route.refusal() {
+            return Ok(endpoint_dispatch_response(refusal));
         }
         let body = match request.body_mut().collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(error) => {
                 warn!(error = %error, host, path, "failed to read http request body");
-                return Ok(response_with_status(StatusCode::BAD_REQUEST));
+                return Ok(response_with_status(StatusCode::BAD_REQUEST).map(Either::Left));
             }
         };
+        if shutdown.is_cancelled() {
+            return Ok(endpoint_rejection_response(None).map(Either::Left));
+        }
 
         let outcome = route
             .dispatch(
                 &runtime,
                 body.as_ref(),
                 &HyperRequestHeaders(request.headers()),
+                &shutdown,
             )
             .await;
-        return Ok(if outcome.is_accepted() {
-            response_with_status(StatusCode::ACCEPTED)
-        } else {
-            endpoint_rejection_response(outcome.retry_after)
-        });
+        return Ok(endpoint_dispatch_response(outcome));
     }
 
-    Ok(response_with_status(StatusCode::NOT_FOUND))
+    Ok(response_with_status(StatusCode::NOT_FOUND).map(Either::Left))
+}
+
+/// Admission shutdown refuses further requests while finishing active responses. The caller's
+/// existing node shutdown deadline bounds joining these connections.
+async fn serve_endpoint_connection<S>(
+    stream: S,
+    runtime: Runtime,
+    request_tasks: ServiceTasks,
+    shutdown: CancellationToken,
+) -> Result<(), hyper::Error>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let request_shutdown = shutdown.clone();
+    let connection = http1::Builder::new()
+        .serve_connection(
+            TokioIo::new(stream),
+            service_fn(move |request| {
+                handle_http_request(
+                    runtime.clone(),
+                    request_tasks.clone(),
+                    request_shutdown.clone(),
+                    request,
+                )
+            }),
+        )
+        .with_upgrades();
+    let mut connection = std::pin::pin!(connection);
+    nervix_primitives::select! {
+        result = &mut connection => result,
+        () = shutdown.cancelled() => {
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+    }
 }
 
 pub(in crate::application) async fn serve_http(
@@ -351,27 +459,13 @@ pub(in crate::application) async fn serve_http(
         let request_tasks = request_tasks.clone();
         let request_shutdown = shutdown.clone();
         connection_tasks.spawn(async move {
-            let io = TokioIo::new(stream);
-            if let Err(error) = http1::Builder::new()
-                .serve_connection(
-                    io,
-                    service_fn(move |request| {
-                        handle_http_request(
-                            runtime.clone(),
-                            request_tasks.clone(),
-                            request_shutdown.clone(),
-                            request,
-                        )
-                    }),
-                )
-                .with_upgrades()
-                .await
+            if let Err(error) =
+                serve_endpoint_connection(stream, runtime, request_tasks, request_shutdown).await
             {
                 warn!(error = %error, "http connection failed");
             }
         });
     }
-    connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
     Ok(())
 }
@@ -408,23 +502,19 @@ pub(in crate::application) async fn serve_https(
                 return;
             };
             let acceptor = TlsAcceptor::from(tls_config);
-            match acceptor.accept(stream).await {
+            let accepted = nervix_primitives::select! {
+                () = request_shutdown.cancelled() => return,
+                accepted = acceptor.accept(stream) => accepted,
+            };
+            match accepted {
                 Ok(tls_stream) => {
-                    let io = TokioIo::new(tls_stream);
-                    if let Err(error) = http1::Builder::new()
-                        .serve_connection(
-                            io,
-                            service_fn(move |request| {
-                                handle_http_request(
-                                    runtime.clone(),
-                                    request_tasks.clone(),
-                                    request_shutdown.clone(),
-                                    request,
-                                )
-                            }),
-                        )
-                        .with_upgrades()
-                        .await
+                    if let Err(error) = serve_endpoint_connection(
+                        tls_stream,
+                        runtime,
+                        request_tasks,
+                        request_shutdown,
+                    )
+                    .await
                     {
                         warn!(error = %error, "https connection failed");
                     }
@@ -435,7 +525,6 @@ pub(in crate::application) async fn serve_https(
             }
         });
     }
-    connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
     Ok(())
 }
@@ -443,6 +532,57 @@ pub(in crate::application) async fn serve_https(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HTTP ENDPOINT and WEBSOCKETS ENDPOINT ingestors declare repeats by name with lowercase
+    /// names: a request's fields are visited under their lowercase names, every value of a
+    /// repeated field together and in the order the request carried them.
+    #[test]
+    fn request_fields_are_visited_lowercase_with_every_value_of_a_field_together() {
+        let mut fields = hyper::HeaderMap::new();
+        for (name, value) in [
+            ("X-Trace", "a"),
+            ("Tenant", "x"),
+            ("x-trace", "b"),
+            ("TENANT", "y"),
+        ] {
+            fields.append(
+                hyper::header::HeaderName::from_bytes(name.as_bytes())
+                    .expect("each name is a valid field name"),
+                hyper::header::HeaderValue::from_static(value),
+            );
+        }
+        let mut visited: Vec<(String, String)> = Vec::new();
+        HyperRequestHeaders(&fields)
+            .visit(&mut |name, value| visited.push((name.to_string(), value.to_string())));
+
+        // The order of different names is not declared, so only each name's values are compared,
+        // after checking that a name's values arrive together.
+        let mut finished = std::collections::BTreeSet::new();
+        let mut current: Option<&str> = None;
+        let mut values: std::collections::BTreeMap<&str, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for (name, value) in &visited {
+            if current != Some(name.as_str()) {
+                if let Some(previous) = current {
+                    finished.insert(previous);
+                }
+                assert!(
+                    !finished.contains(name.as_str()),
+                    "every value of {name} is visited together: {visited:?}"
+                );
+                current = Some(name);
+            }
+            values
+                .entry(name.as_str())
+                .or_default()
+                .push(value.as_str());
+        }
+        let expected = std::collections::BTreeMap::from([
+            ("tenant", vec!["x", "y"]),
+            ("x-trace", vec!["a", "b"]),
+        ]);
+        assert_eq!(values, expected);
+    }
 
     #[test]
     fn http_request_helpers_detect_upgrade_tokens() {

@@ -6,6 +6,11 @@
 //! - **Depends on.** The interconnect test fixture and typed test requests.
 //! - **Must not know.** Product runtime graphs or connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use super::*;
 
 #[nervix_primitives::test]

@@ -6,13 +6,18 @@
 //! - **Depends on.** Quiescence vocabulary and self-contained Model identities.
 //! - **Must not know.** Parsing, planning, persistence, storage, runtime execution or presentation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
 use rkyv::{
     Archive, Deserialize as RkyvDeserialize, Place, Serialize as RkyvSerialize,
-    rancor::Fallible,
+    rancor::{Fallible, Source},
     ser::{Allocator, Writer},
     vec::{ArchivedVec, VecResolver},
     with::{ArchiveWith, DeserializeWith, SerializeWith},
@@ -124,6 +129,10 @@ impl TransactionPosition {
 }
 
 /// The inclusive, consecutive operation range executed as one atomic step.
+///
+/// Its last operation is never before its first. Every form of the range is read through that
+/// check: the serde form through `TryFrom` its fields, the archived form through the same
+/// conversion.
 #[derive(
     Debug,
     Clone,
@@ -137,11 +146,44 @@ impl TransactionPosition {
     Deserialize,
     Archive,
     RkyvSerialize,
-    RkyvDeserialize,
 )]
+#[serde(try_from = "TransactionOperationRangeFields")]
 pub struct TransactionOperationRange {
     first: TransactionOperationNumber,
     last: TransactionOperationNumber,
+}
+
+/// The two ends of a range as its serde form names them, before their order is checked.
+#[derive(Deserialize)]
+struct TransactionOperationRangeFields {
+    first: TransactionOperationNumber,
+    last: TransactionOperationNumber,
+}
+
+impl TryFrom<TransactionOperationRangeFields> for TransactionOperationRange {
+    type Error = ImpactReportError;
+
+    /// The range from the first field through the last, unless the last comes before the first.
+    fn try_from(fields: TransactionOperationRangeFields) -> Result<Self, Self::Error> {
+        let TransactionOperationRangeFields { first, last } = fields;
+        if last < first {
+            return Err(ImpactReportError::OperationRangeReversed { first, last });
+        }
+        Ok(Self { first, last })
+    }
+}
+
+impl<D> RkyvDeserialize<TransactionOperationRange, D> for ArchivedTransactionOperationRange
+where
+    D: Fallible + ?Sized,
+    D::Error: Source,
+{
+    fn deserialize(&self, deserializer: &mut D) -> Result<TransactionOperationRange, D::Error> {
+        let first: TransactionOperationNumber = self.first.deserialize(deserializer)?;
+        let last: TransactionOperationNumber = self.last.deserialize(deserializer)?;
+        let fields = TransactionOperationRangeFields { first, last };
+        TransactionOperationRange::try_from(fields).map_err(D::Error::new)
+    }
 }
 
 impl TransactionOperationRange {
@@ -149,13 +191,8 @@ impl TransactionOperationRange {
         first: TransactionOperationNumber,
         last: TransactionOperationNumber,
     ) -> Result<Self, Report<ImpactReportError>> {
-        if last < first {
-            return Err(Report::new(ImpactReportError::OperationRangeReversed {
-                first,
-                last,
-            }));
-        }
-        Ok(Self { first, last })
+        let fields = TransactionOperationRangeFields { first, last };
+        Self::try_from(fields).map_err(Report::new)
     }
 
     pub fn from_index_and_count(
@@ -624,6 +661,14 @@ impl BranchKeyFingerprint {
     }
 }
 
+/// A branch key's fingerprint reads as its lowercase hexadecimal digest, the text every report,
+/// inspection, runtime event and log names a concrete branch by in place of its key's field values.
+impl std::fmt::Display for BranchKeyFingerprint {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fingerprint_hex::write(&self.0, formatter)
+    }
+}
+
 /// Which concrete executions of a logical node participate in an impact.
 #[derive(
     Debug,
@@ -942,7 +987,7 @@ fn ensure_same_impact_domain(
     }))
 }
 
-/// The non-sensitive identity of one accepted NSPL operation.
+/// The non-sensitive identity of one accepted Plexus operation.
 #[derive(
     Debug,
     Clone,
@@ -1824,6 +1869,14 @@ fn ensure_requirement_domain(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "impact vocabulary construction returns pure identity and range validation \
+                  refusals"
+    )
+)]
 pub enum ImpactReportError {
     #[error("transaction operation number exceeds the target's addressable range")]
     OperationNumberOverflow,
@@ -1891,6 +1944,25 @@ mod impact_report_tests {
         for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
     {
         N::try_from(raw).assured("the test passes a valid Nervix name")
+    }
+
+    /// A stored or transmitted operation range whose last operation comes before its first is
+    /// refused as it is read, so no reader counts the operations of a reversed range.
+    #[test]
+    fn a_reversed_operation_range_is_refused_as_it_is_read() {
+        let second = TransactionOperationNumber::from_index(1).assured("a small index fits");
+        let third = TransactionOperationNumber::from_index(2).assured("a small index fits");
+        let range = TransactionOperationRange::new(second, third).assured("the range is ordered");
+        // An archived range holds its first and then its last number in eight bytes each, so
+        // swapping the halves reverses it.
+        let mut archived = to_bytes::<Error>(&range).assured("an operation range archives");
+        assert_eq!(archived.len(), 16);
+        archived.rotate_left(8);
+        let reversed = from_bytes::<TransactionOperationRange, Error>(&archived);
+        assert!(reversed.is_err(), "{reversed:?}");
+
+        let reversed = serde_json::from_str::<TransactionOperationRange>(r#"{"first":3,"last":2}"#);
+        assert!(reversed.is_err(), "{reversed:?}");
     }
 
     fn operation(number: usize, step: TransactionOperationRange) -> OperationImpactReport {
@@ -2211,6 +2283,7 @@ mod impact_report_tests {
         assert_eq!(restored, basis);
 
         let key = BranchKeyFingerprint::new([0x0f; 32]);
+        assert_eq!(key.to_string(), "0f".repeat(32));
         let json = serde_json::to_string(&key).assured("a branch key has a JSON representation");
         assert_eq!(json, format!("\"{}\"", "0f".repeat(32)));
 

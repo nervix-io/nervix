@@ -1,7 +1,7 @@
 Feature: CLI public session dispatch
   Scenario Outline: CLI applies semantic completion edits at the real cursor
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event ( value I64, secret STRING );
@@ -19,7 +19,7 @@ Feature: CLI public session dispatch
 
   Scenario: CLI completion uses UTF-8 byte edits after Unicode text
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_event ( value I64 );
@@ -30,7 +30,7 @@ Feature: CLI public session dispatch
 
   Scenario: CLI completion searches local upload paths
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -40,7 +40,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: CLI dispatches a command through a public session
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -57,7 +57,7 @@ Feature: CLI public session dispatch
     Given client grpc transport is configured with mode "<mode>"
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -84,7 +84,7 @@ Feature: CLI public session dispatch
   Scenario: CLI connects by hostname and follows the leader from a follower session
     Given cluster peers are addressed by "DNS names"
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -96,7 +96,7 @@ Feature: CLI public session dispatch
 
   Scenario: CLI rejects incorrect credentials through a public session
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -106,7 +106,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: CLI subscription keeps receiving after a high volume of rows
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
@@ -115,13 +115,13 @@ Feature: CLI public session dispatch
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE ACK MAX 8 ACK TIMEOUT 60s ON QUIESCE REJECT RETRY AFTER 1s DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "leader"
     When the CLI subscribes to relay "raw_metrics" on node "{{leader}}"
     Then the CLI subscription output eventually contains "listening for events from relay 'raw_metrics'"
-    When 270 sequential metric http payloads are posted to host "http-{{test_id}}.example.com" path "/metrics"
+    When 270 metric http payloads are posted with acknowledgement, 4 at a time, to host "http-{{test_id}}.example.com" path "/metrics"
     Then the CLI subscription output eventually contains '"value":270'
 
     Examples:
@@ -131,7 +131,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: CLI keeps printing notices and new subscription rows after its node restarts
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
@@ -140,7 +140,7 @@ Feature: CLI public session dispatch
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "cli_node"
@@ -159,7 +159,7 @@ Feature: CLI public session dispatch
       """
       {"value":1,"extra":true}
       """
-    Then the CLI REPL eventually displays "[events] server ERROR: failed to decode http message for ingestor 'raw_metrics_source' in domain '{{domain}}'"
+    Then the CLI REPL eventually displays "[events] server ERROR: ingestor 'raw_metrics_source' general error in domain '{{domain}}': decode rejection"
     When http payload is posted repeatedly to node "{{cli_node}}" with host "http-{{test_id}}.example.com" path "/metrics" until the CLI REPL displays '[events] subscription [watch] from [raw_metrics]: {"value":7}'
       """
       {"value":7}
@@ -175,7 +175,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: CLI attaches its session to the active domain's clock
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
@@ -191,7 +191,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: The CLI follows a domain clock through its generations
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
@@ -200,7 +200,7 @@ Feature: CLI public session dispatch
     Then within "10s" the CLI clock output contains "attached to the clock of domain '{{domain}}': generation 1, paced: period 100ms, skew 10ms, logical origin 2030-01-01T00:00:00Z, UTC anchor"
     And within "10s" the CLI clock output contains "time rate 2"
     And within "10s" the CLI clock output has 3 increasing ticks for generation 1 of domain "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
@@ -228,7 +228,7 @@ Feature: CLI public session dispatch
 
   Scenario Outline: The CLI follows a domain clock across a cluster restart
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 500ms SKEW 50ms;
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
@@ -249,7 +249,7 @@ Feature: CLI public session dispatch
 
   Scenario: The CLI restores a domain clock after transport loss
     Given a 1 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;

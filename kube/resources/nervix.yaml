@@ -339,6 +339,11 @@ spec:
                   fieldPath: status.hostIP
             - name: RUST_LOG
               value: info,nervix=info
+            # The startup preflight refuses resource quotas the 5Gi data volume cannot hold.
+            - name: NERVIX_RESOURCE_MAX_ARCHIVE_BYTES
+              value: 1GiB
+            - name: NERVIX_RESOURCE_MAX_EXTRACTED_BYTES
+              value: 2GiB
           ports:
             - name: grpc
               containerPort: 47391
@@ -378,7 +383,8 @@ spec:
               cpu: 250m
               memory: 512Mi
             limits:
-              memory: 2Gi
+              # The preflight refuses a memory limit that cannot hold the node's memory budgets.
+              memory: 3Gi
           volumeMounts:
             - name: data
               mountPath: /var/lib/nervix

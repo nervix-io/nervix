@@ -6,6 +6,11 @@
 //! - **Depends on.** The runtime's relay boundary and the interconnect transport.
 //! - **Must not know.** Session commands, transactions or scheduling.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::VecDeque;
 
 use ahash::HashMap;
@@ -194,7 +199,10 @@ impl InterconnectRelayPayloadLane {
                         result,
                     } = completed;
                     if let Err(error) = result {
-                        warn!(error = %error, "failed to process remote relay payload");
+                        warn!(
+                            error = %format_args!("{error:#}"),
+                            "failed to process remote relay payload"
+                        );
                     }
                     let next = queued
                         .get_mut(&channel)

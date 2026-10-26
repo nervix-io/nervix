@@ -7,8 +7,12 @@
 //! - **Depends on.** Validated branch templates, relay boundaries, processors, execution
 //!   admission, domain force-flush generations, node quiesce accounting, and runtime state
 //!   persistence.
-//! - **Must not know.** NSPL text, control-plane transactions, consensus, or connector protocols.
+//! - **Must not know.** Plexus text, control-plane transactions, consensus, or connector protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -23,6 +27,23 @@ use error_stack::ResultExt as _;
 use super::*;
 
 pub(super) const BRANCH_INSTANCE_EXPIRATION_SCAN_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Every way a branched entrypoint fails to take one input into the concrete branch it belongs to,
+/// before the input's routes buffer it. The ingestor or reingestor names itself when it reports
+/// the failure, and the acknowledgements of the input fail with it.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum BranchEntrypointError {
+    #[error("could not read the domain time of accepted input")]
+    AcceptedInputClock,
+    #[error("failed to instantiate the branch runtime ({branch})")]
+    Instantiate { branch: BranchScope },
+    #[error("the branch dispatch task failed ({branch})")]
+    DispatchTask { branch: BranchScope },
+    #[error("failed to prepare the route input")]
+    PrepareRouteInput,
+    #[error("failed to prepare an output branch batch")]
+    PrepareBranchBatch,
+}
 
 #[cfg_attr(
     nervix_lint,
@@ -39,7 +60,7 @@ pub(super) struct BranchRuntime {
     pub(super) routing: Option<DomainRoutingCache>,
     pub(super) routing_snapshot: Option<StdArc<DomainRoutingSnapshot>>,
     pub(super) domain_clock: DomainClock,
-    pub(super) source_kind: ModelKind,
+    pub(super) entity_kind: ModelKind,
     pub(super) source: RelayName,
     pub(super) root_relay: RelayName,
     pub(super) error_policies: ErrorPolicies,
@@ -63,7 +84,7 @@ pub(super) struct BranchRuntimeMetrics {
 pub(super) struct PendingMaterializedBatch {
     pub(super) input_relay: RelayName,
     pub(super) batch: Option<RelayRecordBatch>,
-    pub(super) required_wait: Option<AckRequiredWaitGuard>,
+    pub(super) required_wait: Option<AckParkGuard>,
 }
 
 pub(super) struct MaterializedBatchWaitContext<'a> {
@@ -85,7 +106,7 @@ pub(super) struct MaterializedDomainHandles<'a> {
 
 impl PendingMaterializedBatch {
     pub(super) fn new(input_relay: RelayName, batch: RelayRecordBatch) -> Self {
-        let required_wait = AckRequiredWaitGuard::new(batch.acks.iter());
+        let required_wait = AckParkGuard::new(batch.acks.iter());
         Self {
             input_relay,
             batch: Some(batch),
@@ -239,12 +260,7 @@ impl BranchDispatchLanes {
 impl BranchRuntime {
     pub(super) fn refresh_domain_routing(&mut self) -> Result<(), Report<DomainRoutingError>> {
         if self.routing.is_none() {
-            self.routing = nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "Typed Ratchet 03 (86bc9eqjv): retain the domain routing publication across \
-                 revision refresh instead of repeating its installation lookup",
-                self.runtime.domain_routing_cache(&self.domain)
-            );
+            self.routing = self.runtime.domain_routing_cache(&self.domain);
         }
         let Some(routing) = self.routing.as_mut() else {
             return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
@@ -280,6 +296,20 @@ impl BranchRuntime {
     }
 
     pub(super) async fn evict(&mut self) {
+        for (relay, state) in &mut self.materialized_states {
+            if let Err(error) = self
+                .runtime
+                .delete_materialized_stream_key(state, &self.key)
+            {
+                warn!(domain = self.domain.as_str(), relay = relay.as_str(),
+                    scope = %BranchScope::from(&self.key), error = %format_args!("{error:#}"),
+                    "materialized assignment changed during branch eviction");
+            }
+        }
+        self.materialized_states.clear();
+        for relay in self.relays.values_mut() {
+            relay.retire();
+        }
         for processor in self.processors.values_mut() {
             processor.drop_collected_inputs("processor branch was evicted");
             processor.reset_window_state();
@@ -287,13 +317,28 @@ impl BranchRuntime {
     }
 
     pub(super) async fn reconcile_materialized_state_membership(&mut self, relay: &RelayName) {
-        let current_epoch = self
-            .runtime
-            .relay_state_epoch(&self.domain)
-            .load(Ordering::Acquire);
+        let current_epoch = match self.domain_routing() {
+            Ok(routing) => routing.relay_state_epoch.load(Ordering::Acquire),
+            Err(_) => return,
+        };
         if self.relay_state_epoch == Some(current_epoch) {
-            return;
+            if self.materialized_states.contains_key(relay) {
+                return;
+            }
+            if self
+                .domain_routing()
+                .is_ok_and(|routing| !routing.materialized_stream_specs.contains_key(relay))
+            {
+                return;
+            }
         }
+        // A schedule publishes its routing before it advances the epoch, so routing read after the
+        // epoch is at least as new as the epoch this reconciliation records. The routing the branch
+        // read for an earlier batch may predate it.
+        self.refresh_domain_routing().discarded(
+            "a domain whose routing is not resolved has no materialized relays to reconcile, \
+             which reading the routing below reports",
+        );
         let (desired_relays, relay_schema) = match self.domain_routing() {
             Ok(routing) => {
                 let desired_relays = routing
@@ -338,7 +383,7 @@ impl BranchRuntime {
                     warn!(
                         domain = self.domain.as_str(),
                         relay = relay.as_str(),
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to place the branch-local materialized relay state"
                     );
                     return;
@@ -356,12 +401,12 @@ impl BranchRuntime {
                 warn!(
                     domain = self.domain.as_str(),
                     relay = relay.as_str(),
-                    error = %error,
+                    error = format!("{error:#}"),
                     "failed to open the persisted branch-local materialized relay snapshot"
                 );
                 return;
             }
-            match nervix_primitives::expect_lint!(
+            let mut assignment = nervix_primitives::expect_lint!(
                 nervix::lifecycle_call,
                 "first installation of this concrete branch binds its materialized placement and \
                  retains the resulting state",
@@ -372,28 +417,16 @@ impl BranchRuntime {
                     Vec::new(),
                     None,
                 )
-            ) {
-                Ok(mut assignment) => {
-                    let Some(state) = assignment.originator.take() else {
-                        warn!(
-                            domain = self.domain.as_str(),
-                            relay = relay.as_str(),
-                            "branch-local materialized relay lacks authoritative state access"
-                        );
-                        return;
-                    };
-                    self.materialized_states.insert(relay.clone(), state);
-                }
-                Err(error) => {
-                    warn!(
-                        domain = self.domain.as_str(),
-                        relay = relay.as_str(),
-                        error = %error,
-                        "failed to reconcile materialized relay membership"
-                    );
-                    return;
-                }
-            }
+            );
+            let Some(state) = assignment.originator.take() else {
+                warn!(
+                    domain = self.domain.as_str(),
+                    relay = relay.as_str(),
+                    "branch-local materialized relay lacks authoritative state access"
+                );
+                return;
+            };
+            self.materialized_states.insert(relay.clone(), state);
         }
         self.relay_state_epoch = Some(current_epoch);
     }
@@ -412,7 +445,7 @@ impl BranchRuntime {
             return;
         }
         self.reconcile_materialized_state_membership(relay).await;
-        let Some(state) = self.materialized_states.get(relay) else {
+        let Some(state) = self.materialized_states.get_mut(relay) else {
             return;
         };
         let messages = match batch.detached().try_into_messages() {
@@ -422,8 +455,8 @@ impl BranchRuntime {
                 warn!(
                     domain = self.domain.as_str(),
                     relay = relay.as_str(),
-                    branch = branch_key_display(&self.key),
-                    error = %error,
+                    scope = %BranchScope::from(&self.key),
+                    error = %format_args!("{error:#}"),
                     "failed to decode branch-local materialized state batch"
                 );
                 return;
@@ -438,8 +471,8 @@ impl BranchRuntime {
             warn!(
                 domain = self.domain.as_str(),
                 relay = relay.as_str(),
-                branch = branch_key_display(&self.key),
-                error = %error,
+                scope = %BranchScope::from(&self.key),
+                error = %format_args!("{error:#}"),
                 "materialized relay assignment changed while applying a branch-local batch"
             );
         }
@@ -467,18 +500,21 @@ impl BranchRuntime {
         &mut self,
         processor_id: &ModelName,
         execution_now: Timestamp,
+        purpose: ProcessorCheckpointPurpose,
     ) -> OwnershipHandoffResult<()> {
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return Ok(());
         };
-        let result = processor.checkpoint_live_state(self, execution_now).await;
+        let result = processor
+            .checkpoint_live_state(self, execution_now, purpose)
+            .await;
         self.processors.insert(processor_id.clone(), processor);
         result
     }
 
     pub(super) async fn retry_processor_pending_materialized(&mut self, processor_id: &ModelName) {
         if let Err(error) = self.refresh_domain_routing() {
-            warn!(error = %error, "failed to refresh routing for pending processor work");
+            warn!(error = %format_args!("{error:#}"), "failed to refresh routing for pending processor work");
             return;
         }
         let Some(mut processor) = self.processors.remove(processor_id) else {
@@ -497,7 +533,7 @@ impl BranchRuntime {
 
     pub(super) async fn retry_materialized_waiters(&mut self, updated_relay: &RelayName) {
         if let Err(error) = self.refresh_domain_routing() {
-            warn!(error = %error, "failed to refresh routing for materialized-state waiters");
+            warn!(error = %format_args!("{error:#}"), "failed to refresh routing for materialized-state waiters");
             return;
         }
         let processor_ids = self
@@ -550,24 +586,24 @@ impl BranchRuntime {
         );
         self.metrics.source_dirty.mark();
         if self.dispatch_stream(&root_relay, &batch).await.is_err() {
-            let reason = "branched root relay dispatch failed".to_string();
-            if self.source_kind == ModelKind::Ingestor {
+            let error = Report::new(RouteOutputError::Forward { relay: root_relay });
+            if self.entity_kind == ModelKind::Ingestor {
                 self.runtime.handle_general_error_for_acks(
                     &self.domain,
-                    self.source_kind,
+                    self.entity_kind,
                     &self.source,
                     &self.error_policies,
                     batch.acks.iter(),
-                    reason,
+                    &error,
                 );
             } else {
                 self.runtime.handle_internal_processor_error_for_acks(
                     &self.domain,
-                    self.source_kind,
+                    self.entity_kind,
                     &self.source,
                     &self.error_policies,
                     batch.acks.iter(),
-                    reason,
+                    &error,
                 );
             }
             return;
@@ -624,11 +660,7 @@ impl BranchRuntime {
                     &processor.processor,
                     &processor.error_policies,
                     batch.acks.iter(),
-                    format!(
-                        "{} '{}' could not read domain execution time: {error}",
-                        processor.kind.as_str(),
-                        processor.processor.as_str(),
-                    ),
+                    &error.change_context(RelayProcessorError::ExecutionTime),
                 );
                 self.processors.insert(processor_id.clone(), processor);
                 return;
@@ -689,7 +721,7 @@ impl BranchRuntime {
 
     pub(super) async fn tick(&mut self, snapshot: &DomainExecutionSnapshot) {
         if let Err(error) = self.refresh_domain_routing() {
-            warn!(error = %error, "failed to refresh routing for processor tick");
+            warn!(error = %format_args!("{error:#}"), "failed to refresh routing for processor tick");
             return;
         }
         let processor_ids = self.processors.keys().cloned().collect::<Vec<_>>();
@@ -704,7 +736,7 @@ impl BranchRuntime {
 
     pub(super) async fn force_flush(&mut self, snapshot: &DomainExecutionSnapshot) {
         if let Err(error) = self.refresh_domain_routing() {
-            warn!(error = %error, "failed to refresh routing for processor flush");
+            warn!(error = %format_args!("{error:#}"), "failed to refresh routing for processor flush");
             return;
         }
         let now = snapshot.now();
@@ -755,25 +787,30 @@ impl BranchRuntime {
 }
 
 impl IngestorRouteTask {
-    pub(super) fn handle_general_error(&self, acks: &[AckSet], reason: String) {
-        if self.template.branch.source_kind == ModelKind::Ingestor {
+    /// Routes a failure of the route this task buffers through the entrypoint's own error policy.
+    pub(super) fn handle_general_error<C: error_stack::Context>(
+        &self,
+        acks: &[AckSet],
+        error: &Report<C>,
+    ) {
+        if self.template.branch.entity_kind == ModelKind::Ingestor {
             self.runtime_handle.handle_general_error_for_acks(
                 &self.domain,
-                self.template.branch.source_kind,
+                self.template.branch.entity_kind,
                 &self.ingestor,
                 &self.template.branch.error_policies,
                 acks.iter(),
-                reason,
+                error,
             );
         } else {
             self.runtime_handle
                 .handle_internal_processor_error_for_acks(
                     &self.domain,
-                    self.template.branch.source_kind,
+                    self.template.branch.entity_kind,
                     &self.ingestor,
                     &self.template.branch.error_policies,
                     acks.iter(),
-                    reason,
+                    error,
                 );
         }
     }
@@ -793,12 +830,9 @@ impl IngestorRouteTask {
             Err(failure) => {
                 self.handle_general_error(
                     &failure.preserved,
-                    format!(
-                        "{} '{}' failed to prepare route input: {}",
-                        self.template.branch.source_kind.as_str(),
-                        self.ingestor.as_str(),
-                        failure.error
-                    ),
+                    &failure
+                        .error
+                        .change_context(BranchEntrypointError::PrepareRouteInput),
                 );
                 return Vec::new();
             }
@@ -810,12 +844,9 @@ impl IngestorRouteTask {
                 Ok(batch) => prepared.push(batch),
                 Err(failure) => self.handle_general_error(
                     &failure.preserved,
-                    format!(
-                        "{} '{}' failed to prepare output branch batch: {}",
-                        self.template.branch.source_kind.as_str(),
-                        self.ingestor.as_str(),
-                        failure.error
-                    ),
+                    &failure
+                        .error
+                        .change_context(BranchEntrypointError::PrepareBranchBatch),
                 ),
             }
         }
@@ -837,12 +868,9 @@ impl IngestorRouteTask {
             Err(error) => {
                 self.handle_general_error(
                     &acks,
-                    format!(
-                        "{} '{}' failed to concatenate output route batch: {}",
-                        self.template.branch.source_kind.as_str(),
-                        self.ingestor.as_str(),
-                        error
-                    ),
+                    &error.change_context(RouteOutputError::Concatenate {
+                        relay: self.template.branch.root_relay.clone(),
+                    }),
                 );
                 return;
             }
@@ -851,12 +879,9 @@ impl IngestorRouteTask {
             let batch = error.0;
             self.handle_general_error(
                 &batch.acks,
-                format!(
-                    "{} '{}' failed to forward prepared batch for relay '{}'",
-                    self.template.branch.source_kind.as_str(),
-                    self.ingestor.as_str(),
-                    self.template.branch.root_relay.as_str()
-                ),
+                &Report::new(RouteOutputError::Forward {
+                    relay: self.template.branch.root_relay.clone(),
+                }),
             );
         }
     }
@@ -876,12 +901,7 @@ impl IngestorRouteTask {
                     Err(error) => {
                         self.handle_general_error(
                             &batch.acks,
-                            format!(
-                                "{} '{}' could not read the domain clock while starting an output \
-                                 flush: {error}",
-                                self.template.branch.source_kind.as_str(),
-                                self.ingestor.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::BufferClock),
                         );
                         continue;
                     }
@@ -892,11 +912,9 @@ impl IngestorRouteTask {
                 {
                     self.handle_general_error(
                         &batch.acks,
-                        format!(
-                            "{} '{}' could not start an output flush deadline: {error}",
-                            self.template.branch.source_kind.as_str(),
-                            self.ingestor.as_str(),
-                        ),
+                        &error.change_context(RouteOutputError::StartFlushDeadline {
+                            relay: self.template.branch.root_relay.clone(),
+                        }),
                     );
                     continue;
                 }
@@ -1024,8 +1042,8 @@ impl IngestorRouteTask {
             Ok(clock) => clock,
             Err(error) => {
                 self.runtime_handle.events().report_error(format!(
-                    "{} '{}' in domain '{}' could not bind its route flush clock: {error}",
-                    self.template.branch.source_kind.as_str(),
+                    "{} '{}' in domain '{}' could not bind its route flush clock: {error:#}",
+                    self.template.branch.entity_kind.as_str(),
                     self.ingestor.as_str(),
                     self.domain.as_str(),
                 ));
@@ -1034,13 +1052,22 @@ impl IngestorRouteTask {
         };
         let ownership_entity = DomainNodeRef::node_in(
             self.domain.clone(),
-            self.template.branch.source_kind,
+            self.template.branch.entity_kind,
             ModelName::from(&self.template.branch.source),
         );
         let ownership_freeze =
             OwnershipHandoffFreezeWatch::new(&self.runtime_handle, ownership_entity);
         loop {
             nervix_primitives::task::consume_budget().await;
+            self.runtime_handle
+                .inner
+                .fault_injection
+                .pause_ingestor_route_poll_if_armed(
+                    &self.domain,
+                    self.template.branch.entity_kind,
+                    &self.template.branch.source,
+                )
+                .await;
             let freeze = ownership_freeze.observe();
             let ownership_frozen = freeze.is_frozen();
             let flush_deadlines = self.flush_deadlines();
@@ -1075,24 +1102,17 @@ impl IngestorRouteTask {
                         let acks = self.pending_acks();
                         self.handle_general_error(
                             &acks,
-                            format!(
-                                "{} '{}' could not wait for an output flush deadline: {error}",
-                                self.template.branch.source_kind.as_str(),
-                                self.ingestor.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::WaitFlushDeadline),
                         );
                         self.flush_all().await;
                         break;
                     }
                     if let Err(error) = self.flush_due(&domain_clock).await {
                         let acks = self.pending_acks();
+                        let relay = self.template.branch.root_relay.clone();
                         self.handle_general_error(
                             &acks,
-                            format!(
-                                "{} '{}' could not inspect an output flush deadline: {error}",
-                                self.template.branch.source_kind.as_str(),
-                                self.ingestor.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::InspectFlushDeadline { relay }),
                         );
                         self.flush_all().await;
                         break;
@@ -1138,7 +1158,7 @@ impl IngestorRouteRuntime {
         let quiesce = OutputBufferQuiesceGauge::new(runtime_handle.node_quiesce_counters(
             &domain,
             NodeRef::new(
-                template.branch.source_kind,
+                template.branch.entity_kind,
                 ModelName::from(&template.branch.source),
             ),
         ));
@@ -1207,22 +1227,14 @@ impl BranchExecutionRuntime {
         let accepted_at = match domain_clock.snapshot() {
             Ok(snapshot) => snapshot.now(),
             Err(error) => {
-                let reason = format!(
-                    "branch runtime for '{}' in domain '{}' could not read the domain time of \
-                     accepted input: {error}",
-                    ingestor.as_str(),
-                    domain.as_str(),
+                Self::report_dispatch_error(
+                    runtime_handle,
+                    domain,
+                    ingestor,
+                    template,
+                    inputs.iter().flat_map(|message| message.acks.iter()),
+                    &error.change_context(BranchEntrypointError::AcceptedInputClock),
                 );
-                for message in inputs {
-                    Self::report_dispatch_error(
-                        runtime_handle,
-                        domain,
-                        ingestor,
-                        template,
-                        message.acks.iter(),
-                        reason.clone(),
-                    );
-                }
                 return;
             }
         };
@@ -1253,10 +1265,9 @@ impl BranchExecutionRuntime {
                             ingestor,
                             template,
                             message.acks.iter(),
-                            format!(
-                                "failed to instantiate branch '{}': {error:#}",
-                                branch_key_display(&key),
-                            ),
+                            &error.change_context(BranchEntrypointError::Instantiate {
+                                branch: BranchScope::from(&key),
+                            }),
                         );
                         continue;
                     }
@@ -1280,7 +1291,7 @@ impl BranchExecutionRuntime {
                 debug!(
                     domain = domain.as_str(),
                     ingestor = ingestor.as_str(),
-                    key = branch_key_display(&key),
+                    scope = %BranchScope::from(&key),
                     "created branch runtime"
                 );
             }
@@ -1289,7 +1300,7 @@ impl BranchExecutionRuntime {
                     runtime_handle,
                     domain,
                     ingestor,
-                    template.branch.as_ref(),
+                    template,
                     max_instances,
                     instances,
                 )
@@ -1377,31 +1388,31 @@ impl BranchExecutionRuntime {
     ///
     /// Ingestors own a general error policy for their own intake, while every other branch
     /// entrypoint reports through the internal processor policy.
-    fn report_dispatch_error<'a>(
+    fn report_dispatch_error<'a, C: error_stack::Context>(
         runtime_handle: &Runtime,
         domain: &DomainName,
         ingestor: &IngestorName,
         template: &BranchInstanceTemplate,
         acks: impl IntoIterator<Item = &'a AckSet>,
-        reason: String,
+        error: &Report<C>,
     ) {
-        if template.source_kind == ModelKind::Ingestor {
+        if template.entity_kind == ModelKind::Ingestor {
             runtime_handle.handle_general_error_for_acks(
                 domain,
-                template.source_kind,
+                template.entity_kind,
                 ingestor,
                 &template.error_policies,
                 acks,
-                reason,
+                error,
             );
         } else {
             runtime_handle.handle_internal_processor_error_for_acks(
                 domain,
-                template.source_kind,
+                template.entity_kind,
                 ingestor,
                 &template.error_policies,
                 acks,
-                reason,
+                error,
             );
         }
     }
@@ -1421,15 +1432,13 @@ impl BranchExecutionRuntime {
             Err(error) => {
                 runtime_handle.handle_internal_processor_error_for_acks(
                     domain,
-                    template.source_kind,
+                    template.entity_kind,
                     ingestor,
                     &template.error_policies,
                     completion.acks.iter(),
-                    format!(
-                        "branch '{}' dispatch task failed: {}",
-                        branch_key_display(&completion.key),
-                        error
-                    ),
+                    &Report::new(error).change_context(BranchEntrypointError::DispatchTask {
+                        branch: BranchScope::from(&completion.key),
+                    }),
                 );
             }
         }
@@ -1530,7 +1539,7 @@ impl BranchExecutionRuntime {
                 Err(error) => {
                     runtime_handle.events().report_error(format!(
                         "branch runtime for ingestor '{}' in domain '{}' could not bind its \
-                         clock: {error}",
+                         clock: {error:#}",
                         ingestor.as_str(),
                         domain.as_str(),
                     ));
@@ -1568,7 +1577,7 @@ impl BranchExecutionRuntime {
                         &runtime_handle,
                         &domain,
                         &ingestor,
-                        template.branch.as_ref(),
+                        &template,
                         max_instances,
                         &mut instances,
                     )
@@ -1581,7 +1590,7 @@ impl BranchExecutionRuntime {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
                     runtime_handle.events().report_error(format!(
-                        "branch runtime for ingestor '{}' in domain '{}' lost its clock: {error}",
+                        "branch runtime for ingestor '{}' in domain '{}' lost its clock: {error:#}",
                         ingestor.as_str(),
                         domain.as_str(),
                     ));
@@ -1592,7 +1601,7 @@ impl BranchExecutionRuntime {
                 tick_due_branch_instance_branches(&restored_snapshot, &instances).await;
             let ownership_entity = DomainNodeRef::node_in(
                 domain.clone(),
-                template.source_kind,
+                template.entity_kind,
                 ModelName::from(&template.source),
             );
             let mut checkpoint_requests_open = true;
@@ -1613,7 +1622,7 @@ impl BranchExecutionRuntime {
                     Err(error) => {
                         runtime_handle.events().report_error(format!(
                             "branch runtime for ingestor '{}' in domain '{}' lost its clock: \
-                             {error}",
+                             {error:#}",
                             ingestor.as_str(),
                             domain.as_str(),
                         ));
@@ -1628,7 +1637,7 @@ impl BranchExecutionRuntime {
                             &runtime_handle,
                             &domain,
                             &ingestor,
-                            template.branch.as_ref(),
+                            &template,
                             now,
                             branch_ttl,
                             &mut instances,
@@ -1819,7 +1828,7 @@ impl BranchExecutionRuntime {
                         if let Err(error) = result {
                             runtime_handle.events().report_error(format!(
                                 "branch runtime for ingestor '{}' in domain '{}' could not wait \
-                                 for a branch deadline: {error}",
+                                 for a branch deadline: {error:#}",
                                 ingestor.as_str(),
                                 domain.as_str(),
                             ));
@@ -1958,7 +1967,7 @@ pub(super) async fn expire_branch_instance_instances(
     runtime: &Runtime,
     domain: &DomainName,
     ingestor: &IngestorName,
-    branch: Option<&BranchName>,
+    template: &BranchInstanceTemplate,
     now: Timestamp,
     expiration_after: Duration,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
@@ -1970,18 +1979,18 @@ pub(super) async fn expire_branch_instance_instances(
             "the concrete branch ending or detach transition withdraws its exact metric identity",
             runtime.observe_branch_instance_removed(
                 domain,
-                branch,
+                template.branch.as_ref(),
                 &key,
                 Some(BranchEvictionReason::Ttl),
             )
         );
-        runtime.invalidate_branch_relay_generation(domain, &key);
+        template.retire_branch_channels(&key);
         let mut branch = state.lock().await;
         branch.evict().await;
         debug!(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
-            key = branch_key_display(&key),
+            scope = %BranchScope::from(&key),
             "expired branched processor root"
         );
         expired_keys.push(key);
@@ -2003,7 +2012,7 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
     runtime: &Runtime,
     domain: &DomainName,
     ingestor: &IngestorName,
-    branch: Option<&BranchName>,
+    template: &BranchInstanceTemplate,
     max_instances: NonZeroUsize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Vec<Option<BranchKey>> {
@@ -2014,18 +2023,18 @@ pub(super) async fn evict_branch_instance_instances_to_capacity(
             "the concrete branch ending or detach transition withdraws its exact metric identity",
             runtime.observe_branch_instance_removed(
                 domain,
-                branch,
+                template.branch.as_ref(),
                 &key,
                 Some(BranchEvictionReason::Lru),
             )
         );
-        runtime.invalidate_branch_relay_generation(domain, &key);
+        template.retire_branch_channels(&key);
         let mut branch = state.lock().await;
         branch.evict().await;
         debug!(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
-            key = branch_key_display(&key),
+            scope = %BranchScope::from(&key),
             max_instances,
             "evicted branch runtime by lru"
         );
@@ -2055,7 +2064,7 @@ pub(super) async fn shutdown_all_branch_instance_instances(
         debug!(
             domain = domain.as_str(),
             ingestor = ingestor.as_str(),
-            key = branch_key_display(&key),
+            scope = %BranchScope::from(&key),
             "stopped branch runtime"
         );
     }
@@ -2069,7 +2078,7 @@ pub(super) fn branch_lru_placement(
     runtime.state_placement(
         domain,
         RuntimeStateKind::BranchLru,
-        template.source_kind,
+        template.entity_kind,
         &template.source,
         None,
     )
@@ -2089,29 +2098,46 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> error_stack::Result<u64, BranchLruSnapshotError> {
+    /// One branch the lifecycle names, built and not installed yet.
+    struct RestoredBranch {
+        lifetime: BranchInstanceSnapshotEntry<Option<BranchKey>>,
+        state: Mutex<BranchRuntime>,
+    }
+
     let placement = branch_lru_placement(runtime, domain, template)
         .change_context(BranchLruSnapshotError::Unplaced)?;
-    let snapshot = runtime
-        .take_restorable_branch_lru_snapshot(&placement)
+    let lifecycle = runtime
+        .restorable_branch_lru_snapshot(&placement)
         .change_context(BranchLruSnapshotError::Read)?;
-    let Some(snapshot) = snapshot else {
+    let Some(lifecycle) = lifecycle else {
         return Ok(0);
     };
-    let entries = decode_branch_lru_snapshot(&snapshot.payload)?;
-    for (entry, restored) in entries.into_iter().enumerate() {
+    // Every branch is built before any is installed, and the lifecycle is released only once all
+    // of them are, so a failed restore leaves both as they were.
+    let lifetimes = lifecycle.branches()?;
+    let mut restored = Vec::with_capacity(lifetimes.len());
+    for (entry, lifetime) in lifetimes.into_iter().enumerate() {
         nervix_primitives::task::consume_budget().await;
-        let key = restored.key;
-        let last_ingestion = restored.last_ingestion;
-        let incarnation = restored.incarnation;
         let state = template
-            .instantiate(runtime, domain, key.clone(), incarnation)
+            .instantiate(runtime, domain, lifetime.key.clone(), lifetime.incarnation)
             .await
             .change_context(BranchLruSnapshotError::Restore { entry })?;
-        runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
-        instances.insert_restored(key, last_ingestion, incarnation, state);
+        restored.push(RestoredBranch { lifetime, state });
     }
-    instances.set_version(snapshot.lsm);
-    Ok(snapshot.lsm)
+    for branch in restored {
+        let lifetime = branch.lifetime;
+        runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &lifetime.key);
+        instances.insert_restored(
+            lifetime.key,
+            lifetime.last_ingestion,
+            lifetime.incarnation,
+            branch.state,
+        );
+    }
+    let lsm = lifecycle.lsm();
+    instances.set_version(lsm);
+    runtime.release_restored_branch_lru_snapshot(lifecycle);
+    Ok(lsm)
 }
 
 /// Persist the branch lifecycle checkpoint `instances` form now and hand it to the ownership
@@ -2132,10 +2158,11 @@ fn checkpoint_branch_instance_lru_snapshot<V>(
 ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
     let placement = branch_lru_placement(runtime, domain, template).change_context_lazy(|| {
         OwnershipHandoffError::StatePlacement {
-            kind: template.source_kind,
+            kind: template.entity_kind,
             identifier: ModelName::from(&template.source),
         }
     })?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
         .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?;
     let snapshot = PersistedRuntimeStateEntry {
@@ -2144,7 +2171,7 @@ fn checkpoint_branch_instance_lru_snapshot<V>(
     };
     runtime
         .persist_branch_lru_snapshot(placement, snapshot.clone())
-        .map_err(|error| OwnershipHandoffError::persistence(error.current_context().clone()))?;
+        .change_context(OwnershipHandoffError::Persistence)?;
     Ok(snapshot)
 }
 
@@ -2169,6 +2196,7 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
     }
     let placement = branch_lru_placement(runtime, domain, template)
         .change_context(BranchLruSnapshotError::Unplaced)?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
     runtime
         .persist_branch_lru_snapshot(
@@ -2198,6 +2226,7 @@ pub(super) fn publish_branch_instance_lru_snapshot<V>(
 ) -> error_stack::Result<(), BranchLruSnapshotError> {
     let placement = branch_lru_placement(runtime, domain, template)
         .change_context(BranchLruSnapshotError::Unplaced)?;
+    let _publication = runtime.backup_publication(domain);
     let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
     let snapshot = PersistedRuntimeStateEntry {
         lsm: instances.version(),
@@ -2272,7 +2301,7 @@ pub(super) async fn flush_branch_junction(
         ProcessorOutputDispatchContext {
             branch,
             node_kind,
-            source_kind: ModelKind::Junction,
+            entity_kind: ModelKind::Junction,
             processor,
             error_policies,
             materialized_state: ProcessorMaterializedState::Admitted(materialized_values),
@@ -2290,6 +2319,10 @@ pub(super) async fn flush_branch_junction(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};
@@ -2300,6 +2333,107 @@ mod tests {
         runtime_ack::{AckOutcome, AckRootTracker, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
+
+    #[nervix_primitives::test]
+    async fn runtime_report_chain_branch_routing_logs() {
+        use crate::runtime::report_observer::ReportLogObserver;
+
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let mut branch = junction_branch_template("calculate", "orders")
+            .instantiate(&runtime, &domain, None, 1)
+            .await
+            .assured("the fixture installs its junction branch")
+            .into_inner();
+        let snapshot = runtime
+            .bind_domain_clock(&domain)
+            .assured("the fixture installs its clock")
+            .snapshot()
+            .assured("the fixture clock is running");
+        runtime.inner.domain_routings.remove(&domain);
+        branch.routing = None;
+        branch.routing_snapshot = None;
+        let mut logs = ReportLogObserver::new();
+        logs.observe(async {
+            branch
+                .retry_processor_pending_materialized(&named("calculate"))
+                .await;
+            branch.retry_materialized_waiters(&named("profiles")).await;
+            branch.tick(&snapshot).await;
+            branch.force_flush(&snapshot).await;
+        })
+        .await;
+        for message in [
+            "failed to refresh routing for pending processor work",
+            "failed to refresh routing for materialized-state waiters",
+            "failed to refresh routing for processor tick",
+            "failed to refresh routing for processor flush",
+        ] {
+            assert_eq!(
+                logs.next(message).fields["error"],
+                "domain 'default' is not instantiated"
+            );
+        }
+    }
+
+    /// A branch that read its routing before a schedule made a relay materialized here, and that
+    /// reconciles its materialized relays after the schedule published that routing and advanced
+    /// the relay-state epoch, reconciles against the routing published with that epoch. The epoch
+    /// it records then stands for the membership it computed.
+    #[nervix_primitives::test]
+    async fn materialized_membership_is_reconciled_against_the_routing_its_epoch_follows() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let template = junction_branch_template("wait_for_customer", "orders");
+        let mut branch = template
+            .instantiate(&runtime, &domain, None, 1)
+            .await
+            .assured("a junction branch instantiates on the test domain")
+            .into_inner();
+        branch
+            .refresh_domain_routing()
+            .assured("the test domain publishes its routing");
+        let profiles = named::<RelayName>("profiles");
+        let state_schema = test_schema(&[("status", ParseAsType::String)]);
+        let routing = runtime
+            .inner
+            .domain_routings
+            .get(&domain)
+            .verified("the test domain publishes its routing")
+            .clone();
+        routing.store(StdArc::new(DomainRoutingSnapshot {
+            materialized_stream_specs: [(
+                profiles.clone(),
+                RuntimeMaterializedRelaySpec::new(
+                    state_schema.arrow_schema(),
+                    VmSchemaSensitivity::default(),
+                    ResolvedBranching::unbranched(),
+                ),
+            )]
+            .into_iter()
+            .collect(),
+            ..DomainRoutingSnapshot::default()
+        }));
+        runtime.bump_relay_state_epoch(&domain);
+
+        branch
+            .reconcile_materialized_state_membership(&profiles)
+            .await;
+
+        let published = routing.load_full();
+        let reconciled_against_published = match branch.routing_snapshot.as_ref() {
+            Some(snapshot) => StdArc::ptr_eq(snapshot, &published),
+            None => false,
+        };
+        assert!(
+            reconciled_against_published,
+            "the branch reconciled its materialized relays against routing older than the \
+             relay-state epoch it read"
+        );
+    }
+
     #[nervix_primitives::test]
     async fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
         let runtime = Runtime::default();
@@ -2432,7 +2566,7 @@ mod tests {
             tracker.clone(),
         );
         let (acks, _completion) = AckSet::tracked_root(tracker);
-        let _required_wait = acks.required_wait_guard();
+        let _required_wait = acks.park_guard();
         let affected = [NodeRef {
             kind: ModelKind::Ingestor,
             identifier: ModelName::from(&ingestor),
@@ -2455,6 +2589,147 @@ mod tests {
         );
         assert_eq!(handoff.outstanding_acks, 0);
         assert!(handoff.is_drained());
+    }
+
+    /// Ownership capture waits for the route's already admitted batch to be published.
+    #[nervix_primitives::test]
+    async fn ownership_handoff_flushes_the_route_before_freezing_its_state() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        install_unpaced_test_domain(&runtime, &domain);
+        let ingestor = named::<IngestorName>("orders_source");
+        let relay = named::<RelayName>("orders");
+        let schema = test_schema(&[("user_id", ParseAsType::U32)]);
+        let counters = runtime
+            .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Ingestor, ingestor.clone()));
+        let force_flush = runtime.force_flush_participant(&domain, counters.clone());
+        let (branch_sender, mut branch_output) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
+        let (_route_sender, route_input) = mpsc::channel(TWO_ITEM_TEST_CHANNEL_CAPACITY);
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let mut route_task = IngestorRouteTask {
+            runtime_handle: runtime.clone(),
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            template: IngestorRouteTemplate {
+                branch: BranchInstanceTemplate {
+                    revision: ProcessorPlanRevision::new(),
+                    entity_kind: ModelKind::Ingestor,
+                    source: named("orders_source"),
+                    root_relay: relay.clone(),
+                    branch: None,
+                    branch_ttl: None,
+                    branch_max_instances: None,
+                    error_policies: ErrorPolicies::handled_by_log(),
+                    relays: HashMap::default(),
+                    processors: HashMap::default(),
+                    wasm_state_reset: None,
+                },
+                ack_boundary: BranchInstanceAckBoundary::Preserve,
+                flush_policy: RuntimeFlushPolicy::Each {
+                    interval: Duration::from_secs(3600),
+                    max_batch_size: u64::from(u32::MAX),
+                },
+            },
+            branch_sender,
+            pending: HashMap::default(),
+            quiesce: OutputBufferQuiesceGauge::new(counters.clone()),
+        };
+        let domain_clock = runtime
+            .bind_domain_clock(&domain)
+            .expect("the route fixture has an installed domain clock");
+        route_task
+            .accept(
+                RelayRecordBatch::single(
+                    schema.clone(),
+                    None,
+                    test_runtime_row([("user_id".to_string(), RuntimeValue::U32(11))]),
+                    AckSet::empty(),
+                )
+                .expect("route input batch should build"),
+                &domain_clock,
+            )
+            .await;
+        assert_eq!(counters.admitted_work(), 1);
+        let coordination = nervix_models::CoordinationIdentity::new(named("coordinator"), 1, 1);
+        let entity = NodeRef::new(ModelKind::Ingestor, ingestor.clone());
+        let engagement = {
+            let runtime = runtime.clone();
+            let domain = domain.clone();
+            let entity = entity.clone();
+            let coordination = coordination.clone();
+            nervix_primitives::task::spawn(async move {
+                runtime
+                    .engage_entity_gate_operation(
+                        &coordination,
+                        &domain,
+                        &[],
+                        &[entity],
+                        EntityGatePurpose::OwnershipHandoff,
+                        EntityGateLease {
+                            deadline: nervix_primitives::time::Instant::now()
+                                + Duration::from_secs(5),
+                            reason: "route flush before capture",
+                        },
+                    )
+                    .await
+            })
+        };
+        timeout(Duration::from_secs(1), async {
+            while counters.force_flush_obligations() == 0 {
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("handoff should publish the flush before waiting for the route");
+        let task =
+            nervix_primitives::task::spawn(route_task.run(route_input, shutdown_rx, force_flush));
+        let forced = timeout(Duration::from_secs(1), branch_output.recv())
+            .await
+            .expect("the handoff flush must publish admitted route output before freezing")
+            .expect("the branch entrypoint remains open");
+        assert_eq!(
+            row_value(&forced.runtime_row(0).expect("one row"), "user_id"),
+            Some(RuntimeValue::U32(11))
+        );
+        timeout(Duration::from_secs(1), engagement)
+            .await
+            .expect("handoff should finish after the route flush")
+            .expect("engagement task should not panic")
+            .expect("handoff gate should engage");
+        assert!(runtime.entity_gate_operation_is_held(&coordination));
+        timeout(Duration::from_secs(1), async {
+            while !runtime
+                .entity_gate_operation_drain_status(
+                    &coordination,
+                    &domain,
+                    &[],
+                    std::slice::from_ref(&entity),
+                    EntityGatePurpose::OwnershipHandoff,
+                )
+                .expect("the exact handoff scope reports its drain")
+                .is_drained()
+            {
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drain status publishes the freeze after the requested flush completes");
+        let freeze = OwnershipHandoffFreezeWatch::new(&runtime, entity.in_domain(&domain));
+        assert!(freeze.observe().is_frozen());
+        assert!(
+            runtime
+                .entity_drain_status(&domain, &[], &[entity], EntityGatePurpose::OwnershipHandoff)
+                .is_drained()
+        );
+        runtime
+            .release_entity_gate_operation(&coordination, &domain)
+            .await
+            .expect("handoff releases its exact hold");
+        shutdown.send_replace(true);
+        timeout(Duration::from_secs(1), task)
+            .await
+            .expect("route stops")
+            .expect("route does not panic");
     }
 
     /// A domain force flush releases route buffers that a long logical cadence still holds, and
@@ -2480,7 +2755,7 @@ mod tests {
             template: IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    source_kind: ModelKind::Ingestor,
+                    entity_kind: ModelKind::Ingestor,
                     source: named("orders_source"),
                     root_relay: relay.clone(),
                     branch: None,

@@ -7,7 +7,12 @@
 //! - **Depends on.** Typed branch keys, runtime-state identities, persistent maps and the primitive
 //!   publication boundary.
 //! - **Must not know.** What a checkpoint holds, how it is persisted, announced, fetched or
-//!   installed, schedules, the interconnect, or NSPL.
+//!   installed, schedules, the interconnect, or Plexus.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use std::{
     num::{NonZeroU64, NonZeroUsize},

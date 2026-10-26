@@ -5,29 +5,51 @@
 //! - **Owns.** Applying each step of a planned restore and recording it: importing the users,
 //!   creating a domain stopped with its declared resources and making it usable on every node,
 //!   importing each completed resource version under its archived number, and applying the domain's
-//!   models as one batch under the lease the restore holds on the domain.
-//! - **Depends on.** Consensus restore steps, resource version imports, the direct model batch, and
-//!   the planned restore.
-//! - **Must not know.** The archive format, the transport, or how the restore was planned.
+//!   models as one batch under the lease the restore holds on the domain, then installing compatible
+//!   archived runtime checkpoints under the restored schedule.
+//! - **Depends on.** Consensus restore steps, resource version imports, the direct model batch,
+//!   the verified archive description, and the planned restore.
+//! - **Must not know.** Archive record encoding, client transport, or how the restore was planned.
 //!
 //! A step whose consensus record exists is never applied again; a step's own effects are either
 //! recorded with it in one consensus command, or idempotent under the identity the restore gives
 //! them, so a step an earlier attempt applied without recording is completed rather than repeated.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_backup::DescribedRuntimeState;
 use nervix_consensus::{CommandExecution, ConsensusError, RestoreStepEffect};
+use nervix_interconnect::{RuntimeState, StatePlacementEnvelope, backup::RestoreStateInventory};
 use nervix_models::{
-    DomainName, ResourceId, ResourceUploadIdentity, ResourceUploadKey, RestoreStep, UserName,
+    BranchKeyFingerprint, ClusterNodeName, CoordinationIdentity, DomainName, ModelKind, NodeRef,
+    RemoteRuntimeField, ResourceId, ResourceUploadIdentity, ResourceUploadKey, RestoreState,
+    RestoreStateAuthority, RestoreStep, SchemaFingerprint, UserName,
 };
+use nervix_primitives::sync::Arc;
 
 use super::{
-    prepare::{VerifiedArchive, create_statements},
+    prepare::{RestoredBranchDeclarations, VerifiedArchive, create_statements},
     runner::{RestoreSteps, StepFailure},
 };
 use crate::{
-    application::{resource::ImportedResourceVersion, session_service::SessionServiceImpl},
+    application::{
+        backup::{
+            interconnect::{InstallRestoredStateAction, InstallRestoredStateRequest},
+            restore_storage::RestoredStateSource,
+        },
+        resource::ImportedResourceVersion,
+        session_service::SessionServiceImpl,
+    },
     registry::{PlannedDomain, RestorePlan},
+    runtime::{RESTORE_STATE_CHUNK_BYTES, RestoredRuntimeState, StagedArtifact},
 };
 
 /// The steps of one admitted restore, taking effect in consensus and the stores this leader
@@ -37,6 +59,7 @@ pub(super) struct ServerRestoreSteps<'a> {
     pub(super) execution: &'a CommandExecution,
     pub(super) plan: &'a RestorePlan,
     pub(super) archive: &'a VerifiedArchive,
+    pub(super) state: RestoreState,
 }
 
 impl RestoreSteps for ServerRestoreSteps<'_> {
@@ -48,7 +71,7 @@ impl RestoreSteps for ServerRestoreSteps<'_> {
             .pause_restore_step_if_armed(self.service.inner.consensus.local_node_id(), step)
             .await;
         self.service
-            .apply_restore_step(self.execution, self.plan, step, self.archive)
+            .apply_restore_step(self.execution, self.plan, step, self.archive, self.state)
             .await
     }
 }
@@ -66,6 +89,20 @@ pub(in crate::application) fn restored_upload_key(
         id.domain.clone(),
         id.identifier.clone(),
         identity,
+    )
+}
+
+/// An archived branch key as the typed runtime fields a restored placement names.
+pub(super) fn remote_branch_key(
+    branch: Option<&Vec<nervix_backup::StateField>>,
+) -> Option<Vec<RemoteRuntimeField>> {
+    let fields = branch?;
+    Some(
+        fields
+            .iter()
+            .cloned()
+            .map(|field| field.into_remote())
+            .collect(),
     )
 }
 
@@ -90,6 +127,7 @@ impl SessionServiceImpl {
         plan: &RestorePlan,
         step: &RestoreStep,
         archive: &VerifiedArchive,
+        state: RestoreState,
     ) -> Result<(), StepFailure> {
         match step {
             RestoreStep::Users => {
@@ -124,10 +162,501 @@ impl SessionServiceImpl {
                 let domain = planned_domain(plan, target)?;
                 self.apply_restored_models(execution, domain, archive)
                     .await?;
-                self.record_restore_step(execution, step, RestoreStepEffect::Completion)
-                    .await
+                let authority = self
+                    .install_restored_state(execution, domain, archive, state)
+                    .await?;
+                self.record_restore_step(
+                    execution,
+                    step,
+                    RestoreStepEffect::InstalledState {
+                        authority,
+                        clock: domain.activation.clock.clone(),
+                    },
+                )
+                .await
             }
         }
+    }
+
+    /// Installs state only after models have published their new stopped-domain schedule. A
+    /// retry stages a new fenced generation and replaces the complete stopped-domain set.
+    async fn install_restored_state(
+        &self,
+        execution: &CommandExecution,
+        domain: &PlannedDomain,
+        archive: &VerifiedArchive,
+        state: RestoreState,
+    ) -> Result<RestoreStateAuthority, StepFailure> {
+        struct RestoredStateSection {
+            reference: NodeRef,
+            schema: SchemaFingerprint,
+            branch_fingerprint: Option<BranchKeyFingerprint>,
+            branch_key: Option<Vec<RemoteRuntimeField>>,
+            runtime_state: RuntimeState,
+            revision: u64,
+        }
+
+        let authority = match self
+            .inner
+            .consensus
+            .begin_restore_state_installation(execution.reference.clone(), domain.target.clone())
+            .await
+        {
+            Ok(authority) => authority,
+            Err(error) => return Err(self.consensus_step_failure(&error).await),
+        };
+        let mut nodes = self.inner.cluster.live_node_ids().await;
+        nodes.push(self.inner.consensus.local_node_id().clone());
+        let mut inventories = nodes
+            .into_iter()
+            .map(|node| (node, RestoreStateInventory::default()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let schedule = self.inner.consensus.current_schedule().await;
+        let scheduled = schedule.domain(&domain.target);
+        // Planning checked these keys against the schedule it planned; the published schedule is
+        // the one installation stages under, so no key it would not route is staged.
+        if state != RestoreState::ConfigurationOnly
+            && let Some(scheduled) = scheduled
+        {
+            archive
+                .validate_branch_keys(&self.inner.runtime, &domain.source, scheduled)
+                .await
+                .map_err(|refusal| StepFailure::Failed(format!("{refusal:#}")))?;
+        }
+        let mut lifecycles = Vec::new();
+        for archived in archive.states_for(&domain.source) {
+            if let DescribedRuntimeState::BranchLifecycle { lifecycle, .. } = archived {
+                lifecycles.push(lifecycle);
+            }
+        }
+        // Stage lifecycle before guest saves; the published generation contains both at once.
+        for first_lifecycle in [true, false] {
+            nervix_primitives::task::consume_budget().await;
+            if state == RestoreState::ConfigurationOnly {
+                break;
+            }
+            for (index, archived) in archive.states_for(&domain.source).iter().enumerate() {
+                nervix_primitives::task::consume_budget().await;
+                let is_lifecycle =
+                    matches!(archived, DescribedRuntimeState::BranchLifecycle { .. });
+                if is_lifecycle != first_lifecycle {
+                    continue;
+                }
+                let RestoredStateSection {
+                    reference,
+                    schema,
+                    branch_fingerprint,
+                    branch_key,
+                    runtime_state,
+                    revision,
+                } = match archived {
+                    DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => {
+                        RestoredStateSection {
+                            reference: NodeRef::new(lifecycle.owner_kind, lifecycle.entity.clone()),
+                            schema: lifecycle.schema,
+                            branch_fingerprint: None,
+                            branch_key: None,
+                            runtime_state: RuntimeState::BranchLru {
+                                schema: lifecycle.schema,
+                            },
+                            revision: lifecycle.revision,
+                        }
+                    }
+                    DescribedRuntimeState::KafkaOffsets { offsets, .. } => {
+                        if state == RestoreState::WithoutSourceOffsets {
+                            continue;
+                        }
+                        RestoredStateSection {
+                            reference: NodeRef::new(ModelKind::Ingestor, offsets.entity.clone()),
+                            schema: offsets.schema,
+                            branch_fingerprint: None,
+                            branch_key: None,
+                            runtime_state: RuntimeState::KafkaOffset,
+                            revision: offsets.revision,
+                        }
+                    }
+                    DescribedRuntimeState::Materialized { descriptor, .. } => {
+                        let reference = NodeRef::new(ModelKind::Relay, descriptor.entity.clone());
+                        RestoredStateSection {
+                            reference,
+                            schema: descriptor.schema,
+                            branch_fingerprint: None,
+                            branch_key: None,
+                            runtime_state: RuntimeState::MaterializedRelay {
+                                schema: descriptor
+                                    .schema
+                                    .materialized_at(domain.state.start_version),
+                            },
+                            revision: descriptor.revision,
+                        }
+                    }
+                    DescribedRuntimeState::Deduplicator { descriptor, .. } => {
+                        RestoredStateSection {
+                            reference: NodeRef::new(
+                                ModelKind::Deduplicator,
+                                descriptor.entity.clone(),
+                            ),
+                            schema: descriptor.schema,
+                            branch_fingerprint: descriptor.branch_fingerprint,
+                            branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                            runtime_state: RuntimeState::Deduplicator {
+                                schema: descriptor.schema,
+                            },
+                            revision: descriptor.revision,
+                        }
+                    }
+                    DescribedRuntimeState::Window { descriptor, .. } => RestoredStateSection {
+                        reference: NodeRef::new(
+                            ModelKind::WindowProcessor,
+                            descriptor.entity.clone(),
+                        ),
+                        schema: descriptor.schema,
+                        branch_fingerprint: descriptor.branch_fingerprint,
+                        branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                        runtime_state: RuntimeState::WindowProcessor {
+                            schema: descriptor.schema,
+                        },
+                        revision: descriptor.revision,
+                    },
+                    DescribedRuntimeState::Wasm { descriptor, .. } => RestoredStateSection {
+                        reference: NodeRef::new(
+                            ModelKind::WasmProcessor,
+                            descriptor.entity.clone(),
+                        ),
+                        schema: descriptor.schema,
+                        branch_fingerprint: descriptor.branch_fingerprint,
+                        branch_key: remote_branch_key(descriptor.branch.as_ref()),
+                        runtime_state: RuntimeState::WasmProcessor {
+                            schema: descriptor.schema,
+                            generation: descriptor.generation,
+                        },
+                        revision: descriptor.revision,
+                    },
+                };
+                let Some(node) = scheduled.and_then(|scheduled| scheduled.nodes.get(&reference))
+                else {
+                    tracing::warn!(domain = %domain.target, entity = %reference.identifier, "skipped state for an entity absent from the restored schedule");
+                    continue;
+                };
+                if schema != node.schema_fingerprint {
+                    tracing::warn!(domain = %domain.target, entity = %reference.identifier, "skipped state with a mismatched schema fingerprint");
+                    continue;
+                }
+                let runtime_state = match runtime_state {
+                    RuntimeState::WasmProcessor { schema, .. } => {
+                        let Some(generations) = node.wasm_state_generations() else {
+                            return Err(StepFailure::Failed(format!(
+                                "restored WASM processor '{}' has no published state generation",
+                                reference.identifier
+                            )));
+                        };
+                        RuntimeState::WasmProcessor {
+                            schema,
+                            generation: generations.of_branch(branch_fingerprint.as_ref()),
+                        }
+                    }
+                    state => state,
+                };
+                let (artifact, offset, length, digest) = match archived {
+                    DescribedRuntimeState::Wasm { guest, .. } => (
+                        archive.artifact(),
+                        guest.offset,
+                        guest.length,
+                        *guest.digest.as_bytes(),
+                    ),
+                    DescribedRuntimeState::Materialized {
+                        descriptor, groups, ..
+                    } => {
+                        let Some(schema) = domain.materialized_schemas.get(&descriptor.entity)
+                        else {
+                            continue;
+                        };
+                        let Some(scheduled) = scheduled else {
+                            continue;
+                        };
+                        let declarations = RestoredBranchDeclarations::of(scheduled, &reference)
+                            .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
+                        let artifact = Arc::new(
+                            super::materialized::prepare_materialized_checkpoint(
+                                &self.inner.runtime,
+                                archive,
+                                descriptor,
+                                groups,
+                                schema.clone(),
+                                Arc::new(declarations),
+                            )
+                            .await
+                            .map_err(|error| StepFailure::Failed(format!("{error:#}")))?,
+                        );
+                        let length = artifact.length();
+                        let digest = artifact.digest();
+                        (artifact, 0, length, digest)
+                    }
+                    DescribedRuntimeState::BranchLifecycle { .. }
+                    | DescribedRuntimeState::KafkaOffsets { .. } => {
+                        let artifact = archive
+                            .stage_native_checkpoint(&self.inner.runtime, &domain.source, index)
+                            .await
+                            .map_err(|error| StepFailure::Failed(format!("{error:#}")))?;
+                        let length = artifact.length();
+                        let digest = artifact.digest();
+                        (artifact, 0, length, digest)
+                    }
+                    DescribedRuntimeState::Deduplicator {
+                        descriptor, groups, ..
+                    } => {
+                        let Some(key_schema) =
+                            domain.branch_state_schemas.deduplicator(&descriptor.entity)
+                        else {
+                            continue;
+                        };
+                        #[cfg(feature = "testing")]
+                        self.inner
+                            .runtime
+                            .pause_restore_branch_state_conversion_if_armed(&domain.target)
+                            .await;
+                        let artifact = Arc::new(
+                            super::branch_state::prepare_deduplicator_checkpoint(
+                                &self.inner.runtime,
+                                archive,
+                                descriptor,
+                                groups,
+                                key_schema,
+                            )
+                            .await
+                            .map_err(|error| StepFailure::Failed(format!("{error:#}")))?,
+                        );
+                        let length = artifact.length();
+                        let digest = artifact.digest();
+                        (artifact, 0, length, digest)
+                    }
+                    DescribedRuntimeState::Window {
+                        descriptor, groups, ..
+                    } => {
+                        let Some(window_schemas) =
+                            domain.branch_state_schemas.window(&descriptor.entity)
+                        else {
+                            continue;
+                        };
+                        if let Some(skip) =
+                            window_schemas.skip_of(descriptor, lifecycles.iter().copied())
+                        {
+                            tracing::warn!(
+                                domain = %domain.target,
+                                entity = %descriptor.entity,
+                                reason = skip.reason(),
+                                "skipped archived window state"
+                            );
+                            continue;
+                        }
+                        #[cfg(feature = "testing")]
+                        self.inner
+                            .runtime
+                            .pause_restore_branch_state_conversion_if_armed(&domain.target)
+                            .await;
+                        let artifact = Arc::new(
+                            super::branch_state::prepare_window_checkpoint(
+                                &self.inner.runtime,
+                                archive,
+                                descriptor,
+                                groups,
+                                window_schemas,
+                            )
+                            .await
+                            .map_err(|error| StepFailure::Failed(format!("{error:#}")))?,
+                        );
+                        let length = artifact.length();
+                        let digest = artifact.digest();
+                        (artifact, 0, length, digest)
+                    }
+                };
+                let checkpoint = RestoredRuntimeState {
+                    placement: StatePlacementEnvelope {
+                        domain: domain.target.clone(),
+                        state: runtime_state,
+                        kind: reference.kind,
+                        identifier: reference.identifier,
+                        branch_key,
+                    },
+                    branch_fingerprint,
+                    revision,
+                    length,
+                    digest,
+                };
+                for owner_or_replica in &node.assigned_nodes {
+                    nervix_primitives::task::consume_budget().await;
+                    let inventory = inventories.entry(owner_or_replica.clone()).or_default();
+                    inventory.checkpoints =
+                        inventory.checkpoints.checked_add(1).ok_or_else(|| {
+                            StepFailure::Failed(
+                                "restore checkpoint count exceeds address space".to_string(),
+                            )
+                        })?;
+                    inventory.payload_bytes =
+                        inventory.payload_bytes.checked_add(length).ok_or_else(|| {
+                            StepFailure::Failed(
+                                "restore state length exceeds address space".to_string(),
+                            )
+                        })?;
+                    self.install_restored_checkpoint_on(
+                        owner_or_replica,
+                        &authority,
+                        checkpoint.clone(),
+                        artifact.clone(),
+                        offset,
+                    )
+                    .await?;
+                }
+            }
+        }
+        // No published checkpoint changes until every compatible section has staged successfully.
+        let local = self.inner.consensus.local_node_id().clone();
+        let local_inventory = inventories
+            .remove(&local)
+            .verified("the coordinator is an installation target");
+        for (node, inventory) in std::iter::once((local, local_inventory)).chain(inventories) {
+            nervix_primitives::task::consume_budget().await;
+            if &node == self.inner.consensus.local_node_id() {
+                self.publish_restored_state_generation(&domain.target, &authority, inventory)
+                    .await
+                    .map_err(|failure| StepFailure::Failed(failure.to_string()))?;
+            } else {
+                let coordination = self
+                    .inner
+                    .interconnect
+                    .next_coordination_identity()
+                    .map_err(|error| StepFailure::Failed(error.to_string()))?;
+                self.send_restored_state_action(
+                    &node,
+                    &coordination,
+                    &domain.target,
+                    &authority,
+                    InstallRestoredStateAction::Publish { inventory },
+                )
+                .await?;
+            }
+        }
+        Ok(authority)
+    }
+
+    async fn install_restored_checkpoint_on(
+        &self,
+        node: &ClusterNodeName,
+        authority: &RestoreStateAuthority,
+        checkpoint: RestoredRuntimeState,
+        artifact: Arc<StagedArtifact>,
+        source_offset: u64,
+    ) -> Result<(), StepFailure> {
+        if node == self.inner.consensus.local_node_id() {
+            return self
+                .stage_restored_state_checkpoint(
+                    authority,
+                    checkpoint,
+                    RestoredStateSource::Archive {
+                        artifact,
+                        offset: source_offset,
+                    },
+                )
+                .await
+                .map_err(|error| StepFailure::Failed(error.to_string()));
+        }
+        let coordination = self
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .map_err(|error| StepFailure::Failed(error.to_string()))?;
+        let domain = checkpoint.placement.domain.clone();
+        let payload_length = checkpoint.length;
+        self.send_restored_state_action(
+            node,
+            &coordination,
+            &domain,
+            authority,
+            InstallRestoredStateAction::Begin {
+                placement: checkpoint.placement,
+                branch_fingerprint: checkpoint
+                    .branch_fingerprint
+                    .map(|fingerprint| *fingerprint.fingerprint()),
+                revision: checkpoint.revision,
+                length: checkpoint.length,
+                digest: checkpoint.digest,
+            },
+        )
+        .await?;
+        let mut offset = 0_u64;
+        while offset < payload_length {
+            nervix_primitives::task::consume_budget().await;
+            let position = source_offset.checked_add(offset).ok_or_else(|| {
+                StepFailure::Failed("restore state offset exceeds address space".to_string())
+            })?;
+            let length = payload_length
+                .checked_sub(offset)
+                .verified("the loop admits only offsets below the payload length")
+                .min(
+                    u64::try_from(RESTORE_STATE_CHUNK_BYTES)
+                        .assured("the 64 KiB checkpoint chunk fits u64"),
+                );
+            let chunk = StagedArtifact::read_window(artifact.clone(), position, length)
+                .await
+                .map_err(|error| StepFailure::Failed(error.to_string()))?;
+            let length = u64::try_from(chunk.len())
+                .verified("read_window returned at most the requested 64 KiB");
+            self.send_restored_state_action(
+                node,
+                &coordination,
+                &domain,
+                authority,
+                InstallRestoredStateAction::Chunk {
+                    offset,
+                    payload: chunk.to_vec(),
+                },
+            )
+            .await?;
+            offset = offset.checked_add(length).ok_or_else(|| {
+                StepFailure::Failed("restore state offset exceeds address space".to_string())
+            })?;
+        }
+        self.send_restored_state_action(
+            node,
+            &coordination,
+            &domain,
+            authority,
+            InstallRestoredStateAction::Finish,
+        )
+        .await
+    }
+
+    async fn send_restored_state_action(
+        &self,
+        node: &ClusterNodeName,
+        coordination: &CoordinationIdentity,
+        domain: &DomainName,
+        authority: &RestoreStateAuthority,
+        action: InstallRestoredStateAction,
+    ) -> Result<(), StepFailure> {
+        let result = self
+            .inner
+            .interconnect
+            .request(
+                node,
+                InstallRestoredStateRequest {
+                    coordination: coordination.clone(),
+                    domain: domain.clone(),
+                    authority: authority.clone(),
+                    action,
+                },
+            )
+            .await
+            .map_err(|error| {
+                StepFailure::Failed(format!(
+                    "failed to send restored state to '{node}': {error}"
+                ))
+            })?;
+        result.map_err(|failure| {
+            StepFailure::Failed(format!(
+                "failed to install restored state on '{node}': {failure}"
+            ))
+        })
     }
 
     /// Records `step` with `effect` in consensus, which applies the effect unless the step is
@@ -163,7 +692,7 @@ impl SessionServiceImpl {
         if let Err(error) = self.apply_current_cluster_state().await {
             return Err(StepFailure::Failed(format!(
                 "domain '{domain}' was created, but its stopped state did not become usable: \
-                 {error}"
+                 {error:#}"
             )));
         }
         if let Err(error) = self.wait_for_authoritative_visibility().await {

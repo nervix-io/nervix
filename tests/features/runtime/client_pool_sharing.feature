@@ -7,14 +7,14 @@ Feature: Shared database client pools
   Background:
     Given Postgres is running
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
 
   Scenario: Emitters sharing a client stay within its declared maximum
     Given Postgres table "shared_pool_out_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
@@ -23,34 +23,27 @@ Feature: Shared database client pools
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_shared
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_shared
         POOL SIZE MIN 1 MAX 2
         CONFIG {
           'addr' = '{{postgres_addr}}&application_name=nervix_shared_{{test_id}}'
         };
-      CREATE EMITTER writer_one FROM notifications
-        TO POSTGRES postgres_shared INSERT TO TABLE shared_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_one FROM notifications
+        TO postgres_shared TABLE 'shared_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER writer_two FROM notifications
-        TO POSTGRES postgres_shared INSERT TO TABLE shared_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_two FROM notifications
+        TO postgres_shared TABLE 'shared_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER writer_three FROM notifications
-        TO POSTGRES postgres_shared INSERT TO TABLE shared_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_three FROM notifications
+        TO postgres_shared TABLE 'shared_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -71,7 +64,7 @@ Feature: Shared database client pools
   @retained_task_handles
   Scenario: A borrower waiting on a full pool reports the wait and recovers
     Given Postgres table "contended_pool_out_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
@@ -80,28 +73,23 @@ Feature: Shared database client pools
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_contended
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_contended
         POOL SIZE MIN 1 MAX 1
         CONFIG {
           'addr' = '{{postgres_addr}}&application_name=nervix_contended_{{test_id}}'
         };
-      CREATE EMITTER writer_one FROM notifications
-        TO POSTGRES postgres_contended INSERT TO TABLE contended_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_one FROM notifications
+        TO postgres_contended TABLE 'contended_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER writer_two FROM notifications
-        TO POSTGRES postgres_contended INSERT TO TABLE contended_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_two FROM notifications
+        TO postgres_contended TABLE 'contended_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -128,7 +116,7 @@ Feature: Shared database client pools
   @retained_task_handles
   Scenario: A pool outlives one user and closes with the last
     Given Postgres table "retired_pool_out_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer, action string );
@@ -137,28 +125,23 @@ Feature: Shared database client pools
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT postgres_retired
-        TYPE POSTGRES
+      CREATE POSTGRES CLIENT postgres_retired
         POOL SIZE MIN 1 MAX 2
         CONFIG {
           'addr' = '{{postgres_addr}}&application_name=nervix_retired_{{test_id}}'
         };
-      CREATE EMITTER writer_one FROM notifications
-        TO POSTGRES postgres_retired INSERT TO TABLE retired_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_one FROM notifications
+        TO postgres_retired TABLE 'retired_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER writer_two FROM notifications
-        TO POSTGRES postgres_retired INSERT TO TABLE retired_pool_out_{{test_id}}
-        VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER writer_two FROM notifications
+        TO postgres_retired TABLE 'retired_pool_out_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "postgres_user_id" = input.user_id, "postgres_now" = NOW() AS STRING, "postgres_action" = LOWER(input.action) } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -168,14 +151,14 @@ Feature: Shared database client pools
       """
     And Postgres eventually reports at least 1 connections for application "nervix_retired_{{test_id}}"
     And Postgres never reports more than 2 connections for application "nervix_retired_{{test_id}}"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       BEGIN;
       DROP EMITTER writer_two;
       COMMIT;
       """
     Then Postgres eventually reports at least 1 connections for application "nervix_retired_{{test_id}}"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       BEGIN;
       DROP EMITTER writer_one;

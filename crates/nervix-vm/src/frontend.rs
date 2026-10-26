@@ -2,7 +2,15 @@
 //!
 //! - **Owns.** Converting semantic Models once into programs accepted by the expression VM.
 //! - **Depends on.** The vocabulary, Arrow schemas, and the VM's program types.
-//! - **Must not know.** NSPL tokens or diagnostics, registry state, or runtime tasks.
+//! - **Must not know.** Plexus tokens or diagnostics, registry state, or runtime tasks.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
 
 use std::num::NonZeroU64;
 
@@ -460,21 +468,20 @@ pub fn lower_transforming_route(
         RequiredFieldTarget::Output,
         route_span,
     )?;
-    normalized.where_clause = construction
-        .where_clause
-        .as_ref()
-        .map(|expression| {
+    normalized.where_clause = match construction.where_clause.as_ref() {
+        Some(expression) => {
             let span = operation_span(normalized.assignments.len());
-            resolve_transforming_expression(
+            Some(resolve_transforming_expression(
                 expression,
                 &initialized,
                 input_schema,
                 output_schema,
                 true,
                 span,
-            )
-        })
-        .transpose()?;
+            )?)
+        }
+        None => None,
+    };
     normalized.invocations = construction
         .invocations
         .iter()
@@ -1849,21 +1856,27 @@ impl DatetimeFunctionName {
             }
             None => None,
         };
-        DatetimeParser::new(format, local_time).map_err(|mismatch| {
-            let format = written.to_string();
-            let kind = match mismatch {
-                ParserZoneMismatch::ZoneWithOffset => {
-                    FrontendErrorKind::ParseFormatWithOffsetAndZone { format }
-                }
-                ParserZoneMismatch::ZoneWithUnixTime => {
-                    FrontendErrorKind::ParseFormatWithUnixTimeAndZone { format }
-                }
-                ParserZoneMismatch::MissingZone => {
-                    FrontendErrorKind::ParseFormatWithoutZone { format }
-                }
-            };
-            FrontendError::report(span, kind)
-        })
+        {
+            let mapping_input = DatetimeParser::new(format, local_time);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mismatch) => Err({
+                    let format = written.to_string();
+                    let kind = match mismatch {
+                        ParserZoneMismatch::ZoneWithOffset => {
+                            FrontendErrorKind::ParseFormatWithOffsetAndZone { format }
+                        }
+                        ParserZoneMismatch::ZoneWithUnixTime => {
+                            FrontendErrorKind::ParseFormatWithUnixTimeAndZone { format }
+                        }
+                        ParserZoneMismatch::MissingZone => {
+                            FrontendErrorKind::ParseFormatWithoutZone { format }
+                        }
+                    };
+                    FrontendError::report(span, kind)
+                }),
+            }
+        }
     }
 
     /// How a call resolves local times its zone skips or repeats, rejecting them when it does not
@@ -1989,6 +2002,10 @@ fn scalar_data_type(target: &ParseAsType, span: Span) -> FrontendResult<DataType
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_schema::Field;
     use nervix_models::InheritedField;
@@ -2000,12 +2017,12 @@ mod tests {
     }
 
     fn expression(source: &str) -> ModelExpression {
-        nervix_nspl::parse_expression(source).assured("test expressions are valid NSPL")
+        nervix_plexus::parse_expression(source).assured("test expressions are valid Plexus")
     }
 
     fn construction(source: &str) -> RouteConstruction {
-        nervix_nspl::parse_route_construction(source)
-            .assured("test route constructions are valid NSPL")
+        nervix_plexus::parse_route_construction(source)
+            .assured("test route constructions are valid Plexus")
     }
 
     fn nullable_schema(fields: &[(&str, DataType)]) -> Schema {

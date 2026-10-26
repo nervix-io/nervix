@@ -7,6 +7,11 @@
 //! - **Depends on.** Typed vocabulary, expression parsing, and shared route drafts.
 //! - **Must not know.** Registry state, runtime execution, or session transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::{Report, ResultExt as _};
@@ -15,7 +20,7 @@ use nervix_models::{
     JunctionName, MaterializedStateDependency, MaterializedStatePolicy, ModelKind, NodeRef,
     ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName,
 };
-use nervix_nspl::parse_expression;
+use nervix_plexus::parse_expression;
 use thiserror::Error;
 
 use super::{
@@ -178,14 +183,20 @@ impl StateDependencyDraft {
             StatePolicyDraft::Default(assignments) => {
                 let mut built = Vec::new();
                 for (assignment_index, assignment) in assignments.iter().enumerate() {
-                    built.push(assignment.build().map_err(|error| {
-                        let cause = error.current_context().clone();
-                        error.change_context(ProcessorDraftError::StateDefault {
-                            index,
-                            assignment: assignment_index + 1,
-                            cause,
-                        })
-                    })?);
+                    built.push({
+                        let mapping_input = assignment.build();
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err({
+                                let cause = error.current_context().clone();
+                                error.change_context(ProcessorDraftError::StateDefault {
+                                    index,
+                                    assignment: assignment_index + 1,
+                                    cause,
+                                })
+                            }),
+                        }
+                    }?);
                 }
                 MaterializedStatePolicy::Default(built)
             }
@@ -505,13 +516,19 @@ impl ProcessorDraft {
                 ProcessorFamily::Junction => route.build_preserving(),
                 ProcessorFamily::Reingestor => route.build_reingestor(),
             };
-            routes.push(built.map_err(|error| {
-                let cause = error.current_context().clone();
-                error.change_context(ProcessorDraftError::Route {
-                    index: index + 1,
-                    cause,
-                })
-            })?);
+            routes.push({
+                let mapping_input = built;
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let cause = error.current_context().clone();
+                        error.change_context(ProcessorDraftError::Route {
+                            index: index + 1,
+                            cause,
+                        })
+                    }),
+                }
+            }?);
         }
         Ok(ProcessorParts {
             inputs,
@@ -581,6 +598,10 @@ pub(super) enum ProcessorDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
@@ -588,7 +609,7 @@ mod tests {
         FieldScope, Literal, MaterializedStatePolicy, Model, ModelName, OutputBranch,
         RequestedResourceVersion, Statement,
     };
-    use nervix_nspl::statement::parse_statement;
+    use nervix_plexus::statement::parse_statement;
 
     use super::*;
     use crate::create_dialog::ingestor_route_draft::{
@@ -749,7 +770,7 @@ mod tests {
             Box::new(Model::<RequestedResourceVersion>::Junction(built)),
             false,
         ));
-        let canonical = statement.to_canonical_nspl().assured("junction renders");
+        let canonical = statement.to_canonical_plexus().assured("junction renders");
         assert_eq!(
             parse_statement(&canonical).assured("canonical junction parses"),
             statement

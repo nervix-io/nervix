@@ -7,33 +7,43 @@
 //! - **Depends on.** The Models and the runtime reports it renders.
 //! - **Must not know.** Where the values it renders were gathered.
 
-use std::{fmt::Write as _, time::Duration};
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
+use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
 use arch_into::ArchInto;
-use meticulous::ResultExt as _;
 use nervix_dataflow_graph::{DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
-    DataflowNodeStatusEnvelope, IngestorDescribeEnvelope, LookupDescribeEnvelope,
+    DataflowNodeStatusEnvelope, DecodeRejectionEnvelope, IngestorDescribeEnvelope,
+    LookupDescribeEnvelope, TransportPositionEnvelope,
 };
 use nervix_models::{
-    BranchSelection, CanonicalNsplError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
+    BranchSelection, CanonicalPlexusError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
-    CreateReorderer, CreateWindowProcessor, EmitSink, EmitterBody, IcebergCatalog, IngestSource,
-    IngestTimestampSource, IngestorInput, KafkaOffsetMode, Model, ModelKind, ModelName,
-    MongoDbConflictAction, MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy,
-    PostgresConflictAction, ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion,
-    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
-    ResourceVersionEntries, ScheduledNode, WasmStateInspection, expression_to_nspl,
-    ingest_quiesce_to_nspl,
+    CreateReorderer, CreateWindowProcessor, EmitterBody, FieldPath, HeaderModel,
+    IngestTimestampSource, IngestorEntity, IngestorInput, KafkaIngestor, KafkaOffsetMode,
+    KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, PlacementName, PlacementPolicy,
+    ProcessorInputs, ProcessorOutputs, PrometheusIngestor, PulsarIngestor, PulsarTopicIngestor,
+    RelayName, RequestedResourceVersion, ResourceDescription, ResourceEntryContent,
+    ResourceManifestEntry, ResourceUsage, ResourceVersionEntries, ScheduledNode,
+    WasmStateInspection, expression_to_plexus, ingest_quiesce_to_plexus,
+    ingestor_input_body_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
+use sorted_vec::SortedSet;
 
 use crate::{
     registry::{
         PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
     },
-    runtime::IngestorDescribe as RuntimeIngestorDescribe,
+    runtime::{DecodeRejection, IngestorDescribe as RuntimeIngestorDescribe, TransportPosition},
 };
 
 pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
@@ -48,6 +58,12 @@ pub(in crate::application) fn runtime_ingestor_describe_to_envelope(
         quiesce_buffered_bytes: summary.quiesce_counters.buffered_bytes.arch_into(),
         quiesce_dropped_total: summary.quiesce_counters.dropped_total,
         quiesce_rejected_total: summary.quiesce_counters.rejected_total,
+        transport_redeliveries_total: summary.transport_redeliveries_total,
+        decode_rejections_total: summary.decode_rejections_total,
+        last_decode_rejection: summary
+            .last_decode_rejection
+            .map(decode_rejection_to_envelope),
+        oversized_payloads_total: summary.oversized_payloads_total,
         memory_backpressure_paused: summary.memory_backpressure_paused,
         transient_error: summary.transient_error,
         reconnect_backoff: summary.reconnect_backoff,
@@ -88,6 +104,12 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
                 dropped_total: summary.quiesce_dropped_total,
                 rejected_total: summary.quiesce_rejected_total,
             },
+            transport_redeliveries_total: summary.transport_redeliveries_total,
+            decode_rejections_total: summary.decode_rejections_total,
+            last_decode_rejection: summary
+                .last_decode_rejection
+                .map(decode_rejection_from_envelope),
+            oversized_payloads_total: summary.oversized_payloads_total,
             memory_backpressure_paused: summary.memory_backpressure_paused,
             transient_error: summary.transient_error,
             reconnect_backoff: summary.reconnect_backoff,
@@ -113,6 +135,68 @@ pub(in crate::application) fn runtime_ingestor_describe_from_envelope(
         },
         summary.metrics,
     )
+}
+
+/// The envelope a decode rejection crosses between nodes in.
+fn decode_rejection_to_envelope(rejection: DecodeRejection) -> DecodeRejectionEnvelope {
+    let mut fields = Vec::with_capacity(rejection.fields.len());
+    for field in rejection.fields.iter() {
+        fields.push(field.as_str().to_string());
+    }
+    let position = match rejection.position {
+        Some(TransportPosition::Kafka {
+            topic,
+            partition,
+            offset,
+        }) => Some(TransportPositionEnvelope::Kafka {
+            topic,
+            partition,
+            offset,
+        }),
+        Some(TransportPosition::Syslog { peer }) => {
+            Some(TransportPositionEnvelope::Syslog { peer })
+        }
+        None => None,
+    };
+    DecodeRejectionEnvelope {
+        reference: rejection.reference.as_u128(),
+        codec: rejection.codec,
+        position,
+        fields,
+        message: rejection.message,
+        occurred_at: rejection.occurred_at,
+    }
+}
+
+/// The decode rejection a node reported in `envelope`.
+fn decode_rejection_from_envelope(envelope: DecodeRejectionEnvelope) -> DecodeRejection {
+    let mut fields = Vec::with_capacity(envelope.fields.len());
+    for field in envelope.fields {
+        fields.push(FieldPath::new(field));
+    }
+    let position = match envelope.position {
+        Some(TransportPositionEnvelope::Kafka {
+            topic,
+            partition,
+            offset,
+        }) => Some(TransportPosition::Kafka {
+            topic,
+            partition,
+            offset,
+        }),
+        Some(TransportPositionEnvelope::Syslog { peer }) => {
+            Some(TransportPosition::Syslog { peer })
+        }
+        None => None,
+    };
+    DecodeRejection {
+        reference: uuid::Uuid::from_u128(envelope.reference),
+        codec: envelope.codec,
+        position,
+        fields: SortedSet::from_unsorted(fields),
+        message: envelope.message,
+        occurred_at: envelope.occurred_at,
+    }
 }
 
 pub(in crate::application) fn dataflow_node_status_to_envelope(
@@ -197,7 +281,11 @@ pub(in crate::application) fn format_ingestor_describe_output(
     let mut lines = vec![
         format!("ingestor: {}", name.as_str()),
         "kind: INGESTOR".to_string(),
-        format!("source: {}", ingestor.input.source_label()),
+        format!(
+            "from: {} {}",
+            ingestor.input.source_phrase(),
+            ingestor_input_body_to_plexus(&ingestor.input)
+        ),
         format!(
             "streams: {}",
             ingestor
@@ -211,10 +299,16 @@ pub(in crate::application) fn format_ingestor_describe_output(
     match &ingestor.input {
         IngestorInput::Transport(transport) => {
             lines.push(format!("codec: {}", transport.codec.as_str()));
+            if let nervix_models::IngestorEntity::RabbitMq(
+                nervix_models::RabbitMqIngestor::Queue(source),
+            ) = &transport.source
+            {
+                lines.push(format!("mode: {}", source.mode.to_canonical_plexus()));
+            }
         }
         IngestorInput::Client(client) => {
             lines.push(format!("schema: {}", client.schema.as_str()));
-            lines.push(format!("mode: {}", client.mode.to_canonical_nspl()));
+            lines.push(format!("mode: {}", client.mode.to_canonical_plexus()));
         }
     }
     lines.extend([
@@ -242,7 +336,7 @@ pub(in crate::application) fn format_ingestor_describe_output(
         format!("ready: {}", if summary.ready { "true" } else { "false" }),
         format!(
             "quiesce: {}",
-            ingest_quiesce_to_nspl(ingestor.input.quiesce())
+            ingest_quiesce_to_plexus(ingestor.input.quiesce())
         ),
         format!(
             "quiesce state: {}",
@@ -264,7 +358,24 @@ pub(in crate::application) fn format_ingestor_describe_output(
             "nervix_ingestor_quiesce_rejected_total: {}",
             summary.quiesce_counters.rejected_total
         ),
+        format!(
+            "nervix_ingestor_transport_redeliveries_total: {}",
+            summary.transport_redeliveries_total
+        ),
+        format!(
+            "nervix_ingestor_decode_rejections_total: {}",
+            summary.decode_rejections_total
+        ),
+        format!(
+            "nervix_ingestor_oversized_payloads_total: {}",
+            summary.oversized_payloads_total
+        ),
     ]);
+    let last_decode_rejection = match summary.last_decode_rejection.as_ref() {
+        Some(rejection) => rejection.to_string(),
+        None => "-".to_string(),
+    };
+    lines.push(format!("last decode rejection: {last_decode_rejection}"));
     if let IngestorInput::Client(_) = &ingestor.input {
         lines.extend(format_client_producer_lines(summary));
     }
@@ -289,12 +400,12 @@ pub(in crate::application) fn format_ingestor_describe_output(
     };
     lines.push(format!("reconnect wait: {reconnect_wait}"));
 
-    if let Some(IngestSource::Kafka {
+    if let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
         topic,
         offset_mode,
         instances,
         ..
-    }) = ingestor.input.transport_source()
+    }))) = ingestor.input.transport_entity()
     {
         lines.push(format!("kafka topic: {}", topic.as_str()));
         lines.push(format!(
@@ -334,22 +445,49 @@ pub(in crate::application) fn format_ingestor_describe_output(
                 lines.push(format!("kafka instance {instance_idx} partitions: -"));
             }
         }
-    } else if let Some(IngestSource::Pulsar {
+    } else if let Some(IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
         topic,
         subscription,
         instances,
         ..
-    }) = ingestor.input.transport_source()
+    }))) = ingestor.input.transport_entity()
     {
         lines.push(format!("pulsar topic: {}", topic.as_str()));
-        lines.push(format!("pulsar subscription: {}", subscription.as_str()));
+        lines.push(format!(
+            "pulsar subscription: {}",
+            subscription.name.as_str()
+        ));
+        lines.push(format!(
+            "pulsar subscription ownership: {}",
+            subscription.ownership.keywords()
+        ));
         lines.push(format!("pulsar instances: {instances}"));
+    } else if let Some(IngestorEntity::Prometheus(PrometheusIngestor::Query(source))) =
+        ingestor.input.transport_entity()
+    {
+        lines.push(format!(
+            "prometheus max body size: {}",
+            source.max_body_size_in_effect()
+        ));
     }
+    lines.push(format!(
+        "headers: {}",
+        format_header_model(ingestor.input.entity_kind().capabilities().headers)
+    ));
 
     lines.join("\n")
 }
 
-/// One line of `SHOW INGESTORS`: the ingestor's source, its schema or codec, the node that
+/// How `DESCRIBE` shows the header model of one side: the model, or `none` where that side's
+/// messages carry no transport headers.
+fn format_header_model(model: Option<HeaderModel>) -> String {
+    match model {
+        Some(model) => model.to_string(),
+        None => "none".to_string(),
+    }
+}
+
+/// One line of `SHOW INGESTORS`: the pair the ingestor reads, its schema or codec, the node that
 /// executes it and its state, and for a client ingestor whether it admits batches and the
 /// producers attached to it. `summary` is `None` when no node executes the ingestor, or when its
 /// node could not be asked.
@@ -359,9 +497,9 @@ pub(in crate::application) fn format_ingestor_listing_line(
     summary: Option<&RuntimeIngestorDescribe>,
 ) -> String {
     let mut line = format!(
-        "{} source={}",
+        "{} from={}",
         ingestor.name.as_str(),
-        ingestor.input.source_label()
+        ingestor.input.source_phrase()
     );
     match &ingestor.input {
         IngestorInput::Transport(transport) => {
@@ -591,7 +729,7 @@ fn format_expression_list(expressions: &[nervix_models::Expression]) -> String {
     expressions
         .iter()
         .map(|expression| {
-            expression_to_nspl(expression).unwrap_or_else(|error| format!("<invalid: {error}>"))
+            expression_to_plexus(expression).unwrap_or_else(|error| format!("<invalid: {error}>"))
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -719,7 +857,7 @@ pub(in crate::application) fn format_correlator_describe_output(
         format!("match: {}", correlator.match_policy.as_ref()),
         format!(
             "correlate where: {}",
-            expression_to_nspl(&correlator.correlate_where)
+            expression_to_plexus(&correlator.correlate_where)
                 .unwrap_or_else(|error| format!("<invalid: {error}>"))
         ),
         format!("max time: {}", correlator.max_time),
@@ -793,7 +931,7 @@ pub(in crate::application) fn format_emitter_describe_output(
     emitter: &CreateEmitter,
     scheduled_node: Option<&ScheduledNode>,
     status: Option<&DataflowNodeStatusEnvelope>,
-) -> error_stack::Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     let name = name.into();
     let mut lines = vec![
         format!("emitter: {}", name.as_str()),
@@ -850,15 +988,15 @@ pub(in crate::application) fn format_emitter_describe_output(
                 EmitterBody::Client => "native Arrow",
             }
         ),
-        format!("sink: {}", format_emit_sink(&emitter.sink)?),
+        format!("to: {}", emitter.connector.destination_to_plexus()?),
         match &emitter.batch {
             Some(batch) => format!("batch: {batch}"),
             None => "batch: none".to_string(),
         },
-        format!("flush: {}", emitter.flush_policy.to_canonical_nspl()),
+        format!("flush: {}", emitter.flush_policy.to_canonical_plexus()),
         format!(
             "publishing mode: {}",
-            emitter.publishing_mode.to_canonical_nspl()
+            emitter.connector.publishing().to_canonical_plexus()
         ),
         format!(
             "filter-map: {}",
@@ -868,194 +1006,12 @@ pub(in crate::application) fn format_emitter_describe_output(
                 "none"
             }
         ),
+        format!(
+            "headers: {}",
+            format_header_model(emitter.connector.capabilities().headers)
+        ),
     ]);
     Ok(lines.join("\n"))
-}
-
-fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
-    Ok(match sink {
-        EmitSink::Client { schema } => format!("CLIENT schema={}", schema.as_str()),
-        EmitSink::Http {
-            client,
-            method,
-            path,
-        } => format!(
-            "HTTP client={} method={} path={}",
-            client.as_str(),
-            expression_to_nspl(method)?,
-            expression_to_nspl(path)?
-        ),
-        EmitSink::Kafka { client, topic } => {
-            format!("KAFKA client={} topic={}", client.as_str(), topic.as_str())
-        }
-        EmitSink::Pulsar { client, topic } => {
-            format!("PULSAR client={} topic={}", client.as_str(), topic.as_str())
-        }
-        EmitSink::RabbitMq { client, queue } => {
-            format!(
-                "RABBITMQ client={} queue={}",
-                client.as_str(),
-                queue.as_str()
-            )
-        }
-        EmitSink::Redis { client, channel } => {
-            format!(
-                "REDIS client={} channel={}",
-                client.as_str(),
-                channel.as_str()
-            )
-        }
-        EmitSink::Mqtt { client, topic } => {
-            format!("MQTT client={} topic={}", client.as_str(), topic.as_str())
-        }
-        EmitSink::Nats { client, subject } => {
-            format!(
-                "NATS client={} subject={}",
-                client.as_str(),
-                subject.as_str()
-            )
-        }
-        EmitSink::ZeroMq { client } => format!("ZEROMQ client={}", client.as_str()),
-        EmitSink::Syslog { client } => format!("SYSLOG client={}", client.as_str()),
-        EmitSink::Sqs {
-            client,
-            queue,
-            fifo_group,
-        } => {
-            let fifo = match fifo_group.as_ref() {
-                Some(group) => {
-                    let value = match group {
-                        nervix_models::SqsFifoGroup::FromBranch => "FROM BRANCH".to_string(),
-                        nervix_models::SqsFifoGroup::Expression(expression) => {
-                            nervix_models::expression_to_nspl(expression)
-                                .unwrap_or_else(|_| "<unrenderable expression>".to_string())
-                        }
-                    };
-                    format!(" fifo_group={value}")
-                }
-                None => String::new(),
-            };
-            format!(
-                "SQS client={} queue={}{}",
-                client.as_str(),
-                queue.as_str(),
-                fifo
-            )
-        }
-        EmitSink::Sentry { client } => format!("SENTRY client={}", client.as_str()),
-        EmitSink::Otel { client, signal, .. } => {
-            let signal = match signal {
-                nervix_models::OtelSignal::Logs => "logs".to_string(),
-                nervix_models::OtelSignal::Traces => "traces".to_string(),
-                nervix_models::OtelSignal::Metric(metric) => {
-                    format!("metric {}", metric.name)
-                }
-            };
-            format!("OTEL client={} signal={signal}", client.as_str())
-        }
-        EmitSink::ClickHouse { client, table, .. } => format!(
-            "CLICKHOUSE client={} table={}",
-            client.as_str(),
-            table.as_str(),
-        ),
-        EmitSink::Postgres {
-            client,
-            table,
-            conflict_action,
-            ..
-        } => {
-            let conflict = match conflict_action {
-                PostgresConflictAction::None => String::new(),
-                PostgresConflictAction::DoNothing { target } => {
-                    let target = if target.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", target.join(","))
-                    };
-                    format!(" conflict=ON CONFLICT{target} DO NOTHING")
-                }
-                PostgresConflictAction::DoUpdate { target } => {
-                    let target = if target.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", target.join(","))
-                    };
-                    format!(" conflict=ON CONFLICT{target} DO UPDATE")
-                }
-            };
-            format!(
-                "POSTGRES client={} table={}{}",
-                client.as_str(),
-                table.as_str(),
-                conflict,
-            )
-        }
-        EmitSink::MySql {
-            client,
-            table,
-            conflict_action,
-            ..
-        } => {
-            let conflict = match conflict_action {
-                MySqlConflictAction::None => String::new(),
-                MySqlConflictAction::DoNothing => " conflict=ON CONFLICT DO NOTHING".to_string(),
-                MySqlConflictAction::DoUpdate => " conflict=ON CONFLICT DO UPDATE".to_string(),
-            };
-            format!(
-                "MYSQL client={} table={}{}",
-                client.as_str(),
-                table.as_str(),
-                conflict,
-            )
-        }
-        EmitSink::MongoDb {
-            client,
-            collection,
-            conflict_action,
-            ..
-        } => {
-            let conflict = match conflict_action {
-                MongoDbConflictAction::None => String::new(),
-                MongoDbConflictAction::DoNothing { target } => {
-                    format!(" conflict=ON CONFLICT ({}) DO NOTHING", target.join(","))
-                }
-                MongoDbConflictAction::DoUpdate { target } => {
-                    format!(" conflict=ON CONFLICT ({}) DO UPDATE", target.join(","))
-                }
-            };
-            format!(
-                "MONGODB client={} collection={}{}",
-                client.as_str(),
-                collection.as_str(),
-                conflict,
-            )
-        }
-        EmitSink::Iceberg {
-            backend,
-            client,
-            table,
-            values: _,
-            location,
-            catalog,
-            commit_each,
-            max_commit_size,
-        } => {
-            let catalog = match catalog {
-                IcebergCatalog::Rest { client } => format!("rest client={}", client.as_str()),
-            };
-            format!(
-                "ICEBERG backend={} client={} table={} location={} catalog={} commit_each={} \
-                 max_commit_size={}",
-                backend.as_ref(),
-                client.as_str(),
-                table.as_str(),
-                location,
-                catalog,
-                commit_each,
-                max_commit_size
-            )
-        }
-    })
 }
 
 pub(in crate::application) fn format_window_processor_describe_output(
@@ -1199,14 +1155,10 @@ fn format_wasm_checkpoint_lines(inspection: Option<&WasmStateInspection>) -> Vec
     };
     let mut lines = Vec::new();
     for checkpoint in &inspection.checkpoints {
-        let mut branch = "unbranched".to_string();
-        if let Some(fingerprint) = checkpoint.branch {
-            branch.clear();
-            for byte in fingerprint.fingerprint() {
-                write!(branch, "{byte:02x}")
-                    .assured("writing fixed-size fingerprint bytes to String cannot fail");
-            }
-        }
+        let branch = match checkpoint.branch {
+            Some(fingerprint) => fingerprint.to_string(),
+            None => "unbranched".to_string(),
+        };
         let committed = match checkpoint.committed_revision {
             Some(revision) => revision.to_string(),
             None => "none".to_string(),
@@ -1380,11 +1332,11 @@ fn format_window_aggregate_demand(
             demand
                 .functions
                 .iter()
-                .map(|function| function.nspl_name())
+                .map(|function| function.plexus_name())
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        format!("  storage: {}", demand.storage.nspl_name()),
+        format!("  storage: {}", demand.storage.plexus_name()),
         format!(
             "  references: {}",
             references.get(demand.id).copied().unwrap_or(0)
@@ -1555,10 +1507,8 @@ fn placement_member_model_is_eligible<Version>(model: &Model<Version>) -> bool {
         | Model::Reorderer(_)
         | Model::WindowProcessor(_)
         | Model::Emitter(_) => true,
-        Model::Ingestor(ingestor) => !matches!(
-            ingestor.input.transport_source(),
-            Some(IngestSource::Endpoint { .. })
-        ),
+        // Ingestors that execute on every node are outside placement rules.
+        Model::Ingestor(ingestor) => !ingestor.input.executes_on_every_cluster_node(),
         Model::Relay(_) => true,
         _ => false,
     }
@@ -1641,9 +1591,16 @@ pub(in crate::application) fn placement_groups_claimed_by_rule<'a>(
         .collect()
 }
 
+#[cfg(all(
+    test,
+    not(any(feature = "shuttle", feature = "loom", feature = "deloxide"))
+))]
+#[path = "describe_output_properties.rs"]
+mod properties;
+
 #[cfg(test)]
 mod tests {
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::{super::test_fixtures::placement_member, *};
 
@@ -1744,19 +1701,132 @@ mod tests {
         let nodes = vec![
             placement_member("shared", ModelKind::Junction),
             placement_member("shared", ModelKind::Deduplicator),
-            placement_member("sink", ModelKind::Emitter),
+            placement_member("emitter", ModelKind::Emitter),
         ];
 
         assert_eq!(
             format_placement_runtime_nodes(&nodes),
-            "junction:shared, deduplicator:shared, sink"
+            "junction:shared, deduplicator:shared, emitter"
         );
         assert_eq!(
             format_placement_runtime_nodes(&[
                 placement_member("source", ModelKind::Junction),
-                placement_member("sink", ModelKind::Emitter),
+                placement_member("emitter", ModelKind::Emitter),
             ]),
-            "source, sink"
+            "source, emitter"
         );
+    }
+
+    #[test]
+    fn a_prometheus_ingestor_describes_the_response_bound_in_effect() {
+        use nervix_models::{IngestQuiesceMode, PrometheusIngestMode, PrometheusQueryIngestor};
+
+        use super::super::test_fixtures::{named, scheduled_node};
+
+        let summary = RuntimeIngestorDescribe {
+            running: true,
+            ready: true,
+            quiesce_state: None,
+            quiesce_counters: Default::default(),
+            transport_redeliveries_total: 0,
+            decode_rejections_total: 0,
+            last_decode_rejection: None,
+            oversized_payloads_total: 0,
+            memory_backpressure_paused: false,
+            transient_error: None,
+            reconnect_backoff: None,
+            reconnect_wait_millis: None,
+            kafka_domain_offsets: None,
+            client_producers: None,
+        };
+        let written = "1KiB"
+            .parse()
+            .assured("the fixture size is a whole number of kibibytes");
+        for (max_body_size, line) in [
+            (None, "prometheus max body size: 16MiB"),
+            (Some(written), "prometheus max body size: 1KiB"),
+        ] {
+            let mut scheduled = scheduled_node("samples", ModelKind::Ingestor);
+            let Model::Ingestor(ingestor) = scheduled.config.as_mut() else {
+                panic!("the fixture constructs an ingestor");
+            };
+            let IngestorInput::Transport(input) = &mut ingestor.input else {
+                panic!("the fixture constructs a transport ingestor");
+            };
+            input.source = PrometheusQueryIngestor {
+                client: named("prom_main"),
+                query: "up".to_owned(),
+                max_body_size,
+                every: "15s"
+                    .parse()
+                    .assured("the fixture cadence is a positive duration"),
+                mode: PrometheusIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::Suspend,
+            }
+            .into();
+            let Model::Ingestor(ingestor) = scheduled.config.as_ref() else {
+                panic!("the fixture constructs an ingestor");
+            };
+
+            let described =
+                format_ingestor_describe_output(&ingestor.name, ingestor, &scheduled, &summary);
+
+            assert!(
+                described.lines().any(|candidate| candidate == line),
+                "expected `{line}` in {described}"
+            );
+        }
+    }
+
+    #[test]
+    fn placement_completion_respects_every_node_ingestor_declarations() {
+        use nervix_models::{
+            EndpointIngestMode, HttpEndpointIngestor, IngestQuiesceMode, IngestorEntity,
+            SyslogIngestMode, SyslogListenerIngestor, WebsocketsEndpointIngestor,
+        };
+
+        use super::super::test_fixtures::{named, scheduled_node};
+
+        let scheduled = scheduled_node("intake", ModelKind::Ingestor);
+        assert!(placement_member_model_is_eligible(
+            scheduled.config.as_ref()
+        ));
+
+        let sources: [IngestorEntity; 3] = [
+            HttpEndpointIngestor {
+                endpoint: named("http_intake"),
+                mode: EndpointIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::Reject {
+                    retry_after: "1s".to_owned(),
+                },
+            }
+            .into(),
+            WebsocketsEndpointIngestor {
+                endpoint: named("websocket_intake"),
+                mode: EndpointIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::EndpointBuffer {
+                    max_size: "1MiB".to_owned(),
+                },
+            }
+            .into(),
+            SyslogListenerIngestor {
+                client: named("syslog_listener"),
+                mode: SyslogIngestMode::NoAck,
+                quiesce: IngestQuiesceMode::Suspend,
+            }
+            .into(),
+        ];
+        for source in sources {
+            let mut model = scheduled.config.clone();
+            let Model::Ingestor(ingestor) = model.as_mut() else {
+                panic!("the fixture constructs an ingestor");
+            };
+            let IngestorInput::Transport(input) = &mut ingestor.input else {
+                panic!("the fixture constructs a transport ingestor");
+            };
+            input.source = source;
+            assert!(model.executes_on_every_cluster_node());
+            assert!(!placement_member_model_is_eligible(model.as_ref()));
+        }
     }
 }

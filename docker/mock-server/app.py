@@ -6,8 +6,10 @@ from aiohttp import WSMsgType, web
 
 
 served_http = set()
+answered_http = set()
 active_websockets = {}
 clock_source_requests = {}
+served_prometheus_vectors = set()
 
 
 async def handle_http(request: web.Request) -> web.StreamResponse:
@@ -18,11 +20,17 @@ async def handle_http(request: web.Request) -> web.StreamResponse:
 
     served_http.add(path)
     await asyncio.sleep(2)
+    answered_http.add(request.match_info["name"])
     return web.Response(
         status=200,
         body=b'{"user_id":42}',
         content_type="application/json",
     )
+
+
+async def http_observations(request: web.Request) -> web.StreamResponse:
+    name = request.match_info["name"]
+    return web.json_response({"answered": name in answered_http})
 
 
 async def handle_clock_source(request: web.Request) -> web.StreamResponse:
@@ -69,6 +77,34 @@ async def handle_prometheus_clock_source(request: web.Request) -> web.StreamResp
                 ],
             },
         }
+    )
+
+
+async def handle_prometheus_vector(request: web.Request) -> web.StreamResponse:
+    """Answers an instant query with a vector of `count` samples, labelled by their index.
+
+    Under `once`, the first query of a name gets the samples and every later one an empty vector,
+    so each sample is offered exactly once; under `always`, every query gets them.
+    """
+    name = request.match_info["name"]
+    count = int(request.match_info["count"])
+    repeat = request.match_info["repeat"]
+    if repeat == "once":
+        if name in served_prometheus_vectors:
+            count = 0
+        served_prometheus_vectors.add(name)
+    elif repeat != "always":
+        return web.Response(status=404, text=f"unknown repeat '{repeat}'")
+    query_time = float(request.query["time"])
+    result = [
+        {
+            "metric": {"source": "bulk", "index": str(index)},
+            "value": [query_time, str(index)],
+        }
+        for index in range(count)
+    ]
+    return web.json_response(
+        {"status": "success", "data": {"resultType": "vector", "result": result}}
     )
 
 
@@ -137,10 +173,15 @@ async def publish_ws(request: web.Request) -> web.StreamResponse:
 
 app = web.Application()
 app.router.add_get("/http/{name}", handle_http)
+app.router.add_get("/http-observations/{name}", http_observations)
 app.router.add_get("/clock-source/{name}", handle_clock_source)
 app.router.add_get(
     "/prometheus-clock-source/{name}/{delay_ms}/api/v1/query",
     handle_prometheus_clock_source,
+)
+app.router.add_get(
+    "/prometheus-vector/{name}/{count}/{repeat}/api/v1/query",
+    handle_prometheus_vector,
 )
 app.router.add_get("/clock-source-observations/{name}", clock_source_observations)
 app.router.add_delete("/clock-source-observations/{name}", reset_clock_source)

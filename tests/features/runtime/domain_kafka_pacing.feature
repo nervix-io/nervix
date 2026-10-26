@@ -1,13 +1,273 @@
 Feature: Kafka ingestor domain pacing
+  @kafka_start_generation @deloxide_stress
+  Scenario Outline: A START AT Kafka generation keeps acknowledged offsets when its instances resume on <cluster_size> nodes
+    Given Kafka is running
+    And the production sticky scheduler is configured
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And Kafka topic "start_once_in_{{test_id}}" exists with 2 partitions
+    And Kafka topic "start_once_out_{{test_id}}" is observed
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE CODEC resumed_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR source
+        FROM kafka_main TOPIC 'start_once_in_{{test_id}}'
+        OFFSET BY DOMAIN INSTANCES <instances> MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+        RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER sink FROM events
+        TO kafka_main TOPIC 'start_once_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING event_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START AT <start_point>;
+      """
+    When Kafka message is published to topic "start_once_in_{{test_id}}" partition 0
+      """
+      {"seq":1}
+      """
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 1
+      """
+      {"seq":2}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1}
+      {"seq":2}
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      ALTER KAFKA TOPIC INGESTOR source SET DECODE USING resumed_codec;
+      """
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 0
+      """
+      {"seq":3}
+      """
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 1
+      """
+      {"seq":4}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":3}
+      {"seq":4}
+      """
+    When the cluster is restarted
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 0
+      """
+      {"seq":5}
+      """
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 1
+      """
+      {"seq":6}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":5}
+      {"seq":6}
+      """
+    When Kafka topic "start_once_in_{{test_id}}" partition count is changed to 3
+    And Kafka message is published to topic "start_once_in_{{test_id}}" partition 2
+      """
+      {"seq":7}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":7}
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      STOP;
+      START AT '2020-01-01T00:00:00Z';
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1}
+      {"seq":2}
+      {"seq":3}
+      {"seq":4}
+      {"seq":5}
+      {"seq":6}
+      {"seq":7}
+      """
+
+    Examples:
+      | cluster_size | replica_count | instances | start_point            |
+      | 1            | 0             | 1         | NOW                    |
+      | 1            | 0             | 2         | '2020-01-01T00:00:00Z' |
+      | 3            | 1             | 2         | NOW                    |
+      | 3            | 1             | 2         | '2020-01-01T00:00:00Z' |
+
+  @kafka_start_generation_restore @deloxide_stress_restore
+  Scenario Outline: A backup preserves the applied START AT Kafka generation on <cluster_size> nodes
+    Given Kafka is running
+    And the production sticky scheduler is configured
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And Kafka topic "restored_start_in_{{test_id}}" exists with 2 partitions
+    And Kafka topic "restored_start_out_{{test_id}}" is observed
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE CODEC resumed_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT kafka_main CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR source
+        FROM kafka_main TOPIC 'restored_start_in_{{test_id}}'
+        OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+        RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC EMITTER sink FROM events
+        TO kafka_main TOPIC 'restored_start_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING event_codec
+        INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START AT NOW;
+      """
+    When Kafka message is published to topic "restored_start_in_{{test_id}}" partition 0
+      """
+      {"seq":1}
+      """
+    And Kafka message is published to topic "restored_start_in_{{test_id}}" partition 1
+      """
+      {"seq":2}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1}
+      {"seq":2}
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}} --timeout 60s" from node "{{leader}}" into "kafka-start.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
+    And Kafka topic "restored_start_out_{{test_id}}" is observed
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1}
+      {"seq":2}
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI restores "domain {{domain}} --resume" from "kafka-start.nvxb" on node "{{leader}}" reporting JSON
+    Then the CLI restore succeeded, restoring domain "{{domain}}" with 0 resource versions and 8 models
+    When Kafka message is published to topic "restored_start_in_{{test_id}}" partition 0
+      """
+      {"seq":3}
+      """
+    And Kafka message is published to topic "restored_start_in_{{test_id}}" partition 1
+      """
+      {"seq":4}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":3}
+      {"seq":4}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  @kafka_control_execution
+  Scenario Outline: A stalled Kafka domain resume uses bounded connector execution while another ingestor delivers on <cluster_size> nodes
+    Given a mock Kafka broker serves topic "control_wait_{{test_id}}"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( seq I64 );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE CODEC resume_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE KAFKA CLIENT slow_kafka CONFIG {
+        'bootstrap.servers' = '{{mock_kafka_addr}}',
+        'socket.timeout.ms' = '30000'
+      };
+      CREATE KAFKA TOPIC INGESTOR stalled_source
+        FROM slow_kafka TOPIC 'control_wait_{{test_id}}'
+        OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s
+        RETRY POLICY BACKOFF 100ms MAX 1s
+        ON QUIESCE SUSPEND DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE VHOST edge control-{{test_id}}.example.com;
+      CREATE ENDPOINT intake ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR healthy_source
+        FROM intake MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION healthy_subscription TO events;
+      START;
+      """
+    When mock Kafka message is published to topic "control_wait_{{test_id}}"
+      """
+      {"seq":1}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "seq":1
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "ingestor" "stalled_source" is saved as placeholder "kafka_owner"
+    Given the mock Kafka broker holds every answer
+    When these Plexus statements are executed on the leader node
+      """
+      ALTER KAFKA TOPIC INGESTOR stalled_source
+        SET DECODE USING resume_codec;
+      """
+    Then within "30s" node "{{kafka_owner}}" observability metric "nervix_execution_jobs_running" with labels eventually reaches at least 1
+      """
+      class="connector_storage"
+      """
+    When http payload is posted to host "control-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":42}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      "seq":42
+      """
+    When the mock Kafka broker releases its answers
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Unpaced Kafka ingestors consume messages without an explicit timestamp field
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -21,14 +281,13 @@ Feature: Kafka ingestor domain pacing
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -60,11 +319,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 200ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -78,14 +337,13 @@ Feature: Kafka ingestor domain pacing
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -102,7 +360,7 @@ Feature: Kafka ingestor domain pacing
       {"user_id":42}
       """
     Then the relay subscription does not receive a payload within "500ms"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -121,11 +379,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -142,14 +400,13 @@ Feature: Kafka ingestor domain pacing
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
@@ -181,11 +438,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 200ms SKEW 100000h;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -202,14 +459,13 @@ Feature: Kafka ingestor domain pacing
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_pacing_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_pacing_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP AT occurred_at
         TO notifications
@@ -226,7 +482,7 @@ Feature: Kafka ingestor domain pacing
       {"user_id":42,"occurred_at":"2026-04-07T00:00:00Z"}
       """
     Then the relay subscription does not receive a payload within "500ms"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -245,11 +501,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "1h"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -263,14 +519,13 @@ Feature: Kafka ingestor domain pacing
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -292,7 +547,7 @@ Feature: Kafka ingestor domain pacing
       "user_id":42
       """
     When the cluster is restarted
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
       """
@@ -320,13 +575,13 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -340,14 +595,13 @@ Feature: Kafka ingestor domain pacing
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -357,7 +611,7 @@ Feature: Kafka ingestor domain pacing
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_notifications_out FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_notifications_out FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -380,7 +634,7 @@ Feature: Kafka ingestor domain pacing
       """
       "user_id":42
       """
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       BEGIN;
       ALTER WIRE JSON SCHEMA notification_wire ADD FIELD note string OPTIONAL;
@@ -416,11 +670,11 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -434,14 +688,13 @@ Feature: Kafka ingestor domain pacing
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -462,11 +715,11 @@ Feature: Kafka ingestor domain pacing
       """
       "user_id":42
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START AT NOW;
       """
@@ -494,12 +747,12 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -513,14 +766,13 @@ Feature: Kafka ingestor domain pacing
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -550,7 +802,7 @@ Feature: Kafka ingestor domain pacing
       """
       {"user_id":43}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE INGESTOR kafka_notifications;
       """
@@ -577,12 +829,12 @@ Feature: Kafka ingestor domain pacing
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_{{test_id}}" exists with 2 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -596,14 +848,13 @@ Feature: Kafka ingestor domain pacing
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN INSTANCES 2 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -633,7 +884,7 @@ Feature: Kafka ingestor domain pacing
       """
       kafka observed partitions: 0
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE INGESTOR kafka_notifications;
       """
@@ -663,11 +914,11 @@ Feature: Kafka ingestor domain pacing
   Scenario Outline: Stopped unpaced domains do not ingest until explicitly started
     Given Kafka is running
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -681,14 +932,13 @@ Feature: Kafka ingestor domain pacing
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -705,7 +955,7 @@ Feature: Kafka ingestor domain pacing
       {"user_id":42}
       """
     Then the relay subscription does not receive a payload within "1s"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -716,6 +966,133 @@ Feature: Kafka ingestor domain pacing
     Then the relay subscription receives a payload
       """
       "user_id":42
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @kafka_unrecorded_partition_start
+  Scenario Outline: A partition added while an unpaced domain is stopped starts at its end when the Kafka client resets to latest on <cluster_size> nodes
+    Given Kafka is running
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And Kafka topic "added_latest_{{test_id}}" exists with 1 partitions
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA added_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA added_wire MODE STRICT ( seq integer );
+      CREATE CODEC added_codec FROM WIRE JSON SCHEMA added_wire TO SCHEMA added_event;
+      CREATE RELAY added_events SCHEMA added_event UNBRANCHED;
+      CREATE KAFKA CLIENT added_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'latest'
+      };
+      CREATE KAFKA TOPIC INGESTOR added_source
+        FROM added_kafka TOPIC 'added_latest_{{test_id}}'
+        OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING added_codec
+        TO added_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION added_subscription TO added_events;
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "added_source" on the leader node contains
+      """
+      kafka observed partitions: 0
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      STOP;
+      """
+    And Kafka topic "added_latest_{{test_id}}" partition count is changed to 2
+    And Kafka message is published to topic "added_latest_{{test_id}}" partition 1
+      """
+      {"seq":2}
+      """
+    And these Plexus statements are executed on the leader node
+      """
+      START;
+      """
+    Then within "60s" DESCRIBE INGESTOR "added_source" on the leader node contains
+      """
+      kafka observed partitions: 0,1
+      """
+    # The added partition has no domain offset, and the client resets to latest, so the ingestor
+    # starts it at its end and never reads the record published before it took the partition up.
+    And within "60s" repeatedly publishing Kafka message to topic "added_latest_{{test_id}}" partition 1 yields a relay subscription payload
+      """
+      {"seq":3}
+      """
+    And the last relay subscription payload contains '"seq":3'
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @kafka_unrecorded_partition_start
+  Scenario Outline: A partition added while an unpaced domain is stopped starts at its earliest record when the Kafka client resets to earliest on <cluster_size> nodes
+    Given Kafka is running
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And Kafka topic "added_earliest_{{test_id}}" exists with 1 partitions
+    When these Plexus statements are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA added_event ( seq I64 );
+      CREATE WIRE JSON SCHEMA added_wire MODE STRICT ( seq integer );
+      CREATE CODEC added_codec FROM WIRE JSON SCHEMA added_wire TO SCHEMA added_event;
+      CREATE RELAY added_events SCHEMA added_event UNBRANCHED;
+      CREATE KAFKA CLIENT added_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR added_source
+        FROM added_kafka TOPIC 'added_earliest_{{test_id}}'
+        OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING added_codec
+        TO added_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION added_subscription TO added_events;
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "added_source" on the leader node contains
+      """
+      kafka observed partitions: 0
+      """
+    When these Plexus statements are executed on the leader node
+      """
+      STOP;
+      """
+    And Kafka topic "added_earliest_{{test_id}}" partition count is changed to 2
+    And Kafka message is published to topic "added_earliest_{{test_id}}" partition 1
+      """
+      {"seq":2}
+      """
+    And these Plexus statements are executed on the leader node
+      """
+      START;
+      """
+    Then within "60s" DESCRIBE INGESTOR "added_source" on the leader node contains
+      """
+      kafka observed partitions: 0,1
+      """
+    # The added partition has no domain offset, and the client resets to earliest, so the ingestor
+    # starts it at its earliest record.
+    And within "60s" the relay subscription receives payloads in order
+      """
+      "seq":2
+      """
+    When Kafka message is published to topic "added_earliest_{{test_id}}" partition 1
+      """
+      {"seq":3}
+      """
+    Then within "60s" the relay subscription receives payloads in order
+      """
+      "seq":3
       """
 
     Examples:

@@ -7,6 +7,11 @@
 //! - **Depends on.** Timestamp and serialization primitives.
 //! - **Must not know.** Runtime tasks, consensus, notifications, sleeps or transport behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{fmt, num::NonZeroU64, str::FromStr, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
@@ -30,6 +35,14 @@ pub use observation::{
 };
 
 #[derive(Debug, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "clock value parsing and arithmetic return pure validation refusals; operations \
+                  add their own report context"
+    )
+)]
 pub enum DomainClockError {
     #[error("time rate '{value}' must be a positive finite number")]
     InvalidTimeRate { value: String },

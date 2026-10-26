@@ -2,11 +2,11 @@ Feature: Filter selections
   Scenario Outline: FILTER WHERE keeps sparse, dense and no rows of interleaved branches, with and without row errors
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         id STRING,
@@ -31,8 +31,8 @@ Feature: Filter selections
       CREATE RELAY filter_failures SCHEMA filter_failure UNBRANCHED;
       CREATE VHOST edge filter-selection-{{test_id}}.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         FILTER WHERE input.amount / input.divisor > 0
         TO readings

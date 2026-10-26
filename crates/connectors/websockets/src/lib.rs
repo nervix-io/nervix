@@ -1,21 +1,21 @@
-//! WebSocket source transport and signaling protocol execution.
+//! WebsocketsConnectionIngestor connector entities.
 //!
 //! Layer: engines and infrastructure.
-//!
-//! - **Owns.** WebSocket client connections and the compiled signaling protocol shared by client
-//!   sources and server endpoint sessions.
-//! - **Depends on.** The connector contract, WebSocket transport, jaq engine, protobuf reflection,
-//!   vocabulary values, `error-stack`, and Tokio.
-//! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, endpoint
-//!   routing, or another connector implementation.
+//! - **Owns.** The public connection connector implementation surface.
+//! - **Depends on.** The connector contract, vocabulary values and its own driver stack.
+//! - **Must not know.** Graph routing, registry state, placement or other connector engines.
 
-mod signaling;
-mod source;
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "the host supplies a validated connector plan")
+)]
 
-pub use signaling::{
-    CompiledSignalingProtocol, SignalingDataSink, SignalingProtobufDescriptors,
-    SignalingProtocolCompileError, WebsocketSignalingError, WebsocketSignalingSession,
-};
-pub use source::{
-    WebsocketSource, WebsocketSourceMessage, WebsocketSourcePlan, WebsocketSourcePlanError,
-};
+pub mod connection;
+pub use connection::*;

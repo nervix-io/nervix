@@ -9,9 +9,15 @@
 //!   client sends.
 //! - **Must not know.** How a transport frames, correlates or delivers what the pipeline returns.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::time::Duration;
 
 use ahash::RandomState;
+use error_stack::{Report, ResultExt as _};
 use futures_util::future::BoxFuture;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
@@ -26,7 +32,7 @@ use nervix_models::{
     RequestedResourceVersion, ResourceId, ResourceName, ResourceUploadKey, ResourceVersionStatus,
     SemanticReference, TransactionPosition,
 };
-use nervix_nspl::{
+use nervix_plexus::{
     Token, Word,
     client_statement::{
         ClientStatement, CompletionExpectation, local_path_fragment,
@@ -44,8 +50,8 @@ use nervix_vm::program::FunctionName;
 use tracing::{debug, warn};
 
 use super::{
-    authentication::{AuthRateLimiter, BasicAuthCredentials},
-    backup::ServerRetainedBackups,
+    authentication::AuthRateLimiter,
+    backup::{CaptureSectionKey, CapturedSectionStage, ServerRetainedBackups},
     client_consumers::ClientConsumerRouter,
     client_producers::ClientProducerRouter,
     command_execution::{
@@ -54,7 +60,9 @@ use super::{
     command_result::{
         CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
     },
-    completion::{ApplicationRevisionPhase, wait_for_application_revision},
+    completion::{
+        ApplicationRevisionParticipants, ApplicationRevisionPhase, wait_for_application_revision,
+    },
     configured_choices::{ConfiguredChoices, ConfiguredQuery},
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::command_error,
@@ -72,7 +80,7 @@ use super::{
         SubscriptionSampler,
     },
     tls::HttpsListenerCertificates,
-    transaction::TransactionRecovery,
+    transaction::{SessionTransactionBindingError, TransactionRecovery},
 };
 use crate::{
     cluster,
@@ -175,7 +183,6 @@ pub(in crate::application) struct SessionServiceInner {
     /// Routes each client emitter consumer to its current execution owner.
     pub(in crate::application) client_consumers: ClientConsumerRouter,
     pub(in crate::application) service_tasks: ServiceTasks,
-    pub(in crate::application) configured_basic_auth: Option<BasicAuthCredentials>,
     pub(in crate::application) auth_rate_limiter: AuthRateLimiter,
     pub(in crate::application) failed_auth_rate_limit_keys: DashMap<String, (), RandomState>,
     pub(in crate::application) transaction_idle_timeout: Duration,
@@ -208,6 +215,15 @@ pub(in crate::application) struct SessionServiceInner {
     /// The archives this node's backups assembled, until a download collects each or its retry
     /// validity ends.
     pub(in crate::application) retained_backups: ServerRetainedBackups,
+    /// Node-local staged state sections awaiting the coordinator's bulk fetch.
+    pub(in crate::application) captured_backup_sections:
+        DashMap<CaptureSectionKey, CapturedSectionStage, RandomState>,
+    /// Quota-charged, partially received guest saves awaiting a verified restore install.
+    pub(in crate::application) restored_state_uploads: DashMap<
+        nervix_models::CoordinationIdentity,
+        crate::application::backup::interconnect::RestoreUploadEntry,
+        RandomState,
+    >,
     /// The verified archives this node's restores read, until each restore finishes or its retry
     /// validity ends.
     pub(in crate::application) restore_archives: ServerRestoreArchives,
@@ -230,7 +246,7 @@ pub(in crate::application) struct RuntimeStateApplication<'a> {
 /// bounded stack regardless of the preparation and readiness paths active inside this operation.
 pub(in crate::application) fn apply_current_cluster_runtime_state(
     application: RuntimeStateApplication<'_>,
-) -> BoxFuture<'_, Result<(), crate::runtime::RuntimeError>> {
+) -> BoxFuture<'_, error_stack::Result<(), crate::runtime::RuntimeError>> {
     let RuntimeStateApplication {
         runtime,
         https_certificates,
@@ -248,6 +264,10 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             let Some(installation) = admission.begin_installation(shutdown).await else {
                 return Ok(());
             };
+            #[cfg(feature = "testing")]
+            runtime
+                .pause_runtime_installation_if_armed(local_node_id)
+                .await;
             let Some(state) = admission.runtime_state(consensus, shutdown).await else {
                 return Ok(());
             };
@@ -276,11 +296,8 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     "failed to install the HTTPS listener TLS configuration"
                 );
             }
-            runtime_application.map_err(|error| {
-                crate::runtime::RuntimeError::BuildDomainExecution {
-                    domain: "cluster".to_string(),
-                    reason: format!("{error:#}"),
-                }
+            runtime_application.change_context(crate::runtime::RuntimeError::ApplyRevision {
+                revision: state.revision,
             })?;
             #[cfg(feature = "testing")]
             runtime
@@ -300,25 +317,23 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             // Applying a revision gets one start-time operation budget: peer-failure detection followed
             // by readiness propagation. A peer that disconnects after this starts has only the remaining
             // portion of that budget.
-            let Some(readiness_timeout) = node_unavailability_timeout
-                .checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
-            else {
-                return Err(
+            let deadline_overflow = || {
+                Report::new(
                     crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
                         node_unavailability_timeout,
                         readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
                     },
-                );
+                )
+            };
+            let Some(readiness_timeout) = node_unavailability_timeout
+                .checked_add(RUNTIME_REVISION_READINESS_PROPAGATION_BOUND)
+            else {
+                return Err(deadline_overflow());
             };
             let Some(deadline) =
                 nervix_primitives::time::Instant::now().checked_add(readiness_timeout)
             else {
-                return Err(
-                    crate::runtime::RuntimeError::RuntimeRevisionReadinessDeadlineOverflow {
-                        node_unavailability_timeout,
-                        readiness_propagation_bound: RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
-                    },
-                );
+                return Err(deadline_overflow());
             };
             let preparation = wait_for_application_revision(
                 cluster,
@@ -326,6 +341,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 interconnect,
                 state.revision,
                 ApplicationRevisionPhase::RuntimePrepared,
+                ApplicationRevisionParticipants::EveryLiveNode,
                 deadline,
             );
             tokio::pin!(preparation);
@@ -359,10 +375,12 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     );
                     continue;
                 }
-                return Err(crate::runtime::RuntimeError::RuntimeRevisionPreparation {
-                    revision: state.revision,
-                    pending_nodes: timeout.pending_nodes,
-                });
+                return Err(Report::new(
+                    crate::runtime::RuntimeError::RuntimeRevisionPreparation {
+                        revision: state.revision,
+                        pending_nodes: timeout.pending_nodes,
+                    },
+                ));
             }
             debug!(
                 %local_node_id,
@@ -386,7 +404,9 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
             runtime
                 .start_running_domain_ingestors()
                 .await
-                .map_err(|report| crate::runtime::RuntimeError::IngestorStart { report })?;
+                .change_context(crate::runtime::RuntimeError::StartIngestors {
+                    revision: state.revision,
+                })?;
             debug!(
                 %local_node_id,
                 revision = state.revision,
@@ -402,6 +422,7 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                 interconnect,
                 state.revision,
                 ApplicationRevisionPhase::RuntimeReady,
+                ApplicationRevisionParticipants::EveryLiveNode,
                 deadline,
             );
             tokio::pin!(readiness);
@@ -435,10 +456,12 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
                     );
                     continue;
                 }
-                return Err(crate::runtime::RuntimeError::RuntimeRevisionReadiness {
-                    revision: state.revision,
-                    pending_nodes: timeout.pending_nodes,
-                });
+                return Err(Report::new(
+                    crate::runtime::RuntimeError::RuntimeRevisionReadiness {
+                        revision: state.revision,
+                        pending_nodes: timeout.pending_nodes,
+                    },
+                ));
             }
             debug!(
                 %local_node_id,
@@ -525,6 +548,16 @@ pub(in crate::application) fn create_registry_error_response(
             };
             failed_at(format!("{err}"), span)
         }
+        // The reference of the wrong connector or endpoint type is what the statement got wrong,
+        // so the diagnostic underlines it.
+        RegistryError::IngestorClientConnectorMismatch { client, .. } => failed_at(
+            format!("{err}"),
+            find_identifier_span(query, &ModelName::from(client)),
+        ),
+        RegistryError::IngestorEndpointTypeMismatch { endpoint, .. } => failed_at(
+            format!("{err}"),
+            find_identifier_span(query, &ModelName::from(endpoint)),
+        ),
         _ => failed_at(format!("{err}"), None),
     }
 }
@@ -689,6 +722,12 @@ impl CompletionSnapshot<'_> {
                 })
                 .map(|model| model.name().to_string())
                 .collect(),
+            SemanticReference::IngestorReference(source) => self
+                .models
+                .iter()
+                .filter(|model| source.admits(model) && model.name().as_str().starts_with(&prefix))
+                .map(|model| model.name().to_string())
+                .collect(),
             SemanticReference::SchemaField(schema_name) => self
                 .models
                 .iter()
@@ -746,7 +785,7 @@ impl CompletionSnapshot<'_> {
                 let mut names = FunctionName::ordinary_completion_names();
                 match scope {
                     BuiltinFunctionScope::Ordinary => {}
-                    BuiltinFunctionScope::IngestSource(kind) if kind.reads_headers() => {
+                    BuiltinFunctionScope::IngestorEntity(kind) if kind.reads_headers() => {
                         names.push(FunctionName::ReadHeader.as_str().to_string());
                         names.push(FunctionName::ReadHeaders.as_str().to_string());
                     }
@@ -755,7 +794,7 @@ impl CompletionSnapshot<'_> {
                     {
                         names.push(FunctionName::WriteHeader.as_str().to_string());
                     }
-                    BuiltinFunctionScope::IngestSource(_)
+                    BuiltinFunctionScope::IngestorEntity(_)
                     | BuiltinFunctionScope::EmitterInvocation(_) => {}
                 }
                 names
@@ -824,26 +863,27 @@ impl ChoicePageBasis {
             ChoiceTarget::SignalingProtocol => 12,
             ChoiceTarget::Codec => 13,
             ChoiceTarget::CodecField => 14,
-            ChoiceTarget::IngestHttpSource => 15,
-            ChoiceTarget::IngestKafkaSource => 16,
-            ChoiceTarget::IngestPulsarSource => 17,
-            ChoiceTarget::IngestMqttSource => 18,
-            ChoiceTarget::IngestNatsSource => 19,
-            ChoiceTarget::IngestRabbitMqSource => 20,
-            ChoiceTarget::IngestRedisPubSubSource => 21,
-            ChoiceTarget::IngestPrometheusSource => 22,
-            ChoiceTarget::IngestZeroMqSource => 23,
-            ChoiceTarget::IngestSqsSource => 24,
-            ChoiceTarget::IngestEndpointSource => 25,
-            ChoiceTarget::IngestWebsocketsSource => 26,
-            ChoiceTarget::IngestSyslogSource => 27,
-            ChoiceTarget::IngestCodec => 28,
-            ChoiceTarget::IngestUnbranchedRelay => 29,
-            ChoiceTarget::IngestBranchedRelay => 30,
-            ChoiceTarget::BranchField => 31,
-            ChoiceTarget::ProcessorCompatibleInputRelay => 32,
-            ChoiceTarget::ProcessorInputBranchRelay => 33,
-            ChoiceTarget::ProcessorMaterializedRelay => 34,
+            ChoiceTarget::IngestHttpRequestSource => 15,
+            ChoiceTarget::IngestHttpEndpointSource => 16,
+            ChoiceTarget::IngestKafkaSource => 17,
+            ChoiceTarget::IngestPulsarSource => 18,
+            ChoiceTarget::IngestMqttSource => 19,
+            ChoiceTarget::IngestNatsSource => 20,
+            ChoiceTarget::IngestRabbitMqSource => 21,
+            ChoiceTarget::IngestRedisPubSubSource => 22,
+            ChoiceTarget::IngestPrometheusSource => 23,
+            ChoiceTarget::IngestZeroMqSource => 24,
+            ChoiceTarget::IngestSqsSource => 25,
+            ChoiceTarget::IngestWebsocketsConnectionSource => 26,
+            ChoiceTarget::IngestWebsocketsEndpointSource => 27,
+            ChoiceTarget::IngestSyslogSource => 28,
+            ChoiceTarget::IngestCodec => 29,
+            ChoiceTarget::IngestUnbranchedRelay => 30,
+            ChoiceTarget::IngestBranchedRelay => 31,
+            ChoiceTarget::BranchField => 32,
+            ChoiceTarget::ProcessorCompatibleInputRelay => 33,
+            ChoiceTarget::ProcessorInputBranchRelay => 34,
+            ChoiceTarget::ProcessorMaterializedRelay => 35,
         }]);
         hash_choice_text(&mut hasher, request.search());
         for dependency in request.dependencies() {
@@ -1075,7 +1115,8 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::SignalingProtocol
         | ChoiceTarget::Codec
         | ChoiceTarget::CodecField
-        | ChoiceTarget::IngestHttpSource
+        | ChoiceTarget::IngestHttpRequestSource
+        | ChoiceTarget::IngestHttpEndpointSource
         | ChoiceTarget::IngestKafkaSource
         | ChoiceTarget::IngestPulsarSource
         | ChoiceTarget::IngestMqttSource
@@ -1085,8 +1126,8 @@ fn choices_for(request: &ChoiceLookupRequest) -> Result<Vec<Choice>, ChoiceStatu
         | ChoiceTarget::IngestPrometheusSource
         | ChoiceTarget::IngestZeroMqSource
         | ChoiceTarget::IngestSqsSource
-        | ChoiceTarget::IngestEndpointSource
-        | ChoiceTarget::IngestWebsocketsSource
+        | ChoiceTarget::IngestWebsocketsConnectionSource
+        | ChoiceTarget::IngestWebsocketsEndpointSource
         | ChoiceTarget::IngestSyslogSource
         | ChoiceTarget::IngestCodec
         | ChoiceTarget::IngestUnbranchedRelay
@@ -1274,7 +1315,7 @@ fn rebind_resource_before_for(input: &str, cursor: usize) -> Option<ResourceName
 impl SessionServiceImpl {
     pub(in crate::application) async fn apply_current_cluster_state(
         &self,
-    ) -> Result<(), crate::runtime::RuntimeError> {
+    ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
         apply_current_cluster_runtime_state(RuntimeStateApplication {
             runtime: &self.inner.runtime,
             https_certificates: &self.inner.https_certificates,
@@ -1320,7 +1361,8 @@ impl SessionServiceImpl {
             | ChoiceTarget::SignalingProtocol
             | ChoiceTarget::Codec
             | ChoiceTarget::CodecField
-            | ChoiceTarget::IngestHttpSource
+            | ChoiceTarget::IngestHttpRequestSource
+            | ChoiceTarget::IngestHttpEndpointSource
             | ChoiceTarget::IngestKafkaSource
             | ChoiceTarget::IngestPulsarSource
             | ChoiceTarget::IngestMqttSource
@@ -1330,8 +1372,8 @@ impl SessionServiceImpl {
             | ChoiceTarget::IngestPrometheusSource
             | ChoiceTarget::IngestZeroMqSource
             | ChoiceTarget::IngestSqsSource
-            | ChoiceTarget::IngestEndpointSource
-            | ChoiceTarget::IngestWebsocketsSource
+            | ChoiceTarget::IngestWebsocketsConnectionSource
+            | ChoiceTarget::IngestWebsocketsEndpointSource
             | ChoiceTarget::IngestSyslogSource
             | ChoiceTarget::IngestCodec
             | ChoiceTarget::IngestUnbranchedRelay
@@ -1701,7 +1743,10 @@ impl SessionServiceImpl {
                     self.validate_session_transaction_binding(subscriptions.binding())
             {
                 let result = self
-                    .command_with_transaction_status(error.into_command_result(), subscriptions)
+                    .command_with_transaction_status(
+                        SessionTransactionBindingError::command_result(&error),
+                        subscriptions,
+                    )
                     .await;
                 return Ok(CommandResponse::executed(result));
             }
@@ -1876,15 +1921,22 @@ pub(in crate::application) fn conflicting_reference(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
-    use nervix_models::{ModelKind, NodeRef};
+    use nervix_models::{
+        ClientName, ConnectorKind, EndpointName, EndpointType, HttpIngestorEntity,
+        IngestorEntityKind, ModelKind, NodeRef, SyslogIngestorEntity,
+    };
 
     use super::{
         super::{
             subscription::SessionSubscriptions,
             test_fixtures::{
-                TestService, build_test_service, named, queue_in_transaction, suggestion_values,
-                test_execution_reference,
+                TestService, build_test_service, build_test_service_inner, named,
+                queue_in_transaction, suggestion_values, test_execution_reference,
             },
             transaction::TransactionAttachment,
         },
@@ -2189,9 +2241,57 @@ mod tests {
     }
 
     #[test]
+    fn a_source_reference_of_the_wrong_kind_is_underlined() {
+        let domain = DomainName::parse("default").expect("valid domain");
+        let ingestor: ModelName = named("logs");
+
+        let query = "CREATE SYSLOG LISTENER INGESTOR logs FROM cache MODE NO ACK ON QUIESCE \
+                     SUSPEND DECODE USING lines TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE \
+                     ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        let err = error_stack::Report::new(RegistryError::IngestorClientConnectorMismatch {
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            kind: IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener),
+            client: ClientName::parse("cache").expect("valid client name"),
+            required: ConnectorKind::Syslog,
+            found: ConnectorKind::Redis,
+        });
+        let response = create_registry_error_response(query, &domain, &ingestor, &err);
+        assert!(!response.succeeded());
+        assert_eq!(
+            response.message,
+            "SYSLOG LISTENER ingestor 'logs' in domain 'default' requires a SYSLOG client, but \
+             client 'cache' is a REDIS client"
+        );
+        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(response.diagnostics[0].span, Some(42..47));
+
+        let query = "CREATE HTTP ENDPOINT INGESTOR logs FROM socket MODE NO ACK ON QUIESCE \
+                     SUSPEND DECODE USING lines TO events INHERIT ALL UNBRANCHED FLUSH IMMEDIATE \
+                     ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;";
+        let err = error_stack::Report::new(RegistryError::IngestorEndpointTypeMismatch {
+            domain: domain.clone(),
+            ingestor: ingestor.clone(),
+            kind: IngestorEntityKind::Http(HttpIngestorEntity::Endpoint),
+            endpoint: EndpointName::parse("socket").expect("valid endpoint name"),
+            required: EndpointType::Http,
+            found: EndpointType::Websockets,
+        });
+        let response = create_registry_error_response(query, &domain, &ingestor, &err);
+        assert!(!response.succeeded());
+        assert_eq!(
+            response.message,
+            "HTTP ENDPOINT ingestor 'logs' in domain 'default' requires a TYPE HTTP endpoint, but \
+             endpoint 'socket' is TYPE WEBSOCKETS"
+        );
+        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(response.diagnostics[0].span, Some(40..46));
+    }
+
+    #[test]
     fn a_rejected_source_names_its_stage_and_keeps_every_span() {
         let query = "USE demo;\nCREATE SCHEMA broken (id BOGUS);";
-        let parse = nervix_nspl::client_statement::parse_client_statement_sources(query)
+        let parse = nervix_plexus::client_statement::parse_client_statement_sources(query)
             .expect_err("BOGUS is not a type");
         let response = rejected_source_response(parse.current_context());
         assert!(!response.succeeded());
@@ -2200,7 +2300,7 @@ mod tests {
         assert_eq!(response.diagnostics[0].span, Some(35..40));
 
         let query = "USE demo;\nCREATE SCHEMA broken (id STRING @);";
-        let lex = nervix_nspl::client_statement::parse_client_statement_sources(query)
+        let lex = nervix_plexus::client_statement::parse_client_statement_sources(query)
             .expect_err("`@` starts no token");
         let response = rejected_source_response(lex.current_context());
         assert!(!response.succeeded());
@@ -2418,16 +2518,16 @@ mod tests {
         let endpoint = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON QUIESCE \
-             SUSPEND DECODE USING codec TO outgoing SET value = read_",
+            "CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK ON QUIESCE SUSPEND \
+             DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
         assert_eq!(endpoint, vec!["read_header", "read_headers"]);
         let mqtt = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE INGESTOR source FROM MQTT broker TOPIC events MODE NO_ACK SEQUENTIAL ON \
-             QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_",
+            "CREATE MQTT TOPIC INGESTOR source FROM broker TOPIC 'events' MODE NO ACK ON QUIESCE \
+             SUSPEND DECODE USING codec TO outgoing SET value = read_",
         )
         .await;
         assert!(mqtt.is_empty(), "{mqtt:?}");
@@ -2435,16 +2535,16 @@ mod tests {
         let kafka = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE EMITTER sink FROM incoming TO KAFKA broker TOPIC events MODE NO_ACK RETRY \
-             POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_",
+            "CREATE KAFKA TOPIC EMITTER emitter FROM incoming TO broker TOPIC 'events' MODE NO \
+             ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_",
         )
         .await;
         assert_eq!(kafka, vec!["write_header"]);
         let sentry = suggestion_values(
             &service,
             &subscriptions,
-            "CREATE EMITTER sink FROM incoming TO SENTRY client MODE ACK RETRY POLICY BACKOFF \
-             250ms MAX 30s ENCODE USING codec INVOKE write_",
+            "CREATE SENTRY EVENT EMITTER emitter FROM incoming TO client MODE ACK RETRY POLICY \
+             BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_",
         )
         .await;
         assert!(sentry.is_empty(), "{sentry:?}");
@@ -2527,11 +2627,23 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn completion_keeps_queued_models_out_of_other_sessions() {
-        let TestService {
-            service,
-            registry: _registry,
-            path,
-        } = build_test_service(true).await;
+        let (
+            TestService {
+                service,
+                registry,
+                path,
+            },
+            consensus,
+        ) = {
+            #[cfg(feature = "testing")]
+            {
+                build_test_service_inner(true, None, Runtime::new()).await
+            }
+            #[cfg(not(feature = "testing"))]
+            {
+                build_test_service_inner(true, Runtime::new()).await
+            }
+        };
         let mut writer = SessionSubscriptions::new();
         let mut observer = SessionSubscriptions::new();
 
@@ -2554,7 +2666,20 @@ mod tests {
 
         writer.stop_all().await;
         observer.stop_all().await;
-        let _ = std::fs::remove_dir_all(&path);
+        nervix_primitives::time::timeout(Duration::from_secs(30), async {
+            let runtime = &service.inner.runtime;
+            runtime.shutdown(runtime.domain_drain_timeout()).await;
+            consensus.shutdown().await;
+        })
+        .await
+        .expect("the completion fixture joins its runtime and consensus storage before teardown");
+        drop(writer);
+        drop(observer);
+        drop(service);
+        drop(registry);
+        drop(consensus);
+        std::fs::remove_dir_all(&path)
+            .expect("the stopped completion fixture directory is removed");
     }
 
     #[nervix_primitives::test]

@@ -2,11 +2,11 @@ Feature: Relay junction
   Scenario Outline: Junction routes multiple aligned relays into multiple destinations
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -41,8 +41,8 @@ Feature: Relay junction
         ON edge
         PATH '/ingest-b'
         TYPE HTTP;
-      CREATE INGESTOR source_one
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
           INHERIT ALL
@@ -51,8 +51,8 @@ Feature: Relay junction
           FLUSH EACH 100ms MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR source_two
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_two
+        FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
           INHERIT ALL
@@ -110,11 +110,11 @@ Feature: Relay junction
   Scenario Outline: Junction preserves branch keys for interleaved concrete branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -141,8 +141,8 @@ Feature: Relay junction
         ON edge
         PATH '/branch-b'
         TYPE HTTP;
-        CREATE INGESTOR source_one
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
@@ -151,8 +151,8 @@ Feature: Relay junction
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR source_two
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_two
+        FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
         INHERIT ALL
@@ -204,11 +204,11 @@ Feature: Relay junction
   Scenario Outline: Junction filter-map reads materialized relay state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -242,8 +242,8 @@ Feature: Relay junction
         ON edge
         PATH '/ingest-b'
         TYPE HTTP;
-        CREATE INGESTOR state_source
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR state_source
+        FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO state_notifications
         INHERIT ALL
@@ -252,8 +252,8 @@ Feature: Relay junction
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR source_one
-        FROM ENDPOINT ingress_one MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress_one MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
@@ -262,8 +262,8 @@ Feature: Relay junction
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR source_two
-        FROM ENDPOINT ingress_two MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_two
+        FROM ingress_two MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss2
         INHERIT ALL
@@ -310,11 +310,11 @@ Feature: Relay junction
   Scenario Outline: Junction creation rejects mismatched schemas
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "requires equal internal schemas"
+    When these Plexus commands fail with "requires equal internal schemas"
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -347,11 +347,11 @@ Feature: Relay junction
   Scenario Outline: Junction routes read defaulted materialized state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -383,8 +383,8 @@ Feature: Relay junction
         ON edge
         PATH '/junction-default'
         TYPE HTTP;
-        CREATE INGESTOR source_one
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL
@@ -423,11 +423,11 @@ Feature: Relay junction
   Scenario Outline: Junction routes read defaulted materialized state into optional fields
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -459,8 +459,8 @@ Feature: Relay junction
         ON edge
         PATH '/junction-optional'
         TYPE HTTP;
-        CREATE INGESTOR source_one
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_one
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO ss1
         INHERIT ALL

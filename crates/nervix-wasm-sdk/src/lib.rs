@@ -37,14 +37,25 @@
 //! - **Owns.** The complete guest half of the ABI: the reusable linear-memory buffer, envelope
 //!   encoding and decoding, the emit queue, error latching, panic conversion and snapshot plumbing.
 //! - **Depends on.** `nervix-wasm-protocol`, Arrow, and `error-stack`.
-//! - **Must not know.** The host, the server, the Models or NSPL. It is compiled into user guests
+//! - **Must not know.** The host, the server, the Models or Plexus. It is compiled into user guests
 //!   and ships on its own.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
 
 pub mod abi;
 mod context;
 mod envelope;
 mod error;
 mod processor;
+
+#[cfg(test)]
+mod snapshot_properties;
+
+#[cfg(test)]
+mod column_properties;
 
 pub use nervix_wasm_protocol::{
     AckSidecar, AckToken, AckTokenSet, MessageErrorSet, NackSet, OutputColumnRef, OutputRow,

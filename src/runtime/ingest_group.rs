@@ -3,7 +3,12 @@
 //! Layer: data plane.
 //! - **Owns.** Group decoding, timestamped row metadata, route execution and in-memory ACKs.
 //! - **Depends on.** Installed domain capabilities, compiled codecs and branch-local routes.
-//! - **Must not know.** NSPL parsing, consensus decisions or source transport lifecycle.
+//! - **Must not know.** Plexus parsing, consensus decisions or source transport lifecycle.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use ahash::RandomState;
 use arrow_buffer::{BooleanBuffer, BooleanBufferBuilder};
@@ -19,11 +24,11 @@ use super::*;
 /// executes and becomes one Arrow batch per (relay, branch key). A group closes once it holds this
 /// many or more: every message of one payload joins the same group, so a payload that unfolds past
 /// the remaining room carries the group beyond the bound instead of being split. This is
-/// intentionally independent of an NSPL route's flush policy.
+/// intentionally independent of a Plexus route's flush policy.
 pub(in crate::runtime) const INGEST_GROUP_MAX_ROWS: usize = 1024;
 
 /// Chosen operational bound for how long a partial source group waits when the source
-/// goes quiet. This is intentionally independent of an NSPL route's flush policy.
+/// goes quiet. This is intentionally independent of a Plexus route's flush policy.
 pub(in crate::runtime) const INGEST_GROUP_IDLE_FLUSH: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, Copy, strum::Display)]
@@ -48,6 +53,8 @@ pub(in crate::runtime) enum IngestGroupRecordOperation {
 
 #[derive(Debug, Clone, Copy, strum::Display)]
 pub(in crate::runtime) enum IngestMetadataOperation {
+    #[strum(serialize = "open ingest metadata")]
+    Open,
     #[strum(serialize = "append ingest metadata")]
     Append,
     #[strum(serialize = "finish ingest metadata")]
@@ -86,26 +93,70 @@ impl PayloadDecodeFailure {
         }
         Self::NotAdmitted(error.change_context(UnfoldingNotAdmitted))
     }
-
-    /// The failure `ingestor`'s group reports for a payload that did not decode: the codec's
-    /// report beneath the payload's decode failure, or the refusal beneath the unfolding the node
-    /// did not admit.
-    pub(super) fn into_group_error(self, ingestor: &IngestorName) -> Report<IngestGroupError> {
-        match self {
-            Self::Codec(report) => report.change_context(IngestGroupError::DecodePayload {
-                ingestor: ingestor.clone(),
-            }),
-            Self::NotAdmitted(report) => report.change_context(IngestGroupError::Execution {
-                operation: IngestGroupAdmittedOperation::UnfoldPayload,
-            }),
-        }
-    }
 }
 
 /// The node's bounded execution did not take a payload's unfolding now.
 #[derive(Debug, Error)]
 #[error("the node's bounded execution did not unfold the payload")]
 pub(in crate::runtime) struct UnfoldingNotAdmitted;
+
+impl UnfoldingNotAdmitted {
+    /// The failure of the ingest group whose payload's unfolding the node refused, with the
+    /// executor's refusal beneath it.
+    pub(super) fn group_error(refusal: Report<Self>) -> Report<IngestGroupError> {
+        refusal.change_context(IngestGroupError::Execution {
+            operation: IngestGroupAdmittedOperation::UnfoldPayload,
+        })
+    }
+}
+
+/// One payload of a batch a source hands its host, and the entry that stays with it whatever its
+/// codec decides, such as the payload's metadata row.
+pub(in crate::runtime) struct BatchPayload<'p, T> {
+    pub(in crate::runtime) payload: &'p [u8],
+    pub(in crate::runtime) entry: T,
+}
+
+/// The entries of one batch's payloads, divided by whether their codec refused them.
+#[derive(Debug)]
+pub(in crate::runtime) struct SplitPayloads<T> {
+    /// The entries of the payloads that decoded, in batch order.
+    pub(in crate::runtime) decoded: Vec<T>,
+    /// The entries of the payloads their codec refused, in batch order.
+    pub(in crate::runtime) refused: Vec<RefusedEntry<T>>,
+}
+
+impl<T> SplitPayloads<T> {
+    /// The same division, with every entry replaced by what `entry` makes of it.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(
+            reason = "the caller supplies the projection of each payload's entry, such as the \
+                      metadata row its retained batch holds at its index"
+        )
+    )]
+    pub(in crate::runtime) fn map<U>(self, mut entry: impl FnMut(T) -> U) -> SplitPayloads<U> {
+        let mut decoded = Vec::with_capacity(self.decoded.len());
+        for kept in self.decoded {
+            decoded.push(entry(kept));
+        }
+        let mut refused = Vec::with_capacity(self.refused.len());
+        for refusal in self.refused {
+            refused.push(RefusedEntry {
+                entry: entry(refusal.entry),
+                report: refusal.report,
+            });
+        }
+        SplitPayloads { decoded, refused }
+    }
+}
+
+/// The entry of one payload its codec refused, and the codec's report of the refusal.
+#[derive(Debug)]
+pub(in crate::runtime) struct RefusedEntry<T> {
+    pub(in crate::runtime) entry: T,
+    pub(in crate::runtime) report: Report<CodecError>,
+}
 
 #[derive(Debug, Error)]
 pub(in crate::runtime) enum IngestGroupError {
@@ -255,8 +306,6 @@ pub(in crate::runtime) enum IngestGroupError {
         relay: RelayName,
         row: usize,
     },
-    #[error("failed to decode a payload for ingestor '{ingestor}'")]
-    DecodePayload { ingestor: IngestorName },
 }
 
 #[derive(Debug)]
@@ -283,7 +332,7 @@ pub(super) enum BoundIngestorInput {
     /// A transport: the codec that decodes its payloads, and the plan of its source.
     Transport {
         codec: Arc<CompiledCodec>,
-        source: SourceStartPlan,
+        source: IngestorConnectorPlan,
     },
     /// Batches producers submit, which already carry the plan's schema, and the `START`
     /// generation of the execution the ingestor was bound in.
@@ -377,20 +426,6 @@ pub(super) struct ClientBatchDispatch<'a> {
     pub(super) ingested_at: Timestamp,
 }
 
-pub(super) struct RawIngestDispatch<'a> {
-    pub(super) handles: &'a IngestTaskHandles,
-    pub(super) domain: &'a DomainName,
-    pub(super) ingestor: &'a IngestorName,
-    pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
-    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
-    pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
-    pub(super) codec: Arc<CompiledCodec>,
-    pub(super) payload: &'a BufferedIngestPayload,
-    pub(super) collector: &'a mut IngestRouteCollector,
-    pub(super) flush: bool,
-}
-
 /// The payloads of one [`BufferedIngestPayload`] that decoded into their ingest group, which the
 /// group now accepts. None of them carries an acknowledgement of its own: each message takes a
 /// share of a root the group tracks.
@@ -401,7 +436,10 @@ pub(super) struct RawIngestAcceptance<'a> {
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
     pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    pub(super) payload: &'a BufferedIngestPayload,
+    /// One row for each payload that decoded, in the order they decoded.
+    pub(super) metadata: &'a [IngestMetadataRow<'a>],
+    /// When the payloads were observed.
+    pub(super) ingested_at: Timestamp,
     pub(super) collector: &'a mut IngestRouteCollector,
 }
 
@@ -430,7 +468,7 @@ pub(super) struct IngestGroupRows {
 /// accepts the payloads that did decode, giving every message of each payload the payload's
 /// metadata row and a share of its ACK set.
 pub(super) struct PendingIngestGroup {
-    pub(super) kind: IngestMetadataKind,
+    pub(super) scope: IngestorMetadataScope,
     /// The number of rows the group is expected to reach, used to size its builders.
     pub(super) row_bound: usize,
     pub(super) records: Option<RuntimeRecordBatchBuilder>,
@@ -446,9 +484,9 @@ pub(super) struct PendingIngestGroup {
 }
 
 impl PendingIngestGroup {
-    pub(super) fn new(kind: IngestMetadataKind, row_bound: usize) -> Self {
+    pub(super) fn new(scope: IngestorMetadataScope, row_bound: usize) -> Self {
         Self {
-            kind,
+            scope,
             row_bound,
             records: None,
             decoder: JsonDecoder::default(),
@@ -550,10 +588,19 @@ impl PendingIngestGroup {
             }));
         }
 
-        let (kind, row_bound) = (self.kind, self.row_bound);
+        if self.metadata.is_none() {
+            self.metadata = Some(
+                IngestMetadataBuilders::new(self.scope, self.row_bound).change_context(
+                    IngestGroupError::Metadata {
+                        operation: IngestMetadataOperation::Open,
+                    },
+                )?,
+            );
+        }
         let builders = self
             .metadata
-            .get_or_insert_with(|| IngestMetadataBuilders::new(kind, row_bound));
+            .as_mut()
+            .verified("this group opens its metadata builders immediately above");
         for (row, payload_acks) in metadata.iter().zip(acks) {
             let messages = self
                 .undispatched_payloads
@@ -736,10 +783,10 @@ pub(super) struct IngestorMessageError<'a> {
 ///
 /// A source decodes each payload into the open group with `decode_payload` and accepts the payloads
 /// that decoded with `collect`, so the group's records, metadata and ACKs stay row-aligned. The
-/// metadata schema is fixed by the source kind when the ingestor starts, so every group the
+/// metadata schema is fixed by the source's scope when the ingestor starts, so every group the
 /// collector opens builds the same columns.
 pub(super) struct IngestRouteCollector {
-    pub(super) kind: IngestMetadataKind,
+    pub(super) scope: IngestorMetadataScope,
     /// The number of rows a group is expected to reach, used to size its metadata builders.
     pub(super) row_bound: usize,
     pub(super) context: Option<IngestGroupContext>,
@@ -748,28 +795,36 @@ pub(super) struct IngestRouteCollector {
     pub(super) pending: PendingIngestGroup,
     pub(super) routed: IndexMap<RoutedGroupKey, Vec<RelayMessage>, RandomState>,
     pub(super) flush_at: Option<Instant>,
+    /// Whether local input construction was refused during this collector's lifetime. This stays
+    /// distinct from downstream ACK failure, which can arrive concurrently with dispatch.
+    input_refused: bool,
 }
 
 impl IngestRouteCollector {
-    /// Opens a collector for a source of `kind` whose groups close at `row_bound` rows.
+    /// Opens a collector for a source of `scope` whose groups close at `row_bound` rows.
     ///
     /// Sources that flush one group per message or per poll pass their own bound so a
     /// short group does not size its builders for a streaming one.
     pub(super) fn new(
-        kind: IngestMetadataKind,
+        scope: IngestorMetadataScope,
         row_bound: usize,
         metrics: MessageMetricsHandle,
     ) -> Self {
         Self {
-            kind,
+            scope,
             row_bound,
             context: None,
             metrics,
             routing: None,
-            pending: PendingIngestGroup::new(kind, row_bound),
+            pending: PendingIngestGroup::new(scope, row_bound),
             routed: IndexMap::with_hasher(RandomState::default()),
             flush_at: None,
+            input_refused: false,
         }
+    }
+
+    pub(super) fn input_refused(&self) -> bool {
+        self.input_refused
     }
 
     /// Decodes one source payload into the group's record builder, its unfolding admitted to the
@@ -870,7 +925,7 @@ impl IngestRouteCollector {
         );
         let pending = std::mem::replace(
             &mut self.pending,
-            PendingIngestGroup::new(self.kind, self.row_bound),
+            PendingIngestGroup::new(self.scope, self.row_bound),
         );
         Ok(Some((context, pending.into_rows()?)))
     }
@@ -881,12 +936,7 @@ impl IngestRouteCollector {
         domain: &DomainName,
     ) -> Result<StdArc<DomainRoutingSnapshot>, Report<DomainRoutingError>> {
         if self.routing.is_none() {
-            self.routing = nervix_primitives::expect_lint!(
-                nervix::lifecycle_call,
-                "Typed Ratchet 03 (86bc9eqjv): retain the domain routing publication across \
-                 revision refresh instead of repeating its installation lookup",
-                runtime.domain_routing_cache(domain)
-            );
+            self.routing = runtime.domain_routing_cache(domain);
         }
         let Some(routing) = self.routing.as_mut() else {
             return Err(Report::new(DomainRoutingError::DomainNotInstantiated {
@@ -1359,7 +1409,6 @@ impl Runtime {
             let error = Report::new(IngestGroupError::DomainNotRunning {
                 domain: domain.clone(),
             });
-            let reason = error.to_string();
             for group in &groups {
                 self.handle_general_error_for_acks(
                     domain,
@@ -1367,7 +1416,7 @@ impl Runtime {
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     group.messages.iter().map(|message| &message.acks),
-                    reason.clone(),
+                    &error,
                 );
             }
             return Err(error);
@@ -1385,14 +1434,13 @@ impl Runtime {
                     domain: domain.clone(),
                     relay: relay.clone(),
                 });
-                let reason = error.to_string();
                 self.handle_general_error_for_acks(
                     domain,
                     ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     acks.iter(),
-                    reason,
+                    &error,
                 );
                 first_error.get_or_insert(error);
                 continue;
@@ -1403,14 +1451,13 @@ impl Runtime {
                     let error = error.change_context(IngestGroupError::RelayBatch {
                         relay: relay.clone(),
                     });
-                    let reason = error.to_string();
                     self.handle_general_error_for_acks(
                         domain,
                         ModelKind::Ingestor,
                         ingestor,
                         &ErrorPolicies::handled_by_log(),
                         acks.iter(),
-                        reason,
+                        &error,
                     );
                     first_error.get_or_insert(error);
                     continue;
@@ -1421,14 +1468,13 @@ impl Runtime {
                     ingestor: ingestor.clone(),
                     relay: relay.clone(),
                 });
-                let reason = error.to_string();
                 self.handle_general_error_for_acks(
                     domain,
                     ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
-                    reason,
+                    &error,
                 );
                 first_error.get_or_insert(error);
                 continue;
@@ -1439,14 +1485,13 @@ impl Runtime {
                     ingestor: ingestor.clone(),
                     relay: relay.clone(),
                 });
-                let reason = error.to_string();
                 self.handle_general_error_for_acks(
                     domain,
                     ModelKind::Ingestor,
                     ingestor,
                     &ErrorPolicies::handled_by_log(),
                     batch.acks.iter(),
-                    reason,
+                    &error,
                 );
                 first_error.get_or_insert(error);
             }
@@ -1553,8 +1598,6 @@ impl Runtime {
             let keys = vec![None; rows.len()];
             let outcomes = evaluate_filter_map_on_batch(
                 self.executor(),
-                ModelKind::Ingestor.as_str(),
-                ingestor,
                 filter_where,
                 FilterMapOutcomeInputs {
                     carrier: &rows.batch,
@@ -1588,6 +1631,9 @@ impl Runtime {
                         ..
                     } => {
                         keep.append(false);
+                        collector.input_refused |= output_routes.routes.iter().any(|output| {
+                            matches!(output.message_error_policy, MessageErrorPolicy::Log)
+                        });
                         let acks = std::mem::replace(&mut rows.acks[row], AckSet::empty());
                         self.handle_ingestor_message_error(IngestorMessageError {
                             routing,
@@ -1643,6 +1689,10 @@ impl Runtime {
                 if admitted.value(row) {
                     continue;
                 }
+                collector.input_refused |= output_routes
+                    .routes
+                    .iter()
+                    .any(|output| matches!(output.message_error_policy, MessageErrorPolicy::Log));
                 let missing = event_timestamps.is_null(row);
                 let error = structured_message_error(
                     execution_now,
@@ -1731,8 +1781,6 @@ impl Runtime {
             let keys = vec![None; rows.len()];
             let outcomes = evaluate_filter_map_on_batch(
                 self.executor(),
-                ModelKind::Ingestor.as_str(),
-                ingestor,
                 &output.program,
                 FilterMapOutcomeInputs {
                     carrier: &rows.batch,
@@ -1797,7 +1845,6 @@ impl Runtime {
                             executor: self.executor(),
                             now: execution_now,
                         },
-                        ingestor,
                         branch_program,
                         &input_batch,
                         &output_batch,
@@ -1810,7 +1857,7 @@ impl Runtime {
                         relay: output.relay.clone(),
                     })?;
                     for (row, key) in input_rows.into_iter().zip(evaluated) {
-                        route_keys[row] = Some(key);
+                        route_keys[row] = Some(key.map(Some));
                     }
                 }
             } else {
@@ -1910,6 +1957,9 @@ impl Runtime {
                     .pop_front()
                     .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[route_error.output_index];
+                if let MessageErrorPolicy::Log = output.message_error_policy {
+                    collector.input_refused = true;
+                }
                 self.handle_structured_message_error(MessageErrorHandling {
                     routing: Some(routing),
                     domain,
@@ -2052,7 +2102,7 @@ impl Runtime {
             filter_where: filter_where.cloned(),
         };
         let mut collector =
-            IngestRouteCollector::new(IngestMetadataKind::Headers, row_count, metrics.clone());
+            IngestRouteCollector::new(IngestorMetadataScope::Headers, row_count, metrics.clone());
         let routing =
             collector
                 .routing_snapshot(self, domain)
@@ -2065,35 +2115,48 @@ impl Runtime {
             .await
     }
 
-    /// Decodes every payload `payload` holds into `collector`'s open group, their unfoldings
-    /// admitted as `admission` says.
+    /// Decodes every one of `payloads` into `collector`'s open group, their unfoldings admitted as
+    /// `admission` says, and divides their entries by whether the codec refused the payload.
     ///
-    /// The payloads are delivered together or not at all, so a payload that fails to decode takes
-    /// the payloads decoded before it back out of the group. A caller that drops this future before
-    /// it completes discards what it decoded itself.
+    /// A payload its codec refuses leaves the group exactly as it was while the payloads around it
+    /// still decode, because the refusal is the codec's judgement of that payload alone and would
+    /// repeat. A payload the node could not unfold now was judged by nothing, so the batch is
+    /// delivered together or not at all: that refusal takes the payloads decoded before it back
+    /// out of the group, and its caller presents the batch again or refuses it whole. A caller that
+    /// drops this future before it completes discards what it decoded itself.
     #[cfg_attr(
         nervix_lint,
-        nervix::dispatch(reason = "the retained payload exposes its selected message iterator \
-                                   for one admitted batch")
+        nervix::dispatch(
+            reason = "the caller's payload iterator selects the messages of one admitted batch"
+        )
     )]
-    pub(in crate::runtime) async fn decode_raw_ingest_payload(
+    pub(in crate::runtime) async fn decode_raw_ingest_payload<'p, T>(
         &self,
         collector: &mut IngestRouteCollector,
         admission: QueueAdmission,
         codec: &Arc<CompiledCodec>,
-        payload: &BufferedIngestPayload,
-    ) -> Result<(), PayloadDecodeFailure> {
-        for source_payload in payload.payloads() {
+        payloads: impl IntoIterator<Item = BatchPayload<'p, T>>,
+    ) -> Result<SplitPayloads<T>, Report<UnfoldingNotAdmitted>> {
+        let payloads = payloads.into_iter();
+        let mut decoded = Vec::with_capacity(payloads.size_hint().0);
+        let mut refused = Vec::new();
+        for BatchPayload { payload, entry } in payloads {
             nervix_primitives::task::consume_budget().await;
-            if let Err(failure) = collector
-                .decode_payload(self.executor(), admission, codec, source_payload)
-                .await
-            {
-                collector.discard_undispatched_payloads();
-                return Err(failure);
+            let outcome = collector
+                .decode_payload(self.executor(), admission, codec, payload)
+                .await;
+            match outcome {
+                Ok(()) => decoded.push(entry),
+                Err(PayloadDecodeFailure::Codec(report)) => {
+                    refused.push(RefusedEntry { entry, report });
+                }
+                Err(PayloadDecodeFailure::NotAdmitted(refusal)) => {
+                    collector.discard_undispatched_payloads();
+                    return Err(refusal);
+                }
             }
         }
-        Ok(())
+        Ok(SplitPayloads { decoded, refused })
     }
 
     /// Accepts payloads that decoded into their group, giving every message the metadata row of
@@ -2109,10 +2172,10 @@ impl Runtime {
             timestamp_source,
             output_routes,
             filter_where,
-            payload,
+            metadata,
+            ingested_at,
             collector,
         } = acceptance;
-        let metadata = payload.metadata_rows();
         self.dispatch_ingested_records(IngestGroupDispatch {
             handles,
             collector,
@@ -2121,55 +2184,11 @@ impl Runtime {
             timestamp_source,
             output_routes,
             filter_where,
-            metadata: &metadata,
-            ingested_at: payload.observed_at(),
-            acks: vec![AckSet::empty(); payload.len()],
+            metadata,
+            ingested_at,
+            acks: vec![AckSet::empty(); metadata.len()],
         })
         .await
-    }
-
-    /// Decodes and dispatches the payloads a source loop was just handed. An unfolding the
-    /// extension workers have no room for is refused, and the dispatch fails for the loop to
-    /// handle as its source's contract says.
-    pub(in crate::runtime) async fn dispatch_raw_ingest_payload(
-        &self,
-        dispatch: RawIngestDispatch<'_>,
-    ) -> error_stack::Result<(), IngestGroupError> {
-        let RawIngestDispatch {
-            handles,
-            domain,
-            ingestor,
-            timestamp_source,
-            output_routes,
-            filter_where,
-            branched_senders,
-            codec,
-            payload,
-            collector,
-            flush,
-        } = dispatch;
-        let decoded = self
-            .decode_raw_ingest_payload(collector, QueueAdmission::RefuseWhenFull, &codec, payload)
-            .await;
-        if let Err(failure) = decoded {
-            return Err(failure.into_group_error(ingestor));
-        }
-        self.accept_raw_ingest_payload(RawIngestAcceptance {
-            handles,
-            domain,
-            ingestor,
-            timestamp_source,
-            output_routes,
-            filter_where,
-            payload,
-            collector: &mut *collector,
-        })
-        .await?;
-        if flush {
-            self.flush_ingest_collector(domain, ingestor, branched_senders, collector)
-                .await?;
-        }
-        Ok(())
     }
 }
 

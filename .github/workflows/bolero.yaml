@@ -1,8 +1,24 @@
 name: Bolero
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+  workflow_call:
+    inputs:
+      tested-sha:
+        type: string
+        required: true
+      event-name:
+        type: string
+        required: true
+      labels-json:
+        type: string
+        required: true
+    outputs:
+      randomized-result:
+        value: ${{ jobs.bolero-gate.outputs.randomized-result }}
+      sanitizer-result:
+        value: ${{ jobs.bolero-gate.outputs.sanitizer-result }}
+      sanitizer-required:
+        value: ${{ jobs.bolero-gate.outputs.sanitizer-required }}
   schedule:
     - cron: "0 3 * * 0"
   workflow_dispatch:
@@ -15,46 +31,60 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  KACHE_VERSION: "0.28.1"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Kache sizes its local store from the cache volume (5%, rounded and bounded).
+  # Keep the default so a runner disk change also changes its cache budget.
+  KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
+  # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
+  KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
   NO_COLOR: "1"
   CARGO_TERM_COLOR: never
   RUST_LOG_STYLE: never
+  BOLERO_TESTED_SHA: ${{ inputs.tested-sha || github.sha }}
+  BOLERO_EVENT_NAME: ${{ inputs.event-name || github.event_name }}
+  BOLERO_LABELS: ${{ inputs.labels-json || '[]' }}
 
 jobs:
+  # Check excludes this whole call only for its verified prose-only selection without `fuzz`.
+  # Once called (or run directly), every ordinary property remains required, including on reruns.
   bolero-random:
     name: bolero-random
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 35
+    # Run 39649567371 took 47m10s; 90 minutes covers 1.5 times that duration plus publication.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested-sha || github.sha }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
-
-      - name: Install server build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libcurl4-openssl-dev protobuf-compiler
+          tool: just@latest,trunk,wild-linker
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
         with:
           version: "25.12.19"
 
-      - name: Install LLVM 23
+      - name: Install native build tools
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
+
+      - name: Install native server build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libcurl4-openssl-dev protobuf-compiler
 
       - name: Configure cargo
         run: |
@@ -64,34 +94,28 @@ jobs:
           linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
-      - name: Configure kache remote
-        env:
-          KACHE_CONFIG: ${{ runner.temp }}/kache-bolero.toml
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          bash scripts/configure_kache_remote.sh "$KACHE_CONFIG"
-          echo "KACHE_CONFIG=$KACHE_CONFIG" >> "$GITHUB_ENV"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
-          max-size: "1TiB"
-          manifest-key: bolero-random-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: bolero-random-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      - name: Runner diagnostics before Run runner tests and every ordinary Bolero property
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: run-runner-tests-and-every-ordinary-bolero-property
 
       - name: Run runner tests and every ordinary Bolero property
         run: |
@@ -99,40 +123,54 @@ jobs:
           just test-bolero-runner
           just test-bolero
 
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
   bolero-fuzz:
-    name: bolero-fuzz
-    if: github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fuzz')
+    name: bolero-fuzz (${{ matrix.shard }} of ${{ strategy.job-total }})
+    if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each shard runs whole harnesses of the inventory; `just fuzz-plan 3` shows the division.
+        shard: [1, 2, 3]
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # Cold sanitizer builds precede the full per-target campaign and qualification.
-    timeout-minutes: 180
-    env:
-      CARGO_BUILD_JOBS: "1"
+    # The 205-target plan estimates up to 114 minutes per shard before discovery, qualification
+    # and uploads. Fund 1.5 times that estimate plus their overhead on a slow runner.
+    timeout-minutes: 240
     permissions:
       contents: read
-      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested-sha || github.sha }}
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Setup pinned sanitizer nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-09-17
+          components: llvm-tools
 
       - name: Install tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
-
-      - name: Install server build dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y libcurl4-openssl-dev protobuf-compiler
+          tool: just@latest,trunk,wild-linker
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -142,11 +180,18 @@ jobs:
       - name: Setup uv for runner coverage
         uses: astral-sh/setup-uv@v6
 
-      - name: Install LLVM 23
+      - name: Install native build tools
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
+          sudo ln -s /usr/bin/llvm-symbolizer-23 /usr/local/bin/llvm-symbolizer
+          llvm-symbolizer --version
+
+      - name: Install native server build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake libcurl4-openssl-dev protobuf-compiler
 
       - name: Configure cargo
         run: |
@@ -156,78 +201,219 @@ jobs:
           linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
           EOF
 
-      - name: Configure kache remote
-        env:
-          KACHE_CONFIG: ${{ runner.temp }}/kache-bolero.toml
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          bash scripts/configure_kache_remote.sh "$KACHE_CONFIG"
-          echo "KACHE_CONFIG=$KACHE_CONFIG" >> "$GITHUB_ENV"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
-          max-size: "1TiB"
-          manifest-key: bolero-fuzz-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: bolero-fuzz-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      - name: Start runner load recorder
+        run: |
+          python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+      - name: Runner diagnostics before Install pinned cargo-bolero
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: install-pinned-cargo-bolero
 
       - name: Install pinned cargo-bolero
         run: just install-cargo-bolero
 
-      - name: Prepare the server sanitizer binary
-        run: just prepare-archive-counts-fuzz
+      - name: Runner diagnostics before Discover every registered target
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: discover-every-registered-target
 
-      - name: Run every sanitizer libFuzzer target and qualify failures
+      - name: Discover every registered target
         run: |
           just toolchains-install
-          just coverage-bolero 30
+          just validate-bolero
 
-      - name: Upload runner coverage to Codecov
-        uses: codecov/codecov-action@v5
+      - name: Runner diagnostics before Prepare this shard's declared server harnesses
+        uses: ./.github/actions/runner-diagnostics
         with:
-          disable_search: true
-          fail_ci_if_error: true
-          files: target/bolero/python.lcov
-          flags: bolero
-          use_oidc: true
+          label: prepare-this-shard-s-declared-server-harnesses
+
+      - name: Prepare this shard's declared server harnesses
+        env:
+          # One Cargo build job bounds the instrumented server build's compiler memory.
+          CARGO_BUILD_JOBS: "1"
+        run: just prepare-bolero-shard ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Runner diagnostics before Run this shard's sanitizer libFuzzer targets and qualify failures
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: run-this-shard-s-sanitizer-libfuzzer-targets-and-qualify-failures
+
+      - name: Run this shard's sanitizer libFuzzer targets and qualify failures
+        run: just coverage-bolero 30 ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Stop runner load recorder
+        if: always()
+        run: |
+          if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
+            kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
+            for _ in {1..10}; do
+              [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
+              sleep 1
+            done
+          fi
+          if [[ -f "${RUNNER_TEMP}/runner-load.md" ]]; then
+            cat "${RUNNER_TEMP}/runner-load.md" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      # The combining job needs only the records and each shard's aggregate report; raw and merged
+      # profiles and per-target reports stay in the shard's full coverage artifact.
+      - name: Upload shard completion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bolero-fuzz-evidence-${{ matrix.shard }}
+          path: |
+            target/native-coverage/bolero-fuzz/
+            !target/native-coverage/bolero-fuzz/**/profiles/**
+            !target/native-coverage/bolero-fuzz/**/*.profdata
+            !target/native-coverage/bolero-fuzz/**/targets/*/lcov.info
+          if-no-files-found: error
+
+      - name: Upload live campaign coverage and completion evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-bolero-fuzz-${{ matrix.shard }}
+          path: target/native-coverage/bolero-fuzz/
+          if-no-files-found: error
 
       - name: Upload all fuzz and qualification artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bolero-runs
-          path: target/bolero/runs/
+          name: bolero-runs-${{ matrix.shard }}
+          path: |
+            target/bolero/runs/
+            target/bolero/python.lcov
           if-no-files-found: warn
+
+      - name: Upload runner load
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-load-bolero-fuzz-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/runner-load.csv
+            ${{ runner.temp }}/runner-load.md
+            ${{ runner.temp }}/runner-load.log
+          if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
+  bolero-fuzz-combined:
+    name: bolero-fuzz-combined
+    if: inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz')
+    needs: [bolero-fuzz]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tested-sha || github.sha }}
+
+      # The justfile reads the repository toolchain with Python's TOML parser when it loads.
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest
+
+      - name: Download every shard's completion evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bolero-fuzz-evidence-*
+          path: target/bolero-fuzz-shards
+
+      - name: Prove the shards ran every registered target once and merge their reports
+        run: just combine-bolero-fuzz target/bolero-fuzz-shards target/native-coverage/bolero-fuzz/combined
+
+      - name: Upload the combined campaign record and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-bolero-fuzz
+          path: target/native-coverage/bolero-fuzz/combined/
+          if-no-files-found: error
 
   bolero-gate:
     name: bolero-gate
     if: always()
-    needs: [bolero-random, bolero-fuzz]
+    needs: [bolero-random, bolero-fuzz, bolero-fuzz-combined]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      randomized-result: ${{ steps.selection.outputs.randomized-result }}
+      sanitizer-result: ${{ steps.selection.outputs.sanitizer-result }}
+      sanitizer-required: ${{ steps.selection.outputs.sanitizer-required }}
     steps:
       - name: Require ordinary properties and requested fuzzing
+        id: selection
         env:
           RANDOM_RESULT: ${{ needs.bolero-random.result }}
           FUZZ_RESULT: ${{ needs.bolero-fuzz.result }}
-          FUZZ_REQUIRED: ${{ github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'fuzz') }}
+          COMBINED_RESULT: ${{ needs.bolero-fuzz-combined.result }}
+          FUZZ_REQUIRED: ${{ inputs.event-name == 'pull_request' && contains(fromJSON(inputs.labels-json || '[]'), 'fuzz') }}
         run: |
           test "$RANDOM_RESULT" = success
           if [[ "$FUZZ_REQUIRED" == "true" ]]; then
             test "$FUZZ_RESULT" = success
+            test "$COMBINED_RESULT" = success
           else
             test "$FUZZ_RESULT" = skipped
+            test "$COMBINED_RESULT" = skipped
           fi
+          python3 - <<'PYTHON'
+          import json, os, pathlib
+          record = {
+              "producer": "bolero-selection", "verdict": "complete",
+              "tested_sha": os.environ["BOLERO_TESTED_SHA"],
+              "run": os.environ["GITHUB_RUN_ID"], "attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "event": os.environ["BOLERO_EVENT_NAME"], "labels": json.loads(os.environ["BOLERO_LABELS"]),
+              "randomized": os.environ["RANDOM_RESULT"], "sanitizer": os.environ["FUZZ_RESULT"],
+              "sanitizer_combined": os.environ["COMBINED_RESULT"],
+              "sanitizer_required": os.environ["FUZZ_REQUIRED"] == "true",
+          }
+          pathlib.Path("selection.json").write_text(json.dumps(record, indent=2) + "\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              for name, value in [("randomized-result", record["randomized"]), ("sanitizer-result", record["sanitizer"]), ("sanitizer-required", os.environ["FUZZ_REQUIRED"])]:
+                  output.write(f"{name}={value}\n")
+          PYTHON
+
+      - name: Publish eligible execution or deliberate skip
+        uses: actions/upload-artifact@v4
+        with:
+          name: bolero-selection
+          path: selection.json
+          if-no-files-found: error

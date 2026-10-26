@@ -3,20 +3,20 @@ Feature: MQTT TLS resource mounts
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has dev TLS resource directory "dev_tls"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -30,16 +30,15 @@ Feature: MQTT TLS resource mounts
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_tls
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_tls
         MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{mqtt_tls_addr}}',
           'client_id' = 'nervix-cucumber-mqtt-tls-{{test_id}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_tls TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_tls TOPIC 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

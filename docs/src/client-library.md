@@ -1,9 +1,14 @@
 #  Rust Client Library
 
+*Plexus, the Nervix graph definition language.*
+
 The workspace includes `nervix-client-core`, a native Rust client library built on the same session
 gRPC API used by `nervix-cli`. It is the reference implementation of the [Client Implementation
 Manual](./client-implementation-manual.md), and [Client Session
 Protocol](./client-session-protocol.md) explains the protocol behavior it relies on.
+
+For a complete graph, data-handle lifetimes, credit and failure decisions, read
+[Client Ingestors And Emitters](./client-io-architecture.md).
 
 Capabilities:
 
@@ -18,6 +23,9 @@ Capabilities:
 - `Client::open_ingestor(...)`, with `Producer::send(...)`, `Producer::submit(...)`,
   `Producer::rejoin(...)`, `Producer::pending_submissions()`, `Producer::release(...)` and
   `Producer::close()`
+- `Client::subscribe_emitter(...)`, with `EmitterConsumer::next_batch()`,
+  `EmitterDelivery::ack()`, `EmitterDelivery::retry()`, `EmitterDelivery::reject(...)` and
+  `EmitterConsumer::close()`
 - `Client::upload_resource_from_directory(...)`
 - `Client::download_backup(...)`
 - `Client::restore(...)` and `Client::restore_with_reference(...)`
@@ -52,11 +60,25 @@ same `ExecutionHandle` to `execute_prepared` after an uncertain, cancelled, or t
 
 Every call is bounded by `ConnectOptions`: `connect_timeout` for each connection attempt (10
 seconds by default), `request_timeout` for each request (120 seconds), and `retry_timeout` for the
-call with all of its retries and redirects (120 seconds). A call whose deadline passes before a
+call with all of its retries and redirects (120 seconds). `BACKUP` uses `backup_wait_timeout`
+instead for its command wait and reply (ten minutes), shared across every domain cut, redirect and
+reconnect. All four durations must be between one millisecond and 24 hours. A call whose deadline passes before a
 command's outcome is known fails with `ClientError::UncertainCommand`, which names the execution
 reference. An `https://` server is verified only against `ca_certificate_pem`: the client loads no
 system roots, so a TLS connection needs the certificate authority that signed the server's
 certificate.
+
+Every call returns its failure as an `error_stack::Report<ClientError>`. The report's current
+context, `report.current_context()`, is the failure a caller acts on, and the frames beneath it
+keep its cause: a call's transport status, the wire codec's report beneath `EncodeRequest`,
+`InvalidUploadReply` or `InvalidRestoreReply`, the name's report beneath `InvalidResourceName`, a
+local archive's I/O error beneath `BuildUploadArchive` or `ReadRestoreArchive`, and the
+`BackupDownloadError` beneath `BackupDownload`. A failure that may hide an admitted command or an
+installed upload is `UncertainCommand` or `UncertainUpload` above the failure that left the
+outcome unknown, so the execution reference or upload identity is read from the current context
+and the cause from the frame beneath it. The client decides retries, session recovery and
+uncertainty from those typed contexts, and a caller needs no text to decide either; `{report:#}`
+renders the whole chain for display.
 
 Native connections resolve a hostname through Hickory. By default the client loads the host's
 resolver configuration and hosts file once at connection setup. `ConnectOptions::dns` can name a
@@ -91,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .dropping()
         .with_batch_sample_rate("0.1")
         .with_where_clause(
-            nervix_nspl::parse_expression("input.tenant = \"acme\"")?
+            nervix_plexus::parse_expression("input.tenant = \"acme\"")?
         );
     client.subscribe(&request).await?;
 
@@ -135,7 +157,7 @@ the current session refused to open it again, completes without a request and re
 
 `execute` runs `BACKUP CLUSTER TO '<file>';` and `BACKUP DOMAIN [<name>] TO '<file>';` as one
 command and then downloads the archive the backup assembled into the named file. The download is
-not bounded by the client's retry deadline; each frame must arrive within the request timeout. The
+not bounded by the client's command wait; each frame must arrive within the request timeout. The
 client writes a private file beside the destination and moves it over the destination only once
 the archive's size and BLAKE3 digest match the backup's summary, so the file never holds a partial
 archive, and on Unix only its owner may read it. A download that fails in transport starts again
@@ -144,11 +166,18 @@ from the first byte while the server retains the archive.
 The outcome's `backup` field carries the summary: the archive's size and digest, the capture time,
 the instant the server stops retaining it, whether resource bytes are included, the number of
 users, and each domain's revision, section count and bytes. A download that still fails returns
-`ClientError::BackupDownload` with the backup's execution reference and a typed
-`BackupDownloadError`. Running the same `ExecutionHandle` again returns the recorded outcome and
+`ClientError::BackupDownload` with the backup's execution reference, above the typed
+`BackupDownloadError` that says why. Running the same `ExecutionHandle` again returns the recorded outcome and
 downloads the archive again, and `Client::download_backup(reference, summary, destination)`
-downloads a summary's archive directly. A download that receives the whole archive releases it on
-the server, and a later download of it is refused.
+downloads a summary's archive directly. A download releases the archive on the server once the
+server has queued its last frame, and a later download of it is refused.
+
+For recovery from another process, `Client::prepare_backup_with_reference(backup, reference)`
+creates a handle for `execute_prepared` with that durable reference. Select the original domain
+and retain the scope, resources and capture options; the destination file may change. The server
+enforces the semantic binding and retry validity. Each explicit wait attempt is bounded again by
+`backup_wait_timeout`, and does not renew archive retention. `TIMEOUT` in Plexus remains a separate
+budget for each running domain's cut, so a cluster capture may validly exceed that duration.
 
 `execute` refuses `DESCRIBE BACKUP`, which `nervix-cli` serves from a local file without a server;
 the `nervix-backup` crate's `describe_archive` reads and verifies an archive for other Rust
@@ -190,9 +219,10 @@ return the typed `DomainClockAttachOutcome` and `DomainClockDetachOutcome`, whos
 an attachment from each refusal.
 
 Once attached, `Client::domain_clock(&domain)` returns an `AttachedDomainClock` holding the newest
-clock and accepted tick the session received. `latest_tick()` gives the tick id, logical boundary,
-authority UTC observation, and serving node's logical reading; `frontier()` gives that boundary.
-It answers with the same vocabulary arithmetic the cluster runs,
+clock and accepted tick the session received. It is a copy taken when it is called, which later
+frames do not change, so a caller reads it again for a newer clock. `latest_tick()` gives the tick
+id, logical boundary, authority UTC observation, and serving node's logical reading; `frontier()`
+gives that boundary. It answers with the same vocabulary arithmetic the cluster runs,
 `DomainClockState::logical_time_at` and `DomainAdmissionWindow::reached`, for a UTC instant the
 caller supplies:
 
@@ -219,7 +249,9 @@ match client.next_domain_clock_event().await? {
     DomainClockEvent::Observed(observed) => println!("{}", observed.clock),
     DomainClockEvent::Ticked(ticked) => println!("tick {}", ticked.tick.tick_id),
     DomainClockEvent::Ended(ended) => println!("ended because {}", ended.reason),
-    DomainClockEvent::Interrupted(gap) => println!("{} is attached again", gap.domain),
+    DomainClockEvent::Interrupted(gap) => {
+        println!("{}: session lost; the clock is attached again on the next session", gap.domain)
+    }
     DomainClockEvent::RestorationFailed(failure) => {
         println!("{}: {}; retrying in {:?}", failure.domain, failure.message, failure.retry_after)
     }
@@ -228,44 +260,70 @@ match client.next_domain_clock_event().await? {
 
 `logical_time_at` reads an unpaced clock as UTC itself and rounds a paced projection down;
 `wall_duration_until(now, target)` returns the physical wait until a logical instant, rounded up so
-waiting it never arrives early, and zero once the instant is reached; `admission_window` returns
-`None` for an unpaced clock, whose ingestors admit every timestamp. A stopped or uninstalled clock
-answers every question with a typed `DomainClockReadError`. The answers hold for the caller's UTC: a
-host whose UTC is offset from the cluster's receives answers shifted by that offset multiplied by
-the rate.
+waiting it never arrives early by the caller's own UTC, and zero once the instant is reached;
+`admission_window` returns `None` for an unpaced clock, whose ingestors admit every timestamp. A
+stopped or uninstalled clock answers every question with a typed `DomainClockReadError`, and an
+answer outside the timestamp or duration range is `DomainClockReadError::Arithmetic`. The answers
+hold for the caller's UTC: a host whose UTC is offset from the cluster's reads logical instants and
+admission centers shifted by that offset multiplied by the rate, and physical waits that end early
+or late by the offset itself.
 
 `Client::next_domain_clock_event()` reports what the session receives after each attach reply:
 `Observed` with a changed clock, `Ticked` with the newest accepted progress, `Ended` when the server
 ended the attachment because the domain no longer exists on the serving node, and `Interrupted`
-when the session holding an attachment ended. Events are coalesced per domain: an unread state
-arrives before a tick of its generation, while older unread ticks are replaced by the newest one.
-After a reconnect, the client attaches every followed
-clock again on the new session before any other request, and the clock that attachment reports
-follows the interruption as an `Observed` event; changes in between are not reported. A new session
+when the session holding an attachment ended. An attach reply produces no event: `domain_clock`
+reads the clock it carried, and the first event after attaching to a running paced clock is
+normally its newest tick. Events are coalesced per domain, so a caller that reads none never holds
+the session's reader up. The newest state replaces an unread state and the newest tick an unread
+tick, and an unread state arrives before a tick of its generation. An interruption discards the
+unread observations before it, an end discards everything unread about its domain, the newest
+restoration failure replaces an unread one, and a detach discards every unread event of the domain.
+Domains are reported in the order of their first unread event. While a clock is interrupted,
+`domain_clock` keeps the clock the lost session reported last, without a tick, and another lost
+session before the clock is restored reports no second interruption. After a reconnect, the client
+attaches every followed clock again on the new session before any other request, and the clock
+that attachment reports follows the interruption as an `Observed` event; changes in between are not
+reported. When the new session answers that attach while the old session still holds the
+attachment, as after a redirect to the leader, the attachment moves without an interruption: a
+clock that stays paced in the same generation keeps its newest tick, so `domain_clock` is never
+older than a tick event already taken, and a `Ticked` event of the new session follows only for a
+newer tick. A new session
 that answers the attach with the domain not found ends the attachment with `Ended`, as the server
 would. A node that is still starting answers that attach only once it has installed the cluster's
 committed domains, so a restart never ends an attachment. When the new session refuses that attach
 for any other reason, the event is `RestorationFailed` with the server's message and the wait
-before the client sends the attach again on the same session; the wait starts at one second and
-doubles up to thirty seconds. An attach the session leaves unanswered past `request_timeout` ends
-that session, and the next one attaches the clock again. Waiting for the next event reopens a
-closed session when a followed clock waits for it. A detach, or an end, stops following the domain, and
-`domain_clock` returns `None` for it afterwards.
+before the client sends the attach again on the same session; the wait starts at one second on
+each new session and doubles up to thirty seconds. An attach the session leaves unanswered past
+`request_timeout` ends that session, and the next one attaches the clock again. Waiting for the
+next event reopens a closed session when a followed clock waits for it, including a call already
+waiting when the unanswered attach ends its session; a failure to open one is returned while the
+clock keeps waiting, and the next call tries again. A detach, or an end, stops following the
+domain, and `domain_clock` returns `None` for it afterwards. A detach while a clock waits to be
+restored reaches the current session: a closed session is opened again first, which attaches the
+clock before the detach releases it, and an open session that has not restored the clock answers
+`NotAttached`, after which the client no longer follows it either. The client never attaches the
+clock again behind the detach: an attach it already decided to send to restore the clock is sent
+first, and the detach releases what it attached, while a restoration that would attach the clock
+during the detach waits for it to end and attaches the clock only if the client still follows it.
 
 ### Through The Shared C Binding
 
 The shared C binding reads the same events and attached clocks for C, C++, Python, JVM and Ruby
 hosts; its header is `crates/client-ffi/include/nervix_client.h`. `ATTACH DOMAIN CLOCK;` and
-`DETACH DOMAIN CLOCK;` run through `nx_session_prepare` and `nx_session_execute` like any
-statement, for the session's selected domain. `nx_session_next_clock_event` waits for the next
-event, bounded by the same `nx_cancel` tokens and deadlines as every blocking call, and hands out an
-`nx_clock_event` reference. The events are the Rust client's, coalesced the same way:
+`DETACH DOMAIN CLOCK;` run through `nx_session_prepare` and `nx_session_execute` like any statement,
+for the session's selected domain, and fail with `NX_ERROR_INVALID_ARGUMENT` when none is selected.
+`nx_session_next_clock_event` waits for the next event, bounded by the same `nx_cancel` tokens and
+deadlines as every blocking call, and hands out an `nx_clock_event` reference. While a followed
+clock waits to be restored it opens a session; when none can open, it fails with `NX_ERROR_CLOSED`
+if no server is known and otherwise with the connection, transport or deadline failure of that
+attempt, and the next call tries again. The events are the Rust client's, coalesced the same way:
 
 - `nx_clock_event_kind_of` tells an `NX_CLOCK_EVENT_STATE`, `NX_CLOCK_EVENT_TICK`,
   `NX_CLOCK_EVENT_ENDED`, `NX_CLOCK_EVENT_INTERRUPTED` or `NX_CLOCK_EVENT_RESTORATION_FAILED` event
   apart, and `nx_clock_event_domain` borrows the name of the domain it concerns. A restoration
-  failure reports that the session refused to attach an interrupted clock again, or did not answer;
-  the session tries again after the growing wait the Rust client reports.
+  failure reports that the session refused to attach an interrupted clock again, which it tries
+  again after the growing wait the Rust client reports. The event carries only its kind and domain:
+  the binding exposes neither the server's message nor the wait.
 - `nx_clock_event_generation` reads the `START` generation of a state or tick event,
   `nx_clock_event_state` the installation state of a state event, `nx_clock_event_paced` the period,
   skew, logical origin, UTC anchor and time rate of a paced one, `nx_clock_event_tick` the id,
@@ -284,7 +342,8 @@ It never blocks. Right after `ATTACH DOMAIN CLOCK;` completes it is the clock th
 carried, so a host that attaches to a running paced clock reads its `START` generation and
 committed mapping before it uses the first tick. Every later observation and accepted tick replaces
 it in the order the session received them, so a read is never older than an event the host has
-already taken. Once the session holding the attachment ends, which `NX_CLOCK_EVENT_INTERRUPTED`
+already taken, including after a redirect moves the attachment to another session without an
+interruption. Once the session holding the attachment ends, which `NX_CLOCK_EVENT_INTERRUPTED`
 reports, it keeps the clock that session reported last, without a tick, until the restored
 attachment reports the clock again. A read never
 changes once taken, stays valid after the session is freed, and is counted with
@@ -433,6 +492,12 @@ while let Some(delivery) = consumer.next_batch().await? {
 consumer.close().await?;
 ```
 
+`record_batch` accepts a delivery only when its Arrow IPC stream declares exactly the Arrow schema
+of the fields the emitter declares and holds one record batch of the delivery's member count; any
+other stream is a `ClientError::UnexpectedReply`. `EmitterDelivery::decode_record_batch(fields,
+batch, members)` applies the same check to bytes an application kept: it takes the fields of
+`consumer.description()`, a delivery's `batch` bytes and its `members`, and needs no live delivery.
+
 `delivery.retry().await` keeps the same bytes and asks the server to reassign after physical
 backoff. `delivery.reject(reason).await` sends one bounded, non-sensitive reason through the
 emitter's message error policy for all members. Each reassignment carries a new reference; a
@@ -450,7 +515,15 @@ with the consumer, and the next `next_batch` of the same attachment receives tha
 asking for another batch, so abandoning a wait never strands an attempt until its ACK timeout.
 `close` releases the attachment the way a producer's does.
 
-### Through The Shared C Binding
+The [Paced Simulation Drivers](paced-simulation-drivers.md) are complete programs that combine a
+followed domain clock, a producer and competing consumers on one session, in Rust and through the
+shared C binding: they start their consumers before they await an attached outcome, pace their
+`TIMESTAMP AT` values by the attached clock's projections, and make their effects idempotent across
+redeliveries and deliberate replays. They explicitly reopen changed endpoint contracts within a
+START generation, validate the same expected fields and credit requests again, and keep unknown
+submissions with their original handle rather than resending them.
+
+### Endpoints Through The Shared C Binding
 
 The shared C binding exposes the same producers and consumers to C, C++, Python, JVM and Ruby
 hosts, through `crates/client-ffi/include/nervix_client.h`. Every call forwards to the Rust handles

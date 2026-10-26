@@ -5,6 +5,11 @@
 //! - **Depends on.** The production constant divisors and the supported SIMD levels.
 //! - **Must not know.** Arrow, VM programs or error reporting.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use super::*;
 use crate::{CheckedLanes, WORD_LANES, supported_levels};
 

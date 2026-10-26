@@ -1,23 +1,38 @@
-//! Syslog client configuration shared by the source and sink transports.
+//! Syslog client configuration shared by the ingestor and emitter transports.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Syslog transport, framing, size and TLS configuration interpretation.
+//! - **Owns.** Syslog transport, framing, size and TLS configuration interpretation, and which
+//!   clients may set each deadline key.
 //! - **Depends on.** Connector TLS primitives, Syslog client entries, and rustls.
 //! - **Must not know.** Runtime tasks, relays, branches, schedules, Models beyond typed client
 //!   entries, or registry state.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::input(plans, reason = "connector host supplies validated plans")
+)]
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
 
 use std::num::NonZeroUsize;
 
 use ahash::HashSet;
 use error_stack::Report;
 use nervix_connector::{
-    RustlsClientConfigSource, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
+    RustlsClientConfigProvider, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
 };
+use nervix_models::DeadlineKey;
 use nervix_primitives::sync::StdArc;
 use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+use strum::IntoEnumIterator as _;
 use thiserror::Error;
 use url::{Host, Url};
 
@@ -43,6 +58,45 @@ pub enum SyslogFraming {
     NonTransparent,
 }
 
+/// The Syslog clients whose waits one deadline key bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum SyslogDeadlineScope {
+    /// `connect_timeout_ms`: the connection an emitter opens, and the handshake a TLS listener
+    /// completes with each connection it accepts.
+    #[strum(to_string = "an emitter's connection or a TLS listener's handshake")]
+    ConnectionOrTlsHandshake,
+    /// `timeout_ms`: the frames an emitter writes.
+    #[strum(to_string = "an emitter's frame writes")]
+    EmitterWrites,
+    /// `idle_timeout_ms`: the connections a TCP or TLS listener reads.
+    #[strum(to_string = "a TCP or TLS listener's connections")]
+    ListenerConnections,
+}
+
+impl SyslogDeadlineScope {
+    /// The clients whose waits `key` bounds.
+    fn of(key: DeadlineKey) -> Self {
+        match key {
+            DeadlineKey::Timeout => Self::EmitterWrites,
+            DeadlineKey::ConnectTimeout => Self::ConnectionOrTlsHandshake,
+            DeadlineKey::IdleTimeout => Self::ListenerConnections,
+        }
+    }
+
+    /// Whether a client of `direction` over `protocol` performs a wait this scope names.
+    fn includes(self, direction: SyslogDirection, protocol: SyslogProtocol) -> bool {
+        match self {
+            Self::ConnectionOrTlsHandshake => {
+                direction == SyslogDirection::Emit || protocol == SyslogProtocol::Tls
+            }
+            Self::EmitterWrites => direction == SyslogDirection::Emit,
+            Self::ListenerConnections => {
+                direction == SyslogDirection::Ingest && protocol != SyslogProtocol::Udp
+            }
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum SyslogConfigError {
     #[error("missing Syslog client config key '{key}'")]
@@ -54,6 +108,15 @@ pub enum SyslogConfigError {
     },
     #[error("unknown Syslog client config key '{key}'")]
     UnknownKey { key: String },
+    /// A deadline key on a client whose direction and protocol never perform the wait it bounds.
+    #[error("Syslog client config key '{key}' applies only to {scope}")]
+    InapplicableDeadlineKey {
+        key: &'static str,
+        scope: SyslogDeadlineScope,
+    },
+    /// A deadline key's value breaks the deadline rule, which the frames beneath name with the key.
+    #[error("invalid Syslog client deadline")]
+    InvalidDeadline,
     #[error("duplicate Syslog client config key '{key}'")]
     DuplicateKey { key: String },
     #[error(
@@ -150,6 +213,7 @@ impl SyslogClientConfig {
                 }));
             }
         };
+        Self::validate_deadline_keys(entries, direction, protocol)?;
         if protocol == SyslogProtocol::Udp && explicit_framing.is_some() {
             return Err(Report::new(SyslogConfigError::UdpFraming));
         }
@@ -239,18 +303,10 @@ impl SyslogClientConfig {
     fn validate_keys(
         entries: &[nervix_models::ClientConfigEntry],
     ) -> error_stack::Result<(), SyslogConfigError> {
-        let known = [
-            "protocol",
-            "addr",
-            "max_message_size",
-            "framing",
-            "tls_cert_file",
-            "tls_key_file",
-            "tls_ca_file",
-        ];
+        let schema = nervix_models::CreateClientSyslog::<u64>::DECLARATION.config;
         let mut seen = HashSet::default();
         for entry in entries {
-            if !known.contains(&entry.key.as_str()) {
+            if schema.key(&entry.key).is_none() {
                 return Err(Report::new(SyslogConfigError::UnknownKey {
                     key: entry.key.clone(),
                 }));
@@ -258,6 +314,28 @@ impl SyslogClientConfig {
             if !seen.insert(entry.key.clone()) {
                 return Err(Report::new(SyslogConfigError::DuplicateKey {
                     key: entry.key.clone(),
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuses a deadline key on a client of `direction` over `protocol` that never performs the
+    /// wait the key bounds, so every key a client sets bounds something.
+    fn validate_deadline_keys(
+        entries: &[nervix_models::ClientConfigEntry],
+        direction: SyslogDirection,
+        protocol: SyslogProtocol,
+    ) -> error_stack::Result<(), SyslogConfigError> {
+        for key in DeadlineKey::iter() {
+            if Self::optional_value(entries, key.key()).is_none() {
+                continue;
+            }
+            let scope = SyslogDeadlineScope::of(key);
+            if !scope.includes(direction, protocol) {
+                return Err(Report::new(SyslogConfigError::InapplicableDeadlineKey {
+                    key: key.key(),
+                    scope,
                 }));
             }
         }
@@ -302,12 +380,17 @@ impl SyslogClientConfig {
     pub fn tls_client_config(
         &self,
     ) -> error_stack::Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
-        RustlsClientConfigSource::new(&self.entries)
-            .build_with_default_roots()
-            .map_err(|error| {
-                let reason = error.to_string();
-                error.change_context(SyslogConfigError::TlsMaterial { reason })
-            })
+        {
+            let mapping_input =
+                RustlsClientConfigProvider::new(&self.entries).build_with_default_roots();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    error.change_context(SyslogConfigError::TlsMaterial { reason })
+                }),
+            }
+        }
     }
 
     pub fn tls_server_config(
@@ -327,25 +410,40 @@ impl SyslogClientConfig {
                 key: "tls_key_file",
             })
         })?;
-        let cert_pem =
-            read_tls_file(cert_file, "Syslog TLS server certificate").map_err(|error| {
-                let reason = error.to_string();
-                error.change_context(SyslogConfigError::TlsMaterial { reason })
-            })?;
-        let key_pem =
-            read_tls_file(key_file, "Syslog TLS server private key").map_err(|error| {
-                let reason = error.to_string();
-                error.change_context(SyslogConfigError::TlsMaterial { reason })
-            })?;
-        let certs = CertificateDer::pem_slice_iter(&cert_pem)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| {
-                let reason = format!(
-                    "invalid Syslog client config key 'tls_cert_file' '{}': {error}",
-                    cert_file.display()
-                );
-                Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-            })?;
+        let cert_pem = {
+            let mapping_input = read_tls_file(cert_file, "Syslog TLS server certificate");
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    error.change_context(SyslogConfigError::TlsMaterial { reason })
+                }),
+            }
+        }?;
+        let key_pem = {
+            let mapping_input = read_tls_file(key_file, "Syslog TLS server private key");
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    error.change_context(SyslogConfigError::TlsMaterial { reason })
+                }),
+            }
+        }?;
+        let certs = {
+            let mapping_input =
+                CertificateDer::pem_slice_iter(&cert_pem).collect::<Result<Vec<_>, _>>();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = format!(
+                        "invalid Syslog client config key 'tls_cert_file' '{}': {error}",
+                        cert_file.display()
+                    );
+                    Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
+                }),
+            }
+        }?;
         if certs.is_empty() {
             return Err(Report::new(SyslogConfigError::TlsMaterial {
                 reason: format!(
@@ -354,61 +452,100 @@ impl SyslogClientConfig {
                 ),
             }));
         }
-        let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|error| {
-            let reason = format!(
-                "invalid Syslog client config key 'tls_key_file' '{}': {error}",
-                key_file.display()
-            );
-            Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-        })?;
-        let builder = ServerConfig::builder();
-        let config = if let Some(ca_file) = tls.ca_file.as_ref() {
-            let ca_pem =
-                read_tls_file(ca_file, "Syslog TLS client CA certificate").map_err(|error| {
-                    let reason = error.to_string();
-                    error.change_context(SyslogConfigError::TlsMaterial { reason })
-                })?;
-            let mut roots = RootCertStore::empty();
-            for cert in CertificateDer::pem_slice_iter(&ca_pem) {
-                let cert = cert.map_err(|error| {
+        let key = {
+            let mapping_input = PrivateKeyDer::from_pem_slice(&key_pem);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
                     let reason = format!(
-                        "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
-                        ca_file.display()
+                        "invalid Syslog client config key 'tls_key_file' '{}': {error}",
+                        key_file.display()
                     );
                     Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-                })?;
-                roots.add(cert).map_err(|error| {
-                    let reason = format!(
-                        "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
-                        ca_file.display()
-                    );
-                    Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-                })?;
+                }),
             }
-            let verifier = WebPkiClientVerifier::builder(StdArc::new(roots))
-                .build()
-                .map_err(|error| {
-                    let reason = format!(
-                        "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
-                        ca_file.display()
-                    );
+        }?;
+        let builder = ServerConfig::builder();
+        let config = {
+            let mapping_input = if let Some(ca_file) = tls.ca_file.as_ref() {
+                let ca_pem = {
+                    let mapping_input = read_tls_file(ca_file, "Syslog TLS client CA certificate");
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err({
+                            let reason = error.to_string();
+                            error.change_context(SyslogConfigError::TlsMaterial { reason })
+                        }),
+                    }
+                }?;
+                let mut roots = RootCertStore::empty();
+                for cert in CertificateDer::pem_slice_iter(&ca_pem) {
+                    let cert = {
+                        let mapping_input = cert;
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err({
+                                let reason = format!(
+                                    "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
+                                    ca_file.display()
+                                );
+                                Report::new(error)
+                                    .change_context(SyslogConfigError::TlsMaterial { reason })
+                            }),
+                        }
+                    }?;
+                    {
+                        let mapping_input = roots.add(cert);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err({
+                                let reason = format!(
+                                    "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
+                                    ca_file.display()
+                                );
+                                Report::new(error)
+                                    .change_context(SyslogConfigError::TlsMaterial { reason })
+                            }),
+                        }
+                    }?;
+                }
+                let verifier = {
+                    let mapping_input = WebPkiClientVerifier::builder(StdArc::new(roots)).build();
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err({
+                            let reason = format!(
+                                "invalid Syslog client config key 'tls_ca_file' '{}': {error}",
+                                ca_file.display()
+                            );
+                            Report::new(error)
+                                .change_context(SyslogConfigError::TlsMaterial { reason })
+                        }),
+                    }
+                }?;
+                builder
+                    .with_client_cert_verifier(verifier)
+                    .with_single_cert(certs, key)
+            } else {
+                builder.with_no_client_auth().with_single_cert(certs, key)
+            };
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = format!("invalid Syslog TLS server identity: {error}");
                     Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-                })?;
-            builder
-                .with_client_cert_verifier(verifier)
-                .with_single_cert(certs, key)
-        } else {
-            builder.with_no_client_auth().with_single_cert(certs, key)
-        }
-        .map_err(|error| {
-            let reason = format!("invalid Syslog TLS server identity: {error}");
-            Report::new(error).change_context(SyslogConfigError::TlsMaterial { reason })
-        })?;
+                }),
+            }
+        }?;
         Ok(StdArc::new(config))
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::ClientConfigEntry;
 
@@ -468,6 +605,104 @@ mod tests {
         )
         .expect_err("TLS non-transparent framing must fail");
         assert!(tls_framing.to_string().contains("framing"));
+    }
+
+    /// A client's direction and transport.
+    #[derive(Debug, Clone, Copy)]
+    struct Client {
+        direction: SyslogDirection,
+        protocol: &'static str,
+    }
+
+    const fn client(direction: SyslogDirection, protocol: &'static str) -> Client {
+        Client {
+            direction,
+            protocol,
+        }
+    }
+
+    /// One deadline key, the clients that perform the wait it bounds, and the clients that do not.
+    struct DeadlineCase {
+        key: &'static str,
+        scope: SyslogDeadlineScope,
+        applies: &'static [Client],
+        refused: &'static [Client],
+    }
+
+    const UDP_EMITTER: Client = client(SyslogDirection::Emit, "udp");
+    const TCP_EMITTER: Client = client(SyslogDirection::Emit, "tcp");
+    const TLS_EMITTER: Client = client(SyslogDirection::Emit, "tls");
+    const UDP_LISTENER: Client = client(SyslogDirection::Ingest, "udp");
+    const TCP_LISTENER: Client = client(SyslogDirection::Ingest, "tcp");
+    const TLS_LISTENER: Client = client(SyslogDirection::Ingest, "tls");
+
+    #[test]
+    fn a_deadline_key_applies_only_to_a_client_that_performs_its_wait() {
+        let cases = [
+            DeadlineCase {
+                key: "connect_timeout_ms",
+                scope: SyslogDeadlineScope::ConnectionOrTlsHandshake,
+                applies: &[UDP_EMITTER, TCP_EMITTER, TLS_EMITTER, TLS_LISTENER],
+                refused: &[UDP_LISTENER, TCP_LISTENER],
+            },
+            DeadlineCase {
+                key: "timeout_ms",
+                scope: SyslogDeadlineScope::EmitterWrites,
+                applies: &[UDP_EMITTER, TCP_EMITTER, TLS_EMITTER],
+                refused: &[UDP_LISTENER, TCP_LISTENER, TLS_LISTENER],
+            },
+            DeadlineCase {
+                key: "idle_timeout_ms",
+                scope: SyslogDeadlineScope::ListenerConnections,
+                applies: &[TCP_LISTENER, TLS_LISTENER],
+                refused: &[UDP_LISTENER, UDP_EMITTER, TCP_EMITTER, TLS_EMITTER],
+            },
+        ];
+        for case in cases {
+            for performer in case.applies {
+                let settings = deadline_client(performer.protocol, case.key);
+                if let Err(error) = SyslogClientConfig::parse(&settings, performer.direction) {
+                    panic!("{} bounds a wait of {performer:?}: {error}", case.key);
+                }
+            }
+            for bystander in case.refused {
+                let settings = deadline_client(bystander.protocol, case.key);
+                let error = SyslogClientConfig::parse(&settings, bystander.direction)
+                    .expect_err("the client performs no wait the key bounds");
+                assert_eq!(
+                    error.current_context().to_string(),
+                    format!(
+                        "Syslog client config key '{}' applies only to {}",
+                        case.key, case.scope
+                    ),
+                    "{bystander:?}"
+                );
+                let SyslogConfigError::InapplicableDeadlineKey { key, scope } =
+                    error.current_context()
+                else {
+                    panic!(
+                        "{bystander:?} must refuse {} by its scope: {error:?}",
+                        case.key
+                    );
+                };
+                assert_eq!((*key, *scope), (case.key, case.scope), "{bystander:?}");
+            }
+        }
+    }
+
+    /// A client over `protocol` that sets the deadline `key`, with the TLS identity a TLS listener
+    /// requires.
+    fn deadline_client(protocol: &str, key: &str) -> Vec<ClientConfigEntry> {
+        let mut settings = vec![
+            ("protocol", protocol),
+            ("addr", "127.0.0.1:6514"),
+            (key, "1000"),
+        ];
+        if protocol == "tls" {
+            settings.push(("tls_cert_file", "/tmp/server.pem"));
+            settings.push(("tls_key_file", "/tmp/server.key"));
+        }
+        entries(&settings)
     }
 
     #[test]

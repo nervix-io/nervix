@@ -6,7 +6,14 @@
 //! - **Depends on.** Nothing but the messages its variants carry.
 //! - **Must not know.** Any failure a running node recovers from on its own.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
+use nervix_models::DomainName;
 use thiserror::Error;
+
 #[derive(Debug, Error)]
 pub enum AppError {
     #[error("failed to build the Tokio runtime")]
@@ -72,14 +79,16 @@ pub enum AppError {
          dedicated consensus database layout"
     )]
     ConsensusStorageLayout,
-    #[error("failed to apply startup runtime changes: {0}")]
-    ApplyStartupRuntime(String),
+    #[error("failed to read startup runtime changes from the registry")]
+    ReadStartupRuntimeChanges,
+    #[error("failed to plan startup runtime changes for domain '{domain}'")]
+    PlanStartupRuntime { domain: DomainName },
+    #[error("failed to apply startup runtime changes for domain '{domain}'")]
+    ApplyStartupRuntime { domain: DomainName },
     #[error("failed to open runtime state store")]
     OpenRuntimeState,
     #[error("failed to load interconnect tls configuration")]
     LoadInterconnectTls,
-    #[error("failed to load the name resolver configuration")]
-    LoadDnsConfiguration,
     #[error("failed to load gRPC tls configuration")]
     LoadGrpcTls,
     #[error("failed to load web console tls configuration")]
@@ -90,16 +99,26 @@ pub enum AppError {
     RegisterInterconnectRequestHandler,
     #[error("failed to start cluster membership")]
     StartCluster,
+    #[error("the startup preflight refused this node")]
+    Preflight,
+    #[error("this node was refused at join")]
+    JoinRefused,
     #[error("failed to stop cluster membership")]
     ShutdownCluster,
     #[error("failed to close the node's stores")]
     CloseStores,
-    #[error("memory high watermark requires memory low watermark")]
-    MissingMemoryPressureLowWatermark,
-    #[error("memory low watermark requires memory high watermark")]
-    MissingMemoryPressureHighWatermark,
     #[error("invalid memory pressure configuration")]
     InvalidMemoryPressureConfig,
+    #[error("invalid Raft timings")]
+    InvalidRaftTimings,
+    #[error("invalid membership settings")]
+    InvalidMembershipSettings,
+    #[error("invalid capacity settings")]
+    InvalidCapacitySettings,
+    #[error("invalid shutdown timeouts")]
+    InvalidShutdownTimeouts,
+    #[error("failed to read the node settings")]
+    ReadSettings,
     #[error("failed to initialize memory pressure monitor")]
     InitMemoryPressureMonitor,
     #[error("gRPC server failed")]
@@ -116,6 +135,9 @@ pub enum AppError {
     InitTracing,
     #[error("failed to register termination signal handlers")]
     RegisterTerminationSignals,
+    #[cfg(feature = "deloxide")]
+    #[error("failed to start the diagnostic node's deadlock diagnostics")]
+    StartDeadlockDiagnostics,
     #[error("failed to start termination signal supervision")]
     SuperviseTerminationSignals,
     #[error("failed to start shutdown deadline supervision")]

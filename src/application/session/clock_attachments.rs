@@ -21,6 +21,11 @@
 //! received. It then sends the newest accepted tick of that installation. State frames wait for
 //! room; each tick holds one replaceable control slot.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use ahash::HashMap;
 use meticulous::OptionExt as _;
 use nervix_client_wire::{
@@ -392,7 +397,7 @@ impl ClockDelivery {
                         Err(error) => {
                             warn!(
                                 domain = self.domain.as_str(),
-                                error = %error,
+                                error = format!("{error:#}"),
                                 "a domain clock observation does not fit a session frame"
                             );
                             if !self.wait_change().await {
@@ -439,7 +444,7 @@ impl ClockDelivery {
             Err(error) => {
                 warn!(
                     domain = self.domain.as_str(),
-                    error = %error,
+                    error = format!("{error:#}"),
                     "a domain clock tick does not fit a session frame"
                 );
                 None
@@ -525,7 +530,7 @@ impl ClockDelivery {
             }
             Err(error) => warn!(
                 domain = self.domain.as_str(),
-                error = %error,
+                error = format!("{error:#}"),
                 "the end of a domain clock attachment does not fit a session frame"
             ),
         }

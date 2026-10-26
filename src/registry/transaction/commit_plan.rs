@@ -6,6 +6,11 @@
 //! - **Depends on.** The parent transaction planner and public transaction-plan vocabulary.
 //! - **Must not know.** Consensus storage, runtime execution, sessions, Tokio or locks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use meticulous::OptionExt as _;

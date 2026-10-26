@@ -2,11 +2,11 @@ Feature: HTTP endpoint ingestion
   Scenario Outline: HTTP endpoint ingestor delivers a single JSON payload to a subscribed relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -25,8 +25,8 @@ Feature: HTTP endpoint ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -57,11 +57,11 @@ Feature: HTTP endpoint ingestion
   Scenario Outline: HTTP endpoint ingestor delivers each posted payload once to the relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metric (
         value I32
@@ -84,8 +84,8 @@ Feature: HTTP endpoint ingestion
         PATH '/metrics'
         TYPE HTTP;
 
-      CREATE INGESTOR raw_metrics_source
-        FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source
+        FROM raw_metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -130,20 +130,20 @@ Feature: HTTP endpoint ingestion
   Scenario Outline: HTTPS endpoint ingestor delivers a single JSON payload to a subscribed relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has TLS resource directory "tls_bundle" for hosts "http-{{test_id}}.example.com"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE tls_bundle;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE tls_bundle VERSION "{{tls_bundle}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -162,8 +162,8 @@ Feature: HTTP endpoint ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -194,12 +194,12 @@ Feature: HTTP endpoint ingestion
   Scenario Outline: HTTP endpoint stops routing while its domain is stopped and routes again after it restarts
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -218,8 +218,8 @@ Feature: HTTP endpoint ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -240,7 +240,7 @@ Feature: HTTP endpoint ingestion
       """
       {"user_id":42}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
@@ -250,7 +250,7 @@ Feature: HTTP endpoint ingestion
       {"user_id":43}
       """
     Then the relay subscription does not receive a payload within "1s"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """

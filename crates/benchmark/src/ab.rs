@@ -1,8 +1,9 @@
 use std::{
-    fs, io,
+    fs,
     path::{Path, PathBuf},
 };
 
+use error_stack::{Report, ResultExt as _};
 use nervix_approx_into::ApproxInto as _;
 use thiserror::Error;
 
@@ -25,31 +26,19 @@ pub enum AbError {
     #[error("A/B arm '{arm}' has no benchmark runs")]
     EmptyArm { arm: String },
 
+    /// The [`ComparisonError`] that rejected the run's artifacts is beneath.
     #[error("A/B arm '{arm}' has an unusable run {}", directory.display())]
-    Artifact {
-        arm: String,
-        directory: PathBuf,
-        #[source]
-        source: Box<ComparisonError>,
-    },
+    Artifact { arm: String, directory: PathBuf },
 
+    /// The [`ComparisonError`] naming the configuration field that differs is beneath.
     #[error(
         "A/B arm '{arm}' run {} does not match the baseline workload configuration",
         directory.display()
     )]
-    MismatchedConfiguration {
-        arm: String,
-        directory: PathBuf,
-        #[source]
-        source: Box<ComparisonError>,
-    },
+    MismatchedConfiguration { arm: String, directory: PathBuf },
 
     #[error("failed to write A/B summary {}", path.display())]
-    Write {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
+    Write { path: PathBuf },
 }
 
 /// A local same-hardware A/B comparison between a baseline and a candidate server build running
@@ -68,26 +57,27 @@ struct ArmSummary {
 }
 
 impl AbSummary {
-    pub fn from_arms(baseline: AbArm, candidate: AbArm) -> Result<Self, AbError> {
+    pub fn from_arms(baseline: AbArm, candidate: AbArm) -> error_stack::Result<Self, AbError> {
         let baseline = ArmSummary::load(baseline)?;
         let candidate = ArmSummary::load(candidate)?;
         let reference = &baseline.runs[0];
         let slug = reference.manifest.benchmark.clone();
         for arm in [&baseline, &candidate] {
             for run in &arm.runs {
-                let mismatch = |source: ComparisonError| AbError::MismatchedConfiguration {
+                let mismatch = || AbError::MismatchedConfiguration {
                     arm: arm.label.clone(),
                     directory: run.directory.clone(),
-                    source: Box::new(source),
                 };
                 if run.manifest.benchmark != slug {
-                    return Err(mismatch(ComparisonError::MismatchedConfiguration {
+                    return Err(Report::new(ComparisonError::MismatchedConfiguration {
                         benchmark: slug,
                         implementation: run.manifest.implementation.clone(),
                         field: "benchmark",
-                    }));
+                    })
+                    .change_context(mismatch()));
                 }
-                ensure_matching_run_configuration(&slug, reference, run).map_err(mismatch)?;
+                ensure_matching_run_configuration(&slug, reference, run)
+                    .change_context_lazy(mismatch)?;
             }
         }
         Ok(Self {
@@ -211,29 +201,26 @@ impl AbSummary {
         markdown
     }
 
-    pub fn write_markdown(&self, path: impl AsRef<Path>) -> Result<(), AbError> {
+    pub fn write_markdown(&self, path: impl AsRef<Path>) -> error_stack::Result<(), AbError> {
         let path = path.as_ref();
-        fs::write(path, self.render_markdown()).map_err(|source| AbError::Write {
+        fs::write(path, self.render_markdown()).change_context_lazy(|| AbError::Write {
             path: path.to_path_buf(),
-            source,
         })
     }
 }
 
 impl ArmSummary {
-    fn load(arm: AbArm) -> Result<Self, AbError> {
+    fn load(arm: AbArm) -> error_stack::Result<Self, AbError> {
         if arm.run_directories.is_empty() {
-            return Err(AbError::EmptyArm { arm: arm.label });
+            return Err(Report::new(AbError::EmptyArm { arm: arm.label }));
         }
         let mut runs = Vec::with_capacity(arm.run_directories.len());
         for directory in &arm.run_directories {
-            runs.push(
-                RunArtifact::load(directory).map_err(|source| AbError::Artifact {
-                    arm: arm.label.clone(),
-                    directory: directory.clone(),
-                    source: Box::new(source),
-                })?,
-            );
+            let run = RunArtifact::load(directory).change_context_lazy(|| AbError::Artifact {
+                arm: arm.label.clone(),
+                directory: directory.clone(),
+            })?;
+            runs.push(run);
         }
         Ok(Self {
             label: arm.label,

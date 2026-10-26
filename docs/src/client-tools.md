@@ -1,36 +1,42 @@
 # Client Tools
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix ships two interactive clients, and both speak the same language to the same place: they open
-a session against the cluster's session API and submit NSPL to the leader. Almost every statement in
+a session against the cluster's session API and submit Plexus to the leader. Almost every statement in
 this book can be typed into either one, and neither is required — a Nervix cluster is administered
-entirely through NSPL, whatever submits it.
+entirely through Plexus, whatever submits it.
 
 ## Choosing A Client
 
 | Client | Where it runs | Use it for |
 | --- | --- | --- |
 | [Command Line Client](client-tools-cli.md) | your terminal, installed separately | interactive work, scripting, shell completions, streaming a relay to stdout, node administration |
-| [Web Console](client-tools-web-console.md) | your browser, served by every node | reading a running graph, exploring an unfamiliar domain, guided subscriptions, uploading resources |
+| [Web Console](client-tools-web-console.md) | your browser, served by every node | reading a running graph, exploring an unfamiliar domain, guided subscriptions, uploading resources, taking and restoring backups |
 | [Rust Client Library](client-library.md) | your own program | embedding Nervix control and subscriptions in a Rust application |
 
-One further tool is not a client at all: [`nervix-nspl-format`](client-tools-nspl-format.md) formats
-saved `.nspl` files and checks that they are formatted. It never opens a session.
+One further tool is not a client at all: [`nervix-plexus-format`](client-tools-plexus-format.md) formats
+saved `.plexus` files and checks that they are formatted. It never opens a session.
 
 The console is the better tool for understanding a graph you did not write, because it draws one.
 The command line client is the better tool for repeating yourself, because it can be scripted.
 
-Only three things differ. Uploading a resource version names a local directory in the command line
-client and uses a file picker in the console; only the command line client follows a domain clock
-with `ATTACH DOMAIN CLOCK`; the console additionally offers guided actions — clicking a graph item or
-an entity — that simply type NSPL for you.
+Only a few things differ. Uploading a resource version, and restoring a backup archive, name a local
+path in the command line client and use a file picker in the console; a backup's archive is written
+to a local file by the command line client and saved as a browser download by the console, and only
+the command line client reads an archive with `DESCRIBE BACKUP`; the command line client follows a
+domain clock from its `domain-clock` subcommand or with `ATTACH DOMAIN CLOCK`, while the console
+follows the clock of the domain it has selected and shows it in its clock panel; the console
+additionally offers guided actions — clicking a graph item or an entity — that simply type Plexus for
+you.
 
 ## What Every Client Shares
 
 - **The same statement surface.** Domains, schemas, codecs, relays, clients, runtime nodes, and
-  emitters are all declared in NSPL ([NSPL Overview](nspl-overview.md)).
+  emitters are all declared in Plexus ([Plexus Overview](plexus-overview.md)).
 - **Session and transaction statements.** `USE`, `LIST DOMAINS`, `UPLOAD RESOURCE`,
-  `CREATE SUBSCRIPTION`, `DELETE SUBSCRIPTION`, and, outside the console, `ATTACH DOMAIN CLOCK` and
-  `DETACH DOMAIN CLOCK` are session/client operations. `BEGIN`, `COMMIT`, and `REVERT` operate on a
+  `CREATE SUBSCRIPTION`, `DELETE SUBSCRIPTION`, `ATTACH DOMAIN CLOCK`, and `DETACH DOMAIN CLOCK` are
+  session/client operations. `BEGIN`, `COMMIT`, and `REVERT` operate on a
   leader-owned, replicated transaction.
 - **Server-driven completion.** Suggestions come from the cluster, not from a local copy of the
   grammar, so they include the identifiers that actually exist in the active domain. Inside a

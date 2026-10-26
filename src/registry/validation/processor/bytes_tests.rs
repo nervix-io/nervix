@@ -5,6 +5,11 @@
 //! - **Depends on.** Processor decisions and registry test fixtures.
 //! - **Must not know.** Runtime payload execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::fs;
 
 use nervix_models::ParseAsType;

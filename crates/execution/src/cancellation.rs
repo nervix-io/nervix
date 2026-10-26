@@ -15,6 +15,13 @@ use thiserror::Error;
 /// The caller stopped waiting for this job before it finished.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[error("the work was cancelled between bounded units")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "cancellation is the ordinary signal checked between bounded work units"
+    )
+)]
 pub struct Cancelled;
 
 /// Raised when the caller stops awaiting a submitted job. A job that has already started keeps
@@ -99,13 +106,13 @@ impl Drop for CancelOnDrop {
 #[cfg(all(test, feature = "loom"))]
 mod loom_models {
     use meticulous::ResultExt as _;
-    use nervix_model_harness::{InvariantId, loom::explore};
-    use nervix_primitives::{
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        thread,
+    use nervix_model_harness::{
+        InvariantId,
+        loom::{explore, spawn},
+    };
+    use nervix_primitives::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use super::{ArmedCancellation, Cancellation, Cancelled};
@@ -124,7 +131,7 @@ mod loom_models {
             let ArmedCancellation { obligation, signal } = Cancellation::armed();
             let witness = Arc::new(AtomicUsize::new(0));
             let awaiting_witness = Arc::clone(&witness);
-            let awaiting = thread::spawn(move || {
+            let awaiting = spawn(move || {
                 awaiting_witness.store(WRITTEN_BEFORE_CANCELLING, Ordering::Relaxed);
                 // The awaiting caller stops waiting, which drops its armed obligation.
                 drop(obligation);
@@ -151,7 +158,7 @@ mod loom_models {
             let ArmedCancellation { obligation, signal } = Cancellation::armed();
             // A job hands its signal to the bounded units it runs.
             let unit_signal = signal.clone();
-            let awaiting = thread::spawn(move || drop(obligation));
+            let awaiting = spawn(move || drop(obligation));
 
             let first = signal.check();
             let second = unit_signal.check();
@@ -178,7 +185,7 @@ mod loom_models {
     fn loom_a_disarmed_obligation_never_cancels_its_job() {
         explore(DISARM, || {
             let ArmedCancellation { obligation, signal } = Cancellation::armed();
-            let awaiting = thread::spawn(move || obligation.disarm());
+            let awaiting = spawn(move || obligation.disarm());
 
             assert_eq!(
                 signal.check(),

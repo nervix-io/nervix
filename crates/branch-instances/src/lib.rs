@@ -8,7 +8,12 @@
 //! - **Depends on.** Vocabulary timestamps, the primitive publication boundary, and indexed and
 //!   persistent collections.
 //! - **Must not know.** What a branch instance holds, relays, processors, payloads, metrics,
-//!   persistence, NSPL, or control-plane transactions.
+//!   persistence, Plexus, or control-plane transactions.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 mod membership;
 mod registry;

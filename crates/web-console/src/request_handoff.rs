@@ -12,6 +12,11 @@
 //! issues while the console connects, waits to reconnect, or checks its credentials waits here
 //! until the next connection opens, so this is where an unbounded burst would accumulate.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     pin::Pin,
     task::{Context, Poll},

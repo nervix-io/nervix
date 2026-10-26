@@ -8,7 +8,10 @@
 
 use nervix_interconnect::{RelayAdmissionDecision, RelayAdmissionStatus};
 use nervix_models::{CoordinationIdentity, RemoteAckOutcome, RemoteAckResolution};
-use nervix_primitives::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use nervix_primitives::{
+    sync::atomic::{AtomicU8, AtomicUsize, Ordering},
+    time::timeout,
+};
 
 use super::*;
 
@@ -801,4 +804,212 @@ fn relay_restart_fences_unresolved_delivery_and_accepts_fresh_work() {
             restarted_receiver_fences_unresolved_relay(milestone, run)
         });
     }
+}
+
+#[test]
+fn sender_retirement_reclaims_capacity_while_an_admitted_intake_is_retained() {
+    const FIRST: RelayDelivery = RelayDelivery {
+        channel_incarnation: [95; 16],
+        sequence: 0,
+    };
+    const FRESH: RelayDelivery = RelayDelivery {
+        channel_incarnation: [96; 16],
+        sequence: 0,
+    };
+    Scenario {
+        name: "sender replacement with a retained admitted intake",
+        fault_plan: "remove the sender from live membership after admission; recreate its \
+                     transport with a distinct process epoch and deliver Arrow rows through a \
+                     one-item receiver while its first intake remains borrowed",
+        seeds: &[95],
+    }
+    .check(config, |run| {
+        let seed = run.seed();
+        let trace = run.trace();
+        let authority = Authority::new();
+        let server_credentials = authority.issue("server");
+        let client_credentials = authority.issue("client");
+        let (ready_tx, ready_rx) = watch::channel(false);
+        let (admitted_tx, admitted_rx) = watch::channel(false);
+        let (departed_tx, departed_rx) = watch::channel(false);
+        let (retired_tx, retired_rx) = watch::channel(false);
+        let (fresh_tx, fresh_rx) = watch::channel(false);
+        let (done_tx, done_rx) = watch::channel(false);
+        let (finished_tx, finished_rx) = watch::channel(0_usize);
+        run.simulate(move |simulation| {
+            let server_finished = finished_tx.clone();
+            let server_trace = trace.clone();
+            simulation.host("server", move || {
+                let credentials = server_credentials.clone();
+                let ready = ready_tx.clone();
+                let admitted = admitted_tx.clone();
+                let mut departed = departed_rx.clone();
+                let retired = retired_tx.clone();
+                let fresh = fresh_tx.clone();
+                let mut done = done_rx.clone();
+                let finished = server_finished.clone();
+                let trace = server_trace.clone();
+                async move {
+                    let result = HostSupervisor::run(async move {
+                        let options = TransportOptions {
+                            incoming_queue_capacity: 1,
+                            ..TransportOptions::default()
+                        };
+                        let (server, mut incoming) =
+                            bind_with_incoming_options("server", credentials, seed, options).await;
+                        let live = BTreeSet::from([
+                            server.node_id().clone(),
+                            ClusterNodeName::parse("client").assured("the fixture client is valid"),
+                        ]);
+                        server.replace_live_nodes(&live);
+                        ready.send_replace(true);
+                        let first = timeout(HOST_DEADLINE, incoming.recv())
+                            .await
+                            .assured("the first frame arrives")
+                            .assured("the receiver stays open");
+                        let Envelope::RelayPayload(ref body) = first.envelope else {
+                            panic!("the first intake carries Arrow rows");
+                        };
+                        assert_eq!(body.delivery, FIRST);
+                        assert_eq!(decode_arrow(&body.batch_ipc), 3);
+                        let first_registration = body
+                            .admission
+                            .clone()
+                            .assured("the first intake has an identity");
+                        let first_intake = first
+                            .relay_admission
+                            .as_ref()
+                            .assured("the first body has an intake");
+                        assert_eq!(first_intake.admit(), RelayAdmissionDecision::Admitted);
+                        admitted.send_replace(true);
+                        wait_for(&mut departed).await;
+                        server.replace_live_nodes(&BTreeSet::from([server.node_id().clone()]));
+                        assert_eq!(server.snapshot().relay_attempts, 0);
+                        assert_eq!(first_intake.admit(), RelayAdmissionDecision::Admitted);
+                        server.replace_live_nodes(&live);
+                        trace.record(
+                            "server",
+                            "departed sender released one-item capacity while its intake remained \
+                             admitted",
+                        );
+                        retired.send_replace(true);
+                        let received = timeout(HOST_DEADLINE, incoming.recv())
+                            .await
+                            .assured("fresh work fits while the first intake is retained")
+                            .assured("the replacement sender reaches the same receiver");
+                        let Envelope::RelayPayload(ref body) = received.envelope else {
+                            panic!("the replacement sender delivers Arrow rows");
+                        };
+                        assert_eq!(body.delivery, FRESH);
+                        assert_eq!(decode_arrow(&body.batch_ipc), 3);
+                        let registration = body
+                            .admission
+                            .as_ref()
+                            .assured("the fresh intake has an identity");
+                        assert_eq!(first_registration.ack_id, registration.ack_id);
+                        assert_ne!(first_registration.registrar, registration.registrar);
+                        assert_eq!(
+                            received
+                                .relay_admission
+                                .as_ref()
+                                .assured("fresh work has an intake")
+                                .admit(),
+                            RelayAdmissionDecision::Admitted
+                        );
+                        assert_eq!(first_intake.admit(), RelayAdmissionDecision::Admitted);
+                        trace.record(
+                            "server",
+                            "three fresh rows admitted with an exact replacement process identity",
+                        );
+                        fresh.send_replace(true);
+                        wait_for(&mut done).await;
+                        server.shutdown().await;
+                        Ok::<(), io::Error>(())
+                    })
+                    .await;
+                    finished.send_modify(|count| {
+                        *count = count.checked_add(1).assured("two hosts finish")
+                    });
+                    result
+                }
+            });
+            simulation.host("client", move || {
+                let credentials = client_credentials.clone();
+                let mut ready = ready_rx.clone();
+                let mut admitted = admitted_rx.clone();
+                let departed = departed_tx.clone();
+                let mut retired = retired_rx.clone();
+                let mut fresh = fresh_rx.clone();
+                let done = done_tx.clone();
+                let finished = finished_tx.clone();
+                async move {
+                    let result = HostSupervisor::run(async move {
+                        let client = bind(
+                            "client",
+                            credentials.clone(),
+                            seed.checked_add(1).assured("fixture seed fits"),
+                        )
+                        .await;
+                        let first_process = client
+                            .next_coordination_identity()
+                            .assured("the first transport can report its process identity");
+                        wait_for(&mut ready).await;
+                        register_peer(&client, "server").await;
+                        let peer =
+                            ClusterNodeName::parse("server").assured("the fixture server is valid");
+                        client
+                            .send(
+                                &peer,
+                                Envelope::RelayPayload(relay_payload(FIRST, 95, &client)),
+                            )
+                            .await
+                            .assured("the first frame reaches the receiver");
+                        wait_for(&mut admitted).await;
+                        client.shutdown().await;
+                        departed.send_replace(true);
+                        wait_for(&mut retired).await;
+                        let client = bind(
+                            "client",
+                            credentials,
+                            seed.checked_add(2).assured("fixture seed fits"),
+                        )
+                        .await;
+                        let fresh_process = client
+                            .next_coordination_identity()
+                            .assured("the fresh transport can report its process identity");
+                        assert_eq!(first_process.coordinator(), fresh_process.coordinator());
+                        assert_ne!(first_process.process_epoch(), fresh_process.process_epoch());
+                        register_peer(&client, "server").await;
+                        let mut fresh_payload = relay_payload(FRESH, 95, &client);
+                        // The harness supplies runtime identities: this replacement is run two.
+                        fresh_payload
+                            .admission
+                            .as_mut()
+                            .assured("fresh work has an admission identity")
+                            .registrar = ClusterNodeIdentity::new(
+                            client.node_id().clone(),
+                            ClusterNodeIncarnation::new(2),
+                        );
+                        client
+                            .send(&peer, Envelope::RelayPayload(fresh_payload))
+                            .await
+                            .assured("the fresh process reaches the retained receiver");
+                        wait_for(&mut fresh).await;
+                        done.send_replace(true);
+                        client.shutdown().await;
+                        Ok::<(), io::Error>(())
+                    })
+                    .await;
+                    finished.send_modify(|count| {
+                        *count = count.checked_add(1).assured("two hosts finish")
+                    });
+                    result
+                }
+            });
+            simulation.client("observer", async move {
+                wait_for_count(&mut finished_rx.clone(), 2).await;
+                Ok(())
+            });
+        })
+    });
 }

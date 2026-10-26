@@ -2,11 +2,11 @@ Feature: Calendar, time zone and formatted datetime functions
   Scenario Outline: Calendar functions follow local calendars and the domain execution time
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (
         id STRING,
@@ -45,8 +45,8 @@ Feature: Calendar, time zone and formatted datetime functions
       CREATE RELAY local_events SCHEMA local_event UNBRANCHED;
       CREATE VHOST edge calendar-functions-{{test_id}}.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP NOW
         TO events
@@ -101,7 +101,7 @@ Feature: Calendar, time zone and formatted datetime functions
       "id":"fall-back" | "local_hour":1 | "local_hour_start":"2024-11-03T05:00:00+00:00" | "local_day_start":"2024-11-03T04:00:00+00:00" | "berlin_month_start":"2024-10-31T23:00:00+00:00" | "utc_quarter_start":"2024-10-01T00:00:00+00:00" | "local_next_day":"2024-11-04T06:30:00+00:00" | "shifted":"2025-11-03T06:30:00+00:00" | "local_days_elapsed":1 | "months_elapsed":0 | "local_text":"Sun 03 Nov 2024 01:30:00 EST" | "offset_text":"2024-11-03T12:00:00+05:30" | "execution_date":"2000-02-29 JST" | "execution_month":"2000-02-29T11:00:00+00:00"
       "id":"local-mean-time" | "local_hour":12 | "local_hour_start":"1883-11-18T16:56:02+00:00" | "local_day_start":"1883-11-18T04:56:02+00:00" | "berlin_month_start":"1883-10-31T23:06:32+00:00" | "utc_quarter_start":"1883-10-01T00:00:00+00:00" | "local_next_day":"1883-11-19T17:01:00+00:00" | "shifted":"1883-11-18T17:01:00+00:00" | "local_days_elapsed":0 | "months_elapsed":0 | "local_text":"Sun 18 Nov 1883 12:01:00 EST" | "offset_text":"1883-11-18T22:31:00+05:30" | "execution_date":"2000-02-29 JST" | "execution_month":"2000-02-29T11:00:00+00:00"
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       START AT '1999-12-31T12:00:00Z' TIME RATE <time_rate>;
@@ -125,11 +125,11 @@ Feature: Calendar, time zone and formatted datetime functions
   Scenario Outline: Parsing resolves local times explicitly and fails only the messages it cannot convert
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         id STRING,
@@ -164,8 +164,8 @@ Feature: Calendar, time zone and formatted datetime functions
       CREATE RELAY parse_errors SCHEMA parse_error UNBRANCHED;
       CREATE VHOST edge datetime-parsing-{{test_id}}.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         TO readings
           INHERIT ALL
@@ -245,11 +245,11 @@ Feature: Calendar, time zone and formatted datetime functions
 
   Scenario Outline: Calendar, time zone and format arguments are validated when the statement is applied
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (
         occurred_at DATETIME,
@@ -263,7 +263,7 @@ Feature: Calendar, time zone and formatted datetime functions
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY summaries SCHEMA summary UNBRANCHED;
       """
-    When these NSPL commands fail with "function 'date_trunc' does not accept time zone 'Mars/Olympus_Mons'"
+    When these Plexus commands fail with "function 'date_trunc' does not accept time zone 'Mars/Olympus_Mons'"
       """
       CREATE JUNCTION truncate_on_mars
         FROM events
@@ -274,7 +274,7 @@ Feature: Calendar, time zone and formatted datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'date_trunc' requires its time zone to be a STRING literal"
+    And these Plexus commands fail with "function 'date_trunc' requires its time zone to be a STRING literal"
       """
       CREATE JUNCTION truncate_in_field_zone
         FROM events
@@ -285,7 +285,7 @@ Feature: Calendar, time zone and formatted datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'date_bin' does not accept time unit 'month'"
+    And these Plexus commands fail with "function 'date_bin' does not accept time unit 'month'"
       """
       CREATE JUNCTION bin_by_month
         FROM events
@@ -296,7 +296,7 @@ Feature: Calendar, time zone and formatted datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'format_datetime' does not accept format '%Y-%q': unknown directive '%q' at byte 3"
+    And these Plexus commands fail with "function 'format_datetime' does not accept format '%Y-%q': unknown directive '%q' at byte 3"
       """
       CREATE JUNCTION format_quarter
         FROM events
@@ -307,7 +307,7 @@ Feature: Calendar, time zone and formatted datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "values can be up to 270 bytes long, longer than the 256-byte limit"
+    And these Plexus commands fail with "values can be up to 270 bytes long, longer than the 256-byte limit"
       """
       CREATE JUNCTION format_month_names
         FROM events
@@ -318,7 +318,7 @@ Feature: Calendar, time zone and formatted datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'parse_datetime' does not accept format '%H:%M': it does not read a complete date"
+    And these Plexus commands fail with "function 'parse_datetime' does not accept format '%H:%M': it does not read a complete date"
       """
       CREATE JUNCTION parse_clock_time
         FROM events
@@ -329,7 +329,7 @@ Feature: Calendar, time zone and formatted datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'parse_datetime' does not accept format '%d.%m.%y': unknown directive '%y' at byte 6"
+    And these Plexus commands fail with "function 'parse_datetime' does not accept format '%d.%m.%y': unknown directive '%y' at byte 6"
       """
       CREATE JUNCTION parse_two_digit_year
         FROM events
@@ -340,7 +340,7 @@ Feature: Calendar, time zone and formatted datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'parse_datetime' format '%FT%T%:z' reads its UTC offset from the input, so it takes no time zone"
+    And these Plexus commands fail with "function 'parse_datetime' format '%FT%T%:z' reads its UTC offset from the input, so it takes no time zone"
       """
       CREATE JUNCTION parse_offset_in_zone
         FROM events
@@ -351,7 +351,7 @@ Feature: Calendar, time zone and formatted datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'parse_datetime' format '%F %T' reads no UTC offset or Unix time from the input, so it requires a time zone"
+    And these Plexus commands fail with "function 'parse_datetime' format '%F %T' reads no UTC offset or Unix time from the input, so it requires a time zone"
       """
       CREATE JUNCTION parse_without_zone
         FROM events
@@ -362,7 +362,7 @@ Feature: Calendar, time zone and formatted datetime functions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'parse_datetime' does not accept disambiguation 'first'; expected one of compatible, earlier, later, reject"
+    And these Plexus commands fail with "function 'parse_datetime' does not accept disambiguation 'first'; expected one of compatible, earlier, later, reject"
       """
       CREATE JUNCTION parse_first_occurrence
         FROM events

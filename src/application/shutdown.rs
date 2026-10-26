@@ -9,6 +9,14 @@
 //! - **Must not know.** Which listeners, control-plane services, or runtime tasks observe each
 //!   lifecycle signal.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -17,6 +25,9 @@ use nervix_primitives::{
     time::Instant,
 };
 use tracing::info;
+
+mod settings;
+pub use settings::{DrainTimeout, ShutdownSettings, ShutdownSettingsError, ShutdownTimeout};
 
 pub(super) const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a shutdown may take from its first stop request until the process exits. It covers
@@ -103,7 +114,7 @@ pub enum ShutdownPhase {
 }
 
 /// How a shutdown phase ended.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::EnumString)]
 pub enum ShutdownPhaseOutcome {
     /// The phase finished its contract before the shutdown deadline.
     Completed,

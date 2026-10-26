@@ -7,6 +7,11 @@
 //! - **Must not know.** Relay subscriptions, graph execution, or how the WebSocket transports a
 //!   request.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::time::Duration;
 
 use leptos::prelude::*;
@@ -24,7 +29,10 @@ pub(super) fn browser_utc_now() -> Timestamp {
     Timestamp::now()
 }
 
-/// One attempt per selected domain on a connection. A refused attempt remains recorded until the
+/// One attempt per selected domain on a connection. A connection makes its first attempt as it
+/// opens, for the domain selected then, ahead of the transaction it attaches again: a session that
+/// holds a transaction refuses a clock attachment. A selection made later on the connection detaches
+/// that clock and attaches the newly selected one. A refused attempt remains recorded until the
 /// selection changes or a new connection opens, so it cannot turn into a retry loop.
 #[derive(Clone, Default)]
 pub(super) struct ClockSelection {
@@ -39,22 +47,45 @@ pub(super) struct ClockSelectionChange {
 }
 
 impl ClockSelection {
+    /// Records the attempt the connection `connection` makes as it opens, and returns the domain
+    /// whose clock it attaches.
+    pub fn open(&mut self, connection: u64, selected: Option<DomainName>) -> Option<DomainName> {
+        self.connection = Some(connection);
+        self.selected = selected.clone();
+        selected
+    }
+
+    /// Forgets the attempts of a connection that ended; its attachment ended with its session.
+    pub fn close(&mut self) {
+        self.connection = None;
+        self.selected = None;
+    }
+
     pub fn change(
         &mut self,
         connected: bool,
         connection: u64,
         selected: Option<DomainName>,
     ) -> ClockSelectionChange {
+        let opened = self.connection == Some(connection);
         if !connected {
-            self.connection = None;
-            self.selected = None;
+            // A connection that is still opening keeps the attempt it opened with, so once the
+            // server confirms the connection a different selection detaches that clock first.
+            if opened {
+                return ClockSelectionChange {
+                    detach: None,
+                    attach: None,
+                    refresh_display: self.selected != selected,
+                };
+            }
+            self.close();
             return ClockSelectionChange {
                 detach: None,
                 attach: None,
                 refresh_display: true,
             };
         }
-        if self.connection != Some(connection) {
+        if !opened {
             self.connection = Some(connection);
             self.selected = None;
         }
@@ -390,12 +421,52 @@ mod tests {
         let switched = selection.change(true, 1, Some(other.clone()));
         assert_eq!(switched.detach, Some(domain.clone()));
         assert_eq!(switched.attach, Some(other.clone()));
+        selection.close();
         let lost = selection.change(false, 1, Some(other.clone()));
+        assert!(lost.refresh_display);
         assert_eq!(lost.detach, None);
         assert_eq!(lost.attach, None);
         let restored = selection.change(true, 2, Some(other.clone()));
         assert_eq!(restored.detach, None);
         assert_eq!(restored.attach, Some(other));
+    }
+
+    #[test]
+    fn an_opening_connection_keeps_the_clock_it_attached_until_the_server_confirms_it() {
+        let domain = domain();
+        let other = DomainName::parse("other").assured("the other fixture domain is valid");
+        let mut selection = ClockSelection::default();
+        assert_eq!(
+            selection.open(3, Some(domain.clone())),
+            Some(domain.clone())
+        );
+        let opening = selection.change(false, 3, Some(domain.clone()));
+        assert!(!opening.refresh_display);
+        assert_eq!(opening.detach, None);
+        assert_eq!(opening.attach, None);
+        let confirmed = selection.change(true, 3, Some(domain.clone()));
+        assert!(!confirmed.refresh_display);
+        assert_eq!(confirmed.detach, None);
+        assert_eq!(confirmed.attach, None);
+
+        selection.close();
+        assert_eq!(
+            selection.open(4, Some(domain.clone())),
+            Some(domain.clone())
+        );
+        let reselected = selection.change(false, 4, Some(other.clone()));
+        assert!(reselected.refresh_display);
+        assert_eq!(reselected.detach, None);
+        assert_eq!(reselected.attach, None);
+        let switched = selection.change(true, 4, Some(other.clone()));
+        assert_eq!(switched.detach, Some(domain));
+        assert_eq!(switched.attach, Some(other));
+
+        selection.close();
+        assert_eq!(selection.open(5, None), None);
+        let unselected = selection.change(true, 5, None);
+        assert!(!unselected.refresh_display);
+        assert_eq!(unselected.attach, None);
     }
 
     #[test]

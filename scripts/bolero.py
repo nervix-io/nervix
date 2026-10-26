@@ -18,13 +18,20 @@ import sys
 import time
 import tomllib
 from collections import Counter
+from collections.abc import Callable
 from typing import Any, Iterator
+
+from scripts import bolero_coverage as coverage
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "tests/bolero-targets.toml"
 RUNS = ROOT / "target/bolero/runs"
 QUALIFICATION = ROOT / "tests/bolero-qualification/Cargo.toml"
 TARGET_NAME = re.compile(r"^[a-z][a-z0-9-]*$")
+# A registered test target other than the library's unit tests, `lib`: the unit tests of one
+# binary, `bin:<name>`, or one integration test, `test:<name>`, each named as Cargo names it.
+NAMED_TEST_TARGET = re.compile(r"(?:bin|test):[A-Za-z_][A-Za-z_0-9-]*")
+LIBRARY_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"})
 TEST_LINE = re.compile(r"^(\S+): test$", re.MULTILINE)
 # Cargo names every test executable it builds: a library's or binary's as `unittests <root>`, an
 # integration test's by its source path.
@@ -32,6 +39,9 @@ EXECUTABLE = re.compile(r"Executable (?P<description>[^(]+?) \((?P<path>[^)]+)\)
 MACRO = re.compile(r"\bbolero::check!\s*\(")
 UNQUALIFIED_CHECK = re.compile(r"(?<![:\w])check!\s*\(")
 FUNCTION = re.compile(r"\bfn\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(")
+# Symbolizing NEW_FUNC progress can exhaust a short campaign's deadline. Crash stacks
+# still use the configured symbolizer when function progress is disabled.
+LIBFUZZER_PROGRESS_FLAG = "-print_funcs=0"
 
 
 class BoleroError(Exception):
@@ -62,6 +72,27 @@ class Target:
     def crashes(self) -> pathlib.Path:
         return self.work_dir / "crashes"
 
+    @property
+    def harness(self) -> Harness:
+        return Harness(self.manifest, self.package, self.test_target, self.features)
+
+
+@dataclasses.dataclass(frozen=True)
+class Harness:
+    """One compiled test executable. Every target it holds shares one instrumented build."""
+
+    manifest: pathlib.Path | None
+    package: str
+    test_target: str
+    features: tuple[str, ...]
+
+    def describe(self) -> str:
+        features = ",".join(self.features) or "no features"
+        return f"{self.package} {self.test_target} ({features})"
+
+    def sort_key(self) -> tuple[str, str, str, tuple[str, ...]]:
+        return (str(self.manifest), self.package, self.test_target, self.features)
+
 
 @dataclasses.dataclass(frozen=True)
 class Inventory:
@@ -69,8 +100,14 @@ class Inventory:
     nightly: str
     sanitizer: str
     pr_fuzz_seconds: int
-    campaign_fuzz_seconds: int
+    # Targets whose harness CI builds ahead of its campaigns with one Cargo build job, because the
+    # build exceeds the campaign's build deadline and its compiler memory.
+    prepared_targets: tuple[str, ...]
     targets: tuple[Target, ...]
+
+    def prepared_harnesses(self) -> frozenset[Harness]:
+        by_id = {target.id: target for target in self.targets}
+        return frozenset(by_id[target_id].harness for target_id in self.prepared_targets)
 
 
 def positive_int(value: Any, name: str) -> int:
@@ -99,7 +136,7 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
         "nightly",
         "sanitizer",
         "pr_fuzz_seconds",
-        "campaign_fuzz_seconds",
+        "prepared_targets",
     }:
         raise BoleroError("tool section has missing or unknown fields")
     if not re.fullmatch(r"\d+\.\d+\.\d+", tool["cargo_bolero"]):
@@ -131,13 +168,11 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
             raise BoleroError(f"invalid target id: {item['id']}")
         if not item["test"].split("::")[-1].startswith("bolero_"):
             raise BoleroError(f"{item['id']}: test name must start with bolero_")
-        if item["test_target"] != "lib" and not re.fullmatch(
-            r"test:[A-Za-z_][A-Za-z_0-9-]*", item["test_target"]
-        ):
+        if item["test_target"] != "lib" and not NAMED_TEST_TARGET.fullmatch(item["test_target"]):
             raise BoleroError(f"{item['id']}: invalid cargo test target")
         if not isinstance(item["features"], list) or any(
             not isinstance(feature, str)
-            or feature in {"loom", "shuttle", "turmoil"}
+            or feature in {"loom", "shuttle", "turmoil", "deloxide"}
             for feature in item["features"]
         ):
             raise BoleroError(f"{item['id']}: invalid or modeled feature")
@@ -188,11 +223,24 @@ def load_inventory(path: pathlib.Path = INVENTORY) -> Inventory:
         nightly=tool["nightly"],
         sanitizer=tool["sanitizer"],
         pr_fuzz_seconds=positive_int(tool["pr_fuzz_seconds"], "pr_fuzz_seconds"),
-        campaign_fuzz_seconds=positive_int(
-            tool["campaign_fuzz_seconds"], "campaign_fuzz_seconds"
-        ),
+        prepared_targets=prepared_targets(tool["prepared_targets"], targets),
         targets=tuple(targets),
     )
+
+
+def prepared_targets(value: Any, targets: list[Target]) -> tuple[str, ...]:
+    """Each named target stands for one distinct registered harness that CI prepares first."""
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise BoleroError("prepared_targets must list registered target ids")
+    by_id = {target.id: target for target in targets}
+    unknown = [item for item in value if item not in by_id]
+    if unknown:
+        raise BoleroError(f"prepared_targets names unregistered targets: {unknown}")
+    harnesses = Counter(by_id[item].harness for item in value)
+    shared = sorted(harness.describe() for harness, count in harnesses.items() if count > 1)
+    if shared:
+        raise BoleroError(f"prepared_targets names one harness more than once: {shared}")
+    return tuple(value)
 
 
 def package_manifests() -> dict[str, pathlib.Path]:
@@ -226,18 +274,24 @@ def declares_bolero(manifest: dict[str, Any]) -> bool:
 
 
 def package_rust_sources(manifest: pathlib.Path) -> Iterator[pathlib.Path]:
+    """Authored package sources stop at nested manifests and Cargo build output."""
+    excluded = {ROOT / "target", ROOT / ".git", manifest.parent / "target"}
+    if target_dir := os.environ.get("CARGO_TARGET_DIR"):
+        excluded.add(pathlib.Path(target_dir).resolve())
     for directory, children, files in os.walk(manifest.parent):
-        parent = pathlib.Path(directory)
-        # Nested Cargo packages own their Rust, including a workspace's qualification crate.
-        # Build output and Git metadata are not authored sources of the package being checked.
+        path = pathlib.Path(directory)
+        # A nested manifest owns its sources; hidden directories are metadata or dependencies.
+        # Only known build targets are excluded, so an authored `src/target` remains visible.
         children[:] = sorted(
             child for child in children
-            if child not in {".git", "target", ".venv", ".nervix-deps", "node_modules", "__fuzz__"}
-            and not (parent / child / "Cargo.toml").is_file()
+            if not child.startswith(".")
+            and path / child not in excluded
+            and child not in {"node_modules", "__fuzz__"}
+            and not (path / child / "Cargo.toml").is_file()
         )
-        for name in sorted(files):
-            if name.endswith(".rs"):
-                yield parent / name
+        for filename in sorted(files):
+            if filename.endswith(".rs"):
+                yield path / filename
 
 
 def static_targets(manifest: pathlib.Path) -> dict[str, pathlib.Path]:
@@ -291,6 +345,9 @@ def command(
                 process.wait()
                 stream.write(f"\ntimeout after {timeout}s\n".encode())
                 raise BoleroError(f"command timed out after {timeout}s: {args}") from error
+            except BaseException:
+                coverage.native.stop(process, signal.SIGINT)
+                raise
             stream.flush()
             stream.seek(max(0, stream.tell() - 1_000_000))
             output = stream.read().decode(errors="replace")
@@ -313,6 +370,9 @@ def command(
                 pass
             process.communicate()
             raise BoleroError(f"command timed out after {timeout}s: {args}") from error
+        except BaseException:
+            coverage.native.stop(process, signal.SIGINT)
+            raise
         result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
     output = result.stdout + result.stderr
     if result.returncode not in allowed_status:
@@ -332,12 +392,31 @@ def cargo_test_args(target: Target) -> list[str]:
 
 
 def cargo_target_args(test_target: str) -> list[str]:
+    """Cargo's selector of a registered test target: `--lib`, `--bin <name>` or `--test <name>`."""
     if test_target == "lib":
         return ["--lib"]
-    return ["--test", test_target.removeprefix("test:")]
+    kind, name = test_target.split(":", 1)
+    return [f"--{kind}", name]
 
 
-def listed_tests(package: str, test_target: str, *, ignored: bool, manifest: pathlib.Path | None = None) -> list[str]:
+def is_cargo_target(test_target: str, item: dict[str, Any]) -> bool:
+    """Whether `item`, one target of a package's Cargo metadata, is the registered test target."""
+    if test_target == "lib":
+        return bool(LIBRARY_KINDS.intersection(item["kind"]))
+    kind, name = test_target.split(":", 1)
+    return kind in item["kind"] and item["name"] == name
+
+
+def builds_unit_tests(test_target: str) -> bool:
+    """Whether Cargo builds the test target as unit tests, which it names `unittests <root>`: a
+    library's or a binary's, rather than an integration test it names by its source path."""
+    return test_target == "lib" or test_target.startswith("bin:")
+
+
+def listed_tests(
+    package: str, test_target: str, *, ignored: bool, features: tuple[str, ...],
+    manifest: pathlib.Path | None = None,
+) -> list[str]:
     args = [
         "cargo",
         "test",
@@ -345,6 +424,8 @@ def listed_tests(package: str, test_target: str, *, ignored: bool, manifest: pat
         package,
         *cargo_target_args(test_target),
     ]
+    if features:
+        args.extend(["--features", ",".join(features)])
     if manifest:
         args.extend(["--manifest-path", str(manifest)])
     args.extend(["bolero_", "--"])
@@ -354,7 +435,10 @@ def listed_tests(package: str, test_target: str, *, ignored: bool, manifest: pat
     return TEST_LINE.findall(command(args).stdout)
 
 
-def compiled_targets(package: str, test_target: str, manifest: pathlib.Path | None = None) -> list[dict[str, Any]]:
+def compiled_targets(
+    package: str, test_target: str, *, features: tuple[str, ...],
+    manifest: pathlib.Path | None = None,
+) -> list[dict[str, Any]]:
     args = [
         "cargo",
         "test",
@@ -362,6 +446,8 @@ def compiled_targets(package: str, test_target: str, manifest: pathlib.Path | No
         package,
         *cargo_target_args(test_target),
     ]
+    if features:
+        args.extend(["--features", ",".join(features)])
     if manifest:
         args.extend(["--manifest-path", str(manifest)])
     args.extend(["bolero_", "--", "--nocapture"])
@@ -372,6 +458,43 @@ def compiled_targets(package: str, test_target: str, manifest: pathlib.Path | No
             continue
         found.append(json.loads(line))
     return found
+
+
+def discover_package(
+    package: str, manifest: pathlib.Path, targets: tuple[Target, ...]
+) -> list[tuple[str, dict[str, Any]]]:
+    """Compare one package's source macros and compiled targets with its registered targets."""
+    source_functions = static_targets(manifest)
+    registered_functions = {
+        target.test.split("::")[-1]: target.source
+        for target in targets
+    }
+    if source_functions != registered_functions:
+        raise BoleroError(
+            f"{package}: source macros {source_functions} differ from inventory "
+            f"{registered_functions}"
+        )
+    test_targets = {target.test_target for target in targets}
+    compiled = []
+    for test_target in sorted(test_targets):
+        features = tuple(sorted({
+            feature
+            for target in targets
+            if target.test_target == test_target
+            for feature in target.features
+        }))
+        names = listed_tests(package, test_target, ignored=False, features=features, manifest=manifest)
+        ignored = listed_tests(package, test_target, ignored=True, features=features, manifest=manifest)
+        if ignored:
+            raise BoleroError(f"{package}: ignored Bolero targets: {ignored}")
+        found = compiled_targets(package, test_target, features=features, manifest=manifest)
+        if Counter(names) != Counter(item["test_name"] for item in found):
+            raise BoleroError(
+                f"{package}: listed Bolero tests {names} differ from compiled targets "
+                f"{[item['test_name'] for item in found]}"
+            )
+        compiled.extend((test_target, item) for item in found)
+    return compiled
 
 
 def discover(inventory: Inventory) -> None:
@@ -388,34 +511,8 @@ def discover(inventory: Inventory) -> None:
     }
     compiled = []
     for package, manifest in sorted(manifests.items()):
-        source_functions = static_targets(manifest)
-        registered_functions = {
-            target.test.split("::")[-1]: target.source
-            for target in inventory.targets
-            if target.package == package
-        }
-        if source_functions != registered_functions:
-            raise BoleroError(
-                f"{package}: source macros {source_functions} differ from inventory "
-                f"{registered_functions}"
-            )
-        test_targets = {
-            target.test_target
-            for target in inventory.targets
-            if target.package == package
-        }
-        for test_target in sorted(test_targets):
-            names = listed_tests(package, test_target, ignored=False, manifest=manifest)
-            ignored = listed_tests(package, test_target, ignored=True, manifest=manifest)
-            if ignored:
-                raise BoleroError(f"{package}: ignored Bolero targets: {ignored}")
-            targets = compiled_targets(package, test_target, manifest=manifest)
-            if Counter(names) != Counter(item["test_name"] for item in targets):
-                raise BoleroError(
-                    f"{package}: listed Bolero tests {names} differ from compiled targets "
-                    f"{[item['test_name'] for item in targets]}"
-                )
-            compiled.extend((test_target, item) for item in targets)
+        targets = tuple(target for target in inventory.targets if target.package == package)
+        compiled.extend(discover_package(package, manifest, targets))
     identities = [
         (item["package_name"], test_target, item["test_name"])
         for test_target, item in compiled
@@ -451,6 +548,107 @@ def select(inventory: Inventory, query: str | None) -> tuple[Target, ...]:
     return selected
 
 
+# Estimates from sanitizer job 114178003433, which ran all 159 targets on a 16-vCPU runner: a
+# prepared server harness took up to 1,710 s to build with one Cargo build job, a library harness
+# at most about 180 s, and each campaign about 12 s beyond its engine time exporting its coverage.
+PREPARED_BUILD_SECONDS = 1800
+HARNESS_BUILD_SECONDS = 180
+CAMPAIGN_OVERHEAD_SECONDS = 15
+
+
+@dataclasses.dataclass(frozen=True)
+class Shard:
+    """Part `number` of `count` of the sanitizer inventory, numbered from 1."""
+
+    number: int
+    count: int
+
+    @classmethod
+    def parse(cls, text: str) -> Shard:
+        number, separator, count = text.partition("/")
+        if not separator or not number.isdigit() or not count.isdigit():
+            raise BoleroError(f"a shard is NUMBER/COUNT, such as 1/3, not `{text}`")
+        shard = cls(number=int(number), count=int(count))
+        if shard.count < 1 or not 1 <= shard.number <= shard.count:
+            raise BoleroError(f"shard {text} names no part: NUMBER runs from 1 to COUNT")
+        return shard
+
+    def describe(self) -> dict[str, int]:
+        return {"number": self.number, "count": self.count}
+
+
+@dataclasses.dataclass(frozen=True)
+class HarnessEstimate:
+    harness: Harness
+    targets: tuple[Target, ...]
+    seconds: int
+
+
+def harness_estimates(inventory: Inventory) -> list[HarnessEstimate]:
+    """Every harness with its estimated build and campaign time at the inventory's PR duration."""
+    members: dict[Harness, list[Target]] = {}
+    for target in inventory.targets:
+        members.setdefault(target.harness, []).append(target)
+    prepared = inventory.prepared_harnesses()
+    estimates = []
+    for harness, targets in members.items():
+        build = PREPARED_BUILD_SECONDS if harness in prepared else HARNESS_BUILD_SECONDS
+        campaigns = len(targets) * (inventory.pr_fuzz_seconds + CAMPAIGN_OVERHEAD_SECONDS)
+        estimates.append(HarnessEstimate(harness, tuple(targets), build + campaigns))
+    return estimates
+
+
+def shard_plan(inventory: Inventory, count: int) -> tuple[tuple[Target, ...], ...]:
+    """Deal whole harnesses to `count` shards, the longest estimated harness first.
+
+    A harness is never split, so a shard builds only its own harnesses. Each harness goes to the
+    shard holding the least estimated time, the lower-numbered one on a tie, and harnesses of equal
+    estimate keep their sorted order, so every runner computes the same plan from the inventory.
+    """
+    positive_int(count, "shard count")
+    estimates = harness_estimates(inventory)
+    if count > len(estimates):
+        raise BoleroError(
+            f"{count} shards exceed the inventory's {len(estimates)} harnesses, "
+            "so a shard would select no target"
+        )
+    estimates.sort(key=lambda estimate: (-estimate.seconds, estimate.harness.sort_key()))
+    loads = [0] * count
+    harnesses: list[set[Harness]] = [set() for _ in range(count)]
+    for estimate in estimates:
+        lightest = loads.index(min(loads))
+        loads[lightest] += estimate.seconds
+        harnesses[lightest].add(estimate.harness)
+    plan = []
+    for assigned in harnesses:
+        plan.append(tuple(target for target in inventory.targets if target.harness in assigned))
+    return tuple(plan)
+
+
+def plan_digest(plan: tuple[tuple[Target, ...], ...]) -> str:
+    identities = [[target.id for target in shard] for shard in plan]
+    return hashlib.sha256(json.dumps(identities).encode()).hexdigest()
+
+
+def describe_plan(inventory: Inventory, count: int) -> dict[str, Any]:
+    plan = shard_plan(inventory, count)
+    seconds = {estimate.harness: estimate.seconds for estimate in harness_estimates(inventory)}
+    shards = []
+    for number, targets in enumerate(plan, start=1):
+        harnesses = sorted({target.harness for target in targets}, key=Harness.sort_key)
+        shards.append({
+            "number": number,
+            "estimated_seconds": sum(seconds[harness] for harness in harnesses),
+            "prepared_targets": [
+                target_id for target_id in inventory.prepared_targets
+                if exact_target(inventory, target_id).harness in harnesses
+            ],
+            "harnesses": [harness.describe() for harness in harnesses],
+            "targets": [target.id for target in targets],
+        })
+    return {"count": count, "plan_sha256": plan_digest(plan), "shards": shards}
+
+
 def run_dir(target: Target) -> pathlib.Path:
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = RUNS / target.id / f"{stamp}-{time.time_ns()}"
@@ -464,6 +662,7 @@ def metadata(
     args: list[str],
     result: str,
     elapsed: float,
+    details: dict[str, Any] | None = None,
 ) -> None:
     revision = command(["git", "rev-parse", "HEAD"]).stdout.strip()
     inventory = load_inventory()
@@ -480,16 +679,12 @@ def metadata(
     for input_file in saved_inputs:
         if target.manifest == QUALIFICATION:
             replay_commands.append("just qualify-bolero")
-        else:
+            continue
+        # The ordinary assertion replays a property failure; a sanitizer finding reproduces only in
+        # the instrumented build, so both exact replays are recorded.
+        for recipe in ("fuzz-replay", "fuzz-replay-sanitizer"):
             replay_commands.append(
-                shlex.join(
-                    [
-                        "just",
-                        "fuzz-replay",
-                        target.id,
-                        str(input_file.relative_to(ROOT)),
-                    ]
-                )
+                shlex.join(["just", recipe, target.id, str(input_file.relative_to(ROOT))])
             )
     data = {
         "revision": revision,
@@ -514,6 +709,7 @@ def metadata(
         },
         "replay_commands": replay_commands,
         "campaign_replay_limit": "A random seed reproduces one case, not a whole campaign.",
+        **(details or {}),
     }
     (path / "metadata.json").write_text(json.dumps(data, indent=2) + "\n")
 
@@ -521,8 +717,15 @@ def metadata(
 def test_targets(inventory: Inventory, selected: tuple[Target, ...]) -> None:
     executed = 0
     completed = 0
+    prepared: set[tuple[str, ...]] = set()
     for target in selected:
-        args = cargo_test_args(target) + ["--", "--exact", target.test, "--nocapture"]
+        args = cargo_test_args(target)
+        harness = tuple(args)
+        if harness not in prepared:
+            print(f"{target.id}: ordinary build deadline 1800s", flush=True)
+            command(args + ["--no-run"], timeout=1800)
+            prepared.add(harness)
+        args += ["--", "--exact", target.test, "--nocapture"]
         env = {
             "BOLERO_RANDOM_ITERATIONS": str(target.random_iterations),
             "BOLERO_RANDOM_MAX_LEN": str(target.max_input_bytes),
@@ -575,6 +778,7 @@ def bolero_args(inventory: Inventory, target: Target) -> list[str]:
         str(target.max_input_bytes),
         "--timeout",
         f"{target.case_timeout_seconds}s",
+        f"--engine-args={LIBFUZZER_PROGRESS_FLAG}",
     ]
     if target.manifest:
         args.extend(["--manifest-path", str(target.manifest)])
@@ -593,6 +797,38 @@ def verify_tool(inventory: Inventory) -> None:
     command(["rustup", "run", inventory.nightly, "rustc", "--version"])
 
 
+def scoped_build_env(target: Target, path: pathlib.Path) -> dict[str, str]:
+    """Scope cargo-bolero's pinned Rustup Cargo calls to the registered test harness."""
+    rustup = shutil.which("rustup")
+    if rustup is None:
+        raise BoleroError("rustup is required for the pinned sanitizer toolchain")
+    directory = path / "scope-bin"
+    directory.mkdir()
+    # Kache identifies compiler mode by the rustc executable name. Retain that name for the
+    # run-local adapter, and retain its exact source in the campaign evidence.
+    compiler_adapter = directory / "rustc"
+    compiler_adapter.write_bytes(pathlib.Path(__file__).with_name("bolero_rustc.py").read_bytes())
+    compiler_adapter.chmod(0o700)
+    adapter = directory / "rustup"
+    adapter.write_text(
+        f"#!{sys.executable}\n"
+        "import hashlib,os,pathlib,subprocess,sys\n"
+        "args=sys.argv[1:]\n"
+        "if len(args)>=4 and args[0]=='run' and args[2:4]==['cargo','test']:\n"
+        f"    args[4:4]={cargo_target_args(target.test_target)!r}\n"
+        f"    compiler_adapter={str(compiler_adapter)!r}\n"
+        f"    os.environ['NERVIX_BOLERO_RUSTC']=subprocess.check_output([{rustup!r},'which','--toolchain',args[1],'rustc'],text=True).strip()\n"
+        "    os.environ['RUSTC']=compiler_adapter\n"
+        "    identity=hashlib.sha256(pathlib.Path(compiler_adapter).read_bytes()).hexdigest()[:16]\n"
+        "    if '--target-dir' in args:\n"
+        "        index=args.index('--target-dir')+1\n"
+        "        args[index]+='-locations-'+identity\n"
+        f"os.execv({rustup!r},[{rustup!r},*args])\n"
+    )
+    adapter.chmod(0o700)
+    return {"PATH": str(directory) + os.pathsep + os.environ["PATH"]}
+
+
 def resolved_test_target(target: Target) -> tuple[pathlib.Path, pathlib.Path, str]:
     """Read Cargo's current target identity and source root for binary selection."""
     manifest = target.manifest or package_manifests()[target.package]
@@ -607,15 +843,9 @@ def resolved_test_target(target: Target) -> tuple[pathlib.Path, pathlib.Path, st
     if len(packages) != 1:
         raise BoleroError(f"{target.id}: expected one Cargo package {target.package}")
     package = packages[0]
-    library_kinds = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"}
     targets = [
         item for item in package["targets"]
-        if (
-            target.test_target == "lib" and library_kinds.intersection(item["kind"])
-        ) or (
-            target.test_target != "lib" and "test" in item["kind"]
-            and item["name"] == target.test_target.removeprefix("test:")
-        )
+        if is_cargo_target(target.test_target, item)
     ]
     if len(targets) != 1:
         raise BoleroError(f"{target.id}: expected one Cargo {target.test_target} target")
@@ -628,11 +858,11 @@ def resolved_test_target(target: Target) -> tuple[pathlib.Path, pathlib.Path, st
 
 
 def build_instrumented(
-    inventory: Inventory, target: Target, path: pathlib.Path
+    inventory: Inventory, target: Target, path: pathlib.Path, *, timeout: int | None = None
 ) -> pathlib.Path:
     budget_name = "BOLERO_BUILD_TIMEOUT_SECONDS"
     try:
-        build_timeout = int(os.environ.get(budget_name, "1800"))
+        build_timeout = int(os.environ.get(budget_name, "1800")) if timeout is None else timeout
     except ValueError as error:
         raise BoleroError(f"{budget_name} must be a positive integer") from error
     positive_int(build_timeout, budget_name)
@@ -651,12 +881,15 @@ def build_instrumented(
         target.test,
     ]
     print(f"{target.id}: instrumented build deadline {build_timeout}s", flush=True)
-    build = command(args, timeout=build_timeout, log=path / "build.log")
+    build = command(
+        args, env={**scoped_build_env(target, path), **coverage.build_environment()},
+        timeout=build_timeout, log=path / "build.log"
+    )
     executables = EXECUTABLE.findall(build.stdout)
     matches = [
         ROOT / executable
         for label, executable in executables
-        if label.startswith("unittests ") == (target.test_target == "lib")
+        if label.startswith("unittests ") == builds_unit_tests(target.test_target)
         if (package_root / label.removeprefix("unittests ").strip()).resolve() == source
         if pathlib.Path(executable).name.startswith(prefix)
     ]
@@ -665,7 +898,23 @@ def build_instrumented(
     return matches[0]
 
 
+def prepare_shard(inventory: Inventory, shard: Shard) -> None:
+    """Prepare each declared harness this shard's campaigns build, through the shared build path."""
+    harnesses = {target.harness for target in shard_plan(inventory, shard.count)[shard.number - 1]}
+    prepared = []
+    for target_id in inventory.prepared_targets:
+        target = exact_target(inventory, target_id)
+        if target.harness in harnesses:
+            prepared.append(target)
+    if not prepared:
+        print(f"Bolero shard {shard.number}/{shard.count} builds no prepared harness", flush=True)
+        return
+    for target in prepared:
+        prepare_target(inventory, target)
+
+
 def prepare_target(inventory: Inventory, target: Target) -> None:
+    """Record the selected sanitizer build without claiming campaign completion."""
     verify_tool(inventory)
     path = run_dir(target)
     started = time.monotonic()
@@ -686,6 +935,7 @@ def run_instrumented(
     timeout: int,
     log: pathlib.Path,
     allowed_status: tuple[int, ...] = (0,),
+    environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     args = [
         str(binary),
@@ -702,6 +952,7 @@ def run_instrumented(
             "BOLERO_LIBFUZZER_ARGS": " ".join(flags),
             "BOLERO_TEST_NAME": target.test,
             "BOLERO_LIBTEST_HARNESS": "1",
+            **(environment or {}),
         },
         timeout=timeout,
         log=log,
@@ -710,67 +961,61 @@ def run_instrumented(
 
 
 def fuzz_targets(
-    inventory: Inventory, selected: tuple[Target, ...], duration: int
+    inventory: Inventory,
+    selected: tuple[Target, ...],
+    duration: int,
+    shard: Shard | None = None,
 ) -> None:
     verify_tool(inventory)
-    executed = 0
-    completed = 0
-    for target in selected:
-        path = run_dir(target)
-        started = time.monotonic()
-        executed += 1
-        try:
-            binary = build_instrumented(inventory, target, path)
-        except BoleroError:
-            metadata(
-                path,
-                target,
-                bolero_args(inventory, target),
-                "failed build",
-                time.monotonic() - started,
-            )
-            raise
-        runtime_corpus = path / "corpus"
-        runtime_corpus.mkdir()
-        for seed in target.corpus.iterdir():
-            if seed.is_file() and not seed.name.startswith("."):
-                shutil.copy2(seed, runtime_corpus / seed.name)
-        crashes = path / "crashes"
-        crashes.mkdir()
-        flags = [
-            str(runtime_corpus),
-            str(crashes),
-            f"-artifact_prefix={crashes}/",
-            f"-timeout={target.case_timeout_seconds}",
-            f"-max_len={target.max_input_bytes}",
-            f"-max_total_time={duration}",
-            "-rss_limit_mb=2048",
-        ]
-        engine_args = [
-            "BOLERO_LIBFUZZER_ARGS=" + " ".join(flags),
-            str(binary),
-            target.test,
-        ]
-        try:
-            result = run_instrumented(
-                binary,
-                target,
-                flags,
-                timeout=duration + max(30, target.case_timeout_seconds * 3),
-                log=path / "fuzz.log",
-            )
-            if "DONE" not in result.stdout + result.stderr:
-                raise BoleroError(f"{target.id}: libFuzzer did not report completion")
-        except BoleroError:
-            metadata(path, target, engine_args, "failed", time.monotonic() - started)
-            raise
-        metadata(path, target, engine_args, "passed", time.monotonic() - started)
-        completed += 1
-        print(f"{target.id}: libFuzzer completed; artifacts: {path}")
-    print(
-        f"Bolero discovered={len(inventory.targets)} selected={len(selected)} "
-        f"executed={executed} completed={completed}"
-    )
+    partition = None
+    if shard is not None:
+        partition = {
+            **shard.describe(),
+            "plan_sha256": plan_digest(shard_plan(inventory, shard.count)),
+        }
+    with coverage.Campaign(ROOT, inventory, selected, duration, partition) as campaign:
+        for target in selected:
+            path = run_dir(target)
+            started = time.monotonic()
+            with campaign.target(target, path) as measured:
+                try:
+                    binary = build_instrumented(inventory, target, path)
+                except BaseException:
+                    metadata(path, target, bolero_args(inventory, target), "failed build", time.monotonic() - started)
+                    raise
+                runtime_corpus = path / "corpus"
+                runtime_corpus.mkdir()
+                for seed in target.corpus.iterdir():
+                    if seed.is_file() and not seed.name.startswith("."):
+                        shutil.copy2(seed, runtime_corpus / seed.name)
+                crashes = path / "crashes"
+                crashes.mkdir()
+                flags = [
+                    str(runtime_corpus), str(crashes), f"-artifact_prefix={crashes}/",
+                    f"-timeout={target.case_timeout_seconds}", f"-max_len={target.max_input_bytes}",
+                    f"-max_total_time={duration}", "-rss_limit_mb=2048", LIBFUZZER_PROGRESS_FLAG,
+                ]
+                engine_args = ["BOLERO_LIBFUZZER_ARGS=" + " ".join(flags), str(binary), target.test]
+                try:
+                    environment = measured.execute(binary, flags)
+                    engine_started = time.monotonic()
+                    result = run_instrumented(
+                        binary, target, flags,
+                        timeout=duration + max(30, target.case_timeout_seconds * 3),
+                        log=path / "fuzz.log", environment=environment,
+                    )
+                    output = result.stdout + result.stderr
+                    if "DONE" not in output:
+                        raise BoleroError(f"{target.id}: libFuzzer did not report completion")
+                    measured.complete(output, time.monotonic() - engine_started)
+                except BaseException:
+                    metadata(path, target, engine_args, "failed", time.monotonic() - started)
+                    raise
+                metadata(path, target, engine_args, "passed", time.monotonic() - started)
+                print(f"{target.id}: libFuzzer completed; artifacts: {path}")
+        campaign.complete()
+        counts = campaign.record.content["counts"]
+        print(f"Bolero discovered={counts['discovered']} selected={counts['selected']} executed={counts['executed']} completed={counts['completed']}")
 
 
 def exact_target(inventory: Inventory, target_id: str) -> Target:
@@ -781,10 +1026,7 @@ def exact_target(inventory: Inventory, target_id: str) -> Target:
 
 
 def replay(target: Target, failure: pathlib.Path) -> int:
-    if not failure.is_file():
-        raise BoleroError(f"input does not exist: {failure}")
-    if failure.stat().st_size > target.max_input_bytes:
-        raise BoleroError(f"{target.id}: input exceeds {target.max_input_bytes} bytes")
+    checked_input(target, failure)
     target.crashes.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256(failure.read_bytes()).hexdigest()
     destination = target.crashes / f"replay-{digest}"
@@ -803,11 +1045,103 @@ def replay(target: Target, failure: pathlib.Path) -> int:
         r"test result: FAILED\. 0 passed; 1 failed", output
     ):
         raise BoleroError(f"{target.id}: replay failed outside the selected property")
+    # Bolero omits zero counters: corpus-only completion ends after the corpus count.
     if result.returncode == 0 and not re.search(
-        r"corpus inputs: [1-9]\d* \| rng inputs: 0", output
+        r"corpus inputs: [1-9]\d*(?:\r?\n|$)", output
     ):
         raise BoleroError(f"{target.id}: saved input was not replayed")
     print(output[-4000:])
+    return result.returncode
+
+
+def verify_replay_record(target: Target, failure: pathlib.Path) -> None:
+    """Refuse a saved input that no longer matches the run record that saved it.
+
+    An input the runner saved lives in a run directory beside that run's `metadata.json`, which
+    holds the input's digest. A missing or unreadable record, another target's record or a changed
+    input is a corrupt replay record: replaying it would test bytes no run ever failed on. Inputs
+    outside the run directories carry no record and are replayed as given.
+    """
+    location = failure.absolute()
+    if not location.is_relative_to(RUNS):
+        return
+    parts = location.relative_to(RUNS).parts
+    if len(parts) < 3:
+        raise BoleroError(f"corrupt replay record: {failure} is not inside a run directory")
+    if parts[0] != target.id:
+        raise BoleroError(f"corrupt replay record: {failure} was saved by {parts[0]}, not {target.id}")
+    record = RUNS / parts[0] / parts[1] / "metadata.json"
+    try:
+        content = json.loads(record.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise BoleroError(f"corrupt replay record: {record} cannot be read: {error}") from error
+    if not isinstance(content, dict) or content.get("target") != target.id:
+        raise BoleroError(f"corrupt replay record: {record} is not a record of {target.id}")
+    saved = content.get("saved_inputs")
+    name = str(location.relative_to(ROOT))
+    if not isinstance(saved, dict) or name not in saved:
+        raise BoleroError(f"corrupt replay record: {record} does not hold {name}")
+    digest = hashlib.sha256(failure.read_bytes()).hexdigest()
+    if saved[name] != digest:
+        raise BoleroError(
+            f"corrupt replay record: {name} has digest {digest}, its record holds {saved[name]}"
+        )
+
+
+def checked_input(target: Target, failure: pathlib.Path) -> None:
+    if not failure.is_file():
+        raise BoleroError(f"input does not exist: {failure}")
+    if failure.stat().st_size > target.max_input_bytes:
+        raise BoleroError(f"{target.id}: input exceeds {target.max_input_bytes} bytes")
+
+
+def single_input_flags(target: Target, path: pathlib.Path, staged: pathlib.Path) -> list[str]:
+    """libFuzzer runs a file argument once; its crash artifacts stay in the run directory."""
+    return [
+        str(staged),
+        f"-artifact_prefix={path}/",
+        f"-timeout={target.case_timeout_seconds}",
+        LIBFUZZER_PROGRESS_FLAG,
+    ]
+
+
+def replay_sanitizer(inventory: Inventory, target: Target, failure: pathlib.Path) -> int:
+    """Run the exact saved input once through the target's instrumented sanitizer build.
+
+    An assertion failure reproduces in ordinary replay too; a sanitizer finding only here.
+    """
+    verify_tool(inventory)
+    checked_input(target, failure)
+    path = run_dir(target)
+    staged = path / "input"
+    shutil.copy2(failure, staged)
+    flags = single_input_flags(target, path, staged)
+    started = time.monotonic()
+    try:
+        binary = build_instrumented(inventory, target, path)
+        result = run_instrumented(
+            binary,
+            target,
+            flags,
+            timeout=max(60, target.case_timeout_seconds * 3),
+            log=path / "replay.log",
+            allowed_status=tuple(range(256)),
+        )
+    except BoleroError:
+        metadata(path, target, ["BOLERO_LIBFUZZER_ARGS=" + " ".join(flags)], "failed",
+                 time.monotonic() - started)
+        raise
+    outcome = "reproduced" if result.returncode != 0 else "not reproduced"
+    metadata(
+        path,
+        target,
+        ["BOLERO_LIBFUZZER_ARGS=" + " ".join(flags), str(binary), target.test],
+        f"instrumented replay {outcome}",
+        time.monotonic() - started,
+        {"replayed_input_sha256": hashlib.sha256(staged.read_bytes()).hexdigest()},
+    )
+    print((result.stdout + result.stderr)[-4000:])
+    print(f"{target.id}: instrumented replay {outcome}; artifacts: {path}")
     return result.returncode
 
 
@@ -815,10 +1149,7 @@ def reduce_failure(
     inventory: Inventory, target: Target, failure: pathlib.Path
 ) -> pathlib.Path:
     verify_tool(inventory)
-    if not failure.is_file():
-        raise BoleroError(f"input does not exist: {failure}")
-    if failure.stat().st_size > target.max_input_bytes:
-        raise BoleroError(f"{target.id}: input exceeds {target.max_input_bytes} bytes")
+    checked_input(target, failure)
     path = run_dir(target)
     minimized = path / "minimized"
     input_copy = path / "input"
@@ -833,6 +1164,7 @@ def reduce_failure(
             f"-exact_artifact_path={minimized}",
             f"-timeout={target.case_timeout_seconds}",
             "-max_total_time=60",
+            LIBFUZZER_PROGRESS_FLAG,
         ]
         run_instrumented(
             binary,
@@ -844,8 +1176,19 @@ def reduce_failure(
         )
         if not minimized.is_file() or minimized.stat().st_size > failure.stat().st_size:
             raise BoleroError(f"{target.id}: libFuzzer did not save a minimized failure")
-        if replay(target, minimized) == 0:
-            raise BoleroError(f"{target.id}: minimized input no longer fails the property")
+        # The minimum must still fail where it was found, in the instrumented build. Ordinary
+        # replay is recorded beside it: a sanitizer finding passes there by nature.
+        verification = run_instrumented(
+            binary,
+            target,
+            single_input_flags(target, path, minimized),
+            timeout=max(60, target.case_timeout_seconds * 3),
+            log=path / "verify.log",
+            allowed_status=tuple(range(256)),
+        )
+        if verification.returncode == 0:
+            raise BoleroError(f"{target.id}: minimized input no longer fails the instrumented target")
+        ordinary = "fails" if replay(target, minimized) != 0 else "passes"
     except BoleroError:
         metadata(
             path,
@@ -861,37 +1204,53 @@ def reduce_failure(
         ["BOLERO_LIBFUZZER_ARGS=" + " ".join(flags), str(binary), target.test],
         "minimized",
         time.monotonic() - started,
+        {"ordinary_replay": ordinary},
     )
-    print(f"{target.id}: minimized failure: {minimized}")
+    print(f"{target.id}: minimized failure: {minimized}; ordinary replay {ordinary}")
     return minimized
 
 
-def qualify(inventory: Inventory) -> None:
-    """Exercise intentional failure, saved input, minimization, replay and timeout."""
-    verify_tool(inventory)
-    fixture = Target(
-        id="qualification-assertion",
+SANITIZER_MARKER = b"\x33"
+# A generated discovery package holds these properties; each case names which carry `#[ignore]`.
+DISCOVERY_PROPERTY = """
+    #[test]{attribute}
+    fn {name}() {{
+        bolero::check!().with_iterations(0).for_each(|bytes: &[u8]| {{
+            std::hint::black_box(bytes);
+        }});
+    }}
+"""
+
+
+def qualification_target(target_id: str, test: str) -> Target:
+    """A deliberately failing target of the standalone qualification package."""
+    return Target(
+        id=target_id,
         package="bolero-qualification",
         test_target="lib",
-        test="tests::bolero_qualification_fails_on_marker",
+        test=test,
         source=QUALIFICATION.parent / "src/lib.rs",
         features=(),
         domain_version=1,
-        corpus=QUALIFICATION.parent
-        / "src/__fuzz__/tests__bolero_qualification_fails_on_marker/corpus",
+        corpus=QUALIFICATION.parent / "src/__fuzz__" / test.replace("::", "__") / "corpus",
         random_iterations=1,
         max_input_bytes=16,
         case_timeout_seconds=1,
-        invariant="The deliberate marker failure must be detected, saved, minimized and replayed.",
+        invariant="A deliberate failure must be detected, saved, minimized and replayed.",
         manifest=QUALIFICATION,
     )
-    path = run_dir(fixture)
+
+
+def marker_campaign(
+    inventory: Inventory, target: Target, path: pathlib.Path, marker: bytes
+) -> list[str]:
+    """One bounded campaign whose corpus holds only the marker that makes the target fail."""
     corpus = path / "corpus"
     crashes = path / "crashes"
     corpus.mkdir()
     crashes.mkdir()
-    (corpus / "marker").write_bytes(b"\x42\x00")
-    args = bolero_args(inventory, fixture) + [
+    (corpus / "marker").write_bytes(marker)
+    return bolero_args(inventory, target) + [
         "--runs",
         "1",
         "-T",
@@ -900,8 +1259,57 @@ def qualify(inventory: Inventory) -> None:
         str(corpus),
         "--crashes-dir",
         str(crashes),
-        fixture.test,
+        target.test,
     ]
+
+
+def saved_crashes(path: pathlib.Path) -> list[pathlib.Path]:
+    return sorted(item for item in (path / "crashes").iterdir() if item.is_file())
+
+
+class Qualification:
+    """Every way a run must fail, each case with what it observed and the evidence it kept."""
+
+    def __init__(self, path: pathlib.Path) -> None:
+        self.path = path
+        self.cases: list[dict[str, Any]] = []
+
+    def record(
+        self, case: str, requirement: str, observed: str, *evidence: pathlib.Path
+    ) -> None:
+        kept = []
+        for item in evidence:
+            kept.append(str(item.relative_to(ROOT)) if item.is_relative_to(ROOT) else str(item))
+        self.cases.append(
+            {"case": case, "requirement": requirement, "observed": observed, "evidence": kept}
+        )
+
+    def expect_refusal(
+        self, case: str, requirement: str, reason: str, action: Callable[[], object]
+    ) -> None:
+        try:
+            action()
+        except (BoleroError, coverage.native.RunnerError) as error:
+            if reason not in str(error):
+                raise BoleroError(f"{case} failed for another reason: {error}") from error
+            self.record(case, requirement, str(error))
+            return
+        raise BoleroError(f"{case}: {requirement}, but it succeeded")
+
+    def write(self, verdict: str) -> None:
+        content = {"verdict": verdict, "cases": self.cases}
+        (self.path / "qualification.json").write_text(json.dumps(content, indent=2) + "\n")
+
+
+def qualify(inventory: Inventory) -> None:
+    """Exercise every way a run must fail, keeping each case's evidence in one record."""
+    verify_tool(inventory)
+    fixture = qualification_target(
+        "qualification-assertion", "tests::bolero_qualification_fails_on_marker"
+    )
+    path = run_dir(fixture)
+    qualification = Qualification(path)
+    args = marker_campaign(inventory, fixture, path, b"\x42\x00")
     started = time.monotonic()
     try:
         result = command(
@@ -910,85 +1318,256 @@ def qualify(inventory: Inventory) -> None:
             log=path / "assertion.log",
             allowed_status=tuple(range(256)),
         )
-        saved = [item for item in crashes.iterdir() if item.is_file()]
+        saved = saved_crashes(path)
         if result.returncode == 0 or not saved:
             raise BoleroError("intentional failure did not fail and save a crash input")
         if b"\x42" not in saved[0].read_bytes():
             raise BoleroError("saved crash input lost the failing marker")
+        qualification.record(
+            "property-mismatch", "a failing assertion fails the campaign and saves its input",
+            f"exit status {result.returncode}", path / "assertion.log", saved[0],
+        )
         minimized = reduce_failure(inventory, fixture, saved[0])
         if replay(fixture, minimized) == 0:
             raise BoleroError("saved failure replay unexpectedly succeeded")
-
-        timeout_target = dataclasses.replace(
-            fixture,
-            id="qualification-timeout",
-            test="tests::bolero_qualification_times_out_on_marker",
+        qualification.record(
+            "minimization-and-replay",
+            "the minimized input fails the instrumented target and the ordinary assertion",
+            f"{saved[0].stat().st_size} bytes minimized to {minimized.stat().st_size}", minimized,
         )
-        timeout_path = run_dir(timeout_target)
-        timeout_corpus = timeout_path / "corpus"
-        timeout_crashes = timeout_path / "crashes"
-        timeout_corpus.mkdir()
-        timeout_crashes.mkdir()
-        (timeout_corpus / "marker").write_bytes(b"\x55")
-        timeout_args = bolero_args(inventory, timeout_target) + [
-            "--runs",
-            "1",
-            "-T",
-            "5s",
-            "--corpus-dir",
-            str(timeout_corpus),
-            "--crashes-dir",
-            str(timeout_crashes),
-            timeout_target.test,
-        ]
-        try:
-            timeout_result = command(
-                timeout_args,
-                timeout=10,
-                log=timeout_path / "timeout.log",
-                allowed_status=tuple(range(256)),
-            )
-        except BoleroError as error:
-            if "timed out" not in str(error):
-                raise
-            if "seed corpus" not in (timeout_path / "timeout.log").read_text():
-                raise BoleroError("timeout occurred before the case started") from error
-        else:
-            if timeout_result.returncode == 0 or "timeout" not in (
-                timeout_result.stdout + timeout_result.stderr
-            ).lower():
-                raise BoleroError("case timeout did not fail the fuzz engine")
-        metadata(timeout_path, timeout_target, timeout_args, "expected timeout", 0)
-
-        invalid = bolero_args(inventory, fixture) + [
-            "--engine-args=-bolero_qualification_unknown_flag=1",
-            fixture.test,
-        ]
-        engine_result = command(
-            invalid,
-            timeout=1800,
-            log=path / "engine-failure.log",
-            allowed_status=tuple(range(256)),
-        )
-        if engine_result.returncode == 0:
-            raise BoleroError("engine failure unexpectedly succeeded")
-
-        missing = bolero_args(inventory, fixture) + [
-            "tests::bolero_qualification_missing_target"
-        ]
-        missing_result = command(
-            missing,
-            timeout=1800,
-            log=path / "missing-target.log",
-            allowed_status=tuple(range(256)),
-        )
-        if missing_result.returncode == 0:
-            raise BoleroError("missing target unexpectedly succeeded")
+        qualify_replay_records(fixture, minimized, qualification)
+        qualify_sanitizer(inventory, qualification)
+        qualify_timeout(inventory, fixture, qualification)
+        qualify_engine(inventory, fixture, path, qualification)
+        qualify_discovery(path, qualification)
+        qualify_selection(inventory, qualification)
     except BoleroError:
+        qualification.write("failed")
         metadata(path, fixture, args, "failed qualification", time.monotonic() - started)
         raise
+    qualification.write("qualified")
     metadata(path, fixture, args, "qualified", time.monotonic() - started)
-    print(f"Bolero failure path qualified; artifacts: {path}")
+    print(
+        f"Bolero failure path qualified: {len(qualification.cases)} cases; artifacts: {path}"
+    )
+
+
+def qualify_replay_records(
+    fixture: Target, minimized: pathlib.Path, qualification: Qualification
+) -> None:
+    """An input that matches its run record replays; a corrupt record refuses replay."""
+    verify_replay_record(fixture, minimized)
+    corrupt = run_dir(fixture)
+    (corrupt / "crashes").mkdir()
+    changed = corrupt / "crashes" / "input"
+    original = minimized.read_bytes()
+    changed.write_bytes(bytes([original[0] ^ 0xFF]) + original[1:])
+    record = {
+        "target": fixture.id,
+        "saved_inputs": {
+            str(changed.relative_to(ROOT)): hashlib.sha256(original).hexdigest()
+        },
+    }
+    (corrupt / "metadata.json").write_text(json.dumps(record, indent=2) + "\n")
+    qualification.expect_refusal(
+        "corrupt-replay-input", "replay refuses an input that differs from its run record",
+        "has digest", lambda: verify_replay_record(fixture, changed),
+    )
+    unreadable = run_dir(fixture)
+    (unreadable / "crashes").mkdir()
+    kept = unreadable / "crashes" / "input"
+    kept.write_bytes(original)
+    (unreadable / "metadata.json").write_text("{")
+    qualification.expect_refusal(
+        "unreadable-replay-record", "replay refuses an input whose run record cannot be read",
+        "cannot be read", lambda: verify_replay_record(fixture, kept),
+    )
+
+
+def qualify_sanitizer(inventory: Inventory, qualification: Qualification) -> None:
+    """A memory error fails the campaign with its report, and the exact input replays it."""
+    target = qualification_target(
+        "qualification-sanitizer", "tests::bolero_qualification_reports_memory_error_on_marker"
+    )
+    path = run_dir(target)
+    args = marker_campaign(inventory, target, path, SANITIZER_MARKER)
+    started = time.monotonic()
+    result = command(
+        args, timeout=1800, log=path / "sanitizer.log", allowed_status=tuple(range(256))
+    )
+    saved = saved_crashes(path)
+    report = (path / "sanitizer.log").read_text(errors="replace")
+    findings = [line for line in report.splitlines() if "ERROR: AddressSanitizer" in line]
+    outcome = "expected sanitizer finding"
+    if result.returncode == 0 or not saved or not findings:
+        outcome = "missing sanitizer finding"
+    metadata(path, target, args, outcome, time.monotonic() - started)
+    if outcome != "expected sanitizer finding":
+        raise BoleroError("a memory error did not fail the campaign with its report and input")
+    qualification.record(
+        "sanitizer-finding", "an AddressSanitizer report fails the campaign and saves its input",
+        findings[0].strip(), path / "sanitizer.log", saved[0],
+    )
+    if replay_sanitizer(inventory, target, saved[0]) == 0:
+        raise BoleroError("the instrumented replay did not reproduce the sanitizer finding")
+    qualification.record(
+        "sanitizer-replay", "the instrumented exact replay reproduces the sanitizer finding",
+        "replay failed", saved[0],
+    )
+
+
+def qualify_timeout(inventory: Inventory, fixture: Target, qualification: Qualification) -> None:
+    timeout_target = dataclasses.replace(
+        fixture,
+        id="qualification-timeout",
+        test="tests::bolero_qualification_times_out_on_marker",
+    )
+    timeout_path = run_dir(timeout_target)
+    timeout_args = marker_campaign(inventory, timeout_target, timeout_path, b"\x55")
+    observed = "the campaign deadline stopped the stuck case"
+    try:
+        timeout_result = command(
+            timeout_args,
+            timeout=10,
+            log=timeout_path / "timeout.log",
+            allowed_status=tuple(range(256)),
+        )
+    except BoleroError as error:
+        if "timed out" not in str(error):
+            raise
+        if "seed corpus" not in (timeout_path / "timeout.log").read_text():
+            raise BoleroError("timeout occurred before the case started") from error
+    else:
+        if timeout_result.returncode == 0 or "timeout" not in (
+            timeout_result.stdout + timeout_result.stderr
+        ).lower():
+            raise BoleroError("case timeout did not fail the fuzz engine")
+        observed = f"the engine failed the case with exit status {timeout_result.returncode}"
+    metadata(timeout_path, timeout_target, timeout_args, "expected timeout", 0)
+    qualification.record(
+        "timeout", "a case exceeding its timeout fails the campaign", observed,
+        timeout_path / "timeout.log",
+    )
+
+
+def qualify_engine(
+    inventory: Inventory, fixture: Target, path: pathlib.Path, qualification: Qualification
+) -> None:
+    invalid = bolero_args(inventory, fixture) + [
+        "--engine-args=-bolero_qualification_unknown_flag=1",
+        fixture.test,
+    ]
+    engine_result = command(
+        invalid,
+        timeout=1800,
+        log=path / "engine-failure.log",
+        allowed_status=tuple(range(256)),
+    )
+    if engine_result.returncode == 0:
+        raise BoleroError("engine failure unexpectedly succeeded")
+    qualification.record(
+        "engine-failure", "an engine that cannot start fails the campaign",
+        f"exit status {engine_result.returncode}", path / "engine-failure.log",
+    )
+    missing = bolero_args(inventory, fixture) + [
+        "tests::bolero_qualification_missing_target"
+    ]
+    missing_result = command(
+        missing,
+        timeout=1800,
+        log=path / "missing-target.log",
+        allowed_status=tuple(range(256)),
+    )
+    if missing_result.returncode == 0:
+        raise BoleroError("missing target unexpectedly succeeded")
+    qualification.record(
+        "missing-engine-target", "a campaign naming no compiled target fails",
+        f"exit status {missing_result.returncode}", path / "missing-target.log",
+    )
+
+
+def discovery_package(
+    directory: pathlib.Path, properties: dict[str, str]
+) -> tuple[pathlib.Path, dict[str, Target]]:
+    """Write a standalone package holding `properties` and the targets that would register it."""
+    source = directory / "src"
+    source.mkdir(parents=True)
+    manifest = directory / "Cargo.toml"
+    shutil.copy2(QUALIFICATION, manifest)
+    shutil.copy2(QUALIFICATION.parent / "Cargo.lock", directory / "Cargo.lock")
+    body = []
+    for name, attribute in properties.items():
+        body.append(DISCOVERY_PROPERTY.format(name=name, attribute=attribute))
+    (source / "lib.rs").write_text(
+        "//! A generated discovery qualification package.\n\n"
+        "#[cfg(test)]\nmod tests {" + "".join(body) + "}\n"
+    )
+    targets = {}
+    for name in properties:
+        test = f"tests::{name}"
+        targets[name] = dataclasses.replace(
+            qualification_target(f"qualification-{name}", test),
+            source=source / "lib.rs",
+            corpus=source / "__fuzz__" / test.replace("::", "__") / "corpus",
+            manifest=manifest,
+        )
+    return manifest, targets
+
+
+def qualify_discovery(path: pathlib.Path, qualification: Qualification) -> None:
+    """Compiled discovery of generated packages accepts the exact registration and nothing else."""
+    package = "bolero-qualification"
+    manifest, targets = discovery_package(path / "discovery-registered", {"bolero_registered": ""})
+    compiled = discover_package(package, manifest, (targets["bolero_registered"],))
+    work_dirs = [pathlib.Path(item["work_dir"]).resolve() for _, item in compiled]
+    if work_dirs != [targets["bolero_registered"].work_dir.resolve()]:
+        raise BoleroError(f"discovery of the registered package found {compiled}")
+    qualification.record(
+        "discovery-control", "discovery accepts a package whose registration is exact",
+        "one compiled target in its registered work directory", manifest,
+    )
+    manifest, targets = discovery_package(
+        path / "discovery-ignored", {"bolero_registered": "", "bolero_ignored": "\n    #[ignore]"}
+    )
+    qualification.expect_refusal(
+        "discovery-ignored", "discovery fails on an ignored property", "ignored Bolero targets",
+        lambda: discover_package(package, manifest, tuple(targets.values())),
+    )
+    manifest, targets = discovery_package(
+        path / "discovery-unregistered", {"bolero_registered": "", "bolero_unregistered": ""}
+    )
+    qualification.expect_refusal(
+        "discovery-unregistered", "discovery fails on a property the inventory lacks",
+        "differ from inventory",
+        lambda: discover_package(package, manifest, (targets["bolero_registered"],)),
+    )
+    manifest, targets = discovery_package(path / "discovery-missing", {"bolero_registered": ""})
+    absent = dataclasses.replace(
+        targets["bolero_registered"], id="qualification-missing", test="tests::bolero_missing"
+    )
+    qualification.expect_refusal(
+        "discovery-missing", "discovery fails on a registered property the source lacks",
+        "differ from inventory",
+        lambda: discover_package(package, manifest, (targets["bolero_registered"], absent)),
+    )
+
+
+def qualify_selection(inventory: Inventory, qualification: Qualification) -> None:
+    """A selection, shard or campaign that would run nothing fails instead of passing."""
+    qualification.expect_refusal(
+        "empty-selection", "a filter that selects no target fails", "no Bolero targets selected",
+        lambda: select(inventory, "qualification selects no registered target"),
+    )
+    harnesses = len(harness_estimates(inventory))
+    qualification.expect_refusal(
+        "empty-shard", "a shard plan that would leave a shard without targets fails",
+        "would select no target", lambda: shard_plan(inventory, harnesses + 1),
+    )
+    qualification.expect_refusal(
+        "empty-campaign", "a campaign with no selected target fails",
+        "nonempty unique selection",
+        lambda: coverage.Campaign(ROOT, inventory, (), inventory.pr_fuzz_seconds, None),
+    )
 
 
 def main() -> int:
@@ -997,8 +1576,12 @@ def main() -> int:
     subparsers.add_parser("validate")
     subparsers.add_parser("list")
     subparsers.add_parser("qualify")
+    plan = subparsers.add_parser("plan")
+    plan.add_argument("count", type=int)
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("target")
+    prepare_shard_parser = subparsers.add_parser("prepare-shard")
+    prepare_shard_parser.add_argument("shard", type=Shard.parse)
     test = subparsers.add_parser("test")
     test.add_argument("filter", nargs="?")
     fuzz = subparsers.add_parser("fuzz")
@@ -1006,12 +1589,28 @@ def main() -> int:
     fuzz.add_argument("duration", nargs="?", type=int)
     fuzz_all = subparsers.add_parser("fuzz-all")
     fuzz_all.add_argument("duration", nargs="?", type=int)
-    for action in ("replay", "reduce"):
+    fuzz_all.add_argument("--shard", type=Shard.parse, default=Shard(1, 1))
+    for action in ("replay", "replay-sanitizer", "reduce"):
         selected = subparsers.add_parser(action)
         selected.add_argument("target")
         selected.add_argument("failure", type=pathlib.Path)
+    combine = subparsers.add_parser("combine")
+    combine.add_argument("evidence", type=pathlib.Path)
+    combine.add_argument("output", type=pathlib.Path)
     args = parser.parse_args()
     inventory = load_inventory()
+    # Planning and combining shard evidence read only the inventory and the records, so they run
+    # without a Rust toolchain. Every other action first compares the inventory with discovery.
+    if args.action == "plan":
+        print(json.dumps(describe_plan(inventory, args.count), indent=2))
+        return 0
+    if args.action == "combine":
+        combined = coverage.combine(
+            ROOT, inventory, args.evidence, args.output,
+            lambda count: shard_plan(inventory, count), plan_digest,
+        )
+        print(f"Bolero combined shard evidence: {combined}")
+        return 0
     discover(inventory)
     if args.action == "validate":
         return 0
@@ -1025,33 +1624,42 @@ def main() -> int:
     if args.action == "prepare":
         prepare_target(inventory, exact_target(inventory, args.target))
         return 0
+    if args.action == "prepare-shard":
+        prepare_shard(inventory, args.shard)
+        return 0
     if args.action == "test":
         test_targets(inventory, select(inventory, args.filter))
         return 0
     if args.action in ("fuzz", "fuzz-all"):
-        selected = (
-            (exact_target(inventory, args.target),)
-            if args.action == "fuzz"
-            else inventory.targets
-        )
         duration = (
             args.duration
             if args.duration is not None
             else inventory.pr_fuzz_seconds
         )
         positive_int(duration, "duration")
-        fuzz_targets(inventory, selected, duration)
+        if args.action == "fuzz":
+            fuzz_targets(inventory, (exact_target(inventory, args.target),), duration)
+            return 0
+        selected = shard_plan(inventory, args.shard.count)[args.shard.number - 1]
+        fuzz_targets(inventory, selected, duration, args.shard)
         return 0
     target = exact_target(inventory, args.target)
+    # A saved input inside a run directory must still match the record that saved it.
+    verify_replay_record(target, args.failure)
     if args.action == "replay":
         return replay(target, args.failure)
+    if args.action == "replay-sanitizer":
+        return replay_sanitizer(inventory, target, args.failure)
     reduce_failure(inventory, target, args.failure)
     return 0
 
-
 if __name__ == "__main__":
     try:
-        sys.exit(main())
-    except (BoleroError, OSError, KeyError, ValueError, tomllib.TOMLDecodeError) as error:
+        with coverage.suppressed_profiles(), coverage.native.interruptible():
+            sys.exit(main())
+    except (BoleroError, coverage.native.RunnerError, OSError, KeyError, ValueError, tomllib.TOMLDecodeError) as error:
         print(f"Bolero: {error}", file=sys.stderr)
         sys.exit(1)
+    except (KeyboardInterrupt, coverage.native.Interrupted):
+        print("Bolero: interrupted; retained campaigns are incomplete", file=sys.stderr)
+        sys.exit(130)

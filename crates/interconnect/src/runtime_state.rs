@@ -8,6 +8,14 @@
 //! - **Depends on.** The vocabulary a placement names and the typed request contract.
 //! - **Must not know.** How a runtime encodes, stores, fences or restores the state it names.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use nervix_models::{
@@ -16,7 +24,10 @@ use nervix_models::{
 use rkyv::{Archive, Deserialize, Serialize};
 use strum::{FromRepr, IntoStaticStr};
 
-use crate::{InterconnectRequest, PoolClass, RemoteOperationFailure};
+use crate::{
+    InterconnectRequest, InterconnectStreamRequest, PoolClass, RemoteOperationFailure,
+    RequestSubquota,
+};
 
 macro_rules! declare_runtime_state_kinds {
     ($($Kind:ident = $tag:literal,)+) => {
@@ -58,6 +69,17 @@ declare_runtime_state_kinds! {
     WasmProcessor = 5,
     WindowProcessor = 8,
     BranchLru = 7,
+}
+
+impl RuntimeStateKind {
+    /// Whether state of this kind belongs to one branch of its entity, which a placement names by
+    /// the branch key's fingerprint. Every other kind is state of the whole entity.
+    pub fn is_branch_local(self) -> bool {
+        matches!(
+            self,
+            Self::Correlator | Self::Deduplicator | Self::WasmProcessor | Self::WindowProcessor
+        )
+    }
 }
 
 /// One runtime state a placement names, together with the lifetime that state belongs to.
@@ -139,12 +161,68 @@ pub struct StatePlacementEnvelope {
     pub branch_key: Option<Vec<RemoteRuntimeField>>,
 }
 
-/// One checkpoint of the state a placement names. It travels only beside that placement, which
-/// alone says what the payload is laid out by.
+/// The exact checkpoint of the state a placement names. Its bytes travel through the bulk pool;
+/// the receiving node verifies their length and digest before installing them.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StateSnapshotEnvelope {
     pub lsm: u64,
-    pub payload: Vec<u8>,
+    pub length: u64,
+    pub digest: [u8; 32],
+}
+
+/// Fetch the checkpoint selected by a preceding state-sync or handoff description. An owner
+/// refuses a revision it no longer holds rather than substituting newer state.
+#[derive(Debug, Clone, Copy, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StateCheckpointRead {
+    /// Use the state selected at request admission, or storage when it has no live state.
+    Published,
+    /// Use the exact checkpoint the source persisted while capturing a planned handoff.
+    HandoffCapture,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct FetchStateCheckpoint {
+    pub placement: StatePlacementEnvelope,
+    pub lsm: u64,
+    pub read: StateCheckpointRead,
+}
+
+/// Kafka checkpoints may exceed either the replication message or bulk memory ceiling. The
+/// request selects a retained state handle once, and its response streams the current native
+/// checkpoint rather than carrying that checkpoint inside a control response.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct SyncKafkaOffsets {
+    pub placement: StatePlacementEnvelope,
+    pub after_lsm: Option<u64>,
+}
+
+/// A typed admission and revision check precedes the bulk transfer. An unchanged checkpoint
+/// requires neither encoding nor a Snapshot stream, and ordinary absence remains distinct from a
+/// failed checkpoint read.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
+pub struct DescribeKafkaOffsets {
+    pub placement: StatePlacementEnvelope,
+    pub after_lsm: u64,
+}
+
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KafkaOffsetRevision {
+    Current,
+    Advanced(u64),
+}
+
+impl InterconnectRequest for DescribeKafkaOffsets {
+    type Response = Result<KafkaOffsetRevision, RemoteOperationFailure>;
+    const NAME: &'static str = "describe_kafka_offsets";
+    const CLASS: PoolClass = PoolClass::Commands;
+    const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+impl InterconnectStreamRequest for SyncKafkaOffsets {
+    const NAME: &'static str = "sync_kafka_offsets";
+    const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+    const TIMEOUT: Duration = Duration::from_secs(30);
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq)]
@@ -249,4 +327,70 @@ impl InterconnectRequest for StateSyncRequest {
     const NAME: &'static str = "state_sync";
     const CLASS: PoolClass = PoolClass::Replication;
     const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+impl InterconnectStreamRequest for FetchStateCheckpoint {
+    const NAME: &'static str = "fetch_state_checkpoint";
+    const CLASS: PoolClass = PoolClass::Bulk;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Snapshot;
+    const TIMEOUT: Duration = Duration::from_secs(60);
+}
+
+#[cfg(all(
+    test,
+    not(any(feature = "shuttle", feature = "turmoil", feature = "loom"))
+))]
+#[path = "runtime_state_properties.rs"]
+mod replication_properties;
+
+#[cfg(all(test, not(any(feature = "shuttle", feature = "turmoil"))))]
+mod wire_properties {
+    use meticulous::ResultExt as _;
+    use nervix_execution::Executor;
+
+    use super::*;
+    use crate::request::RkyvMessage;
+
+    #[derive(Debug, bolero::TypeGenerator)]
+    struct CheckpointDescriptionCase {
+        lsm: u64,
+        length: u32,
+        digest: [u8; 32],
+        present: bool,
+    }
+
+    #[test]
+    fn bolero_checkpoint_descriptions_round_trip_through_the_replication_wire() {
+        let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .assured("the ordinary test runtime builds");
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(64)
+            .with_type::<CheckpointDescriptionCase>()
+            .for_each(|case| {
+                runtime.block_on(async {
+                    let executor = Executor::default();
+                    let response = StateSyncResponse {
+                        result: Ok(case.present.then_some(StateSnapshotEnvelope {
+                            lsm: case.lsm,
+                            length: u64::from(case.length),
+                            digest: case.digest,
+                        })),
+                    };
+                    let class = StateSyncRequest::CLASS;
+                    let (encoded, _reservation) = response
+                        .clone()
+                        .encode_rkyv(executor.clone(), class, class.payload_limit(&executor))
+                        .await
+                        .assured("a bounded checkpoint description encodes");
+                    let (decoded, _reservation) =
+                        StateSyncResponse::decode_rkyv(executor, class, encoded)
+                            .await
+                            .assured("the encoded checkpoint description decodes");
+                    assert_eq!(decoded, response);
+                });
+            });
+    }
 }

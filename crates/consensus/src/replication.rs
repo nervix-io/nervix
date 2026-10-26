@@ -28,6 +28,14 @@
 //! belonging to a stream the leader has already torn down are released with the stream rather than
 //! staying queued behind it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{pin::pin, time::Duration};
 
 use arch_into::ArchInto as _;
@@ -46,13 +54,19 @@ use nervix_primitives::{
 use nervix_recovery::Discarded as _;
 use openraft::{
     error::{RPCError, Unreachable},
-    network::RPCOption,
+    network::{RPCOption, RaftNetworkV2 as _},
     raft::{AppendEntriesRequest, StreamAppendResult},
 };
 use thiserror::Error;
 use tracing::debug;
 
-use crate::{LogIdOf, ProtocolReceiver, TypeConfig, validate_protocol_origin, wire};
+use crate::{
+    AppendStreamOpenRecorder, LogIdOf, NetworkClient, ProtocolReceiver, TypeConfig,
+    unreachable_err, validate_protocol_origin, wire,
+};
+
+#[cfg(test)]
+mod append_setup_tests;
 
 /// How many entries one append batch may gather before the byte target stops it.
 pub(crate) const MAX_APPEND_BATCH_ENTRIES: u64 = 1024;
@@ -98,6 +112,140 @@ pub(crate) enum AppendPath {
 /// crate's ceiling expires first.
 pub(crate) fn heartbeat_deadline(option: &RPCOption) -> Duration {
     option.soft_ttl().min(HEARTBEAT_DEADLINE_CEILING)
+}
+
+/// Initial probes have no log data; commit updates following data stay on the ordered stream.
+enum ReplicationReplyPhase<S> {
+    Probing(S),
+    Streaming(BoxStream<'static, Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>>),
+    Finished,
+}
+
+/// One task owns the transition from management probes to the follower's data stream.
+struct ReplicationReplies<Recorder, S> {
+    client: NetworkClient<Recorder>,
+    option: RPCOption,
+    phase: ReplicationReplyPhase<S>,
+}
+
+impl<Recorder, S> ReplicationReplies<Recorder, S>
+where
+    Recorder: AppendStreamOpenRecorder,
+    S: Stream<Item = AppendEntriesRequest<TypeConfig>> + Send + Unpin + 'static,
+{
+    async fn next(
+        &mut self,
+    ) -> Option<Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>> {
+        nervix_primitives::task::consume_budget().await;
+        let phase = std::mem::replace(&mut self.phase, ReplicationReplyPhase::Finished);
+        match phase {
+            ReplicationReplyPhase::Probing(mut input) => {
+                let request = input.next().await?;
+                if request.entries.is_empty() {
+                    let boundary = request.prev_log_id.clone();
+                    let response = match self
+                        .client
+                        .append_entries(request, self.option.clone())
+                        .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    let answer = response.into_stream_result(boundary.clone(), boundary.clone());
+                    if answer == Ok(boundary) {
+                        self.phase = ReplicationReplyPhase::Probing(input);
+                    }
+                    Some(Ok(answer))
+                } else {
+                    let mut answers = match self.client.open_replication_data(request, input).await
+                    {
+                        Ok(answers) => answers,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    let answer = answers.next().await;
+                    self.phase = ReplicationReplyPhase::Streaming(answers);
+                    answer
+                }
+            }
+            ReplicationReplyPhase::Streaming(mut answers) => {
+                let answer = answers.next().await;
+                self.phase = ReplicationReplyPhase::Streaming(answers);
+                answer
+            }
+            ReplicationReplyPhase::Finished => None,
+        }
+    }
+}
+
+impl<Recorder> NetworkClient<Recorder>
+where
+    Recorder: AppendStreamOpenRecorder,
+{
+    pub(crate) async fn replication_answers<S>(
+        mut self,
+        mut input: S,
+        option: RPCOption,
+    ) -> Result<
+        BoxStream<'static, Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>>,
+        RPCError<TypeConfig>,
+    >
+    where
+        S: Stream<Item = AppendEntriesRequest<TypeConfig>> + Send + Unpin + 'static,
+    {
+        // Consume input before even an immediate refusal, preserving the caller's retry gate.
+        let Some(first) = input.next().await else {
+            return Ok(Box::pin(futures_util::stream::empty()));
+        };
+        if !first.entries.is_empty() {
+            return self.open_replication_data(first, input).await;
+        }
+        let boundary = first.prev_log_id.clone();
+        let response = self.append_entries(first, option.clone()).await?;
+        let answer = response.into_stream_result(boundary.clone(), boundary.clone());
+        let continues = answer == Ok(boundary);
+        let first_answer = futures_util::stream::iter([Ok(answer)]);
+        if !continues {
+            return Ok(Box::pin(first_answer));
+        }
+        let owner = ReplicationReplies {
+            client: self,
+            option,
+            phase: ReplicationReplyPhase::Probing(input),
+        };
+        let remaining = futures_util::stream::unfold(owner, |mut owner| async move {
+            let answer = owner.next().await?;
+            Some((answer, owner))
+        });
+        Ok(Box::pin(first_answer.chain(remaining)))
+    }
+
+    async fn open_replication_data<S>(
+        &self,
+        first: AppendEntriesRequest<TypeConfig>,
+        input: S,
+    ) -> Result<
+        BoxStream<'static, Result<StreamAppendResult<TypeConfig>, RPCError<TypeConfig>>>,
+        RPCError<TypeConfig>,
+    >
+    where
+        S: Stream<Item = AppendEntriesRequest<TypeConfig>> + Send + Unpin + 'static,
+    {
+        self.connectivity.check().map_err(unreachable_err)?;
+        self.append_stream_open_recorder
+            .record_append_stream_attempt(&self.target);
+        let input = futures_util::stream::iter([first]).chain(input);
+        let answers = open_append_stream(
+            &self.interconnect,
+            &self.executor,
+            &self.local_node_id,
+            &self.target,
+            input,
+        )
+        .await?;
+        self.append_stream_open_recorder
+            .record_append_stream_open(&self.target);
+        Ok(answers)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -485,6 +633,10 @@ impl ProtocolReceiver {
         Box::pin(answers)
     }
 }
+
+#[cfg(test)]
+#[path = "replication/initial_probe_tests.rs"]
+mod initial_probe_tests;
 
 #[cfg(test)]
 mod tests {

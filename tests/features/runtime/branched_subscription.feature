@@ -2,11 +2,11 @@ Feature: Branched session subscriptions
   Scenario Outline: Session subscriptions mask sensitive branch-key fields
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA incoming_notification (
         tenant STRING SENSITIVE,
@@ -44,8 +44,8 @@ Feature: Branched session subscriptions
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR sensitive_branch_source
-        FROM ENDPOINT sensitive_branch_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sensitive_branch_source
+        FROM sensitive_branch_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_notification_codec
         TO public_notifications
           SET tenant = message.tenant,
@@ -79,11 +79,11 @@ Feature: Branched session subscriptions
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -99,16 +99,15 @@ Feature: Branched session subscriptions
         CREATE IF NOT EXISTS SCHEMA user_id_tenant_branch ( user_id I64, tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_tenant_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-subscription-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main
-        TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main
+        TOPIC 'notifications_{{test_id}}'
+        MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
           INHERIT ALL
@@ -145,11 +144,11 @@ Feature: Branched session subscriptions
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -174,16 +173,15 @@ Feature: Branched session subscriptions
         SCHEMA notification
         BRANCHED BY by_mqtt_notifications
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-subscription-filter-map-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main
-        TOPIC notifications_{{test_id}}
-        MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main
+        TOPIC 'notifications_{{test_id}}'
+        MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
           INHERIT ALL
@@ -194,33 +192,33 @@ Feature: Branched session subscriptions
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "targets namespace 'branch'"
+    When these Plexus commands fail with "targets namespace 'branch'"
       """
       CREATE SUBSCRIPTION branch_scope_subscription TO notifications
       WHERE branch.tenant = 'acme';
       """
-    When these NSPL commands fail with "targets namespace 'relay_state.notifications'"
+    When these Plexus commands fail with "targets namespace 'relay_state.notifications'"
       """
       CREATE SUBSCRIPTION materialized_scope_subscription TO notifications
       WHERE relay_state.notifications.tenant = 'acme';
       """
-    When these NSPL commands fail with "targets namespace 'output'"
+    When these Plexus commands fail with "targets namespace 'output'"
       """
       CREATE SUBSCRIPTION output_scope_subscription TO notifications
       WHERE output.tenant = 'acme';
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE SUBSCRIPTION construction_subscription TO notifications
       SET normalized = lower(input.raw);
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE SUBSCRIPTION side_effect_subscription TO notifications
       WHERE input.active
       INVOKE write_header('tenant', input.tenant);
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SUBSCRIPTION notifications_subscription TO notifications
       WHERE tenant = 'acme' AND message.active AND input.user_id = 42;

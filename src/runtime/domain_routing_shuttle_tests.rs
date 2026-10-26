@@ -5,6 +5,11 @@
 //! - **Depends on.** The production routing publisher, cache and typed processor plan.
 //! - **Must not know.** Schedule application, processor execution or graph Models.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use ahash::HashMap;
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_models::{AckMode, ErrorPolicies, ModelKind, ModelName, NodeRef};

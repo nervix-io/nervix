@@ -32,7 +32,7 @@ WASM processor output flush is guest-controlled. `CREATE WASM PROCESSOR` does no
 
 Every declaration requires both limits immediately after `FILE`, in this order:
 
-```nspl,ignore
+```plexus,ignore
 FILE "processor.wasm"
 MAX FUEL 1000000000
 MAX MEMORY 64MiB
@@ -250,8 +250,20 @@ or generated-pool index; its type and nullability come from the positionally
 aligned destination field, and its row count comes from `acks.rows.len()`.
 
 `generated_arrow_ipc_batch` is either an empty byte string or exactly one Arrow
-IPC stream containing one schema and one record batch. The empty byte string is
-the only valid empty generated pool; do not encode a zero-column Arrow stream.
+IPC stream containing one schema and one uncompressed record batch. The stream
+ends with the end-of-stream marker, or where its record batch message ends. Its
+schema may declare only the Arrow types Nervix carries: integers of 8 to 64
+bits, 32- and 64-bit floats, booleans, UTF-8 text, binary, nanosecond
+timestamps, and lists and fixed-size lists of those, none dictionary-encoded.
+Every message must open with Arrow's continuation marker, `0xFFFFFFFF`, and
+declare metadata and body lengths that lie inside the stream. Its record batch
+must declare exactly the field nodes and buffers those fields take, every
+buffer inside the message body, a validity bitmap long enough for the nulls it
+counts and offsets buffers that hold whole offsets. Nervix checks all of this
+before it reads the batch or allocates anything from a declared length, and a
+stream that fails the check is invalid generated Arrow IPC. The empty byte
+string is the only valid empty generated pool; do not encode a zero-column
+Arrow stream.
 When present, generated schema field names must be empty. Nervix compares every
 other field property with each referencing destination field, including data
 type, nullability, timestamp units and timezones, nested types, fixed lengths,
@@ -363,7 +375,9 @@ All table and vector fields are required, including empty vectors. Unknown
 fields are ignored for FlatBuffers schema evolution; unknown union or enum
 variants, missing required fields, a wrong identifier or size prefix, trailing
 bytes, invalid column counts, bad source tokens, malformed or trailing Arrow
-IPC, and exact-schema mismatches are global processor errors. Empty output
+IPC, and exact-schema mismatches are global processor errors. Short headers are
+rejected before identifier access, including a complete size prefix whose declared
+length matches a buffer too short to hold the root and identifier. Empty output
 groups, out-of-range or unreferenced generated columns, and generated
 row-layout mismatches are also rejected. Nonzero uninitialized column indexes
 are rejected. CBOR and per-output generated-column
@@ -402,7 +416,9 @@ whose restored state needs a timer requests it again from its next input or time
 
 Keep `nervix_load_state` strict about what it restores. Save what a restore needs to validate the
 state, such as the branch configuration it was taken under, and reject state that does not match
-the instance it is handed to.
+the instance it is handed to. The Rust SDK's snapshot envelope permits a restored domain name to
+change if the domain type, branch key, and input and output schemas match. Guests with their own
+snapshot format decide whether a domain name change is valid for their application state.
 
 A concrete branch evicted for its `TTL` or instance limit stops without a quiesce flush, but its
 checkpoint stays: when the same branch key appears again, its new instance restores the last
@@ -579,8 +595,10 @@ callback at a time, in this order:
    routes `message_errors` through the route's `ON MESSAGE ERROR` policy. It holds back the success
    of every other input the callback decided: inputs carried into output rows, `acked` inputs,
    handled message errors, and inputs that `ON GLOBAL ERROR IGNORE` accepts after a failed
-   callback. Output reaches downstream nodes, and can reach sinks, while its checkpoint is still on
-   its way; only the acknowledgement waits.
+   callback. Output reaches downstream nodes, and can reach emitters, while its checkpoint is still on
+   its way; only the acknowledgement waits. Until the checkpoint ends, Nervix reports the inputs it
+   holds back alive to their source, so a source's `ACK TIMEOUT` shorter than the checkpoint does
+   not deliver them again.
 4. It saves the guest with `nervix_dump_state`. The saved state is **captured** and stamped with the
    branch's next revision.
 5. It writes that revision to the node's stable storage and waits until the storage is
@@ -659,10 +677,10 @@ checkpoint on that node fails until the node restarts.
 
 ### Recovery, Replay And Duplicates
 
-A checkpoint is not a transaction that spans the guest, its output and external sinks. It guarantees
+A checkpoint is not a transaction that spans the guest, its output and external emitters. It guarantees
 exactly one thing: once a source has received a successful acknowledgement for an input, the guest
 state that reflects the input is on the stable storage of the branch's owner and of every replica the
-checkpoint was confirmed by. What that means differs for guest state, for the source, and for sinks.
+checkpoint was confirmed by. What that means differs for guest state, for the source, and for emitters.
 
 - **Guest state.** A restarted node restores each branch from the newest checkpoint on its own
   storage. After an owner is lost, [forced recovery](#state-generations) continues each branch from
@@ -676,7 +694,7 @@ checkpoint was confirmed by. What that means differs for guest state, for the so
   input: a guest counts buffered input as it accepts it, a checkpoint that failed at its replicas
   stays on the owner's storage, and a replica can hold a checkpoint whose acknowledgement it sent too
   late. A guest therefore applies a redelivered input again unless it recognizes the input itself.
-- **External delivery.** Output is dispatched before its checkpoint completes, so a sink can emit
+- **External delivery.** Output is dispatched before its checkpoint completes, so an emitter can emit
   output whose input is later negatively acknowledged and redelivered, and the redelivered input
   produces that output again. Delivery through a WASM processor is at least once; see
   [ACK Semantics And Effective Delivery](emitters.md#ack-semantics-and-effective-delivery).
@@ -889,7 +907,10 @@ operations and saved state, in one shape:
 wasm processor '<processor>' <stage> failed (<branch>, resource '<resource>' version <version> file '<file>'[, export '<export>'][, saved state revision <revision>]): <cause>
 ```
 
-`<branch>` is `branch` followed by the concrete branch key, or `unbranched`. `<export>` names the
+`<branch>` is `branch` followed by the lowercase hexadecimal fingerprint of the concrete branch's
+key, or `unbranched`. The fingerprint is the one `DESCRIBE WASM PROCESSOR` prints beside the
+branch's checkpoint, and a diagnostic never contains the key's field values, which the branch
+schema may declare `SENSITIVE`. `<export>` names the
 guest export whose call failed, or the export that runs the failed operation. `<revision>` appears
 when the failure involves saved state: the revision being restored or the revision being persisted.
 `<cause>` is the complete chain of failures below the stage, ending with the guest's own reason when
@@ -914,11 +935,11 @@ another node reaches the session unchanged.
 | `state replication` | Waiting for every assigned replica to hold the checkpoint on its stable storage, or the schedule assigning fewer replicas than the checkpoint was captured for. |
 | `state authority check` | The state's authority refused it: a replica or peer that is not the state's authority, or this node after the branch's state generation or ownership moved on. |
 
-For example, a branch whose guest rejects its saved counters after an instance was recreated is
-reported as:
+For example, the branch keyed by tenant `alpha` whose guest rejects its saved counters after an
+instance was recreated is reported as:
 
 ```text
-wasm processor 'sessionizer' application state restoration failed (branch {"tenant":"alpha"}, resource 'sessionizer' version 3 file 'sessionizer.wasm', export 'nervix_load_state', saved state revision 12): wasm guest rejected the application state in its saved snapshot: counters header is truncated
+wasm processor 'sessionizer' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'sessionizer' version 3 file 'sessionizer.wasm', export 'nervix_load_state', saved state revision 12): wasm guest rejected the application state in its saved snapshot: counters header is truncated
 ```
 
 ## Troubleshooting

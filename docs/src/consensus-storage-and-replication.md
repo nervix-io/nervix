@@ -1,5 +1,7 @@
 # Consensus Storage And Replication
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix uses Raft to replicate the control-plane state described in the
 [Control Plane](./control-plane.md). Each node keeps its own durable log, applied state, votes,
 membership, and snapshots. This chapter defines when those records are durable, how a leader paces
@@ -14,11 +16,21 @@ The replicated transaction report and its content-addressed topology use this du
 and actual facts that report retains. This chapter owns log reading, snapshot transfer, and the
 storage bounds that carry large reports.
 
+Consensus request and append-stream responses carry the fixed `ConsensusRequestError` wire
+outcome, classified at its source owner for the compiler failure-contract gate. Local storage and
+Raft failures retain their contextual reports before this projection. Opening the node database
+also preserves the typed storage cause below startup context; a consensus keyspace in that
+database returns the separate layout context. [Errors And Diagnostics](errors-and-diagnostics.md)
+owns the compiler and propagation rules.
+
 ## Durable Write Path
 
 Every consensus mutation uses a full synchronization barrier that asks the filesystem to persist
 both data and filesystem metadata. The device and filesystem must honor that request for the
-host-power-loss guarantees in this chapter to hold.
+host-power-loss guarantees in this chapter to hold. This durability promise, `fsync every append`,
+is fixed by the build and is a prerequisite every node publishes: a node that promised anything else
+would give its acknowledgements another meaning, so it is refused at join, as
+[Node Settings](node-settings.md#the-prerequisite-list-is-closed) describes.
 
 The path from a proposal to its reply has four distinct boundaries:
 
@@ -61,10 +73,13 @@ Consensus startup, proposal, and membership operations carry contextual error re
 Database open failures retain their I/O cause; Raft configuration, startup, and handler
 registration failures retain the failure beneath the startup context. A rejected proposal keeps
 its Raft cause while classifying a known redirect as leadership loss, a fatal storage failure as
-storage, and other Raft write failures separately. A state-machine refusal remains a typed
-conflict, distinct from a storage or leadership failure. These classifications determine whether
-the control plane redirects, retries, or reports an uncertain failure; it does not parse the error
-message to decide.
+storage, and other Raft write failures separately. A leader whose lease lapsed, because no quorum
+acknowledged a heartbeat or append it sent within the maximum election timeout, refuses a proposal
+before appending it with a redirect that names no leader. That refusal is leadership loss as well,
+although the node can still lead, and nothing of the refused proposal reached the log. A
+state-machine refusal remains a typed conflict, distinct from a storage or leadership failure.
+These classifications determine whether the control plane redirects, retries, or reports an
+uncertain failure; it does not parse the error message to decide.
 
 Transaction mutation checks also create local reports. Raft's applied response retains its
 existing serialized `TransactionMutationError` outcome, so report frames are local to the state
@@ -92,6 +107,14 @@ A crash or lost connection after durable application but before delivery of the 
 the client uncertain even though the command took effect; persistent administrative requests use
 their stable execution reference to join or retrieve that result.
 
+Transaction tombstone removal evaluates age and the current applying command records together in
+the state machine. An applying transaction request retains its finished target, and an applying
+ordinary command retains its internal transactions, including planning refresh attempts, by their
+mutation owner. Their commit plans and reports remain durable with the tombstones. The leader uses
+the same eligibility decision to avoid cleanup proposals while every aged tombstone is retained;
+application rechecks it so a proposal cannot race a newly admitted consumer. Once the last consumer
+finishes, the original terminal timestamp determines eligibility, without an additional window.
+
 Transaction application completion persists the actual quiescence history and actual effects in
 the same applied state-machine boundary that changes the step from applying to applied or failed.
 Recovery therefore sees ordered requested, confirmed, failed or uncertain, and released outcomes
@@ -99,9 +122,32 @@ without inferring them from a client timeout. These records contain control-plan
 attribution, and non-sensitive diagnostics only. Runtime payloads, acknowledgement maps, connector
 buffers, and handoff bytes remain volatile data-plane state.
 
+### Restore Checkpoint Reclamation
+
+Restore checkpoint reclamation borrows the applied state through `with_restore_state_reclamation`
+and retains its read guard across node-local bounded storage deletion. Its caller takes the
+checkpoint installation barrier after this guard, in the same order as staging and publication.
+The retention view keeps the current generation of every applying restore and any generation
+ahead of the applied log; without an applied log it keeps all generations. Leadership and lease
+expiry alone do not end an applying execution's retry lifetime. Terminal, expired, missing or
+superseded executions no longer retain an applied unpublished generation. The runtime store
+protects its selected durable publication independently. Within the selected initial or restored namespace, the store
+retains only chunk sets referenced by the same view's segmented header and exact checkpoint
+revision; segmented or inline replacement, header purge and incomplete unpublished revisions
+permit bounded chunk deletion. Snapshot retention
+preserves preexisting readers, while the installation barrier serializes ordinary, replica and
+ownership writes with cleanup. This adds no consensus record or log
+mutation and never removes a replicated incomplete-installation gate. Because the sweep holds that
+read guard for its whole duration, as staging and publication jobs do, the node publishes its next
+applied revision only after the job finishes. See [Restore Staging
+Maintenance](backup-and-restore-architecture.md#restore-staging-maintenance) for the node-local
+cleanup boundary, and [Backup And
+Restore](backup-and-restore.md#restore-checkpoint-storage-quota-and-metrics) for the quota and its
+metrics.
+
 ### Coordinated WASM Reset Publications
 
-An NSPL reset first records a typed ordered transaction step with its captured planning inputs,
+A Plexus reset first records a typed ordered transaction step with its captured planning inputs,
 statement identity, and reset scope. That record changes no processor Model or schedule by itself;
 the coordinator uses its retained execution reference for the `Publishing` and `Ready` mutations.
 If the leader stops after recording the step, transaction recovery resumes that same reference.
@@ -132,6 +178,17 @@ The leader keeps one ordered append stream to each follower. That stream uses th
 heartbeats and leadership probes use a separate management connection so a slow or flow-controlled
 log transfer cannot consume the path that maintains the leader lease.
 
+Before opening an append stream, the network adapter consumes the caller's first request. OpenRaft
+applies its retry delay and cancellation while producing that input; even an immediate local
+admission rejection therefore passes through the caller's gate. An ended input opens no transport.
+Leading empty requests, including finite catch-up probes, use the management heartbeat operation
+and its deadline. Each answer confirms that request's previous-log boundary; a conflict, higher
+vote or incomplete acceptance ends that input before any data stream opens. The first request that
+carries entries remains charged while stream setup runs and joins the remaining requests exactly
+once after setup succeeds. Subsequent empty commit updates stay on that ordered stream alongside
+data batches. Setup retains its five-second deadline; waiting for the caller's next request belongs
+to the caller's lifecycle, rather than to connection setup.
+
 One replication batch targets 1 MiB and stops at 1,024 entries. Commands remain whole, so the first
 command may take a batch past the target; the encoded replication operation is bounded at 2 MiB.
 Submissions and answers stay in log order. A conflict, higher vote, partial acceptance, stream
@@ -156,17 +213,42 @@ these are true:
 An answer or transport flow-control progress restarts the idle window. A stream with no outstanding
 batch can remain idle indefinitely. The time required for a follower to synchronize one batch is
 therefore not treated as a failure while the transfer is still moving.
+The interconnect frame writer uses the same progress contract: every nonzero flow-control grant
+restarts its write idle bound, including grants within one large append frame. Catch-up at a
+limited byte rate can therefore preserve its append stream across many five-second intervals.
+The native writer checks both a moving and a stalled receiver. The public rate-limited follower
+scenario sends opaque TLS bytes through a bounded test proxy at 32768 bytes per second and checks
+the applied domain backlog within its assertion bound and the bytes carried by the paced path.
+Append stream openings observe actual data-stream setup; initial empty probes do not open those
+streams. Native transport regressions cover finite probes, the transition to data, ordered empty
+commit updates and rejected probes. The public catch-up scenarios retain their stream-count and
+time assertions and change no product deadline.
 
 Heartbeats keep the shorter deadline derived from the configured heartbeat interval, capped at five
 seconds. With the default 250 ms heartbeat, the current soft deadline is 187.5 ms. Replication
 answers also prove leader contact, so sustained writes suppress redundant heartbeats for an
 automatically derived window. The window is no longer than the heartbeat interval or half the gap
-between that interval and the minimum election timeout. This keeps the heartbeat interval plus the
+between that interval and the minimum election timeout, which, with the election timeouts derived
+at six heartbeats, is one heartbeat interval. This keeps the heartbeat interval plus the
 suppression window below the minimum election timeout.
 
 The independent paths matter when a follower has slow storage: its append answer may take much
 longer than a heartbeat deadline, while management traffic still prevents an election. Changing the
 heartbeat interval does not change the append stream's five-second progress bound.
+
+### A Quorum Over A Lossy Link
+
+When only a bare quorum of voters is reachable, such as two of three while the third is down, every
+commit needs all of them and the leader's link to each. When such a link loses packets but stays up,
+TCP recovers them by retransmission under the host kernel's retransmission timeout, which grows
+exponentially while the losses continue; Nervix does not tune it. An exchange whose deadline passes
+before its retransmission arrives fails and is retried: a heartbeat at its soft deadline, and an
+append stream at its five-second setup or progress bound. Commits can therefore stall, leadership
+can move between the reachable voters, and a control command, which needs several commits in
+sequence, can time out.
+
+Nervix sets no bound on such a stall. It lasts until the loss ends or another voter becomes
+reachable, and it loses no committed entry.
 
 ### Follower Memory And Backpressure
 
@@ -188,8 +270,13 @@ stream. If the leader has already purged part of that suffix, the follower recei
 snapshot and then the remaining log. Client proposals and management heartbeats continue while the
 catch-up runs.
 
-A discovered node joins as a learner. Each membership reconciliation gives a blocking learner
-catch-up attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
+A discovered node joins as a learner once the leader has read its published prerequisite record and
+found it compatible with the record of every live voter. The leader leaves any other candidate
+outside the membership and logs why once while the reason holds: at `debug` while the candidate has
+published no record the leader can read, and at `warn` with the voter and the mismatch when it
+cannot run beside a voter. [Prerequisites At Join](node-settings.md#prerequisites-at-join) describes
+what the refused node does. Each membership reconciliation gives a blocking learner catch-up
+attempt ten seconds. Promotion to voter is proposed only after that attempt reports the
 learner caught up; the membership change has its own ten-second bound. A timeout leaves the node a
 learner, records `raft membership reconciliation failed`, and the one-second reconciliation loop
 tries again while ordinary replication continues.
@@ -211,6 +298,11 @@ Committed-range application, startup replay, and leader-bounded replication stre
 successive admitted chunks. A chunk targets 1 MiB or 1,024 entries, whichever is reached first, and
 one oversized first entry travels alone. The reader releases the ordered storage worker between
 chunks and retains the chunk's memory charge until its entries have been handed to the consumer.
+Handing out the final entry releases the exhausted iterator allocation and its charge before that
+poll returns. A consumer that parks with its final entry therefore holds no empty chunk that could
+keep another reader or a source control call out of the Commands class. The reader retains an
+explicit exhausted boundary, without the allocation, so a subsequent chunk still yields before
+requesting the ordered storage worker.
 
 There is no range-size failure at 2 MiB or at any other aggregate backlog size. A committed range
 and a startup backlog may span any number of chunks. The state-machine worker applies the entries
@@ -317,23 +409,47 @@ the bounded storage executor, but consensus has its own single ordered worker.
 
 The dedicated database owns exactly four current keyspaces: `raft_count_logs`, `raft_count_meta`,
 `raft_count_state`, and `raft_count_snapshots`. Opening it validates the complete keyspace namespace
-before reading any records. Its state metadata requires the current `WideCounts` encoding. Native
-counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
+before reading any records. Its state metadata requires the current `RestoredLifecycle` encoding,
+including the durable restore installation gate. Native counts in commands, queued transactions, progress, outcomes, and plan, report and topology headers
 are archived as fixed-width 64-bit values with checked native decoding. Log replay, state recovery
 and snapshot installation therefore retain their complete magnitudes. See
 [Archived Counts](./typed-states.md#archived-counts).
 
 This layout has one current shape. A consensus database containing an unknown keyspace, a malformed
-current archive, or incomplete current state fails with `invalid consensus record storage; recreate
-the node's stored state`. Recreate the node's stored state and let it rejoin from the cluster.
+current archive, or incomplete or inconsistent current state fails with `invalid consensus record
+storage; recreate the node's stored state`. Recreate the node's stored state and let it rejoin from
+the cluster.
+
+Archive shape and nesting are validated before a durable batch or state record is read back.
+Vocabulary values inside a valid shape are checked as each value is read. If one is refused after
+earlier list or fixed-array elements or a boxed or shared value have been read, the archive reader
+drops those values and releases their allocation. The whole record fails; no partial record is
+installed or retained during replay, catch-up, or snapshot installation.
+
+Recovery accepts exactly the records the state writer stores. Each state record sits under the
+canonical encoding of its key, so a key spelled another way, or one with bytes after its encoding,
+is refused instead of being read as a neighbouring record. A record whose value names its own
+identity must name the key it is stored under: a domain, a schedule's domain and each of its nodes,
+a user, a resource version, node status or upload, a transaction, its commit plan header or impact
+report header, and a command execution. The state keyspace holds those records and the metadata and
+nothing else, so a record no family owns is refused as well. Recovered resource records hold at
+most one upload for each resource version, and an expired command execution's reference carries
+the issue time its expiry is ordered by. A transaction is in a state its transitions reach: an
+open or committing transaction queues exactly the statements and source bytes it accepted, a
+finished one queues none and keeps the identity and admission of exactly as many statements as it
+accepted, a commit's results apply consecutive statements from the first and its
+progress stays inside the queue, and a failure names a statement the transaction accepted. Every
+log read checks that a log record is stored under its own entry's index.
 
 ## Shutdown And Forced Endings
 
 Consensus remains available throughout stop admission and graph drain. During terminal teardown,
 the node stops Raft, which ends its append stream generations, then submits an idle barrier to the
 ordered storage worker. Reaching that barrier proves every earlier submitted durable write returned
-and released the consensus store before its database handle is dropped. The interconnect is stopped
-after consensus, so peers first observe the append protocol ending and later the transport closing.
+and released the consensus store before its database handle is dropped. Dropping it closes the
+dedicated database, which finishes even when one of its background workers failed during the close;
+see [Shutdown And Recovery](./shutdown.md#terminal-teardown). The interconnect is stopped after
+consensus, so peers first observe the append protocol ending and later the transport closing.
 
 A repeated signal, an expired shutdown deadline, or `SIGKILL` skips that barrier. Recovery then sees
 the last complete atomic storage boundaries: an append batch is present or absent; an applied range
@@ -358,7 +474,7 @@ contact hints; current peer identity, incarnation, and endpoint still come from 
 | `nervix_execution_memory_reserved_bytes{class="commands"}` | Includes decoded follower batches held until durable answers and replication payload admission. It stays bounded by the Commands capacity. |
 | `nervix_interconnect_pending_operations{operation="append"}` | Live append-stream operations on the exporting node. |
 | `nervix_interconnect_stream_resets_total{class="replication"}` | Abnormal replication stream endings, separated by deadline, capacity, peer, shutdown, or malformed reason. |
-| `nervix_interconnect_bulk_bytes_total{class="bulk"}` | Bytes moving during snapshot catch-up. |
+| `nervix_interconnect_requests_total{operation="snapshot"}` and `nervix_interconnect_request_seconds_total{operation="snapshot"}` | On the sending node, the snapshot transfer requests a lagging follower answered or failed: the transfer's start, its 64 KiB chunks, and its finish. A transfer moves as these bounded requests in the Bulk pool rather than as a streamed body, so `nervix_interconnect_bulk_bytes_total` does not count it. |
 | `nervix_consensus_snapshot_pinned_generations`, `nervix_consensus_snapshot_pinned_readers`, `nervix_consensus_snapshot_unreferenced_generations` | Generations retained for outgoing transfers and generations awaiting durable deletion. |
 
 Normal membership changes appear at `info`. Append generation endings and invalid or foreign batches
@@ -368,19 +484,27 @@ purge requests appear at `debug`.
 
 ## Tuning
 
-The server exposes heartbeat, election, snapshot, and retention policy as command-line arguments and
-matching environment variables:
+The server exposes heartbeat, snapshot, and retention policy as command-line arguments and matching
+environment variables:
 
 | Argument | Environment | Default | Effect |
 | --- | --- | --- | --- |
-| `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for their soft deadline. It does not set the append-stream idle bound. |
-| `--raft-election-timeout-min` | `NERVIX_RAFT_ELECTION_TIMEOUT_MIN` | `1500ms` | Lower end of the randomized follower election timeout. Must exceed the heartbeat interval plus the derived suppression window. |
-| `--raft-election-timeout-max` | `NERVIX_RAFT_ELECTION_TIMEOUT_MAX` | `3000ms` | Exclusive upper end of the randomized election timeout. Must exceed the minimum. |
+| `--raft-heartbeat-interval` | `NERVIX_RAFT_HEARTBEAT_INTERVAL` | `250ms` | Period for leader liveness probes and basis for their soft deadline, and for the randomized follower election timeout, which runs from six to twelve heartbeat intervals, `1.5s` to `3s` by default. It does not set the append-stream idle bound. |
 | `--raft-snapshot-entry-threshold` | `NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD` | `10000` | Applied entries since the last completed snapshot that request the next build. |
 | `--raft-snapshot-byte-threshold` | `NERVIX_RAFT_SNAPSHOT_BYTE_THRESHOLD` | `64MiB` | Appended entry bytes since the last completed snapshot that request the next build. |
 | `--raft-covered-log-entries-retained` | `NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED` | `1000` | Newest snapshot-covered entries retained for log catch-up. |
 | `--raft-covered-log-bytes-retained` | `NERVIX_RAFT_COVERED_LOG_BYTES_RETAINED` | `64MiB` | Newest snapshot-covered encoded bytes retained; the entry or byte bound reached first decides. |
 | `--raft-retained-log-cap` | `NERVIX_RAFT_RETAINED_LOG_CAP` | `1GiB` | Current-log byte level above which later mutations wait up to 30 seconds for reclamation. |
+
+Consensus runs its timings in whole milliseconds. Before a node opens a store or binds a listener,
+it refuses a heartbeat below one millisecond, such as
+`raft-heartbeat-interval (500µs) must be at least 1ms, the resolution consensus runs timings at`,
+and a heartbeat so long that twelve of it do not fit the milliseconds consensus counts an election
+timeout in, so consensus never opens with timings it would reject. The election timeouts are not
+configured on their own, because deriving them by fixed factors keeps every pairing of nodes
+safe: [Node Settings](node-settings.md) gives the class of each argument, and the heartbeat is a
+prerequisite that every two nodes keep within a factor of two of each other, so that one rolling
+change moves it by less than that. The snapshot and retention bounds are node capabilities.
 
 Replication batch and memory limits are fixed by the current server execution policy; the server
 does not expose flags for them:
@@ -397,12 +521,29 @@ does not expose flags for them:
 | Snapshot section / transport chunk | 8 MiB / 64 KiB |
 | Complete snapshot transfer | 30 seconds |
 
-Use the timing settings as one policy. Lowering the election minimum without lowering the heartbeat
-interval can make the configuration invalid at startup. Raising the heartbeat interval does not
-allow slower append storage because append liveness is progress-based and fixed at five seconds.
+The heartbeat sets the whole timing policy: lowering it shortens the election timeouts with it, and
+raising it lengthens them. Change it across a cluster by less than a factor of two per rolling
+restart; a node outside that bound of a live peer is refused as it joins. Raising the heartbeat
+interval does not allow slower append storage because append liveness is progress-based and fixed
+at five seconds.
 
 Snapshot and covered-log settings trade storage and catch-up method. Smaller thresholds build and
 transfer snapshots more often; smaller covered suffixes make a lagging follower switch to a snapshot
 sooner. Larger thresholds and suffixes retain more log and require a retained-log cap large enough
 for the working set. The cap should leave room for entries newer than the latest completed snapshot,
 because those entries cannot be purged regardless of the covered-log settings.
+
+## Restored Domain Installation Gate
+
+The consensus state machine persists each restored domain's pending or installing state alongside
+its restore execution and mutation lease. Creating the domain establishes a pending start gate;
+admitting state installation records leader tenure, execution, lease revision and the committed
+log index as its generation. Recording the model step removes the gate only for that exact
+authority. The record is included in snapshots and restored after restart, independently of lease
+release or terminal execution failure. Runtime state bytes remain in the node-owned state store.
+A local storage mutation holds the applied-state read guard through its authority validation,
+checkpoint mutation and handle clearing; a newer applied authority or start-gate release cannot
+cross that boundary. The current state encoding requires these records and rejects a database
+whose encoding does not match, requiring recreation under the alpha persistence contract. The current encoding also requires a restore's explicit lifecycle policy and its
+installed-state effect's clock. RESUME changes the domain to running and removes its complete-set
+installation gate in that single applied effect; it preserves the archived generation and mapping.

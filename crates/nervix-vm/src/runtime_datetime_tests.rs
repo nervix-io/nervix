@@ -1,14 +1,19 @@
-//! Tests for datetime builtins compiled from NSPL and executed over batches.
+//! Tests for datetime builtins compiled from Plexus and executed over batches.
 //!
 //! Layer: test harness.
 //!
-//! - **Owns.** Compiling every datetime builtin from NSPL source, including calendar units, time
+//! - **Owns.** Compiling every datetime builtin from Plexus source, including calendar units, time
 //!   zones and formats, executing it over batches that hold nulls and failing rows, and checking
 //!   the typed results, the per-row errors and their codes, the execution-local time an expression
 //!   over `now()` observes, which calls are shared, and the operand types checked when a program is
 //!   compiled.
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How a datetime kernel traverses its Arrow buffers.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
 
 use std::str::FromStr as _;
 

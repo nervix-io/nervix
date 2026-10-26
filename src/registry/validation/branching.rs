@@ -7,6 +7,11 @@
 //! - **Depends on.** The branch and schema Models and the graph's edges.
 //! - **Must not know.** How a branch is materialized at runtime.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
@@ -257,27 +262,32 @@ pub(in crate::registry) fn ensure_output_branch(
         "branch SET",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        arrow_schema_for_internal_schema(branch_schema),
-        schema_sensitivity_for_internal_schema(branch_schema),
-        bindings,
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!("branch SET compile failed: {}", message),
-        })
-    })?;
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            arrow_schema_for_internal_schema(branch_schema),
+            schema_sensitivity_for_internal_schema(branch_schema),
+            bindings,
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    ..CompileOptions::default()
+                },
+            ),
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("branch SET compile failed: {}", message),
+                })
+            }),
+        }
+    }?;
     Ok(())
 }
 
@@ -1098,6 +1108,10 @@ pub(in crate::registry) fn add_output_branch_dependency_edges(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::fs;
 
@@ -1105,9 +1119,10 @@ mod tests {
     use nervix_models::{
         AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, ClusterNodeName,
         CreateGenerator, CreateIngestor, CreateReingestor, CreateWireSchema, Expression,
-        FieldReference, FieldScope, FlushPolicy, GeneralErrorPolicy, IngestSource, JsonType,
-        KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy, ParseAsType,
-        PlacementPolicy, ProcessorInputs, SchemaField, WireSchemaField, WireSchemaName,
+        FieldReference, FieldScope, FlushPolicy, GeneralErrorPolicy, IngestorEntity, JsonType,
+        KafkaIngestMode, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor,
+        MaterializedRelayState, MessageErrorPolicy, ParseAsType, PlacementPolicy, ProcessorInputs,
+        SchemaField, WireSchemaField, WireSchemaName,
     };
     use nervix_primitives::sync::Arc;
     use nonzero_ext::nonzero;
@@ -1499,20 +1514,22 @@ mod tests {
                         ),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Kafka {
-                                    client: named("broker_in_2"),
-                                    topic: named("notifications"),
-                                    offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
-                                    instances: nonzero!(1u64),
-                                    mode: KafkaIngestMode::AckSequential {
-                                        timeout: "30s".to_string(),
-                                        retry_policy: nervix_models::RetryPolicy {
-                                            backoff: "200ms".to_string(),
-                                            max_backoff: "5s".to_string(),
+                                source: IngestorEntity::Kafka(KafkaIngestor::Topic(
+                                    KafkaTopicIngestor {
+                                        client: named("broker_in_2"),
+                                        topic: named("notifications"),
+                                        offset_mode: KafkaOffsetMode::ConsumerGroup(named("cg")),
+                                        instances: nonzero!(1u64),
+                                        mode: KafkaIngestMode::AckSequential {
+                                            timeout: "30s".to_string(),
+                                            retry_policy: nervix_models::RetryPolicy {
+                                                backoff: "200ms".to_string(),
+                                                max_backoff: "5s".to_string(),
+                                            },
                                         },
+                                        quiesce: nervix_models::IngestQuiesceMode::Suspend,
                                     },
-                                    quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                                },
+                                )),
                                 codec: named("event_codec"),
                             },
                         ),
@@ -1656,7 +1673,7 @@ mod tests {
                             .assured("the fixture cadence is a positive duration"),
                         output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                             relay: named("output"),
-                            construction: nervix_nspl::parse_route_construction(
+                            construction: nervix_plexus::parse_route_construction(
                                 "SET value = relay_state.input.value",
                             )
                             .expect("generator route must parse"),
@@ -1873,7 +1890,7 @@ mod tests {
                             with_inherit_all(ProcessorOutputs::new(vec![
                                 ProcessorOutput {
                                     relay: named("errors"),
-                                    construction: nervix_nspl::parse_route_construction(
+                                    construction: nervix_plexus::parse_route_construction(
                                         r#"WHERE input.value = "error""#,
                                     )
                                     .expect("route construction must parse"),
@@ -1883,7 +1900,7 @@ mod tests {
                                 },
                                 ProcessorOutput {
                                     relay: named("warnings"),
-                                    construction: nervix_nspl::parse_route_construction(
+                                    construction: nervix_plexus::parse_route_construction(
                                         r#"WHERE input.value = "warn""#,
                                     )
                                     .expect("route construction must parse"),

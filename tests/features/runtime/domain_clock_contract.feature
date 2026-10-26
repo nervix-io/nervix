@@ -5,7 +5,7 @@ Feature: Domain clock contract regressions
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD <period> SKEW 100ms;
       CREATE SCHEMA http2_clock_request (
@@ -28,8 +28,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/clock'
         TYPE HTTP;
-      CREATE INGESTOR http2_clock_source
-        FROM ENDPOINT http2_clock_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http2_clock_source
+        FROM http2_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING http2_clock_request_codec
         TIMESTAMP NOW
         TO http2_clock_observations
@@ -42,7 +42,7 @@ Feature: Domain clock contract regressions
       CREATE SUBSCRIPTION http2_clock_subscription TO http2_clock_observations;
       """
     When bulk execution on node "node-2" is occupied
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE <time_rate>;
       """
@@ -100,7 +100,7 @@ Feature: Domain clock contract regressions
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 2 node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       CREATE SCHEMA authority_clock_request (
@@ -123,8 +123,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/clock'
         TYPE HTTP;
-      CREATE INGESTOR authority_clock_source
-        FROM ENDPOINT authority_clock_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR authority_clock_source
+        FROM authority_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING authority_clock_request_codec
         TIMESTAMP NOW
         TO authority_clock_observations
@@ -137,14 +137,14 @@ Feature: Domain clock contract regressions
       CREATE SUBSCRIPTION authority_clock_subscription TO authority_clock_observations;
       """
     And domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     And node "node-3" is added to the cluster
     Then node "node-1" eventually reports raft voters "node-1,node-2,node-3"
     Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       STOP;
       START AT '2010-01-01T00:00:00Z' TIME RATE 1.0;
@@ -165,6 +165,135 @@ Feature: Domain clock contract regressions
     And timestamp placeholder "restarted_clock_time" is before "2011-01-01T00:00:00Z"
     When domain clock progress for domain "{{domain}}" on node "node-2" resumes
 
+  @domain_clock_takeover
+  @deloxide_stress
+  Scenario: An installed survivor takes over the clock while another survivor installs the authority revision
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "authority_domain"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
+      """
+    And domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
+    When runtime preparation on node "node-3" is paused
+    And application health probes from node "node-1" to node "node-2" fail
+    And application health probes from node "node-3" to node "node-2" fail
+    Then node "node-1" eventually reports interconnect to "node-2" as "unavailable"
+    When consensus connectivity for node "node-2" is blocked
+    And gossip exchanges involving node "node-2" are blocked with a "5s" send delay
+    Then node "node-3" reaches its runtime preparation pause
+    Given a clock session is opened on node "node-1"
+    When the clock session attaches to the clock of domain "{{domain}}"
+    Then the clock session is attached at generation 1 to a paced clock with period "100ms", skew "10ms", logical origin "2000-01-01T00:00:00Z" and time rate "4"
+    And within "10s" the clock session receives 2 increasing ticks for generation 1 with period "100ms" and time rate "4"
+    When runtime preparation on node "node-3" is released
+    And gossip exchanges involving node "node-2" are restored
+    And consensus connectivity for node "node-2" is restored
+    And application health probes from node "node-1" to node "node-2" are restored
+    And application health probes from node "node-3" to node "node-2" are restored
+    And domain clock progress for domain "{{domain}}" on node "node-2" resumes
+    Then within "10s" the clock session receives a tick with an id higher than before owner loss
+
+  @domain_clock_takeover
+  @deloxide_stress
+  Scenario: A prepared clock observer receives replacement ticks before another node activates the revision
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "authority_domain"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
+      """
+    And domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
+    When leadership is transferred from node "node-1" to node "node-3"
+    Then node "node-3" eventually reports leader "node-3"
+    When runtime preparation on node "node-3" is paused
+    And application health probes from node "node-3" to node "node-2" fail
+    Then node "node-3" eventually reports interconnect to "node-2" as "unavailable"
+    And node "node-3" reaches its runtime preparation pause
+    Given a clock session is opened on node "node-2"
+    When the clock session attaches to the clock of domain "{{domain}}"
+    Then the clock session is attached at generation 1 to a paced clock with period "100ms", skew "10ms", logical origin "2000-01-01T00:00:00Z" and time rate "4"
+    And within "10s" the clock session receives 2 increasing ticks for generation 1 with period "100ms" and time rate "4"
+    When runtime preparation on node "node-3" is released
+    And application health probes from node "node-3" to node "node-2" are restored
+    And domain clock progress for domain "{{domain}}" on node "node-2" resumes
+    Then within "10s" the clock session receives a tick with an id higher than before owner loss
+
+  @domain_clock_takeover
+  @deloxide_stress
+  Scenario: A survivor takes the clock over from an authority that led consensus while the survivor's runtime installation waits
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "authority_domain"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
+      """
+    And domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
+    When leadership is transferred from node "node-1" to node "node-2"
+    Then node "node-2" eventually reports leader "node-2"
+    Given the next domain clock authority proposal of node "node-1" is rejected for lost leadership
+    And the next domain clock authority proposal of node "node-3" is rejected for lost leadership
+    When runtime installation on node "node-1" is paused
+    And application health probes from node "node-1" to node "node-2" fail
+    And application health probes from node "node-3" to node "node-2" fail
+    Then node "node-1" eventually reports interconnect to "node-2" as "unavailable"
+    And node "node-3" eventually reports interconnect to "node-2" as "unavailable"
+    When consensus connectivity for node "node-2" is blocked
+    And gossip exchanges involving node "node-2" are blocked with a "5s" send delay
+    Given a clock session is opened on node "node-3"
+    When the clock session attaches to the clock of domain "{{domain}}"
+    Then the clock session is attached at generation 1 to a paced clock with period "100ms", skew "10ms", logical origin "2000-01-01T00:00:00Z" and time rate "4"
+    And within "10s" the clock session receives 2 increasing ticks for generation 1 with period "100ms" and time rate "4"
+    And node "node-1" reaches its runtime installation pause
+    When runtime installation on node "node-1" is released
+    And gossip exchanges involving node "node-2" are restored
+    And consensus connectivity for node "node-2" is restored
+    And application health probes from node "node-1" to node "node-2" are restored
+    And application health probes from node "node-3" to node "node-2" are restored
+    And domain clock progress for domain "{{domain}}" on node "node-2" resumes
+    Then within "10s" the clock session receives a tick with an id higher than before owner loss
+
+  @domain_clock_takeover
+  @deloxide_stress
+  Scenario: A survivor receives replacement clock ticks while its own runtime preparation waits
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "authority_domain"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
+      START AT '2000-01-01T00:00:00Z' TIME RATE 4.0;
+      """
+    And domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
+    Then domain clock progress for domain "{{domain}}" on node "node-2" reaches the delivery pause within the authority observation budget
+    When runtime preparation on node "node-3" is paused
+    And application health probes from node "node-1" to node "node-2" fail
+    And application health probes from node "node-3" to node "node-2" fail
+    Then node "node-1" eventually reports interconnect to "node-2" as "unavailable"
+    When consensus connectivity for node "node-2" is blocked
+    And gossip exchanges involving node "node-2" are blocked with a "5s" send delay
+    Then node "node-3" reaches its runtime preparation pause
+    Given a clock session is opened on node "node-3"
+    When the clock session attaches to the clock of domain "{{domain}}"
+    Then the clock session is attached at generation 1 to a paced clock with period "100ms", skew "10ms", logical origin "2000-01-01T00:00:00Z" and time rate "4"
+    And within "10s" the clock session receives 2 increasing ticks for generation 1 with period "100ms" and time rate "4"
+    When runtime preparation on node "node-3" is released
+    And gossip exchanges involving node "node-2" are restored
+    And consensus connectivity for node "node-2" is restored
+    And application health probes from node "node-1" to node "node-2" are restored
+    And application health probes from node "node-3" to node "node-2" are restored
+    And domain clock progress for domain "{{domain}}" on node "node-2" resumes
+    Then within "10s" the clock session receives a tick with an id higher than before owner loss
+
   @domain_clock_authority
   @clock_attachment_owner_loss
   Scenario: Nonleader clock-owner loss preserves the committed mapping
@@ -172,12 +301,12 @@ Feature: Domain clock contract regressions
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
     And the active domain is "authority_domain"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 10ms;
       """
     And domain clock progress for domain "{{domain}}" on node "node-2" is paused before delivery
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
@@ -212,17 +341,17 @@ Feature: Domain clock contract regressions
     Given the production sticky scheduler is configured
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1h SKEW 1m;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
     And node "node-2" is added to the cluster
     And the cluster is restarted
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA joined_clock_request (
         sequence I64
@@ -244,8 +373,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/clock'
         TYPE HTTP;
-      CREATE INGESTOR joined_clock_source
-        FROM ENDPOINT joined_clock_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR joined_clock_source
+        FROM joined_clock_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING joined_clock_request_codec
         TIMESTAMP NOW
         TO joined_clock_observations
@@ -273,11 +402,11 @@ Feature: Domain clock contract regressions
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA clock_source_record (
         user_id I64
@@ -289,16 +418,15 @@ Feature: Domain clock contract regressions
         FROM WIRE JSON SCHEMA clock_source_wire
         TO SCHEMA clock_source_record;
       CREATE RELAY clock_source_records SCHEMA clock_source_record UNBRANCHED;
-      CREATE CLIENT clock_source
-        TYPE HTTP
+      CREATE HTTP CLIENT clock_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?fixture=domain-clock&delay_ms=25',
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-      CREATE INGESTOR clock_source_reader
-        FROM HTTP clock_source EVERY 1h
-        ON QUIESCE SUSPEND DECODE USING clock_source_codec
+      CREATE HTTP REQUEST INGESTOR clock_source_reader
+        FROM clock_source EVERY 1h
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING clock_source_codec
         TIMESTAMP NOW
         TO clock_source_records
           INHERIT ALL
@@ -326,11 +454,11 @@ Feature: Domain clock contract regressions
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA cadence_source_record (
         user_id I64
@@ -342,16 +470,15 @@ Feature: Domain clock contract regressions
         FROM WIRE JSON SCHEMA cadence_source_wire
         TO SCHEMA cadence_source_record;
       CREATE RELAY cadence_source_records SCHEMA cadence_source_record UNBRANCHED;
-      CREATE CLIENT cadence_source
-        TYPE HTTP
+      CREATE HTTP CLIENT cadence_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?fixture=http-cadence&delay_ms=25',
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-      CREATE INGESTOR cadence_source_reader
-        FROM HTTP cadence_source EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING cadence_source_codec
+      CREATE HTTP REQUEST INGESTOR cadence_source_reader
+        FROM cadence_source EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING cadence_source_codec
         TIMESTAMP NOW
         TO cadence_source_records
           INHERIT ALL
@@ -376,11 +503,11 @@ Feature: Domain clock contract regressions
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA cadence_sample (
         source STRING,
@@ -402,15 +529,14 @@ Feature: Domain clock contract regressions
         executed_at DATETIME
       );
       CREATE RELAY cadence_observations SCHEMA cadence_observation UNBRANCHED;
-      CREATE CLIENT cadence_prometheus
-        TYPE PROMETHEUS
+      CREATE PROMETHEUS CLIENT cadence_prometheus
         CONFIG {
           'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/350',
           'timeout_ms' = 5000
         };
-      CREATE INGESTOR cadence_reader
-        FROM PROMETHEUS cadence_prometheus QUERY 'vector(42.5)' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING cadence_sample_codec
+      CREATE PROMETHEUS QUERY INGESTOR cadence_reader
+        FROM cadence_prometheus QUERY 'vector(42.5)' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING cadence_sample_codec
         TIMESTAMP NOW
         TO cadence_observations
           SET due = message.due,
@@ -435,11 +561,11 @@ Feature: Domain clock contract regressions
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA rebound_sample (
         source STRING,
@@ -461,15 +587,14 @@ Feature: Domain clock contract regressions
         executed_at DATETIME
       );
       CREATE RELAY rebound_observations SCHEMA rebound_observation UNBRANCHED;
-      CREATE CLIENT rebound_prometheus
-        TYPE PROMETHEUS
+      CREATE PROMETHEUS CLIENT rebound_prometheus
         CONFIG {
           'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/10',
           'timeout_ms' = 5000
         };
-      CREATE INGESTOR rebound_reader
-        FROM PROMETHEUS rebound_prometheus QUERY 'vector(42.5)' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING rebound_sample_codec
+      CREATE PROMETHEUS QUERY INGESTOR rebound_reader
+        FROM rebound_prometheus QUERY 'vector(42.5)' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING rebound_sample_codec
         TIMESTAMP NOW
         TO rebound_observations
           SET due = message.due,
@@ -483,7 +608,7 @@ Feature: Domain clock contract regressions
       """
     And physical time passes for "300ms"
     Then within "50ms" clock source recorder "{{test_id}}" records 0 requests
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       STOP;
       START AT '2010-01-01T00:00:00Z' TIME RATE 20.0;
@@ -499,12 +624,12 @@ Feature: Domain clock contract regressions
   Scenario Outline: Delayed clock progress cannot move observed logical time backwards
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD <clock_interval> SKEW <clock_interval>;
       """
     And domain clock progress for domain "{{domain}}" is paused before delivery
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA clock_request (
         sequence I64
@@ -525,8 +650,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/clock'
         TYPE HTTP;
-      CREATE INGESTOR clock_request_source
-        FROM ENDPOINT clock_request_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR clock_request_source
+        FROM clock_request_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING clock_request_codec
         TIMESTAMP NOW
         TO clock_observations
@@ -538,7 +663,7 @@ Feature: Domain clock contract regressions
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION clock_observations_subscription TO clock_observations;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -573,15 +698,15 @@ Feature: Domain clock contract regressions
   Scenario Outline: Out-of-range paced starts and projections return typed timestamp diagnostics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       """
-    When these NSPL commands fail with "outside the signed Unix-nanosecond range"
+    When these Plexus commands fail with "outside the signed Unix-nanosecond range"
       """
       START AT '<outside_timestamp>' TIME RATE 1.0;
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA clock_diagnostic (
         sequence I64
@@ -589,7 +714,7 @@ Feature: Domain clock contract regressions
       CREATE RELAY clock_diagnostics SCHEMA clock_diagnostic UNBRANCHED;
       CREATE SUBSCRIPTION clock_diagnostics_subscription TO clock_diagnostics;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       START AT '2262-04-11T23:47:16.854775807Z' TIME RATE 1.0;
       """
@@ -601,6 +726,10 @@ Feature: Domain clock contract regressions
     And the last server error contains
       """
       leaves the signed Unix-nanosecond range
+      """
+    And the last server error contains
+      """
+      timestamp arithmetic leaves the signed Unix-nanosecond range
       """
 
     Examples:
@@ -614,11 +743,11 @@ Feature: Domain clock contract regressions
   Scenario Outline: A paced domain admits an event at its historical logical origin
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA historical_event (
         sequence I64,
@@ -638,8 +767,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR historical_event_source
-        FROM ENDPOINT historical_event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR historical_event_source
+        FROM historical_event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING historical_event_codec
         TIMESTAMP AT occurred_at
         TO historical_events
@@ -650,7 +779,7 @@ Feature: Domain clock contract regressions
         ON GENERAL ERROR LOG;
       CREATE SUBSCRIPTION historical_events_subscription TO historical_events;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
@@ -672,11 +801,11 @@ Feature: Domain clock contract regressions
   Scenario Outline: uuid_v7 encodes paced logical time from the Unix epoch and fails before it
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA stamp_request (
         sequence I64
@@ -703,8 +832,8 @@ Feature: Domain clock contract regressions
         ON edge
         PATH '/stamp'
         TYPE HTTP;
-      CREATE INGESTOR stamp_source
-        FROM ENDPOINT stamp_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR stamp_source
+        FROM stamp_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING stamp_request_codec
         TIMESTAMP NOW
         TO stamp_requests
@@ -726,7 +855,7 @@ Feature: Domain clock contract regressions
       CREATE SUBSCRIPTION stamped_requests_subscription TO stamped_requests;
       CREATE SUBSCRIPTION stamp_errors_subscription TO stamp_errors;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '<logical_start>' TIME RATE 0.001;
       """

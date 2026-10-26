@@ -7,6 +7,11 @@
 //! - **Depends on.** Browser draft signals, model-owned type variants, and the shared choice UI.
 //! - **Must not know.** Registry internals, statement parsing, or how a command is dispatched.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 use nervix_models::{AvroType, JsonType, ParseAsType, WireSchemaStrictness};
 use strum::IntoEnumIterator as _;

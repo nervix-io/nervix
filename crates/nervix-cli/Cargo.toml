@@ -15,12 +15,13 @@ byte-unit = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 error-stack = { workspace = true }
+humantime = { workspace = true }
 meticulous = { workspace = true }
 nervix-backup = { workspace = true }
 nervix-client-core = { workspace = true, features = ["autocomplete"] }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
-nervix-nspl = { workspace = true, features = ["client"] }
+nervix-plexus = { workspace = true, features = ["client"] }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 reedline = { workspace = true, features = ["external_printer"] }

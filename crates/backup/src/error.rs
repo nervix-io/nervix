@@ -12,6 +12,8 @@ use crate::section::RecordKind;
 pub enum ArchiveWriteError {
     #[error("the {kind} record could not be encoded")]
     Encode { kind: RecordKind },
+    #[error("writing the {kind} record was interrupted by its writer's caller")]
+    Interrupted { kind: RecordKind },
     #[error("the {kind} record encodes to {length} bytes, above the {limit}-byte record limit")]
     RecordTooLarge {
         kind: RecordKind,
@@ -92,7 +94,7 @@ pub enum ArchiveReadError {
     },
     #[error("section '{path}' does not match the digest its manifest declares")]
     DigestMismatch { path: String },
-    #[error("section '{path}' is not UTF-8 NSPL text")]
+    #[error("section '{path}' is not UTF-8 Plexus text")]
     InvalidText { path: String },
     #[error("the archive's sections do not describe domain '{domain}' completely: {missing}")]
     IncompleteDomain {

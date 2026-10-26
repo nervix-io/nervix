@@ -6,6 +6,11 @@
 //! - **Depends on.** Vocabulary Models, the activation plan and the expression VM frontend.
 //! - **Must not know.** Resource stores, compiled runtime modules, clocks or spawned tasks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use error_stack::{Report, ResultExt as _};
@@ -344,6 +349,10 @@ impl ResourceExecutionPlans {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
@@ -388,10 +397,10 @@ mod tests {
                 each: "100ms".parse().assured("the cadence is positive"),
                 output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                     relay: named("generated"),
-                    construction: nervix_nspl::parse_route_construction(
+                    construction: nervix_plexus::parse_route_construction(
                         "SET value = relay_state.latest.value",
                     )
-                    .assured("the route is valid NSPL"),
+                    .assured("the route is valid Plexus"),
                     flush_policy: Some(FlushPolicy::Immediate),
                     message_error_policy: MessageErrorPolicy::Log,
                     branch: None,
@@ -524,7 +533,7 @@ mod tests {
             unreachable!("the fourth fixture model is the generator");
         };
         generator.output_routes.routes[0].construction =
-            nervix_nspl::parse_route_construction("INHERIT ALL")
+            nervix_plexus::parse_route_construction("INHERIT ALL")
                 .assured("inheritance is valid syntax for a transforming route");
         let error = plan_result(transforming)
             .expect_err("a generator route cannot inherit an input record");

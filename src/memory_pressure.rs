@@ -8,12 +8,23 @@
 //! - **Must not know.** Which ingestors exist, what they are connected to, or what a message is. It
 //!   watches one number and applies one decision through the runtime's own control.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
+use arch_into::ArchInto as _;
+use error_stack::{Report, ResultExt as _};
 use nervix_primitives::{
     sync::CancellationToken,
     time::{MissedTickBehavior, interval, sleep},
 };
+use strum::Display;
 use thiserror::Error;
 use tikv_jemalloc_ctl::{epoch, stats};
 use tracing::{debug, info, warn};
@@ -21,6 +32,12 @@ use typed_builder::TypedBuilder;
 use ubyte::ByteUnit;
 
 use crate::runtime::Runtime;
+
+mod settings;
+pub use settings::{
+    MemoryHighWatermark, MemoryLowWatermark, MemoryPressureCheckInterval,
+    MemoryPressureResumeJitter, MemoryPressureSettings,
+};
 
 pub const DEFAULT_MEMORY_PRESSURE_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 pub const DEFAULT_MEMORY_PRESSURE_RESUME_JITTER: Duration = Duration::from_secs(1);
@@ -38,15 +55,17 @@ pub struct MemoryPressureConfig {
 }
 
 impl MemoryPressureConfig {
-    pub fn validate(&self) -> Result<(), MemoryPressureConfigError> {
+    pub fn validate(&self) -> error_stack::Result<(), MemoryPressureConfigError> {
         if self.low_watermark >= self.high_watermark {
-            return Err(MemoryPressureConfigError::LowWatermarkNotBelowHigh {
-                low: self.low_watermark,
-                high: self.high_watermark,
-            });
+            return Err(Report::new(
+                MemoryPressureConfigError::LowWatermarkNotBelowHigh {
+                    low: self.low_watermark,
+                    high: self.high_watermark,
+                },
+            ));
         }
         if self.check_interval.is_zero() {
-            return Err(MemoryPressureConfigError::ZeroCheckInterval);
+            return Err(Report::new(MemoryPressureConfigError::ZeroCheckInterval));
         }
         Ok(())
     }
@@ -54,18 +73,38 @@ impl MemoryPressureConfig {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum MemoryPressureConfigError {
+    #[error("memory high watermark requires memory low watermark")]
+    HighWatermarkWithoutLow,
+    #[error("memory low watermark requires memory high watermark")]
+    LowWatermarkWithoutHigh,
     #[error("memory low watermark ({low}) must be lower than high watermark ({high})")]
     LowWatermarkNotBelowHigh { low: ByteUnit, high: ByteUnit },
     #[error("memory pressure check interval must be greater than zero")]
     ZeroCheckInterval,
 }
 
-#[derive(Debug, Error)]
+/// Why the memory-pressure supervisor cannot start or take a sample. The configuration or
+/// allocator failure stays beneath it in the report.
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryPressureError {
-    #[error("{0}")]
-    InvalidConfig(#[from] MemoryPressureConfigError),
-    #[error("failed to read jemalloc memory usage: {0}")]
-    ReadJemalloc(String),
+    #[error("invalid memory pressure configuration")]
+    InvalidConfig,
+    #[error("failed to read jemalloc memory usage: {step}")]
+    ReadJemalloc { step: JemallocReadStep },
+}
+
+/// The jemalloc control a memory sample reads.
+#[derive(Debug, Display, Clone, Copy, PartialEq, Eq)]
+pub enum JemallocReadStep {
+    /// Advancing the epoch that refreshes the cached statistics.
+    #[strum(serialize = "advance epoch")]
+    AdvanceEpoch,
+    /// Reading `stats.allocated`.
+    #[strum(serialize = "stats.allocated")]
+    Allocated,
+    /// Reading `stats.resident`.
+    #[strum(serialize = "stats.resident")]
+    Resident,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,9 +135,11 @@ pub struct MemoryPressureController {
 }
 
 impl MemoryPressureController {
-    pub fn new(config: MemoryPressureConfig) -> Result<Self, MemoryPressureError> {
-        config.validate()?;
-        epoch::advance().map_err(|error| MemoryPressureError::ReadJemalloc(error.to_string()))?;
+    pub fn new(config: MemoryPressureConfig) -> error_stack::Result<Self, MemoryPressureError> {
+        config
+            .validate()
+            .change_context(MemoryPressureError::InvalidConfig)?;
+        advance_jemalloc_epoch()?;
         Ok(Self { config })
     }
 
@@ -117,7 +158,7 @@ impl MemoryPressureController {
             let snapshot = match jemalloc_memory_usage() {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
-                    warn!(error = %error, "memory pressure check failed");
+                    warn!(error = format!("{error:#}"), "memory pressure check failed");
                     continue;
                 }
             };
@@ -175,7 +216,10 @@ impl MemoryPressureController {
             let snapshot = match jemalloc_memory_usage() {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
-                    warn!(error = %error, "memory pressure resume check failed");
+                    warn!(
+                        error = format!("{error:#}"),
+                        "memory pressure resume check failed"
+                    );
                     return MemoryPressureState::Pressured;
                 }
             };
@@ -206,12 +250,8 @@ impl MemoryPressureController {
                 return MemoryPressureState::Pressured;
             }
 
-            match runtime.resume_one_ingestor_after_memory_pressure().await {
-                Ok(true) => {}
-                Ok(false) => return MemoryPressureState::Healthy,
-                Err(error) => {
-                    warn!(error = %error, "failed to resume ingestor after memory pressure");
-                }
+            if !runtime.resume_one_ingestor_after_memory_pressure().await {
+                return MemoryPressureState::Healthy;
             }
         }
     }
@@ -227,20 +267,26 @@ impl MemoryPressureController {
     }
 }
 
-pub fn jemalloc_memory_usage() -> Result<MemoryUsageSnapshot, MemoryPressureError> {
-    epoch::advance().map_err(|error| MemoryPressureError::ReadJemalloc(error.to_string()))?;
-    let allocated = stats::allocated::read()
-        .map_err(|error| MemoryPressureError::ReadJemalloc(error.to_string()))?
-        .try_into()
-        .unwrap_or(u64::MAX);
-    let resident = stats::resident::read()
-        .map_err(|error| MemoryPressureError::ReadJemalloc(error.to_string()))?
-        .try_into()
-        .unwrap_or(u64::MAX);
+pub fn jemalloc_memory_usage() -> error_stack::Result<MemoryUsageSnapshot, MemoryPressureError> {
+    advance_jemalloc_epoch()?;
+    let allocated = stats::allocated::read().change_context(MemoryPressureError::ReadJemalloc {
+        step: JemallocReadStep::Allocated,
+    })?;
+    let resident = stats::resident::read().change_context(MemoryPressureError::ReadJemalloc {
+        step: JemallocReadStep::Resident,
+    })?;
     Ok(MemoryUsageSnapshot {
-        allocated,
-        resident,
+        allocated: allocated.arch_into(),
+        resident: resident.arch_into(),
     })
+}
+
+/// Refreshes the statistics jemalloc caches, so the reads that follow see current usage.
+fn advance_jemalloc_epoch() -> error_stack::Result<(), MemoryPressureError> {
+    epoch::advance().change_context(MemoryPressureError::ReadJemalloc {
+        step: JemallocReadStep::AdvanceEpoch,
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -254,10 +300,81 @@ mod tests {
             .low_watermark(ByteUnit::Megabyte(10))
             .build();
 
-        assert!(matches!(
-            config.validate(),
-            Err(MemoryPressureConfigError::LowWatermarkNotBelowHigh { .. })
-        ));
+        let error = config
+            .validate()
+            .expect_err("equal watermarks must be rejected");
+        assert_eq!(
+            error.current_context(),
+            &MemoryPressureConfigError::LowWatermarkNotBelowHigh {
+                low: ByteUnit::Megabyte(10),
+                high: ByteUnit::Megabyte(10),
+            }
+        );
+    }
+
+    #[test]
+    fn config_rejects_zero_check_interval() {
+        let config = MemoryPressureConfig::builder()
+            .high_watermark(ByteUnit::Megabyte(100))
+            .low_watermark(ByteUnit::Megabyte(40))
+            .check_interval(Duration::ZERO)
+            .build();
+
+        let error = config
+            .validate()
+            .expect_err("a zero check interval must be rejected");
+        assert_eq!(
+            error.current_context(),
+            &MemoryPressureConfigError::ZeroCheckInterval
+        );
+    }
+
+    #[test]
+    fn controller_keeps_the_configuration_failure_beneath_its_own() {
+        let config = MemoryPressureConfig::builder()
+            .high_watermark(ByteUnit::Megabyte(40))
+            .low_watermark(ByteUnit::Megabyte(100))
+            .build();
+
+        let error = MemoryPressureController::new(config)
+            .expect_err("a low watermark above the high one must be rejected");
+        assert_eq!(error.current_context(), &MemoryPressureError::InvalidConfig);
+        assert_eq!(
+            error.downcast_ref::<MemoryPressureConfigError>(),
+            Some(&MemoryPressureConfigError::LowWatermarkNotBelowHigh {
+                low: ByteUnit::Megabyte(100),
+                high: ByteUnit::Megabyte(40),
+            })
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "invalid memory pressure configuration: memory low watermark (100MB) must be lower \
+             than high watermark (40MB)"
+        );
+    }
+
+    #[test]
+    fn controller_starts_from_a_valid_configuration() {
+        let config = MemoryPressureConfig::builder()
+            .high_watermark(ByteUnit::Megabyte(100))
+            .low_watermark(ByteUnit::Megabyte(40))
+            .build();
+
+        let controller =
+            MemoryPressureController::new(config).expect("a valid configuration must start");
+        assert_eq!(controller.config, config);
+    }
+
+    #[test]
+    fn memory_usage_reads_the_allocator_statistics() {
+        let retained = std::hint::black_box(vec![0_u8; 1 << 20]);
+        let retained_bytes = u64::try_from(retained.len()).expect("one MiB fits in u64");
+
+        let usage = jemalloc_memory_usage().expect("the test allocator is jemalloc");
+
+        assert!(usage.allocated >= retained_bytes);
+        assert!(usage.resident > 0);
+        drop(retained);
     }
 
     #[test]

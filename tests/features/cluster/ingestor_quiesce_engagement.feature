@@ -6,7 +6,7 @@ Feature: Ingestor quiesce engagement during dispatch
     And the production sticky scheduler is configured
     And a <nodes> node nervix cluster is started
     And Kafka topic "quiesce_dispatch_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA quiesce_event ( id I64 );
@@ -18,14 +18,14 @@ Feature: Ingestor quiesce engagement during dispatch
         FROM WIRE JSON SCHEMA quiesce_event_wire
         TO SCHEMA quiesce_event;
       CREATE RELAY quiesce_output SCHEMA quiesce_event UNBRANCHED;
-      CREATE CLIENT quiesce_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT quiesce_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR quiesce_source
-        FROM KAFKA quiesce_kafka TOPIC quiesce_dispatch_{{test_id}}
-          OFFSET BY CONSUMER GROUP nervix_cucumber_quiesce_dispatch_{{test_id}}
-          MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR quiesce_source
+        FROM quiesce_kafka TOPIC 'quiesce_dispatch_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'nervix_cucumber_quiesce_dispatch_{{test_id}}'
+          MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING quiesce_event_codec
         TO quiesce_output INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -33,7 +33,7 @@ Feature: Ingestor quiesce engagement during dispatch
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "ingestor" "quiesce_source" is saved as placeholder "source_owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION quiesce_seen TO quiesce_output;
       """
@@ -44,7 +44,7 @@ Feature: Ingestor quiesce engagement during dispatch
       """
     Then ingestor "quiesce_source" reaches the dispatch pause
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       <operation>
       """
@@ -60,9 +60,9 @@ Feature: Ingestor quiesce engagement during dispatch
       """
     And the relay subscription does not receive a payload within "2s"
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
 
     Examples:
-      | nodes | operation                                                               |
-      | 1     | ALTER INGESTOR quiesce_source SET DECODE USING quiesce_event_codec_alt; |
-      | 3     | DRAIN NODE {{source_owner}};                                            |
+      | nodes | operation                                                                           |
+      | 1     | ALTER KAFKA TOPIC INGESTOR quiesce_source SET DECODE USING quiesce_event_codec_alt; |
+      | 3     | DRAIN NODE {{source_owner}};                                                        |

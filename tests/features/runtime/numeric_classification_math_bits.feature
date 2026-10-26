@@ -2,11 +2,11 @@ Feature: Numeric classification, math and bit functions
   Scenario Outline: Float classification, sign, truncation, precision rounding and trigonometry fail only the messages whose results are not finite
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         id STRING,
@@ -43,8 +43,8 @@ Feature: Numeric classification, math and bit functions
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge float-functions-{{test_id}}.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         TO readings
           INHERIT ALL
@@ -96,11 +96,11 @@ Feature: Numeric classification, math and bit functions
   Scenario Outline: Integer bit operations, shifts and rounding to tens fail only the messages whose counts or results do not fit
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA register_sample (
         id STRING,
@@ -135,8 +135,8 @@ Feature: Numeric classification, math and bit functions
       CREATE RELAY register_errors SCHEMA register_error UNBRANCHED;
       CREATE VHOST edge bit-functions-{{test_id}}.example.com;
       CREATE ENDPOINT register_ingress ON edge PATH '/registers' TYPE HTTP;
-      CREATE INGESTOR register_source
-        FROM ENDPOINT register_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR register_source
+        FROM register_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING register_batch_codec
         TO register_samples
           INHERIT ALL
@@ -187,7 +187,7 @@ Feature: Numeric classification, math and bit functions
 
   Scenario Outline: Numeric classification and bit functions reject operands outside their signatures when the statement is applied
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "<message>"
+    When these Plexus commands fail with "<message>"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA register_sample (

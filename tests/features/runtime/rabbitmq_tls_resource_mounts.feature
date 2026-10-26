@@ -3,21 +3,21 @@ Feature: RabbitMQ TLS resource mounts
     Given RabbitMQ is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And node "node-1" has dev TLS resource directory "dev_tls"
     And RabbitMQ queue "notifications_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -31,15 +31,14 @@ Feature: RabbitMQ TLS resource mounts
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
-        CREATE CLIENT rabbit_tls
-        TYPE RABBITMQ
+        CREATE RABBITMQ CLIENT rabbit_tls
         MOUNT dev_tls VERSION 1
         CONFIG {
           'addr' = '{{rabbitmq_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE INGESTOR rabbit_notifications
-        FROM RABBITMQ rabbit_tls QUEUE notifications_{{test_id}} INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
+        FROM rabbit_tls QUEUE 'notifications_{{test_id}}' INSTANCES 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL

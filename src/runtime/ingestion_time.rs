@@ -3,7 +3,12 @@
 //! Layer: data plane.
 //! - **Owns.** Selecting external or logical delivery time and enforcing its admission window.
 //! - **Depends on.** Installed domain clocks, vocabulary and Arrow row views.
-//! - **Must not know.** NSPL parsing, transport intake or progress notification history.
+//! - **Must not know.** Plexus parsing, transport intake or progress notification history.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use arrow_array::{Array, TimestampNanosecondArray};
 use arrow_buffer::BooleanBuffer;
@@ -183,6 +188,10 @@ impl DomainClockLifecycle {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::BTreeMap;
 

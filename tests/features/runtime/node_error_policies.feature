@@ -2,34 +2,34 @@ Feature: Runtime node error policies
   Scenario Outline: Runtime nodes require their mandatory error policy blocks
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       <statement>;
       """
 
     Examples:
-      | node             | statement                                                                                                                                                                                                                                                                                                                  |
-      | ingestor         | CREATE INGESTOR http_notifications FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET user_id = message.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON GENERAL ERROR LOG |
-      | reingestor       | CREATE REINGESTOR repartition FROM notifications TO tenant_notifications INHERIT ALL BRANCHED BY by_repartition SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                           |
-      | junction         | CREATE JUNCTION join_streams FROM notifications_a, notifications_b UNBRANCHED TO notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                                                        |
-      | deduplicator     | CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME 10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                                        |
-      | window processor | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION UNBRANCHED TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency)                                                                                                                                |
-      | generator        | CREATE GENERATOR synth USING MATERIALIZED STATE notifications EACH 100ms UNBRANCHED TO alerts SET user_id = relay_state.notifications.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                         |
-      | emitter          | CREATE EMITTER kafka_emit FROM notifications TO KAFKA kafka_main TOPIC notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON GENERAL ERROR LOG                                                                              |
-      | inferencer       | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE                                                  |
+      | node             | statement                                                                                                                                                                                                                                                                                                            |
+      | ingestor         | CREATE HTTP ENDPOINT INGESTOR http_notifications FROM http_notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_http_notifications SET user_id = message.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON GENERAL ERROR LOG |
+      | reingestor       | CREATE REINGESTOR repartition FROM notifications TO tenant_notifications INHERIT ALL BRANCHED BY by_repartition SET tenant = message.tenant FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                     |
+      | junction         | CREATE JUNCTION join_streams FROM notifications_a, notifications_b UNBRANCHED TO notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                                                  |
+      | deduplicator     | CREATE DEDUPLICATOR dedup_txns FROM inbound DEDUPLICATE ON input.transaction_id MAX TIME 10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                                  |
+      | window processor | CREATE WINDOW PROCESSOR latency_window FROM metrics WIDTH 10s DURATION STEP 5s DURATION UNBRANCHED TO metric_summaries SET tenant = FIRST(input.tenant), total_latency = SUM(input.latency)                                                                                                                          |
+      | generator        | CREATE GENERATOR synth USING MATERIALIZED STATE notifications EACH 100ms UNBRANCHED TO alerts SET user_id = relay_state.notifications.user_id FLUSH EACH 100ms MAX BATCH SIZE 1MiB                                                                                                                                   |
+      | emitter          | CREATE KAFKA TOPIC EMITTER kafka_emit FROM notifications TO kafka_main TOPIC 'notifications_out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON GENERAL ERROR LOG                                                                |
+      | inferencer       | CREATE INFERENCER score_model FROM features USING RESOURCE fraud_model VERSION 3 FILE 'models/fraud.onnx' INPUTS { "features" DENSE TENSOR<F32>[2] = input.vector } OUTPUT SCHEMA { "score" DENSE TENSOR<F32>[1] } UNBRANCHED TO scored SET score = score FLUSH IMMEDIATE                                            |
 
   Scenario Outline: Pure runtime processors reject general error policies
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       <statement>;
       """
@@ -47,15 +47,15 @@ Feature: Runtime node error policies
   Scenario: General error policy rejects SEND TO because it is not tied to a concrete message
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
-      CREATE EMITTER kafka_emit
+      CREATE KAFKA TOPIC EMITTER kafka_emit
         FROM notifications
-        TO KAFKA kafka_main TOPIC notifications_out MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        TO kafka_main TOPIC 'notifications_out' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -65,12 +65,12 @@ Feature: Runtime node error policies
   Scenario Outline: Emitter message errors can be sent to an error relay
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -97,8 +97,8 @@ Feature: Runtime node error policies
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -107,15 +107,14 @@ Feature: Runtime node error policies
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+        CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER zeromq_notifications
+        CREATE ZEROMQ PUSH EMITTER zeromq_notifications
         FROM notifications
-        TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR SEND TO error_stream
@@ -151,11 +150,11 @@ Feature: Runtime node error policies
   Scenario Outline: Route filter evaluation errors retain their structured operation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA calculation (
         id STRING,
@@ -179,8 +178,8 @@ Feature: Runtime node error policies
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge filter-operation-{{test_id}}.example.com;
       CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE INGESTOR calculation_source
-        FROM ENDPOINT calculation_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR calculation_source
+        FROM calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations
           INHERIT ALL
@@ -219,11 +218,11 @@ Feature: Runtime node error policies
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -237,14 +236,13 @@ Feature: Runtime node error policies
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -253,9 +251,9 @@ Feature: Runtime node error policies
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward
+        CREATE KAFKA TOPIC EMITTER kafka_forward
         FROM notifications
-        TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR IGNORE

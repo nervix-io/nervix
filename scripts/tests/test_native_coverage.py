@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 
-from scripts import native_coverage
+from scripts import coverage_workspace_wrapper, deloxide_lane, native_coverage
 from scripts.native_coverage import (
     Captured,
     Classification,
@@ -111,11 +111,26 @@ class InventoryTests(unittest.TestCase):
     def test_the_producers_are_the_native_extra_checks_in_ci_order(self) -> None:
         self.assertEqual(
             [producer.name for producer in native_coverage.PRODUCERS],
-            ["test-typed-ratchet", "bench-smoke", "test-primitives", "nspl-completion-walk"],
+            ["test-typed-ratchet", "bench-smoke", "test-primitives-ordinary",
+             "test-primitives-shuttle", "test-primitives-loom", "test-primitives-turmoil",
+             "test-primitives-deloxide", "plexus-completion-walk", "validate-connector-matrix", "test-shuttle", "test-loom", "test-turmoil",
+             "test-deadlock-evidence-order", "test-deadlock-report", "test-deloxide",
+             "test-deloxide-order", "test-deloxide-stress", "test-deloxide-stress-restore"],
         )
+        inventory = deloxide_lane.load_inventory(REPOSITORY)
         for producer in native_coverage.PRODUCERS:
-            self.assertEqual(producer.mode, "ordinary")
             self.assertEqual(producer.rerun(), f"just coverage-native-extras {producer.name}")
+            if producer.name.startswith("test-primitives-"):
+                self.assertEqual(producer.name, f"test-primitives-{producer.mode}")
+            # Each selection of the diagnostic lane collects in the build of the feature it
+            # compiles, and only after the prerequisites the lane takes its prepared binaries from.
+            if producer.lane is not None:
+                self.assertEqual(producer.name, f"test-{producer.lane}")
+                self.assertEqual(producer.mode, inventory.selection(producer.lane).feature)
+                self.assertEqual(producer.prepare, ("tests-deps",))
+                self.assertEqual(producer.instrumented, f"test-{producer.lane}-workloads")
+        lanes = [producer.lane for producer in native_coverage.PRODUCERS if producer.lane is not None]
+        self.assertEqual(lanes, list(inventory.selections))
 
     def test_a_check_composed_otherwise_than_its_producer_is_refused(self) -> None:
         producer = Producer("check", "ordinary", ("prepare",), "body", ("finish",))
@@ -168,8 +183,8 @@ class InventoryTests(unittest.TestCase):
         producers = native_coverage.PRODUCERS
         self.assertEqual(native_coverage.select_producers([], producers), list(producers))
         self.assertEqual(
-            native_coverage.select_producers(["nspl-completion-walk", "bench-smoke"], producers),
-            [next(producer for producer in producers if producer.name == "nspl-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],
+            native_coverage.select_producers(["plexus-completion-walk", "bench-smoke"], producers),
+            [next(producer for producer in producers if producer.name == "plexus-completion-walk"), next(producer for producer in producers if producer.name == "bench-smoke")],
         )
         with self.assertRaisesRegex(RunnerError, "no producer `bench`; the producers are"):
             native_coverage.select_producers(["bench"], producers)
@@ -182,11 +197,43 @@ class InventoryTests(unittest.TestCase):
         workflow = (REPOSITORY / ".github/workflows/check.yaml").read_text(encoding="utf-8")
         job = job_section(workflow, "extra-tests")
         self.assertRegex(job, r"tool: [^\n]*\bcargo-llvm-cov\b")
-        self.assertIn("run: just test-native-coverage\n", job)
+        self.assertIn("run: just coverage-model-runner\n", job)
         for producer in native_coverage.PRODUCERS:
             with self.subTest(producer=producer.name):
-                self.assertIn(f"run: just coverage-native-extras {producer.name}\n", job)
-                self.assertNotIn(f"run: just {producer.name}\n", job)
+                if producer.name == "test-shuttle":
+                    selected_job = job_section(workflow, "shuttle")
+                elif producer.name == "test-loom":
+                    selected_job = job_section(workflow, "loom")
+                elif producer.name == "test-turmoil":
+                    selected_job = job_section(workflow, "turmoil")
+                elif producer.lane is not None:
+                    lane = job_section(workflow, "deloxide")
+                    self.assertIn(f"selection: [{', '.join(deloxide_lane.load_inventory(REPOSITORY).selections)}]", lane)
+                    self.assertIn("SELECTION: ${{ matrix.selection }}", lane)
+                    self.assertRegex(lane, r"tool: [^\n]*\bcargo-llvm-cov\b")
+                    self.assertIn('just coverage-native-extras "test-${SELECTION}"\n', lane)
+                    self.assertIn('just test-deloxide-qualification "${SELECTION}"\n', lane)
+                    upload = step_section(lane, "Upload diagnostic lane evidence")
+                    self.assertIn("if: always()", upload)
+                    for artifact in ("completion.json", "lcov.info", "lane.json"):
+                        self.assertIn(f"target/native-coverage/test-${{{{ matrix.selection }}}}/**/{artifact}", upload)
+                    self.assertNotIn("profraw", upload)
+                    # Diagnostic coverage never joins ordinary coverage or its CRAP report.
+                    coverage = job_section(workflow, "coverage")
+                    self.assertNotIn("deloxide", coverage)
+                    continue
+                elif producer.name.startswith("test-deadlock-"):
+                    selected_job = job_section(workflow, "diagnostic-evidence")
+                    self.assertIn("run: just coverage-deadlock\n", selected_job)
+                    justfile = (REPOSITORY / "justfile").read_text(encoding="utf-8")
+                    self.assertIn(f" run {producer.name} --output ", justfile)
+                    continue
+                else:
+                    selected_job = job
+                name = "test-primitives" if producer.name.startswith("test-primitives-") else producer.name
+                if producer.name == "test-turmoil":
+                    name += " --output target/turmoil.lcov"
+                self.assertIn(f"just coverage-native-extras {name}\n", selected_job)
         upload = step_section(job, "Upload native extra coverage")
         self.assertIn("if: always()", upload)
         self.assertIn("name: coverage-native-extras", upload)
@@ -287,6 +334,242 @@ class InstrumentationTests(unittest.TestCase):
                 native_coverage.instrumentation(
                     commands, workspace, toolchain(), Path(directory), {}
                 )
+
+    def test_workspace_instrumentation_moves_the_flags_into_a_wrapper_beneath_kache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(root=Path(directory), target=Path(directory) / "target")
+            base = {"RUSTC_WRAPPER": "kache", "PATH": "/usr/bin"}
+            instrumented = native_coverage.instrumentation(
+                FakeCommands(workspace.root),
+                workspace,
+                toolchain(),
+                Path(directory) / "attempt",
+                base,
+                native_coverage.InstrumentedCrates.WORKSPACE,
+            )
+            description = instrumented.describe(workspace)
+        environment = instrumented.environment
+        self.assertEqual(environment["RUSTC_WRAPPER"], "kache")
+        self.assertEqual(
+            environment["RUSTC_WORKSPACE_WRAPPER"], str(native_coverage.WORKSPACE_WRAPPER)
+        )
+        self.assertEqual(environment["RUSTFLAGS"], "-Clink-arg=--ld-path=wild")
+        self.assertEqual(
+            environment[native_coverage.WORKSPACE_FLAGS_VARIABLE],
+            "-C\x1finstrument-coverage\x1f--cfg=coverage",
+        )
+        self.assertEqual(description["instrumented_crates"], "workspace")
+        self.assertEqual(description["rustflags"], ["-Clink-arg=--ld-path=wild"])
+        self.assertEqual(
+            description["workspace_rustflags"], ["-C", "instrument-coverage", "--cfg=coverage"]
+        )
+        self.assertNotIn("RUSTC_WORKSPACE_WRAPPER", base)
+
+    def test_encoded_flags_stay_encoded_when_the_wrapper_takes_the_instrumentation(self) -> None:
+        shown = (
+            "export CARGO_ENCODED_RUSTFLAGS='-C\x1ftarget-cpu=native\x1f-C\x1finstrument-coverage"
+            "\x1f--cfg\x1fcoverage\x1f--cfg=coverage_nightly'\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(root=Path(directory), target=Path(directory) / "target")
+            instrumented = native_coverage.instrumentation(
+                FakeCommands(workspace.root, show_env=shown),
+                workspace,
+                toolchain(),
+                Path(directory),
+                {"RUSTC_WRAPPER": "kache"},
+                native_coverage.InstrumentedCrates.WORKSPACE,
+            )
+        environment = instrumented.environment
+        self.assertEqual(environment["CARGO_ENCODED_RUSTFLAGS"], "-C\x1ftarget-cpu=native")
+        self.assertNotIn("RUSTFLAGS", environment)
+        self.assertEqual(
+            environment[native_coverage.WORKSPACE_FLAGS_VARIABLE],
+            "-C\x1finstrument-coverage\x1f--cfg\x1fcoverage\x1f--cfg=coverage_nightly",
+        )
+
+    def test_workspace_instrumentation_refuses_a_workspace_wrapper_already_set(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Workspace(root=Path(directory), target=Path(directory) / "target")
+            base = {"RUSTC_WRAPPER": "kache", "RUSTC_WORKSPACE_WRAPPER": "/usr/bin/clippy-driver"}
+            with self.assertRaisesRegex(RunnerError, "RUSTC_WORKSPACE_WRAPPER is already set"):
+                native_coverage.instrumentation(
+                    FakeCommands(workspace.root),
+                    workspace,
+                    toolchain(),
+                    Path(directory),
+                    base,
+                    native_coverage.InstrumentedCrates.WORKSPACE,
+                )
+
+    def test_only_the_instrumentation_and_its_cfgs_move_to_the_workspace_wrapper(self) -> None:
+        separated = native_coverage.separate_coverage_flags(
+            [
+                "-Cinstrument-coverage",
+                "-C",
+                "target-cpu=native",
+                "--cfg",
+                "coverage",
+                "--cfg=coverage_nightly",
+                "--cfg=trybuild_no_target",
+                "-C",
+                "instrument-coverage",
+                "--cfg",
+                "tokio_unstable",
+                "-C",
+            ]
+        )
+        self.assertEqual(
+            separated.build,
+            ("-C", "target-cpu=native", "--cfg=trybuild_no_target", "--cfg", "tokio_unstable", "-C"),
+        )
+        self.assertEqual(
+            separated.coverage,
+            (
+                "-Cinstrument-coverage",
+                "--cfg",
+                "coverage",
+                "--cfg=coverage_nightly",
+                "-C",
+                "instrument-coverage",
+            ),
+        )
+
+    def test_only_the_diagnostic_lanes_instrument_workspace_crates_alone(self) -> None:
+        for producer in native_coverage.PRODUCERS:
+            with self.subTest(producer=producer.name):
+                if producer.lane is not None:
+                    expected = native_coverage.InstrumentedCrates.WORKSPACE
+                else:
+                    expected = native_coverage.InstrumentedCrates.EVERY
+                self.assertEqual(producer.instrumented_crates, expected)
+
+
+class WorkspaceWrapperTests(unittest.TestCase):
+    """The workspace compiler wrapper, run as Cargo runs it: the compiler, then its arguments."""
+
+    FLAGS = "-C\x1finstrument-coverage\x1f--cfg=coverage"
+
+    def run_wrapper(
+        self, arguments: list[str], flags: str | None = FLAGS
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as directory:
+            recorded = Path(directory) / "arguments.json"
+            compiler = Path(directory) / "rustc"
+            compiler.write_text(
+                f"#!{sys.executable}\n"
+                "import json, sys\n"
+                f"open({str(recorded)!r}, 'w').write(json.dumps(sys.argv[1:]))\n",
+                encoding="utf-8",
+            )
+            compiler.chmod(0o755)
+            environment = dict(os.environ)
+            environment.pop(native_coverage.WORKSPACE_FLAGS_VARIABLE, None)
+            if flags is not None:
+                environment[native_coverage.WORKSPACE_FLAGS_VARIABLE] = flags
+            completed = subprocess.run(
+                [str(native_coverage.WORKSPACE_WRAPPER), str(compiler), *arguments],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if recorded.exists():
+                completed.stdout = recorded.read_text(encoding="utf-8")
+            return completed
+
+    def test_a_named_crate_is_compiled_with_the_collector_flags(self) -> None:
+        for arguments in (
+            ["--crate-name", "nervix_server", "src/lib.rs"],
+            ["--crate-name=nervix_cli", "src/main.rs"],
+        ):
+            with self.subTest(arguments=arguments):
+                completed = self.run_wrapper(arguments)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(
+                    json.loads(completed.stdout),
+                    [*arguments, "-C", "instrument-coverage", "--cfg=coverage"],
+                )
+
+    def test_queries_of_the_compiler_pass_through_unchanged(self) -> None:
+        for arguments in (
+            ["-", "--crate-name", "___", "--print=file-names"],
+            ["-", "--crate-name=___", "--print=cfg"],
+            ["-vV"],
+        ):
+            with self.subTest(arguments=arguments):
+                completed = self.run_wrapper(arguments, flags=None)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(json.loads(completed.stdout), arguments)
+
+    def test_a_crate_compiled_without_the_flags_is_refused(self) -> None:
+        completed = self.run_wrapper(["--crate-name", "nervix_server", "src/lib.rs"], flags=None)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(native_coverage.WORKSPACE_FLAGS_VARIABLE, completed.stderr)
+
+    def test_the_wrapper_execs_the_compiler_it_was_given(self) -> None:
+        cases = {
+            "a crate": (
+                ["--crate-name", "nervix_vm", "src/lib.rs"],
+                ["--crate-name", "nervix_vm", "src/lib.rs", "-C", "instrument-coverage"],
+            ),
+            "a query": (["-vV"], ["-vV"]),
+        }
+        for case, (arguments, expected) in cases.items():
+            with self.subTest(case=case):
+                with (
+                    mock.patch.object(sys, "argv", ["wrapper", "/toolchain/rustc", *arguments]),
+                    mock.patch.dict(
+                        os.environ,
+                        {coverage_workspace_wrapper.FLAGS_VARIABLE: "-C\x1finstrument-coverage\x1f"},
+                    ),
+                    mock.patch.object(coverage_workspace_wrapper.os, "execv") as execv,
+                ):
+                    coverage_workspace_wrapper.main()
+                execv.assert_called_once_with("/toolchain/rustc", ["/toolchain/rustc", *expected])
+
+    def test_the_wrapper_refuses_a_crate_without_flags_or_compiler(self) -> None:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key != coverage_workspace_wrapper.FLAGS_VARIABLE
+        }
+        with (
+            mock.patch.object(sys, "argv", ["wrapper", "/toolchain/rustc", "--crate-name", "x"]),
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch.object(coverage_workspace_wrapper.os, "execv") as execv,
+            self.assertRaises(SystemExit) as refused,
+        ):
+            coverage_workspace_wrapper.main()
+        self.assertIn(coverage_workspace_wrapper.FLAGS_VARIABLE, str(refused.exception))
+        execv.assert_not_called()
+        with mock.patch.object(sys, "argv", ["wrapper"]), self.assertRaises(SystemExit):
+            coverage_workspace_wrapper.main()
+
+    def test_the_compiled_crate_is_named_by_either_spelling(self) -> None:
+        self.assertEqual(
+            coverage_workspace_wrapper.compiled_crate(["--edition", "2024", "--crate-name", "a"]), "a"
+        )
+        self.assertEqual(coverage_workspace_wrapper.compiled_crate(["--crate-name=b"]), "b")
+        self.assertIsNone(coverage_workspace_wrapper.compiled_crate(["--crate-name", "___"]))
+        self.assertIsNone(coverage_workspace_wrapper.compiled_crate(["--crate-name=___"]))
+        self.assertIsNone(coverage_workspace_wrapper.compiled_crate(["--crate-name"]))
+        self.assertIsNone(coverage_workspace_wrapper.compiled_crate(["-vV"]))
+        self.assertEqual(
+            coverage_workspace_wrapper.FLAGS_VARIABLE, native_coverage.WORKSPACE_FLAGS_VARIABLE
+        )
+
+    def test_the_wrapper_requires_the_compiler_argument(self) -> None:
+        completed = subprocess.run(
+            [str(native_coverage.WORKSPACE_WRAPPER)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("first argument", completed.stderr)
 
 
 class ToolchainTests(unittest.TestCase):
@@ -1001,7 +1284,17 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(record["sources"]["covered"], 7)
         self.assertEqual(record["report"], "lcov.info")
         self.assertEqual(record["started_at"], "2026-09-29T12:00:00Z")
-        self.assertEqual(record["finished_at"], "2026-09-29T12:00:01Z")
+        self.assertEqual(
+            record["stages"],
+            {
+                "prepare": "2026-09-29T12:00:01Z",
+                "instrument": "2026-09-29T12:00:02Z",
+                "run": "2026-09-29T12:00:03Z",
+                "export": "2026-09-29T12:00:04Z",
+                "finish": "2026-09-29T12:00:05Z",
+            },
+        )
+        self.assertEqual(record["finished_at"], "2026-09-29T12:00:06Z")
         self.assertTrue((collected.attempt / "profiles").is_dir())
 
         recipes = [streamed.arguments for streamed in commands.streamed]
@@ -1014,7 +1307,105 @@ class CollectTests(unittest.TestCase):
         self.assertEqual(instrumented["RUSTC_WRAPPER"], "kache")
         self.assertEqual(instrumented["LLVM_PROFILE_FILE"], "/dev/null")
         self.assertEqual(instrumented[native_coverage.ATTEMPT_VARIABLE], str(collected.attempt))
+        self.assertEqual(
+            instrumented[native_coverage.PREPARED_TARGET_VARIABLE], str(self.root / "target")
+        )
+        self.assertNotIn(deloxide_lane.REPORT_VARIABLE, instrumented)
         self.assertIn(RUNNER, instrumented)
+
+    def test_a_diagnostic_lane_is_exported_only_from_its_complete_record(self) -> None:
+        lane_producer = Producer(
+            "test-deloxide", "deloxide", ("tests-deps",), "test-deloxide-workloads", (),
+            lane="deloxide",
+            instrumented_crates=native_coverage.InstrumentedCrates.WORKSPACE,
+        )
+
+        def lane_record(verdict: str) -> dict[str, object]:
+            return {
+                "selection": "deloxide",
+                "verdict": verdict,
+                "stages": [{"name": name, "verdict": "complete", "budget_seconds": 600, "duration_seconds": 2.0} for name in ("build", "workloads")],
+                "build_measurements": [{"kind": kind, "duration_seconds": 0.5} for kind in ("initial", "warm")],
+                "workspace": {"attempt": "target/native-coverage-build-deloxide/test-deloxide/deloxide/run.x", "instrumented": True},
+                "counts": {"discovered": 3, "selected": 2, "executed": 2, "completed": 2},
+                "workloads": [{"id": "probe.a", "completed": True}, {"id": "probe.b", "completed": True}],
+                "findings": {"observations": 4, "qualifying": 4},
+            }
+
+        def writes(content: dict[str, object] | None) -> Callable[[], int]:
+            def run() -> int:
+                instrumented = commands.streamed[-1].environment
+                path = Path(instrumented[deloxide_lane.REPORT_VARIABLE])
+                self.assertEqual(path.parent, next(self.root.rglob("completion.json")).parent)
+                if content is not None:
+                    path.write_text(json.dumps(content))
+                return 0
+            return run
+
+        commands = FakeCommands(self.root, {"test-deloxide-workloads": writes(lane_record("complete"))})
+        collected = self.collect(commands, producer=lane_producer)
+        record = self.record(collected)
+        self.assertEqual(collected.status, 0)
+        self.assertEqual(record["verdict"], "complete")
+        self.assertEqual(record["lane"]["counts"]["completed"], 2)
+        self.assertEqual(record["lane"]["findings"], {"observations": 4, "qualifying": 4})
+        self.assertEqual([streamed.arguments for streamed in commands.streamed][0], ["just", "tests-deps"])
+        prepared, lane = commands.streamed[0].environment, commands.streamed[1].environment
+        self.assertNotIn("RUSTC_WORKSPACE_WRAPPER", prepared)
+        self.assertEqual(lane["RUSTC_WORKSPACE_WRAPPER"], str(native_coverage.WORKSPACE_WRAPPER))
+        self.assertNotIn("instrument-coverage", lane["RUSTFLAGS"])
+        self.assertEqual(record["instrumentation"]["instrumented_crates"], "workspace")
+
+        for case, content in {"no record": None, "a failed lane": lane_record("failed"), "builds only": lane_record("built")}.items():
+            with self.subTest(case=case):
+                self.setUp()
+                commands = FakeCommands(self.root, {"test-deloxide-workloads": writes(content)})
+                collected = self.collect(commands, producer=lane_producer)
+                record = self.record(collected)
+                self.assertEqual(collected.status, 1)
+                self.assertEqual(record["verdict"], "failed")
+                self.assertEqual(record["failure"]["stage"], "run")
+                self.assertNotIn("sources", record)
+
+    def test_a_lane_selection_collects_in_the_build_it_compiles_and_exports_its_own_record(self) -> None:
+        lane_producer = Producer(
+            "test-deloxide-stress-restore", "deloxide-stress", ("tests-deps",),
+            "test-deloxide-stress-restore-workloads", (), lane="deloxide-stress-restore",
+            instrumented_crates=native_coverage.InstrumentedCrates.WORKSPACE,
+        )
+
+        def writes(selection: str) -> Callable[[], int]:
+            def run() -> int:
+                path = Path(commands.streamed[-1].environment[deloxide_lane.REPORT_VARIABLE])
+                path.write_text(json.dumps({
+                    "selection": selection,
+                    "verdict": "complete",
+                    "stages": [{"name": name, "verdict": "complete", "budget_seconds": 600, "duration_seconds": 2.0} for name in ("build", "workloads")],
+                    "build_measurements": [{"kind": kind, "duration_seconds": 0.5} for kind in ("initial", "warm")],
+                    "workspace": {"attempt": "target/native-coverage-build-deloxide-stress/test-deloxide/x/run.y", "instrumented": True},
+                    "counts": {"discovered": 2, "selected": 2, "executed": 2, "completed": 2},
+                    "workloads": [{"id": "stress.a", "completed": True}],
+                    "findings": {"observations": 1, "qualifying": 1},
+                }))
+                return 0
+            return run
+
+        commands = FakeCommands(self.root, {"test-deloxide-stress-restore-workloads": writes("deloxide-stress-restore")})
+        collected = self.collect(commands, producer=lane_producer)
+        self.assertEqual(collected.status, 0)
+        self.assertEqual(self.record(collected)["lane"]["counts"]["completed"], 2)
+        self.assertTrue(collected.attempt.is_relative_to(
+            self.root / "target/native-coverage/test-deloxide-stress-restore/deloxide-stress"
+        ))
+        lane = commands.streamed[1].environment
+        self.assertEqual(lane["CARGO_TARGET_DIR"], str(self.root / "target/native-coverage-build-deloxide-stress"))
+
+        # The record of another selection of the same build does not complete this one.
+        self.setUp()
+        commands = FakeCommands(self.root, {"test-deloxide-stress-restore-workloads": writes("deloxide-stress")})
+        collected = self.collect(commands, producer=lane_producer)
+        self.assertEqual(collected.status, 1)
+        self.assertEqual(self.record(collected)["failure"]["stage"], "run")
 
     def test_a_failing_part_fails_the_collection_at_its_stage(self) -> None:
         cases = {
@@ -1282,8 +1673,15 @@ FIXTURE = {
                 std::process::exit(3);
             }
             let child = env!("CARGO_BIN_EXE_coverage-fixture-child");
-            let status = std::process::Command::new(child).status().expect("the child runs");
-            assert!(status.success());
+            let count = if std::env::var_os("COVERAGE_FIXTURE_REPEAT_CHILD").is_some() {
+                3
+            } else {
+                1
+            };
+            for _ in 0..count {
+                let status = std::process::Command::new(child).status().expect("the child runs");
+                assert!(status.success());
+            }
             if std::env::var_os("COVERAGE_FIXTURE_SKIP_PROFILE").is_some() {
                 unsafe { _exit(0) }
             }
@@ -1504,6 +1902,45 @@ class FixtureTests(unittest.TestCase):
         assert isinstance(described, dict)
         self.assertEqual(described["excluded_files"], {"harness": 1})
         self.assertEqual(set(described["packages"]), {"coverage-fixture"})
+
+    def test_fresh_attempt_processes_each_contribute_their_counters(self) -> None:
+        collection = self.collect("walk", COVERAGE_FIXTURE_REPEAT_CHILD="1")
+        self.assertEqual(collection.status, 0, collection.record.get("failure"))
+        self.assertEqual(collection.record["verdict"], "complete")
+        # One profile for the parent and one for each fresh child, even though all children
+        # execute the same binary. Their counters must add rather than overwrite one another.
+        self.assertEqual(len(collection.record["profiles"]), 4)
+        library = self.line_counts(collection.attempt / "lcov.info", "src/lib.rs")
+        self.assertEqual(library[10], 3)
+        self.assertEqual(library[19], 3)
+        self.assertEqual(len(collection.record["selection"]["children"]), 1)
+
+    def test_completed_build_cleanup_keeps_collected_evidence_and_the_build_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target with spaces"
+            workspace = Workspace(self.fixture, target)
+            with workspace.build_lock():
+                artifact = workspace.build() / "debug/deps/fixture.rlib"
+                artifact.parent.mkdir(parents=True)
+                artifact.write_bytes(b"compiled output")
+            attempt = workspace.new_attempt(fixture_producer("walk"), "rust-1.99.0", "complete")
+            (attempt / "lcov.info").write_text("exported report\n")
+            (attempt / "completion.json").write_text('{"verdict":"complete"}\n')
+            (attempt / "profiles/walk.profraw").write_bytes(b"retained profile")
+            collected = files(target / native_coverage.COLLECTION_DIRECTORY)
+            sources = files(self.fixture / "src")
+            result = subprocess.run(
+                ["just", "clean-ci-benchmarks"],
+                cwd=REPOSITORY,
+                env={**os.environ, "CARGO_TARGET_DIR": str(target)},
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(artifact.exists())
+            self.assertTrue((workspace.build() / native_coverage.LOCK).is_file())
+            self.assertEqual(files(target / native_coverage.COLLECTION_DIRECTORY), collected)
+            self.assertEqual(files(self.fixture / "src"), sources)
 
     def test_the_ordinary_coverage_cleanup_leaves_every_collection_alone(self) -> None:
         collection = self.collect("walk")

@@ -3,9 +3,21 @@
 //! Layer: engines and infrastructure.
 //! - **Owns.** Replicated command identities, semantic request digests, and retained outcomes.
 //! - **Depends on.** Vocabulary identities and timestamps.
-//! - **Must not know.** NSPL parsing, sessions, runtime activation, or transport responses.
+//! - **Must not know.** Plexus parsing, sessions, runtime activation, or transport responses.
 
-use std::{collections::BTreeMap, io, time::Duration};
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io,
+    time::Duration,
+};
 
 use error_stack::Report;
 use imbl::OrdSet;
@@ -29,7 +41,7 @@ use crate::{
 /// their embedded time, so this allowance cannot reopen a reclaimed identity.
 const COMMAND_EXECUTION_REFERENCE_FUTURE_SKEW: Duration = Duration::from_secs(5 * 60);
 
-/// The byte range of a command's NSPL source a diagnostic points at. `start` is not after `end`.
+/// The byte range of a command's Plexus source a diagnostic points at. `start` is not after `end`.
 #[derive(
     Debug,
     Clone,
@@ -289,6 +301,12 @@ pub struct CommandExecution {
     pub state: CommandExecutionState,
 }
 
+impl crate::records::StoredUnder<CommandExecutionReference> for CommandExecution {
+    fn is_stored_under(&self, reference: &CommandExecutionReference) -> bool {
+        self.reference == *reference
+    }
+}
+
 impl CommandExecution {
     pub fn applying(
         reference: CommandExecutionReference,
@@ -412,6 +430,16 @@ impl CommandExecution {
             return;
         };
         domain_mutations.insert(domain, lease);
+    }
+
+    pub(crate) fn release_domain_mutation(&mut self, domain: &DomainName) {
+        let CommandExecutionState::Applying {
+            domain_mutations, ..
+        } = &mut self.state
+        else {
+            return;
+        };
+        domain_mutations.remove(domain);
     }
 
     pub fn transaction_request(&self) -> Option<&CommandExecutionTransactionRequest> {
@@ -726,6 +754,14 @@ impl CommandExecutionRecords {
     ) -> io::Result<Self> {
         let entries: Records<CommandExecutionReference, CommandExecution> =
             Records::load(b'e', keyspace)?;
+        Self::from_entries(entries, retry_fence)
+    }
+
+    /// The executions `entries` holds under `retry_fence`, with the indexes derived from them.
+    fn from_entries(
+        entries: Records<CommandExecutionReference, CommandExecution>,
+        retry_fence: Option<Timestamp>,
+    ) -> io::Result<Self> {
         let mut applying = OrdSet::new();
         let mut finished = OrdSet::new();
         let mut expired = OrdSet::new();
@@ -741,10 +777,10 @@ impl CommandExecutionRecords {
                     });
                 }
                 CommandExecutionState::Expired => {
-                    let issued_at = execution
-                        .reference
-                        .retry_issued_at()
-                        .map_err(io::Error::other)?;
+                    // Only a retry identity whose issue time reads back is ever expired.
+                    let issued_at = execution.reference.retry_issued_at().map_err(|_| {
+                        io::Error::other(crate::durable_batch::StorageFailure::InvalidState)
+                    })?;
                     expired.insert(ExpiredCommandExecutionKey {
                         issued_at,
                         reference: execution.reference.clone(),
@@ -761,6 +797,27 @@ impl CommandExecutionRecords {
         })
     }
 
+    /// `executions`, each keyed by its reference, under `retry_fence`, for generated storage
+    /// states. It refuses what recovery refuses: an expired execution whose reference holds no
+    /// issue time.
+    #[cfg(test)]
+    pub(crate) fn generated(
+        executions: impl IntoIterator<Item = CommandExecution>,
+        retry_fence: Option<Timestamp>,
+    ) -> io::Result<Self> {
+        let mut entries = Records::default();
+        for execution in executions {
+            entries.insert(execution.reference.clone(), execution);
+        }
+        Self::from_entries(entries, retry_fence)
+    }
+
+    /// Every retained execution, in reference order.
+    #[cfg(test)]
+    pub(crate) fn executions(&self) -> impl Iterator<Item = &CommandExecution> {
+        self.entries.values()
+    }
+
     pub(crate) fn write_changes(
         &self,
         preceding: &Self,
@@ -775,8 +832,28 @@ impl CommandExecutionRecords {
         self.retry_fence
     }
 
+    /// How many keyed records the executions store.
+    pub(crate) fn stored_records(&self) -> usize {
+        self.entries.len()
+    }
+
     pub(crate) fn get(&self, reference: &CommandExecutionReference) -> Option<&CommandExecution> {
         self.entries.get(reference)
+    }
+
+    /// Transaction identities that applying transaction requests still need for exact recovery.
+    pub(crate) fn applying_transaction_targets(&self) -> BTreeSet<&str> {
+        let mut targets = BTreeSet::new();
+        for reference in &self.applying {
+            let execution = self
+                .entries
+                .get(reference)
+                .verified("the applying index names a retained execution");
+            if let Some(CommandExecutionEffect::TransactionRequest(request)) = execution.effect() {
+                targets.insert(request.target.id());
+            }
+        }
+        targets
     }
 
     #[cfg(test)]

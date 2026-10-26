@@ -3,12 +3,12 @@ Feature: Domain metrics
   Scenario Outline: DESCRIBE DOMAIN reports input/output and processed traffic metrics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA transaction (
         tenant STRING,
@@ -27,8 +27,8 @@ Feature: Domain metrics
         CREATE RELAY domain_metrics_deduped SCHEMA transaction BRANCHED BY by_domain_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT domain_metrics_ingress ON edge PATH '/domain-metrics' TYPE HTTP;
-        CREATE INGESTOR domain_metrics_source
-        FROM ENDPOINT domain_metrics_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR domain_metrics_source
+        FROM domain_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO domain_metrics_raw
         INHERIT ALL
@@ -45,13 +45,12 @@ Feature: Domain metrics
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+        CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-        CREATE EMITTER domain_metrics_sink FROM domain_metrics_deduped TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING transaction_codec
+        CREATE ZEROMQ PUSH EMITTER domain_metrics_sink FROM domain_metrics_deduped TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING transaction_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -66,7 +65,7 @@ Feature: Domain metrics
       """
       "transaction_id":"txn-1"
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE DOMAIN;
       """

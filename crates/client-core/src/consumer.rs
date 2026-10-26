@@ -12,6 +12,11 @@
 //! attachment takes it over instead of asking for another batch, so a cancelled wait never strands
 //! an assigned attempt until its ACK timeout.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     collections::{BTreeMap, VecDeque},
     time::Duration,
@@ -36,6 +41,7 @@ use nervix_primitives::sync::{
     oneshot, watch,
 };
 use nervix_recovery::Discarded as _;
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
@@ -61,9 +67,14 @@ pub(crate) struct ConsumerHandle {
     registry: DesiredConsumers,
     initial_id: ConsumerId,
     lifecycle: ConsumerLifecycle,
-    /// Reads whose callers stopped waiting before their replies arrived, oldest first. Each is
-    /// taken over by a later read of its attachment; the rest end with their attachment.
-    parked: SyncMutex<VecDeque<ParkedRead>>,
+    parked: ParkedReads,
+}
+
+/// Reads whose callers stopped waiting before their replies arrived, oldest first. Each is taken
+/// over by a later read of its attachment; the rest end with their attachment.
+#[derive(Default)]
+struct ParkedReads {
+    reads: SyncMutex<VecDeque<ParkedRead>>,
 }
 
 /// A batch read sent on one attachment, whose reply nobody waits for right now.
@@ -82,10 +93,17 @@ struct WaitingRead<'a> {
 /// The selected primitive owner of a desired consumer's attachment and close fence. It is kept
 /// independent of the transport so its state transitions can be checked under Shuttle.
 struct ConsumerLifecycle {
-    phase: SyncMutex<ConsumerPhase>,
+    state: SyncMutex<ConsumerState>,
     changed: watch::Sender<()>,
+}
+
+/// What the consumer's lock guards. The phase and the gap still to report change together, so the
+/// end of an exchange, the decision a read's reply makes, and the next read's report of the gap are
+/// ordered by the lock and report each gap exactly once.
+struct ConsumerState {
+    phase: ConsumerPhase,
     /// The first read after an attachment gap reports it before any restored delivery.
-    interruption_pending: AtomicBool,
+    interruption_pending: bool,
 }
 
 enum ConsumerPhase {
@@ -94,6 +112,18 @@ enum ConsumerPhase {
     Restoring(Arc<()>),
     ReopenRequired(ConsumerReopenReason),
     Closed,
+}
+
+/// Where a read starts, decided under the consumer's lock together with the gap it reports first.
+enum ReadStart {
+    /// The attachment ended since a read last reported a gap: this read reports it.
+    Gap,
+    /// The read goes through this attachment.
+    Attached(Arc<ConsumerAttachment>),
+    Closed,
+    ReopenRequired(ConsumerReopenReason),
+    /// The session has to recover and restore an attachment before the read.
+    Unattached,
 }
 
 /// Why a consumer must explicitly open a new endpoint instead of following its former one.
@@ -219,7 +249,7 @@ impl Client {
                                 generation,
                                 closed: AtomicBool::new(false),
                             });
-                            let registry = client.inner.events.sinks.consumers.clone();
+                            let registry = client.inner.events.emitters.consumers.clone();
                             let inner = StdArc::new(ConsumerHandle {
                                 client,
                                 request,
@@ -229,7 +259,7 @@ impl Client {
                                 lifecycle: ConsumerLifecycle::new(ConsumerPhase::Active(
                                     attachment.clone(),
                                 )),
-                                parked: SyncMutex::new(VecDeque::new()),
+                                parked: ParkedReads::default(),
                             });
                             registry.register(&inner);
                             if !attachment.exchange.pending.lock().is_open() {
@@ -323,14 +353,16 @@ impl ConsumerLifecycle {
     fn new(phase: ConsumerPhase) -> Self {
         let (changed, _) = watch::channel(());
         Self {
-            phase: SyncMutex::new(phase),
+            state: SyncMutex::new(ConsumerState {
+                phase,
+                interruption_pending: false,
+            }),
             changed,
-            interruption_pending: AtomicBool::new(false),
         }
     }
 
     fn connection(&self) -> ConsumerConnection {
-        match &*self.phase.lock() {
+        match &self.state.lock().phase {
             ConsumerPhase::Active(_) => ConsumerConnection::Active,
             ConsumerPhase::Interrupted => ConsumerConnection::Interrupted,
             ConsumerPhase::Restoring(_) => ConsumerConnection::Restoring,
@@ -340,61 +372,117 @@ impl ConsumerLifecycle {
     }
 
     fn current(&self) -> Option<Arc<ConsumerAttachment>> {
-        match &*self.phase.lock() {
+        match &self.state.lock().phase {
             ConsumerPhase::Active(attachment) => Some(attachment.clone()),
             _ => None,
         }
     }
 
     fn reopen_reason(&self) -> Option<ConsumerReopenReason> {
-        match &*self.phase.lock() {
+        match &self.state.lock().phase {
             ConsumerPhase::ReopenRequired(reason) => Some(reason.clone()),
             _ => None,
         }
     }
 
     fn exchange_ended(&self, generation: &Arc<()>) {
-        let mut phase = self.phase.lock();
-        let matches = match &*phase {
-            ConsumerPhase::Active(attachment) => Arc::ptr_eq(&attachment.generation, generation),
-            ConsumerPhase::Restoring(current) => Arc::ptr_eq(current, generation),
-            _ => false,
-        };
-        if matches {
-            if let ConsumerPhase::Active(attachment) = &*phase {
-                attachment.closed.store(true, Ordering::Release);
-            }
-            *phase = ConsumerPhase::Interrupted;
-            self.interruption_pending.store(true, Ordering::Release);
-            drop(phase);
+        let mut state = self.state.lock();
+        if state.end_exchange(generation) {
+            state.interruption_pending = true;
+            drop(state);
+            self.changed.send_replace(());
+        }
+    }
+
+    /// Takes the gap an earlier end of the attachment left unreported, if any.
+    fn take_interruption(&self) -> bool {
+        std::mem::take(&mut self.state.lock().interruption_pending)
+    }
+
+    /// Decides where a read starts. A gap still to report comes first, under the same lock that
+    /// reads the phase, so a read that starts as its exchange ends reports the gap before any
+    /// recovery or restoration begins.
+    fn read_start(&self) -> ReadStart {
+        let mut state = self.state.lock();
+        if std::mem::take(&mut state.interruption_pending) {
+            return ReadStart::Gap;
+        }
+        match &state.phase {
+            ConsumerPhase::Active(attachment) => ReadStart::Attached(attachment.clone()),
+            ConsumerPhase::Closed => ReadStart::Closed,
+            ConsumerPhase::ReopenRequired(reason) => ReadStart::ReopenRequired(reason.clone()),
+            ConsumerPhase::Interrupted | ConsumerPhase::Restoring(_) => ReadStart::Unattached,
+        }
+    }
+
+    /// Whether a reply read on `attachment` arrived after the attachment ended. Such a read reports
+    /// the gap itself, so the gap is not reported again.
+    fn reply_after_gap(&self, attachment: &Arc<ConsumerAttachment>) -> bool {
+        let mut state = self.state.lock();
+        if let ConsumerPhase::Active(current) = &state.phase
+            && Arc::ptr_eq(current, attachment)
+        {
+            return false;
+        }
+        state.interruption_pending = false;
+        true
+    }
+
+    /// Ends the attachment made on the exchange `generation` because a read on it ended, and
+    /// reports the gap through that read.
+    fn exchange_ended_by_read(&self, generation: &Arc<()>) {
+        let mut state = self.state.lock();
+        let ended = state.end_exchange(generation);
+        state.interruption_pending = false;
+        drop(state);
+        if ended {
             self.changed.send_replace(());
         }
     }
 
     fn begin_restore(&self, generation: &Arc<()>) -> bool {
-        let mut phase = self.phase.lock();
-        if !matches!(&*phase, ConsumerPhase::Interrupted) {
+        let mut state = self.state.lock();
+        if !matches!(&state.phase, ConsumerPhase::Interrupted) {
             return false;
         }
-        *phase = ConsumerPhase::Restoring(generation.clone());
-        drop(phase);
+        state.phase = ConsumerPhase::Restoring(generation.clone());
+        drop(state);
         self.changed.send_replace(());
         true
     }
 
     fn close(&self) -> Option<Arc<ConsumerAttachment>> {
-        let mut phase = self.phase.lock();
-        let attachment = match &*phase {
+        let mut state = self.state.lock();
+        let attachment = match &state.phase {
             ConsumerPhase::Active(attachment) => Some(attachment.clone()),
             _ => None,
         };
-        *phase = ConsumerPhase::Closed;
-        drop(phase);
+        state.phase = ConsumerPhase::Closed;
+        drop(state);
         if let Some(attachment) = &attachment {
             attachment.closed.store(true, Ordering::Release);
         }
         self.changed.send_replace(());
         attachment
+    }
+}
+
+impl ConsumerState {
+    /// Interrupts the attachment made on the exchange `generation`, or the restoration running on
+    /// it. Returns whether it did.
+    fn end_exchange(&mut self, generation: &Arc<()>) -> bool {
+        let matches = match &self.phase {
+            ConsumerPhase::Active(attachment) => Arc::ptr_eq(&attachment.generation, generation),
+            ConsumerPhase::Restoring(current) => Arc::ptr_eq(current, generation),
+            _ => false,
+        };
+        if matches {
+            if let ConsumerPhase::Active(attachment) = &self.phase {
+                attachment.closed.store(true, Ordering::Release);
+            }
+            self.phase = ConsumerPhase::Interrupted;
+        }
+        matches
     }
 }
 
@@ -418,7 +506,7 @@ impl ConsumerHandle {
     }
 
     pub(crate) fn is_restoring(&self, generation: &Arc<()>) -> bool {
-        matches!(&*self.lifecycle.phase.lock(), ConsumerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
+        matches!(&self.lifecycle.state.lock().phase, ConsumerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
     }
 
     pub(crate) fn watch(&self) -> watch::Receiver<()> {
@@ -429,14 +517,22 @@ impl ConsumerHandle {
         self.request.clone()
     }
 
+    pub(crate) fn domain(&self) -> &DomainName {
+        &self.request.domain
+    }
+
+    pub(crate) fn emitter(&self) -> &EmitterName {
+        &self.request.emitter
+    }
+
     pub(crate) fn restoration_failed(&self, generation: &Arc<()>) {
-        let mut phase = self.lifecycle.phase.lock();
-        if !matches!(&*phase, ConsumerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
+        let mut state = self.lifecycle.state.lock();
+        if !matches!(&state.phase, ConsumerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
         {
             return;
         }
-        *phase = ConsumerPhase::ReopenRequired(ConsumerReopenReason::ProtocolViolated);
-        drop(phase);
+        state.phase = ConsumerPhase::ReopenRequired(ConsumerReopenReason::ProtocolViolated);
+        drop(state);
         self.lifecycle.changed.send_replace(());
     }
 
@@ -445,8 +541,8 @@ impl ConsumerHandle {
         generation: &Arc<()>,
         refusal: EmitterOpenRefusal,
     ) -> bool {
-        let mut phase = self.lifecycle.phase.lock();
-        if !matches!(&*phase, ConsumerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
+        let mut state = self.lifecycle.state.lock();
+        if !matches!(&state.phase, ConsumerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
         {
             return false;
         }
@@ -467,9 +563,15 @@ impl ConsumerHandle {
             | EmitterOpenRefusal::NodeCapacityExhausted => None,
         };
         if let Some(reason) = terminal {
-            *phase = ConsumerPhase::ReopenRequired(reason);
-            drop(phase);
+            state.phase = ConsumerPhase::ReopenRequired(reason);
+            drop(state);
             self.lifecycle.changed.send_replace(());
+            debug!(
+                domain = self.request.domain.as_str(),
+                emitter = self.request.emitter.as_str(),
+                refusal = ?refusal,
+                "a consumer restoration was refused for good"
+            );
             return false;
         }
         true
@@ -512,17 +614,24 @@ impl ConsumerHandle {
             closed: AtomicBool::new(false),
         });
         let installed = {
-            let mut phase = self.lifecycle.phase.lock();
-            let valid = matches!(&*phase, ConsumerPhase::Restoring(current) if Arc::ptr_eq(current, &generation));
+            let mut state = self.lifecycle.state.lock();
+            let valid = matches!(&state.phase, ConsumerPhase::Restoring(current) if Arc::ptr_eq(current, &generation));
             if valid {
-                *phase = match reason {
+                state.phase = match reason {
                     Some(reason) => ConsumerPhase::ReopenRequired(reason),
                     None => ConsumerPhase::Active(attachment.clone()),
                 };
             }
-            valid && matches!(&*phase, ConsumerPhase::Active(_))
+            valid && matches!(&state.phase, ConsumerPhase::Active(_))
         };
         self.lifecycle.changed.send_replace(());
+        debug!(
+            domain = self.request.domain.as_str(),
+            emitter = self.request.emitter.as_str(),
+            consumer = %id,
+            installed,
+            "a consumer restoration was opened"
+        );
         if !installed {
             attachment.closed.store(true, Ordering::Release);
             close_consumer(
@@ -535,22 +644,20 @@ impl ConsumerHandle {
         }
     }
 
+    /// Waits for an attachment to read through, recovering the session and restoring the consumer
+    /// when it has none. A gap that arises meanwhile is reported instead of restored past.
     async fn attachment(&self) -> error_stack::Result<Arc<ConsumerAttachment>, ClientError> {
         loop {
             nervix_primitives::task::consume_budget().await;
             let mut changed = self.lifecycle.changed.subscribe();
-            {
-                let phase = self.lifecycle.phase.lock();
-                match &*phase {
-                    ConsumerPhase::Active(attachment) => return Ok(attachment.clone()),
-                    ConsumerPhase::Closed => return Err(Report::new(ClientError::SessionClosed)),
-                    ConsumerPhase::ReopenRequired(reason) => {
-                        return Err(Report::new(ClientError::ConsumerReopenRequired(
-                            reason.clone(),
-                        )));
-                    }
-                    _ => {}
+            match self.lifecycle.read_start() {
+                ReadStart::Gap => return Err(Report::new(ClientError::ConsumerInterrupted)),
+                ReadStart::Attached(attachment) => return Ok(attachment),
+                ReadStart::Closed => return Err(Report::new(ClientError::SessionClosed)),
+                ReadStart::ReopenRequired(reason) => {
+                    return Err(Report::new(ClientError::ConsumerReopenRequired(reason)));
                 }
+                ReadStart::Unattached => {}
             }
             if !matches!(
                 self.client.recover_session(RecoveryMode::IfClosed).await,
@@ -562,6 +669,11 @@ impl ConsumerHandle {
             if self.current().is_some() {
                 continue;
             }
+            debug!(
+                domain = self.request.domain.as_str(),
+                emitter = self.request.emitter.as_str(),
+                "a consumer read waits for its restoration"
+            );
             changed
                 .changed()
                 .await
@@ -570,12 +682,8 @@ impl ConsumerHandle {
     }
 
     fn stop(&self) -> Option<Arc<ConsumerAttachment>> {
-        let attachment = self.lifecycle.close();
+        let attachment = self.parked.close(&self.lifecycle);
         self.registry.unregister(self);
-        // A closed consumer reads nothing again; the attempts its parked reads may hold are
-        // revoked with its attachment.
-        let parked = std::mem::take(&mut *self.parked.lock());
-        drop(parked);
         attachment
     }
 
@@ -585,7 +693,7 @@ impl ConsumerHandle {
         &self,
         attachment: &Arc<ConsumerAttachment>,
     ) -> error_stack::Result<Answered, ClientError> {
-        let request = match self.adopt(attachment) {
+        let request = match self.parked.adopt(attachment) {
             Some(request) => request,
             None => {
                 let read = ClientRequest::ReadEmitterBatch(ReadEmitterBatchRequest {
@@ -603,13 +711,15 @@ impl ConsumerHandle {
         };
         waiting.reply().await
     }
+}
 
+impl ParkedReads {
     /// Takes over the oldest parked read of `attachment`. Parked reads of an earlier attachment
     /// ended with it, and are dropped on the way.
     fn adopt(&self, attachment: &Arc<ConsumerAttachment>) -> Option<PendingRequest> {
         let mut stale = Vec::new();
         let adopted = {
-            let mut parked = self.parked.lock();
+            let mut parked = self.reads.lock();
             loop {
                 let Some(read) = parked.pop_front() else {
                     break None;
@@ -626,11 +736,26 @@ impl ConsumerHandle {
 
     /// Keeps a read whose caller stopped waiting for a later read of its attachment. A read of an
     /// attachment that already ended has no reply left to take over.
+    ///
+    /// The attachment is checked under the lock [`Self::close`] takes after ending it, so a read
+    /// either parks before a close revokes every parked read or finds its attachment ended.
     fn park(&self, read: ParkedRead) {
+        let mut reads = self.reads.lock();
         if read.attachment.closed.load(Ordering::Acquire) {
+            drop(reads);
+            drop(read);
             return;
         }
-        self.parked.lock().push_back(read);
+        reads.push_back(read);
+    }
+
+    /// Closes the consumer `lifecycle` follows, and revokes every parked read: a closed consumer
+    /// reads nothing again, so the attempts its parked reads may hold end with its attachment.
+    fn close(&self, lifecycle: &ConsumerLifecycle) -> Option<Arc<ConsumerAttachment>> {
+        let attachment = lifecycle.close();
+        let parked = std::mem::take(&mut *self.reads.lock());
+        drop(parked);
+        attachment
     }
 }
 
@@ -657,7 +782,7 @@ impl WaitingRead<'_> {
 impl Drop for WaitingRead<'_> {
     fn drop(&mut self) {
         if let Some(read) = self.read.take() {
-            self.handle.park(read);
+            self.handle.parked.park(read);
         }
     }
 }
@@ -683,40 +808,31 @@ impl EmitterConsumer {
         self.inner.lifecycle.reopen_reason()
     }
 
-    /// Reads one attempt. An attachment gap is reported once before any restored delivery.
+    /// Reads one attempt. The first read after the attachment ends reports that gap once, before
+    /// the consumer is restored, and a later read restores the attachment and reads on.
     ///
     /// A caller that stops waiting leaves the read with the consumer, and the next read of the
     /// same attachment receives its reply, so no attempt the server assigned is stranded.
     pub async fn next_batch(&self) -> error_stack::Result<Option<EmitterDelivery>, ClientError> {
-        if self
-            .inner
-            .lifecycle
-            .interruption_pending
-            .swap(false, Ordering::AcqRel)
-        {
-            return Err(Report::new(ClientError::ConsumerInterrupted));
-        }
-        if self.inner.connection() == ConsumerConnection::Closed {
-            return Ok(None);
-        }
-        let attachment = self.inner.attachment().await?;
-        if self
-            .inner
-            .lifecycle
-            .interruption_pending
-            .swap(false, Ordering::AcqRel)
-        {
+        let attachment = match self.inner.lifecycle.read_start() {
+            ReadStart::Gap => return Err(Report::new(ClientError::ConsumerInterrupted)),
+            ReadStart::Closed => return Ok(None),
+            ReadStart::ReopenRequired(reason) => {
+                return Err(Report::new(ClientError::ConsumerReopenRequired(reason)));
+            }
+            ReadStart::Attached(attachment) => attachment,
+            ReadStart::Unattached => self.inner.attachment().await?,
+        };
+        if self.inner.lifecycle.take_interruption() {
             return Err(Report::new(ClientError::ConsumerInterrupted));
         }
         let reply = self.inner.read(&attachment).await;
         let reply = match reply {
             Ok(reply) => reply,
             Err(report) if report.current_context().retryable_session_failure() => {
-                self.inner.exchange_ended(&attachment.generation);
                 self.inner
                     .lifecycle
-                    .interruption_pending
-                    .store(false, Ordering::Release);
+                    .exchange_ended_by_read(&attachment.generation);
                 return Err(Report::new(ClientError::ConsumerInterrupted));
             }
             Err(report) => return Err(report),
@@ -727,16 +843,7 @@ impl EmitterConsumer {
                 reply.body,
             )));
         };
-        if attachment.closed.load(Ordering::Acquire)
-            || self
-                .inner
-                .current()
-                .is_none_or(|current| !Arc::ptr_eq(&current, &attachment))
-        {
-            self.inner
-                .lifecycle
-                .interruption_pending
-                .store(false, Ordering::Release);
+        if self.inner.lifecycle.reply_after_gap(&attachment) {
             return Err(Report::new(ClientError::ConsumerInterrupted));
         }
         match outcome.disposition {
@@ -744,11 +851,9 @@ impl EmitterConsumer {
                 // The wire end does not distinguish relocation from a removed endpoint. A fresh
                 // open checks the pinned contract and generation, and its refusal supplies the
                 // terminal reason when the endpoint really disappeared.
-                self.inner.exchange_ended(&attachment.generation);
                 self.inner
                     .lifecycle
-                    .interruption_pending
-                    .store(false, Ordering::Release);
+                    .exchange_ended_by_read(&attachment.generation);
                 Err(Report::new(ClientError::ConsumerInterrupted))
             }
             ReadEmitterDisposition::Batch(batch) => Ok(Some(EmitterDelivery {
@@ -860,11 +965,169 @@ impl EmitterDelivery {
     }
 }
 
+#[cfg(all(test, not(feature = "shuttle")))]
+#[path = "consumer_tests.rs"]
+mod tests;
+
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
+    use std::num::NonZeroU64;
+
+    use meticulous::ResultExt as _;
+    use nervix_client_wire::RequestId;
     use nervix_model_harness::shuttle::check_random_and_pct;
+    use nervix_primitives::sync::mpsc;
 
     use super::*;
+    use crate::exchange::PendingReplies;
+
+    /// An attachment made on the exchange `generation`, which no server answers.
+    fn attachment_on(generation: &Arc<()>) -> Arc<ConsumerAttachment> {
+        let (frames, _unanswered) = mpsc::channel(1);
+        Arc::new(ConsumerAttachment {
+            id: ConsumerId::opened_by(RequestId::new(NonZeroU64::MIN)),
+            exchange: Arc::new(ExchangeRequests {
+                frames,
+                pending: Arc::new(SyncMutex::new(PendingReplies::new())),
+            }),
+            generation: generation.clone(),
+            closed: AtomicBool::new(false),
+        })
+    }
+
+    /// A read's reply arrives while its exchange ends: whichever of them comes first, the
+    /// consumer reports the gap exactly once, through the read or through the next one.
+    #[test]
+    fn shuttle_a_reply_racing_the_end_of_its_exchange_reports_the_gap_once() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let generation = Arc::new(());
+                let attachment = attachment_on(&generation);
+                let lifecycle = StdArc::new(ConsumerLifecycle::new(ConsumerPhase::Active(
+                    attachment.clone(),
+                )));
+                let ending = {
+                    let lifecycle = lifecycle.clone();
+                    nervix_primitives::task::spawn(async move {
+                        lifecycle.exchange_ended(&generation);
+                    })
+                };
+                let replying = {
+                    let lifecycle = lifecycle.clone();
+                    nervix_primitives::task::spawn(
+                        async move { lifecycle.reply_after_gap(&attachment) },
+                    )
+                };
+                ending
+                    .await
+                    .assured("the ending side only ends the exchange");
+                let reported_by_the_reply = replying
+                    .await
+                    .assured("the replying side only decides what its reply reports");
+                let reported_by_the_next_read = lifecycle.take_interruption();
+                assert_eq!(
+                    usize::from(reported_by_the_reply) + usize::from(reported_by_the_next_read),
+                    1,
+                    "one attachment gap was not reported exactly once"
+                );
+            });
+        });
+    }
+
+    /// A read starts while its exchange ends: the read reports the gap, or it starts on the
+    /// attachment before the end and the next read reports it. No read starts restoring the
+    /// consumer while the gap is unreported.
+    #[test]
+    fn shuttle_a_read_starting_as_its_exchange_ends_reports_the_gap_before_restoring() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let generation = Arc::new(());
+                let attachment = attachment_on(&generation);
+                let lifecycle = StdArc::new(ConsumerLifecycle::new(ConsumerPhase::Active(
+                    attachment.clone(),
+                )));
+                let ending = {
+                    let lifecycle = lifecycle.clone();
+                    nervix_primitives::task::spawn(async move {
+                        lifecycle.exchange_ended(&generation);
+                    })
+                };
+                let starting = {
+                    let lifecycle = lifecycle.clone();
+                    nervix_primitives::task::spawn(async move { lifecycle.read_start() })
+                };
+                ending
+                    .await
+                    .assured("the ending side only ends the exchange");
+                let start = starting
+                    .await
+                    .assured("the starting side only decides where its read starts");
+                let reported_by_the_next_read = lifecycle.take_interruption();
+                match start {
+                    ReadStart::Gap => assert!(
+                        !reported_by_the_next_read,
+                        "one attachment gap was reported twice"
+                    ),
+                    ReadStart::Attached(started_on) => {
+                        assert!(
+                            Arc::ptr_eq(&started_on, &attachment),
+                            "a read started on an attachment the consumer never had"
+                        );
+                        assert!(
+                            reported_by_the_next_read,
+                            "a read that started before the end left its gap unreported"
+                        );
+                    }
+                    ReadStart::Unattached | ReadStart::Closed | ReadStart::ReopenRequired(_) => {
+                        panic!("a read started past an unreported attachment gap");
+                    }
+                }
+            });
+        });
+    }
+
+    /// A read whose caller stops waiting parks while the consumer closes: the close revokes it,
+    /// or the read finds the attachment ended and never parks.
+    #[test]
+    fn shuttle_a_read_parked_while_its_consumer_closes_does_not_outlive_the_close() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let generation = Arc::new(());
+                let attachment = attachment_on(&generation);
+                let lifecycle = StdArc::new(ConsumerLifecycle::new(ConsumerPhase::Active(
+                    attachment.clone(),
+                )));
+                let parked = StdArc::new(ParkedReads::default());
+                let request = attachment
+                    .exchange
+                    .register()
+                    .assured("a fresh exchange registers requests");
+                let parking = {
+                    let parked = parked.clone();
+                    nervix_primitives::task::spawn(async move {
+                        parked.park(ParkedRead {
+                            attachment,
+                            request,
+                        });
+                    })
+                };
+                let closing = {
+                    let parked = parked.clone();
+                    nervix_primitives::task::spawn(async move { parked.close(&lifecycle) })
+                };
+                parking
+                    .await
+                    .assured("the parking side only parks its read");
+                closing
+                    .await
+                    .assured("the closing side only closes the consumer");
+                assert!(
+                    parked.reads.lock().is_empty(),
+                    "a read parked while its consumer closed outlived the close"
+                );
+            });
+        });
+    }
 
     #[test]
     fn shuttle_close_fences_a_consumer_restore_started_on_the_same_exchange() {
@@ -924,10 +1187,23 @@ impl EmitterDelivery {
     /// Decodes the canonical Arrow stream and checks every field against the emitter's declared
     /// output schema before yielding it to the application.
     pub fn record_batch(&self) -> error_stack::Result<arrow_array::RecordBatch, ClientError> {
+        Self::decode_record_batch(&self.inner.description.fields, &self.batch, self.members)
+    }
+
+    /// Decodes the canonical Arrow stream one delivery carried: `batch` must declare exactly the
+    /// Arrow schema of `fields`, the output schema its emitter declares, and hold one record batch
+    /// of `members` rows. [`Self::record_batch`] decodes a delivery through this, and an
+    /// application that kept a delivery's bytes and row count beside its consumer's description
+    /// decodes them the same way.
+    pub fn decode_record_batch(
+        fields: &[SchemaField],
+        batch: &Bytes,
+        members: u32,
+    ) -> error_stack::Result<arrow_array::RecordBatch, ClientError> {
         use arrow_ipc::reader::StreamReader;
-        let expected = SchemaField::arrow_schema(&self.inner.description.fields);
+        let expected = SchemaField::arrow_schema(fields);
         let mut reader =
-            StreamReader::try_new(std::io::Cursor::new(&self.batch), None).map_err(|_| {
+            StreamReader::try_new(std::io::Cursor::new(batch), None).map_err(|_| {
                 Report::new(ClientError::UnexpectedReply {
                     request: RequestKind::ReadEmitterBatch,
                 })
@@ -937,20 +1213,20 @@ impl EmitterDelivery {
                 request: RequestKind::ReadEmitterBatch,
             }));
         }
-        let Some(batch) = reader.next() else {
+        let Some(rows) = reader.next() else {
             return Err(Report::new(ClientError::UnexpectedReply {
                 request: RequestKind::ReadEmitterBatch,
             }));
         };
-        let batch = batch.map_err(|_| {
+        let rows = rows.map_err(|_| {
             Report::new(ClientError::UnexpectedReply {
                 request: RequestKind::ReadEmitterBatch,
             })
         })?;
         if reader.next().is_some()
-            || batch.num_rows()
+            || rows.num_rows()
                 != meticulous::ResultExt::assured(
-                    usize::try_from(self.members),
+                    usize::try_from(members),
                     "a u32 row count fits in supported client targets",
                 )
         {
@@ -958,6 +1234,6 @@ impl EmitterDelivery {
                 request: RequestKind::ReadEmitterBatch,
             }));
         }
-        Ok(batch)
+        Ok(rows)
     }
 }

@@ -23,8 +23,9 @@
 //! diagnostic is the state the run was actually in: every scenario still active, which attempt of
 //! it is running, the phase it is in, how long it has been in that phase, and the nodes it holds.
 //! It then asks every live node to stop and waits one [`WATCHDOG_CLEANUP_WINDOW`] for all of them
-//! together, and finally drops the run, which aborts the node tasks the scenario worlds own and
-//! kills the child processes they started.
+//! together, and finally drops the run, which kills the child processes the scenario worlds
+//! started and leaves the nodes they still hold to their keepers. Those nodes end with the
+//! runtime when the process drops it.
 //!
 //! # Why the budget is the length it is
 //!
@@ -48,6 +49,7 @@ use nervix_primitives::sync::{
     blocking::{LazyLock, Mutex},
 };
 use nervix_recovery::Reported as _;
+use nervix_test_environment::TeardownFailures;
 
 use super::{
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
@@ -58,19 +60,17 @@ use super::{
 /// The `timeout-minutes` of the workflow job that runs the scenario suite. A policy input: keep it
 /// in step with the `scenarios` job in `.github/workflows/check.yaml`, which is the emergency guard
 /// outside this budget rather than the mechanism that ends a wedged run.
-const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(60 * 60);
+pub(crate) const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(120 * 60);
 /// The `scenarios` job's setup and instrumented server and CLI build before the suite starts.
-/// The first cold kache 0.28.1 PR run took 11m37s from job start to the scenario binary. Round
-/// that measurement up to 14 minutes so another cold runner has room for setup variation.
-const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(14 * 60);
+/// Run 39656928785 took 13m40s from job start to the binary. Thirty minutes funds twice that
+/// measurement, rounded up, including variation in cold builds and dependency setup.
+const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(30 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
 /// watchdog drives, the dependency containers the suite then stops, and the artifact upload that
-/// follows. The cleanup is bounded by [`WATCHDOG_CLEANUP_WINDOW`], the containers stop in seconds
-/// and the upload measured 2 to 3 seconds with 8 seconds of steps after it, so roughly a minute
-/// and a half is the worst that has been observed and this is some three times that. A policy
-/// input: the conservatism that matters belongs in [`SUITE_SLACK`], which pays for a slow run
-/// rather than for a slow cleanup.
-const SUITE_CLEANUP_RESERVE: Duration = Duration::from_secs(5 * 60);
+/// follows. Cleanup, dependency stop and runtime shutdown can consume four minutes together.
+/// Retain eleven further minutes for coverage export, uploads and bounded cache publication on
+/// a slow runner; those steps share this reserve after a successful run too. A policy input.
+const SUITE_CLEANUP_RESERVE: Duration = Duration::from_secs(15 * 60);
 /// The one budget a whole scenario run has: what the job limit leaves once the work before the
 /// suite and the reserve after it are both paid for.
 pub(crate) const SUITE_BUDGET: Duration =
@@ -81,21 +81,21 @@ pub(crate) const SUITE_BUDGET: Duration =
         },
         None => panic!("the workflow job limit must cover the work that precedes the suite"),
     };
-/// The first split-job PR run completed all attempts in 21m49s, including four retries, with
-/// 88.3% run-slot utilization. The next, passing run took 20m26s with seven retries and 94.3%
-/// utilization. Round the slower complete run up to 22 minutes as the observed suite ceiling.
-const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(22 * 60);
-/// What the budget must leave beyond the slowest healthy suite, so a runner slower than the
-/// measuring one still finishes its own scenarios.
-///
-/// An absolute slack rather than a multiple of the suite, because what stretches a whole-suite run
-/// adds rather than scales: a retry re-runs one scenario, and a loaded runner delays the steps it
-/// is running. Earlier measurements spread over six minutes; retain two and a half times that
-/// variation even as the measured healthy duration grows. A policy input.
-const SUITE_SLACK: Duration = Duration::from_secs(15 * 60);
+/// Run 39569675589 completed 3336 attempts in 34m28s. Round up to 35 minutes for the measured
+/// healthy ceiling. Run 39656928785 completed 2516 attempts in 41 minutes; its progress projects
+/// about 55 minutes for the full inventory, so the measuring runner's speed cannot be assumed.
+const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(35 * 60);
+/// A policy input funding a runner at half the measured throughput, including the broadly
+/// distributed 1.49-times slowdown seen in the independent Syslog run 39654966701.
+const SUITE_HEADROOM_FACTOR: u32 = 2;
+/// Additional time beyond the scaled healthy ceiling for retries and the last active attempts.
+const SUITE_SLACK: Duration = Duration::from_secs(5 * 60);
 const _: () = assert!(
-    match SLOWEST_HEALTHY_SUITE.checked_add(SUITE_SLACK) {
-        Some(bound) => bound.as_nanos() <= SUITE_BUDGET.as_nanos(),
+    match SLOWEST_HEALTHY_SUITE.checked_mul(SUITE_HEADROOM_FACTOR) {
+        Some(scaled) => match scaled.checked_add(SUITE_SLACK) {
+            Some(bound) => bound.as_nanos() <= SUITE_BUDGET.as_nanos(),
+            None => false,
+        },
         None => false,
     },
     "the suite budget must outlast the slowest healthy suite by its slack"
@@ -299,8 +299,9 @@ impl LiveClusterHandle {
     /// Publishes a node whose task has just been spawned.
     ///
     /// The returned registration belongs to that task: the node leaves the registry when the task
-    /// ends, whether it returned, failed, panicked or was aborted. That is what lets the watchdog
-    /// tell a cluster that stopped from one that is still running without owning either.
+    /// ends, whether it returned, failed or panicked, or ended with the runtime. That is what lets
+    /// the watchdog tell a cluster that stopped from one that is still running without owning
+    /// either.
     pub(crate) fn node_started(
         &self,
         name: &str,
@@ -499,7 +500,7 @@ pub(crate) struct WatchdogCleanup {
     pub(crate) elapsed: Duration,
     /// How many nodes were asked to stop.
     pub(crate) asked: usize,
-    /// The clusters still running when the window passed. Dropping the run aborts them.
+    /// The clusters still running when the window passed. They end with the runtime.
     pub(crate) still_live: Vec<LiveCluster>,
 }
 
@@ -639,8 +640,9 @@ impl SuiteWatchdog {
         flush_process_output();
 
         let cleanup = WatchdogCleanup::stop_every_live_node(self.cleanup_window).await;
-        // Dropping the run ends every scenario future the suite still held, which aborts the node
-        // tasks those scenarios own and kills the child processes they started.
+        // Dropping the run ends every scenario future the suite still held, which kills the child
+        // processes those scenarios started and hands the nodes they still hold to keepers. A
+        // node the window could not stop ends when the process drops the runtime.
         drop(run);
         SuiteRun::TimedOut(SuiteTimeout { stall, cleanup })
     }
@@ -650,10 +652,13 @@ impl SuiteWatchdog {
 ///
 /// The run's own result is already known by the time this happens, so the only thing at stake is
 /// whether the process ends in time to report that result itself.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum SuiteTeardown {
-    /// The dependencies stopped, reporting these failures.
-    Stopped(Vec<String>),
+    /// The dependencies stopped, and every one of them was removed.
+    Stopped,
+    /// The dependencies stopped, and these failed to stop or to be removed. Each keeps its report
+    /// until the teardown is printed.
+    Failed(TeardownFailures),
     /// The budget passed with the stop still running, so the suite stopped waiting for it and
     /// left the containers to the runner that owns them.
     Abandoned(Duration),
@@ -666,11 +671,12 @@ impl SuiteTeardown {
     /// dependency is belongs to whoever started it, and what a bounded ending is belongs here.
     pub(crate) async fn bounded<Stop>(stop: Stop) -> Self
     where
-        Stop: Future<Output = Vec<String>>,
+        Stop: Future<Output = Result<(), TeardownFailures>>,
     {
         let deadline = PhaseDeadline::after(DEPENDENCY_SHUTDOWN_BUDGET);
         match deadline.bound(stop).await {
-            BeforeDeadline::Finished(failures) => Self::Stopped(failures),
+            BeforeDeadline::Finished(Ok(())) => Self::Stopped,
+            BeforeDeadline::Finished(Err(failures)) => Self::Failed(failures),
             BeforeDeadline::Passed => Self::Abandoned(DEPENDENCY_SHUTDOWN_BUDGET),
         }
     }
@@ -678,23 +684,22 @@ impl SuiteTeardown {
     /// Whether the teardown both finished and had nothing to report.
     pub(crate) fn is_clean(&self) -> bool {
         match self {
-            Self::Stopped(failures) => failures.is_empty(),
-            Self::Abandoned(_) => false,
+            Self::Stopped => true,
+            Self::Failed(_) | Self::Abandoned(_) => false,
         }
     }
 }
 
 impl fmt::Display for SuiteTeardown {
+    /// One line, whatever the teardown met, so the report the process ends with stays one report.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stopped(failures) if failures.is_empty() => {
+            Self::Stopped => {
                 formatter.write_str("suite dependency teardown stopped every dependency")
             }
-            Self::Stopped(failures) => write!(
-                formatter,
-                "suite dependency teardown failed: {}",
-                failures.join("; ")
-            ),
+            Self::Failed(failures) => {
+                write!(formatter, "suite dependency teardown failed: {failures}")
+            }
             Self::Abandoned(budget) => write!(
                 formatter,
                 "suite dependency teardown did not finish within {budget:?} and was left to the \

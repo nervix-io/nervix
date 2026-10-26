@@ -3,14 +3,14 @@
 use std::{collections::BTreeSet, fmt};
 
 use error_stack::Report;
-use nervix_models::{BackupResources, DomainName, Timestamp};
+use nervix_models::{BackupCut, BackupQuiesceCounters, BackupResources, DomainName, Timestamp};
 
 use crate::{
     error::{ArchiveReadError, ArchiveWriteError},
     path::{MANIFEST_PATH, SectionPath},
     section::{ArchiveRecord, RecordKind, decode_record, encode_record},
     wire::{
-        DomainCaptureWire, ManifestWire, ResourcesWire, ScopeWire, SectionContentWire,
+        CutWire, DomainCaptureWire, ManifestWire, ResourcesWire, ScopeWire, SectionContentWire,
         SectionEntryWire,
     },
 };
@@ -20,14 +20,14 @@ use crate::{
 pub const ARCHIVE_FORMAT_MAJOR: u16 = 1;
 
 /// The manifest record's format version.
-const MANIFEST_VERSION: u16 = 1;
+const MANIFEST_VERSION: u16 = 2;
 
 /// What an archive is and every section it holds, in the order the archive holds them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupManifest {
     /// The Nervix release that wrote the archive.
     pub producer_version: String,
-    /// The NSPL release its `models.nspl` sections are written in.
+    /// The Plexus release its `models.plexus` sections are written in.
     pub language_version: String,
     /// The cluster the archive was taken from.
     pub cluster_id: String,
@@ -59,6 +59,8 @@ pub struct DomainCapture {
     pub revision: u64,
     /// The Raft log entry that revision is.
     pub raft_log: RaftLogPosition,
+    /// The consistency boundary of the domain state in this archive.
+    pub cut: BackupCut,
 }
 
 /// One entry of the Raft log, by the term that wrote it and its index.
@@ -82,18 +84,35 @@ pub struct SectionEntry {
 pub enum SectionContent {
     /// A record this crate owns, behind its header.
     Record(RecordKind),
-    /// Canonical NSPL text.
-    Nspl,
+    /// Canonical Plexus text.
+    Plexus,
     /// The original archive of a resource version, byte for byte.
     ResourceArchive,
+    /// An opaque guest save, whose descriptor is an archive-owned record.
+    WasmGuestBlob,
+    /// One bounded Arrow IPC stream of materialized relay columns.
+    MaterializedColumns,
+    /// One bounded Arrow IPC group of a deduplicator's typed keys and the time each was seen.
+    DeduplicatorKeys,
+    /// One bounded Arrow IPC group of a window's retained input rows.
+    WindowInputRows,
+    /// The aggregate argument columns of the same retained window rows.
+    WindowArgumentColumns,
 }
 
 impl SectionContent {
     /// The largest section of this content a reader accepts, when its kind has a bound of its own.
     pub(crate) fn length_limit(self) -> Option<u64> {
         match self {
+            Self::Record(RecordKind::MaterializedIdentities) => {
+                Some(crate::materialized::MATERIALIZED_IDENTITIES_BYTES)
+            }
             Self::Record(_) => Some(crate::section::MAX_RECORD_BYTES),
-            Self::Nspl | Self::ResourceArchive => None,
+            Self::Plexus | Self::ResourceArchive | Self::WasmGuestBlob => None,
+            Self::MaterializedColumns => Some(crate::materialized::MATERIALIZED_COLUMNS_BYTES),
+            Self::DeduplicatorKeys | Self::WindowInputRows | Self::WindowArgumentColumns => {
+                Some(crate::branch_state::BRANCH_STATE_GROUP_BYTES)
+            }
         }
     }
 }
@@ -171,6 +190,23 @@ impl From<&BackupManifest> for ManifestWire {
                 revision: capture.revision,
                 raft_term: capture.raft_log.term,
                 raft_index: capture.raft_log.index,
+                cut: match capture.cut {
+                    BackupCut::Quiesced {
+                        engaged_at,
+                        released_at,
+                        quiesce,
+                    } => CutWire::Quiesced {
+                        engaged_at_unix_nanos: engaged_at.unix_nanos(),
+                        released_at_unix_nanos: released_at.unix_nanos(),
+                        buffered_records: quiesce.buffered_records,
+                        buffered_bytes: quiesce.buffered_bytes,
+                        dropped_records: quiesce.dropped_records,
+                        rejected_records: quiesce.rejected_records,
+                    },
+                    BackupCut::Live => CutWire::Live,
+                    BackupCut::Stopped => CutWire::Stopped,
+                    BackupCut::ConfigurationOnly => CutWire::ConfigurationOnly,
+                },
             })
             .collect();
         let sections = manifest
@@ -218,6 +254,36 @@ impl BackupManifest {
                     term: capture.raft_term,
                     index: capture.raft_index,
                 },
+                cut: match capture.cut {
+                    CutWire::Quiesced {
+                        engaged_at_unix_nanos,
+                        released_at_unix_nanos,
+                        buffered_records,
+                        buffered_bytes,
+                        dropped_records,
+                        rejected_records,
+                    } => {
+                        if released_at_unix_nanos < engaged_at_unix_nanos {
+                            return Err(Report::new(ArchiveReadError::InvalidValue {
+                                path: MANIFEST_PATH.to_string(),
+                                field: "domain cut interval",
+                            }));
+                        }
+                        BackupCut::Quiesced {
+                            engaged_at: Timestamp::from_unix_nanos(engaged_at_unix_nanos),
+                            released_at: Timestamp::from_unix_nanos(released_at_unix_nanos),
+                            quiesce: BackupQuiesceCounters {
+                                buffered_records,
+                                buffered_bytes,
+                                dropped_records,
+                                rejected_records,
+                            },
+                        }
+                    }
+                    CutWire::Live => BackupCut::Live,
+                    CutWire::Stopped => BackupCut::Stopped,
+                    CutWire::ConfigurationOnly => BackupCut::ConfigurationOnly,
+                },
             });
         }
         let mut sections = Vec::with_capacity(wire.sections.len());
@@ -239,8 +305,13 @@ impl BackupManifest {
                         }));
                     }
                 },
-                SectionContentWire::Nspl => SectionContent::Nspl,
+                SectionContentWire::Plexus => SectionContent::Plexus,
                 SectionContentWire::ResourceArchive => SectionContent::ResourceArchive,
+                SectionContentWire::WasmGuestBlob => SectionContent::WasmGuestBlob,
+                SectionContentWire::MaterializedColumns => SectionContent::MaterializedColumns,
+                SectionContentWire::DeduplicatorKeys => SectionContent::DeduplicatorKeys,
+                SectionContentWire::WindowInputRows => SectionContent::WindowInputRows,
+                SectionContentWire::WindowArgumentColumns => SectionContent::WindowArgumentColumns,
             };
             sections.push(SectionEntry {
                 path,
@@ -275,8 +346,13 @@ impl From<SectionContent> for SectionContentWire {
     fn from(content: SectionContent) -> Self {
         match content {
             SectionContent::Record(kind) => Self::Record { kind: kind.tag() },
-            SectionContent::Nspl => Self::Nspl,
+            SectionContent::Plexus => Self::Plexus,
             SectionContent::ResourceArchive => Self::ResourceArchive,
+            SectionContent::WasmGuestBlob => Self::WasmGuestBlob,
+            SectionContent::MaterializedColumns => Self::MaterializedColumns,
+            SectionContent::DeduplicatorKeys => Self::DeduplicatorKeys,
+            SectionContent::WindowInputRows => Self::WindowInputRows,
+            SectionContent::WindowArgumentColumns => Self::WindowArgumentColumns,
         }
     }
 }

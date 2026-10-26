@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from scripts.ratchet import (
+from scripts.rust_source import (
     RustFile,
     Site,
     generic_arguments,

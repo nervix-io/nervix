@@ -5,6 +5,11 @@
 //! is given. A fixture used by one module belongs in that module's own test module instead.
 //! The runtime's unit tests bind their loopback interconnect through this module as well, so the
 //! TLS material a transport authenticates with is generated in one place.
+//!
+//! The checks every forwarded client stream holds its frames to, which the client producer link
+//! and the client consumer stream properties share, are in [`duplex_frame_checks`].
+
+pub(in crate::application) mod duplex_frame_checks;
 
 use std::{path::PathBuf, time::Duration};
 
@@ -15,14 +20,17 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CommandRequest, SuggestRequest};
 #[cfg(feature = "testing")]
 use nervix_consensus::ConsensusTestProbe;
-use nervix_consensus::{Consensus, ConsensusSettings, Proposer, RaftRetentionPolicy};
+use nervix_consensus::{
+    Consensus, ConsensusSettings, Proposer, RaftRetentionSettings, RaftTimings,
+};
 use nervix_interconnect::{TlsConfigBundle, Transport, TransportClock};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
     CreateEmitter, CreateIngestor, CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig,
-    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource,
-    KafkaOffsetMode, Model, ModelKind, ModelName, NodeEndpoint, NodeRef, NodeServiceUrl,
-    PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint,
+    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, EmitterEntity,
+    IngestorEntity, KafkaIngestor, KafkaOffsetMode, KafkaTopicIngestor, Model, ModelKind,
+    ModelName, NodeEndpoint, NodeRef, NodeServiceUrl, PlacementGroupSchedule, ProcessorInputs,
+    ProcessorOutputs, ScheduledNode, SchemaFingerprint, SyslogCollectorEmitter, SyslogEmitter,
     TransactionLifecycle, TransactionPosition, WasmProcessorLimits,
 };
 use nervix_primitives::{
@@ -45,11 +53,7 @@ use super::{
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
     subscription::{SessionSubscriptions, SubscriptionInterests, SubscriptionSampler},
     tls::HttpsListenerCertificates,
-    transaction::{
-        DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
-        DEFAULT_TRANSACTION_MAX_SOURCE_BYTES, DEFAULT_TRANSACTION_MAX_STATEMENTS,
-        DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-    },
+    transaction::TransactionLimits,
 };
 use crate::{
     ConfiguredFaultInjection, cluster, registry::Registry, resource::ResourceStore,
@@ -263,6 +267,7 @@ fn test_session_service(
         &cluster,
     );
     let subscription_interests = SubscriptionInterests::new(cluster.clone(), runtime.metrics());
+    let transaction_limits = TransactionLimits::default();
     let client_producers = super::client_producers::ClientProducerRouter::new(
         runtime.clone(),
         interconnect.clone(),
@@ -293,14 +298,13 @@ fn test_session_service(
             client_consumers,
             interconnect,
             service_tasks: super::service_tasks::ServiceTasks::default(),
-            configured_basic_auth: None,
             auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
             failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
-            transaction_idle_timeout: DEFAULT_TRANSACTION_IDLE_TIMEOUT,
-            transaction_tombstone_retention: DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
-            transaction_max_statements: DEFAULT_TRANSACTION_MAX_STATEMENTS,
-            transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
-            transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
+            transaction_idle_timeout: transaction_limits.idle_timeout(),
+            transaction_tombstone_retention: transaction_limits.tombstone_retention(),
+            transaction_max_statements: transaction_limits.max_statements(),
+            transaction_max_source_bytes: transaction_limits.max_source_bytes(),
+            transaction_max_open: transaction_limits.max_open(),
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
             command_execution_policy: super::command_execution::CommandExecutionPolicy::default(),
             command_executions: super::command_execution::CommandExecutionOwners::default(),
@@ -310,6 +314,8 @@ fn test_session_service(
             resource_upload_executions: DashMap::with_hasher(RandomState::new()),
             resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             retained_backups: Default::default(),
+            captured_backup_sections: Default::default(),
+            restored_state_uploads: Default::default(),
             restore_archives: Default::default(),
         }),
     }
@@ -336,6 +342,7 @@ pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeNam
             cluster_id: cluster_id.to_string(),
             node_id: node_id.clone(),
             advertised_host: "127.0.0.1".to_string(),
+            join_terms: super::NodeSettings::default().join_terms(),
         },
         tls,
         Default::default(),
@@ -357,7 +364,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             name: named(identifier_raw),
             output_routes: ProcessorOutputs::new(Vec::new()),
             input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-                source: IngestSource::Kafka {
+                source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                     client: named("kafka_main"),
                     topic: named("notifications"),
                     offset_mode: KafkaOffsetMode::Domain,
@@ -370,7 +377,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
                         },
                     },
                     quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                },
+                })),
                 codec: named("events_codec"),
             }),
             timestamp_source: None,
@@ -381,18 +388,20 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
             body: nervix_models::EmitterBody::Values,
-            sink: Box::new(EmitSink::Syslog {
-                client: named("syslog_forwarder"),
-            }),
+            connector: Box::new(EmitterEntity::Syslog(SyslogEmitter::Collector(
+                SyslogCollectorEmitter {
+                    mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
+                        retry_policy: nervix_models::RetryPolicy {
+                            backoff: "1s".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("syslog_forwarder"),
+                },
+            ))),
             batch: None,
             flush_policy: nervix_models::FlushPolicy::Immediate,
             error_policies: nervix_models::ErrorPolicies::handled_by_log(),
-            publishing_mode: nervix_models::EmitterPublishingMode::NoAck {
-                retry_policy: nervix_models::RetryPolicy {
-                    backoff: "1s".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: nervix_models::RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -535,14 +544,18 @@ pub(in crate::application) struct TestService {
 pub(in crate::application) async fn build_test_service(
     create_default_domain_flag: bool,
 ) -> TestService {
-    build_test_service_inner(create_default_domain_flag, None, Runtime::new()).await
+    build_test_service_inner(create_default_domain_flag, None, Runtime::new())
+        .await
+        .0
 }
 
 #[cfg(not(feature = "testing"))]
 pub(in crate::application) async fn build_test_service(
     create_default_domain_flag: bool,
 ) -> TestService {
-    build_test_service_inner(create_default_domain_flag, Runtime::new()).await
+    build_test_service_inner(create_default_domain_flag, Runtime::new())
+        .await
+        .0
 }
 
 /// A service whose runtime admits its work through `executor`, so a test can fill a class the
@@ -558,6 +571,23 @@ pub(in crate::application) async fn build_test_service_with_executor(
         Runtime::with_executor(executor),
     )
     .await
+    .0
+}
+
+/// A service whose runtime consults `fault_injection`, so a test can arm the failures and waits
+/// the service's seams take.
+#[cfg(feature = "testing")]
+pub(in crate::application) async fn build_test_service_with_fault_injection(
+    create_default_domain_flag: bool,
+    fault_injection: crate::FaultInjection,
+) -> TestService {
+    build_test_service_inner(
+        create_default_domain_flag,
+        None,
+        Runtime::with_fault_injection(fault_injection),
+    )
+    .await
+    .0
 }
 
 #[cfg(feature = "testing")]
@@ -565,14 +595,17 @@ pub(in crate::application) async fn build_test_service_with_probe(
     create_default_domain_flag: bool,
     probe: ConsensusTestProbe,
 ) -> TestService {
-    build_test_service_inner(create_default_domain_flag, Some(probe), Runtime::new()).await
+    build_test_service_inner(create_default_domain_flag, Some(probe), Runtime::new())
+        .await
+        .0
 }
 
-async fn build_test_service_inner(
+/// Returns the running consensus owner so a test can join its storage work before removing files.
+pub(in crate::application) async fn build_test_service_inner(
     create_default_domain_flag: bool,
     #[cfg(feature = "testing")] probe: Option<ConsensusTestProbe>,
     runtime: Runtime,
-) -> TestService {
+) -> (TestService, Consensus) {
     let path = test_db_path();
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).expect("test db directory should exist");
@@ -598,10 +631,9 @@ async fn build_test_service_inner(
         interconnect_advertise_addr: interconnect.local_addr().into(),
         interconnect: interconnect.clone(),
         executor: executor.clone(),
-        raft_heartbeat_interval: Duration::from_millis(50),
-        raft_election_timeout_min: Duration::from_millis(150),
-        raft_election_timeout_max: Duration::from_millis(300),
-        raft_retention: RaftRetentionPolicy::default(),
+        raft_timings: RaftTimings::resolve(Some(Duration::from_millis(25)))
+            .expect("the fixture's Raft heartbeat is valid"),
+        raft_retention: RaftRetentionSettings::default(),
     };
     #[cfg(feature = "testing")]
     let consensus = match probe {
@@ -618,14 +650,25 @@ async fn build_test_service_inner(
         .maybe_initialize()
         .await
         .expect("single-node consensus should initialize");
-    if create_default_domain_flag {
-        create_test_domain(&consensus.proposer(), "default").await;
-    }
-    for _ in 0..50 {
+    // Every service a test builds acts as the leader of its single-node consensus, and a loaded
+    // machine can take well over a second to elect it. The fixture waits for that election, bounded
+    // generously at a minute of polls, and fails here rather than hand a test a node that does not
+    // lead yet.
+    let mut leading = false;
+    for _ in 0..3_000 {
+        nervix_primitives::task::consume_budget().await;
         if consensus.observer().current_leader().await.as_ref() == Some(&expected_leader) {
+            leading = true;
             break;
         }
         nervix_primitives::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        leading,
+        "the single-node test consensus did not elect node '{expected_leader}'"
+    );
+    if create_default_domain_flag {
+        create_test_domain(&consensus.proposer(), "default").await;
     }
     let interconnect_addr = interconnect.local_addr();
     let cluster = Arc::new(
@@ -639,7 +682,8 @@ async fn build_test_service_inner(
             bootstrap_host: None,
             recovery_endpoints: Default::default(),
             interconnect: interconnect.clone(),
-            node_unavailability_timeout: Duration::from_secs(10),
+            membership: crate::cluster::MembershipSettings::default(),
+            prerequisites: interconnect.local_prerequisites(),
             fault_injection: Default::default(),
         })
         .await
@@ -656,11 +700,14 @@ async fn build_test_service_inner(
         interconnect,
         runtime,
     );
-    TestService {
-        service,
-        registry,
-        path,
-    }
+    (
+        TestService {
+            service,
+            registry,
+            path,
+        },
+        consensus,
+    )
 }
 
 pub(in crate::application) async fn suggestion_values(

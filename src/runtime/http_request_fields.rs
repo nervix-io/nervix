@@ -10,10 +10,15 @@
 //!   request rejected later reads: its original source record, the materialized state its batch
 //!   was admitted with, and its attempted codec record; and which part of a delivered request is
 //!   payload: its codec record, never its method, target or headers.
-//! - **Depends on.** The emitter's HTTP sink plan, the VM's compile and execute API, the
+//! - **Depends on.** The emitter's HTTP emitter plan, the VM's compile and execute API, the
 //!   vocabulary's HTTP request fields, and the node's planned message errors.
 //! - **Must not know.** Which connector sends the requests, how their bodies are encoded, or when
 //!   the emitter publishes them.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use error_stack::ResultExt as _;
 use nervix_models::{
@@ -59,6 +64,8 @@ pub(in crate::runtime) enum HttpRequestFieldsError {
     HeaderWriteArguments,
     #[error("failed to select the source records of the published rows")]
     SelectSourceRecords,
+    #[error("failed to keep the rows whose HTTP requests are valid")]
+    AcceptedRows,
     #[error("published row {row} has no source record")]
     MissingSourceRecord { row: usize },
     #[error("failed to address the source record of published row {row}")]
@@ -387,7 +394,7 @@ impl CompiledHttpRequestFields {
     /// Compiles the request fields of the HTTP emitter `emitter` against `schemas`.
     pub(in crate::runtime) fn compile(
         emitter: &EmitterName,
-        sink: &HttpSinkPlan,
+        connector: &HttpRequestEmitterPlan,
         request: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
         schemas: HttpRequestSchemas,
         context: RuntimeVmCompileContext<'_>,
@@ -463,26 +470,31 @@ impl CompiledHttpRequestFields {
         if let Some(lookup_binding) = lookup_binding {
             bindings.push(lookup_binding);
         }
-        let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
-            &parsed,
-            request_schema,
-            VmSchemaSensitivity::default(),
-            bindings,
-            context.compile_options(VmCompileOptions {
-                output_mode: VmOutputMode::ExplicitOnly,
-                allow_sensitive_output: false,
-                allow_header_writes: true,
-                ..VmCompileOptions::default()
-            }),
-        )
-        .map_err(|error| {
-            let message = error.current_context().message.clone();
-            error
-                .change_context(HttpRequestFieldsError::Compile {
-                    emitter: emitter.clone(),
-                })
-                .attach_printable(message)
-        })?;
+        let compiled = {
+            let mapping_input = compile_vm_program_with_options_for_bindings_with_sensitivity(
+                &parsed,
+                request_schema,
+                VmSchemaSensitivity::default(),
+                bindings,
+                context.compile_options(VmCompileOptions {
+                    output_mode: VmOutputMode::ExplicitOnly,
+                    allow_sensitive_output: false,
+                    allow_header_writes: true,
+                    ..VmCompileOptions::default()
+                }),
+            );
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let message = error.current_context().message.clone();
+                    error
+                        .change_context(HttpRequestFieldsError::Compile {
+                            emitter: emitter.clone(),
+                        })
+                        .attach_printable(message)
+                }),
+            }
+        }?;
         Ok(Self {
             program: CompiledProgramWithMaterializedInterest {
                 compiled: Arc::new(compiled),
@@ -491,7 +503,7 @@ impl CompiledHttpRequestFields {
                 lookup_hash_maps,
                 error_sites: CompiledMessageErrorSites::new(),
             },
-            origin: sink.origin.clone(),
+            origin: connector.origin.clone(),
             body,
             sites,
             positions,
@@ -512,21 +524,17 @@ impl CompiledHttpRequestFields {
         input: HttpRequestInput,
         side_inputs: &HashMap<String, RuntimeValue>,
         execution_now: Timestamp,
-    ) -> PlannedGeneralResult<PreparedHttpRequests> {
+    ) -> Result<PreparedHttpRequests, PlannedGeneralFailure> {
         let acks = std::mem::take(&mut published.acks);
         let source_input = match &input {
             HttpRequestInput::Published => None,
             HttpRequestInput::Source { records, rows } => match records.selected(rows) {
                 Ok(selected) => Some(selected),
                 Err(error) => {
-                    let error = error.change_context(HttpRequestFieldsError::SelectSourceRecords);
-                    return Err(Report::new(PlannedGeneralError {
-                        acks,
-                        reason: format!(
-                            "emitter '{}' failed to prepare its HTTP requests: {error:#}",
-                            emitter.as_str()
-                        ),
-                    }));
+                    let error = error
+                        .change_context(HttpRequestFieldsError::SelectSourceRecords)
+                        .change_context(PlannedGeneralError::HttpRequests);
+                    return Err(PlannedGeneralFailure::new(error, acks));
                 }
             },
         };
@@ -546,8 +554,6 @@ impl CompiledHttpRequestFields {
                 executor,
                 now: execution_now,
             },
-            "emitter",
-            emitter,
             &self.program,
             FilterMapBatchInputs {
                 carrier: &published.batch,
@@ -569,13 +575,8 @@ impl CompiledHttpRequestFields {
         let fields = match self.evaluated_fields(&evaluated, &invocations) {
             Ok(fields) => fields,
             Err(error) => {
-                return Err(Report::new(PlannedGeneralError {
-                    acks,
-                    reason: format!(
-                        "emitter '{}' failed to read its HTTP request fields: {error:#}",
-                        emitter.as_str()
-                    ),
-                }));
+                let error = error.change_context(PlannedGeneralError::HttpRequests);
+                return Err(PlannedGeneralFailure::new(error, acks));
             }
         };
         let state_snapshot = relay_state_snapshot_from_side_inputs(side_inputs);
@@ -594,16 +595,7 @@ impl CompiledHttpRequestFields {
             };
             let source_record = match input.source_record(&published, row) {
                 Ok(source_record) => source_record,
-                Err(error) => {
-                    return Err(batch_failure(
-                        acks,
-                        message_errors,
-                        format!(
-                            "emitter '{}' failed to report a rejected HTTP request: {error:#}",
-                            emitter.as_str()
-                        ),
-                    ));
-                }
+                Err(error) => return Err(batch_failure(acks, message_errors, error)),
             };
             let partial_output = match input.publishes_codec_records() {
                 true => finalized_partial_output(&published.batch, row),
@@ -637,31 +629,16 @@ impl CompiledHttpRequestFields {
         }
         let sources = match input.admitted(&accepted_rows) {
             Ok(sources) => sources,
-            Err(error) => {
-                return Err(batch_failure(
-                    acks,
-                    message_errors,
-                    format!(
-                        "emitter '{}' failed to keep the source records of its HTTP requests: \
-                         {error:#}",
-                        emitter.as_str()
-                    ),
-                ));
-            }
+            Err(error) => return Err(batch_failure(acks, message_errors, error)),
         };
         published.acks = acks;
         let batch = match published.take(&accepted_rows) {
             Ok(batch) => batch,
             Err(failure) => {
-                return Err(batch_failure(
-                    failure.preserved,
-                    message_errors,
-                    format!(
-                        "emitter '{}' failed to keep the rows whose HTTP requests are valid: {:#}",
-                        emitter.as_str(),
-                        failure.error
-                    ),
-                ));
+                let error = failure
+                    .error
+                    .change_context(HttpRequestFieldsError::AcceptedRows);
+                return Err(batch_failure(failure.preserved, message_errors, error));
             }
         };
         Ok(PreparedHttpRequests {
@@ -835,17 +812,20 @@ impl CompiledHttpRequestFields {
     }
 }
 
-/// The general error that fails a whole batch. It owns the acknowledgements of every row, including
-/// those of the rows already rejected into `message_errors`.
+/// The general failure that fails a whole batch. It owns the acknowledgements of every row,
+/// including those of the rows already rejected into `message_errors`.
 fn batch_failure(
     mut acks: Vec<AckSet>,
     message_errors: Vec<PlannedMessageError>,
-    reason: String,
-) -> Report<PlannedGeneralError> {
+    error: Report<HttpRequestFieldsError>,
+) -> PlannedGeneralFailure {
     for planned in message_errors {
         acks.push(planned.message.acks);
     }
-    Report::new(PlannedGeneralError { acks, reason })
+    PlannedGeneralFailure::new(
+        error.change_context(PlannedGeneralError::HttpRequests),
+        acks,
+    )
 }
 
 /// The value of one row of a string column a request field was evaluated into, or `absent` when
@@ -924,6 +904,10 @@ impl RequestFieldSites {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_connector::ResolvedClientConfig;
 
@@ -1005,12 +989,12 @@ mod tests {
         (batch, completions)
     }
 
-    struct HttpSinkTestPlan {
-        sink: HttpSinkPlan,
+    struct HttpRequestEmitterTestPlan {
+        connector: HttpRequestEmitterPlan,
         request: nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     }
 
-    fn sink(method: &str, path: &str, header_writes: &str) -> HttpSinkTestPlan {
+    fn connector(method: &str, path: &str, header_writes: &str) -> HttpRequestEmitterTestPlan {
         use nervix_models::{Assignment, AssignmentTarget};
 
         let construction = RouteConstruction {
@@ -1032,8 +1016,8 @@ mod tests {
             SemanticScopePolicy::read_write("message", HTTP_REQUEST_NAMESPACE),
         )
         .expect("the test request fields must lower");
-        HttpSinkTestPlan {
-            sink: HttpSinkPlan {
+        HttpRequestEmitterTestPlan {
+            connector: HttpRequestEmitterPlan {
                 client: EmitterClientSpec {
                     name: named("api"),
                     config: ResolvedClientConfig::default(),
@@ -1046,7 +1030,7 @@ mod tests {
     }
 
     fn compile(
-        plan: &HttpSinkTestPlan,
+        plan: &HttpRequestEmitterTestPlan,
         output: Option<Arc<CompiledSchema>>,
     ) -> CompiledHttpRequestFields {
         let source = source_schema();
@@ -1059,7 +1043,7 @@ mod tests {
         });
         CompiledHttpRequestFields::compile(
             &named("deliver"),
-            &plan.sink,
+            &plan.connector,
             &plan.request,
             HttpRequestSchemas {
                 input: RuntimeVmSchema {
@@ -1084,14 +1068,14 @@ mod tests {
         let materialized = HashMap::default();
         let lookups = HashMap::default();
         let branching = ResolvedBranching::unbranched();
-        let plan = sink(
+        let plan = connector(
             "input.divisor",
             "'/events'",
             "INVOKE write_header('X-Test', 'value')",
         );
         let report = CompiledHttpRequestFields::compile(
             &named("deliver"),
-            &plan.sink,
+            &plan.connector,
             &plan.request,
             HttpRequestSchemas {
                 input: RuntimeVmSchema {
@@ -1136,7 +1120,7 @@ mod tests {
     #[nervix_primitives::test]
     async fn each_row_is_rejected_at_its_first_failed_field_and_the_rest_keep_their_requests() {
         let compiled = compile(
-            &sink(
+            &connector(
                 "input.method",
                 "concat(input.path, repeat('a', input.padding))",
                 "INVOKE write_header('X-Id', input.id), write_header(input.header_name, \
@@ -1339,7 +1323,7 @@ mod tests {
             ("payload", ParseAsType::String),
         ]);
         let compiled = compile(
-            &sink(
+            &connector(
                 "'PUT'",
                 "concat('/v1/', output.payload, '/', id)",
                 "INVOKE write_header('X-Source', input.method), write_header('X-Message', \

@@ -19,18 +19,18 @@ Feature: Emitter batch containers
         "event.proto": "syntax = \"proto3\";\npackage nervix.test;\n\nmessage Event {\n  int64 seq = 1;\n  string note = 2;\n}\n\nmessage EventBatch {\n  repeated Event events = 1;\n}\n\nmessage EventEnvelope {\n  uint32 count = 1;\n  repeated Event records = 2;\n}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "containers_{{test_id}}" exists with 1 partitions
     And Kafka topic "containers_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE proto_bundle;
       UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE WIRE JSON SCHEMA event_json_wire MODE STRICT ( seq integer, note string );
@@ -73,8 +73,8 @@ Feature: Emitter batch containers
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
         INHERIT ALL
@@ -82,78 +82,78 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER record_json FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER record_json FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING json_codec
         INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_json_wire FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_json_wire FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING json_wire_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_cbor_wire FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_cbor_wire FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING cbor_wire_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_avro_wire FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_avro_wire FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING avro_wire_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_json FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_json FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING json_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_yaml FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_yaml FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING yaml_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_toml FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_toml FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING toml_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_cbor FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_cbor FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING cbor_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_xml FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_xml FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING xml_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_proto FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_proto FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING proto_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER batch_proto_envelope FROM events
-        TO KAFKA kafka_main TOPIC containers_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER batch_proto_envelope FROM events
+        TO kafka_main TOPIC 'containers_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING proto_envelope_codec
         INHERIT ALL
@@ -174,7 +174,7 @@ Feature: Emitter batch containers
       hex:83bf6373657101646e6f74656161ffbf6373657102646e6f74656162ffbf6373657103646e6f74656163ff
       hex:0602026104026206026300
       text:[{"seq": 1, "note": "a"}, {"seq": 2, "note": "b"}, {"seq": 3, "note": "c"}]
-      hex:5b7b7365713a20312c206e6f74653a20617d2c207b7365713a20322c206e6f74653a20627d2c207b7365713a20332c206e6f74653a20637d5d0a
+      text:[{"seq": 1, "note": "a"}, {"seq": 2, "note": "b"}, {"seq": 3, "note": "c"}]
       hex:5b5b62617463685d5d0a736571203d20310a6e6f7465203d202261220a0a5b5b62617463685d5d0a736571203d20320a6e6f7465203d202262220a0a5b5b62617463685d5d0a736571203d20330a6e6f7465203d202263220a
       hex:83a26373657101646e6f74656161a26373657102646e6f74656162a26373657103646e6f74656163
       hex:3c62617463683e3c6576656e74207365713d223122206e6f74653d2261222f3e3c6576656e74207365713d223222206e6f74653d2262222f3e3c6576656e74207365713d223322206e6f74653d2263222f3e3c2f62617463683e
@@ -192,13 +192,13 @@ Feature: Emitter batch containers
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "transformed_{{test_id}}" exists with 1 partitions
     And Kafka topic "transformed_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA rich_event ( seq I64, tags <tags_type>, blob BYTES );
       CREATE CODEC ingest_codec FROM JSON TO SCHEMA rich_event
@@ -220,8 +220,8 @@ Feature: Emitter batch containers
       CREATE RELAY events SCHEMA rich_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
         INHERIT ALL
@@ -229,30 +229,30 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER identity_batches FROM events
-        TO KAFKA kafka_main TOPIC transformed_{{test_id}}
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER identity_batches FROM events
+        TO kafka_main TOPIC 'transformed_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING identity_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER mapped_batches FROM events
-        TO KAFKA kafka_main TOPIC transformed_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER mapped_batches FROM events
+        TO kafka_main TOPIC 'transformed_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING map_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER enveloped_batches FROM events
-        TO KAFKA kafka_main TOPIC transformed_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER enveloped_batches FROM events
+        TO kafka_main TOPIC 'transformed_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING envelope_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER expanded_batches FROM events
-        TO KAFKA kafka_main TOPIC transformed_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER expanded_batches FROM events
+        TO kafka_main TOPIC 'transformed_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING expansion_codec
         INHERIT ALL
@@ -288,18 +288,18 @@ Feature: Emitter batch containers
         "event.proto": "syntax = \"proto3\";\npackage nervix.test;\n\nmessage Event {\n  int64 seq = 1;\n  string note = 2;\n}\n\nmessage EventBatch {\n  repeated Event events = 1;\n}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "json_batches_{{test_id}}" exists with 1 partitions
     And Kafka topic "proto_batches_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE proto_bundle;
       UPLOAD RESOURCE proto_bundle VERSION '{{proto_dir}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA echoed_event ( seq I64, note STRING, path STRING );
@@ -324,8 +324,8 @@ Feature: Emitter batch containers
       CREATE RELAY echoed SCHEMA echoed_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_batch_codec
         TO events
         INHERIT ALL
@@ -333,27 +333,27 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE EMITTER json_batches FROM events
-        TO KAFKA kafka_main TOPIC json_batches_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER json_batches FROM events
+        TO kafka_main TOPIC 'json_batches_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING json_batch_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER proto_batches FROM events
-        TO KAFKA kafka_main TOPIC proto_batches_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER proto_batches FROM events
+        TO kafka_main TOPIC 'proto_batches_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING proto_batch_codec
         INHERIT ALL
         BATCH MAX MESSAGES 10 MAX SIZE 1KiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE INGESTOR json_batch_source
-        FROM KAFKA kafka_main TOPIC json_batches_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_json_batches_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR json_batch_source
+        FROM kafka_main TOPIC 'json_batches_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_json_batches_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING json_batch_codec
         TO echoed
@@ -363,9 +363,9 @@ Feature: Emitter batch containers
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR proto_batch_source
-        FROM KAFKA kafka_main TOPIC proto_batches_{{test_id}}
-        OFFSET BY CONSUMER GROUP nervix_cucumber_proto_batches_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR proto_batch_source
+        FROM kafka_main TOPIC 'proto_batches_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_proto_batches_{{test_id}}'
         MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING proto_batch_reader
         TO echoed
@@ -402,13 +402,13 @@ Feature: Emitter batch containers
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "subdivided_{{test_id}}" exists with 1 partitions
     And Kafka topic "subdivided_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event (
@@ -427,8 +427,8 @@ Feature: Emitter batch containers
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
         INHERIT ALL
@@ -436,9 +436,9 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER subdivided FROM events
-        TO KAFKA kafka_main TOPIC subdivided_{{test_id}}
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER subdivided FROM events
+        TO kafka_main TOPIC 'subdivided_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING padded_pairs_codec
         INHERIT ALL
@@ -482,13 +482,13 @@ Feature: Emitter batch containers
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "failed_batches_{{test_id}}" exists with 1 partitions
     And Kafka topic "failed_batches_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event (
@@ -506,8 +506,8 @@ Feature: Emitter batch containers
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
         INHERIT ALL
@@ -515,9 +515,9 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER failing_batches FROM events
-        TO KAFKA kafka_main TOPIC failed_batches_{{test_id}}
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER failing_batches FROM events
+        TO kafka_main TOPIC 'failed_batches_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING failing_codec
         INHERIT ALL
@@ -561,13 +561,13 @@ Feature: Emitter batch containers
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "syslog_frames_{{test_id}}" exists with 1 partitions
     And Kafka topic "syslog_frames_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA syslog_event (
         facility U8,
@@ -581,8 +581,8 @@ Feature: Emitter batch containers
       CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO syslog_events
         INHERIT ALL
@@ -590,9 +590,9 @@ Feature: Emitter batch containers
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
-      CREATE EMITTER syslog_frames FROM syslog_events
-        TO KAFKA kafka_main TOPIC syslog_frames_{{test_id}}
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE KAFKA TOPIC EMITTER syslog_frames FROM syslog_events
+        TO kafka_main TOPIC 'syslog_frames_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING syslog_codec
         INHERIT ALL

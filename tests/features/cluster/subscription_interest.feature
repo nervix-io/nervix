@@ -2,19 +2,19 @@ Feature: Gossip subscription interest
   Scenario: Published interest starts, reopens, and stops remote subscription fan-out
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
@@ -22,8 +22,8 @@ Feature: Gossip subscription interest
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE VHOST edge subscription-interest-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor
-        FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor
+        FROM event_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO events
         INHERIT ALL
@@ -38,7 +38,7 @@ Feature: Gossip subscription interest
       """
       - domain={{domain}} kind=relay name=events owner=node-1
       """
-    When these NSPL commands are executed on node "node-3"
+    When these Plexus commands are executed on node "node-3"
       """
       CREATE SUBSCRIPTION remote_events TO events;
       """
@@ -50,7 +50,7 @@ Feature: Gossip subscription interest
       """
       {"id":1}
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       DELETE SUBSCRIPTION remote_events;
       CREATE SUBSCRIPTION remote_events TO events;
@@ -63,7 +63,7 @@ Feature: Gossip subscription interest
       """
       {"id":2}
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       DELETE SUBSCRIPTION remote_events;
       """

@@ -6,6 +6,11 @@
 //! - **Depends on.** Vocabulary Models, the domain activation plan and the VM frontend.
 //! - **Must not know.** Runtime delivery tasks, node-local VM bindings or relay services.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     CodecName, DomainName, FlushPolicy, IngestorInput, MessageErrorPolicy, Model, NodeRef,
@@ -310,6 +315,10 @@ impl MessageErrorRouteSpecs {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{DomainName, ModelKind, ModelName, ParseAsType, SchemaField, Statement};
 
@@ -328,7 +337,7 @@ mod tests {
     }
 
     fn parsed_model(source: &str) -> Model {
-        let statement = nervix_nspl::server_statement::parse_server_statement(source)
+        let statement = nervix_plexus::server_statement::parse_server_statement(source)
             .expect("test model should parse");
         let Statement::Create(create) = statement else {
             panic!("test source should create a model");
@@ -345,7 +354,7 @@ mod tests {
     fn with_dlq(mut model: Model) -> Model {
         let policy = MessageErrorPolicy::Dlq {
             relay: named("errors"),
-            assignments: nervix_nspl::parse_route_construction(
+            assignments: nervix_plexus::parse_route_construction(
                 "SET value = error.code, operation = error.operation",
             )
             .expect("error assignments should parse")
@@ -409,7 +418,7 @@ mod tests {
                 "events",
                 "out",
             )),
-            with_dlq(emitter("sink", "events", "json", "broker")),
+            with_dlq(emitter("emitter", "events", "json", "broker")),
             with_dlq(parsed_model(
                 "CREATE REORDERER order_events FROM events BY input.value MAX TIME 10s UNBRANCHED \
                  TO out INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",

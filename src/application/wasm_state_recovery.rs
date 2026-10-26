@@ -8,6 +8,14 @@
 //! - **Must not know.** Guest memory, snapshot bytes, or how a branch discovered its state was
 //!   refused.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_interconnect::{
     RecoverWasmProcessorStateRequest, RecoverWasmProcessorStateResponse, RemoteOperationSubject,

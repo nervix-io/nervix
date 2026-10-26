@@ -7,6 +7,11 @@
 //! - **Depends on.** The Models a mutation carries and the graph it is planned against.
 //! - **Must not know.** How the store persists a plan or how the runtime applies it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::{HashMap, HashSet};
 use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
@@ -48,6 +53,13 @@ pub(crate) enum RegistryMutation<Version = u64> {
 
 #[derive(Debug, Error)]
 #[error("the statement is not a model mutation")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "statement conversion returns the ordinary not-a-mutation outcome"
+    )
+)]
 pub(crate) struct RegistryMutationConversionError;
 
 impl TryFrom<&Statement> for RegistryMutation<RequestedResourceVersion> {

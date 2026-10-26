@@ -3,7 +3,12 @@
 //! Layer: data plane.
 //! - **Owns.** Typed lookup-call keys, pending calls and result-column construction.
 //! - **Depends on.** Compiled expressions, Arrow values and resource lookups.
-//! - **Must not know.** NSPL parsing, scheduling or connector lifecycle.
+//! - **Must not know.** Plexus parsing, scheduling or connector lifecycle.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use super::*;
 
@@ -365,19 +370,22 @@ pub(super) fn rewrite_lookup_hash_map_expr(
                         span: expr.span,
                     }));
                 };
-                let lookup_field_type = lookup_runtime
-                    .schema
-                    .arrow_schema()
-                    .field_with_name(&lookup_field)
-                    .map(|field| field.data_type().clone())
-                    .map_err(|error| {
-                        Report::new(LookupHashMapError::FieldUnavailable {
+                let lookup_field_type = {
+                    let mapping_input = lookup_runtime
+                        .schema
+                        .arrow_schema()
+                        .field_with_name(&lookup_field)
+                        .map(|field| field.data_type().clone());
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err(Report::new(LookupHashMapError::FieldUnavailable {
                             lookup: lookup.clone(),
                             field: lookup_field.clone(),
                             span: expr.span,
                         })
-                        .attach_printable(error)
-                    })?;
+                        .attach_printable(error)),
+                    }
+                }?;
                 // Deduplication over the calls lowered so far in this one program. The
                 // comparison includes the key expression, which has no hash or ordering, so the
                 // bound is the LOOKUP_HASH_MAP calls written in the program being compiled.
@@ -588,6 +596,10 @@ pub(super) fn compile_lookup_hash_map_calls(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use ahash::HashMap;
     use nervix_models::{CreateSchema, ModelName, ParseAsType};
@@ -682,10 +694,7 @@ mod tests {
             ],
         }));
         let program = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("project_titles"),
-            },
+            &named("project_titles"),
             &[named("incoming_logs")],
             &named("projected_titles"),
             &construction(
@@ -714,10 +723,7 @@ mod tests {
         assert_eq!(program.lookup_hash_maps.len(), 2);
 
         let binary_key = compile_processor_output_filter_map_program(
-            RuntimeCompileTarget {
-                domain: &domain("default"),
-                identifier: &named("project_titles"),
-            },
+            &named("project_titles"),
             &[named("incoming_logs")],
             &named("projected_titles"),
             &construction(

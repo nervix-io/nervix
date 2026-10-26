@@ -2,11 +2,11 @@ Feature: Route-local value construction
   Scenario Outline: Transforming routes explicitly inherit and construct output in order
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA source_event (
         id STRING,
@@ -33,8 +33,8 @@ Feature: Route-local value construction
       CREATE RELAY projected_events SCHEMA projected_event UNBRANCHED;
       CREATE VHOST edge value-construction-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
         TO source_events
           INHERIT ALL
@@ -79,11 +79,11 @@ Feature: Route-local value construction
   Scenario Outline: Header-capable ingestor error routes read the source envelope and follow FLUSH
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA header_calculation (
         id STRING,
@@ -111,8 +111,8 @@ Feature: Route-local value construction
       CREATE RELAY header_calculation_errors SCHEMA header_calculation_error UNBRANCHED;
       CREATE VHOST edge header-error-{{test_id}}.example.com;
       CREATE ENDPOINT header_calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE INGESTOR header_calculation_source
-        FROM ENDPOINT header_calculation_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR header_calculation_source
+        FROM header_calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING header_calculation_codec
         TO header_calculation_results
           SET id = input.id,
@@ -144,11 +144,11 @@ Feature: Route-local value construction
   Scenario Outline: Error routes expose typed error metadata and captured construction state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA calculation (
         id STRING,
@@ -186,8 +186,8 @@ Feature: Route-local value construction
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge error-construction-{{test_id}}.example.com;
       CREATE ENDPOINT calculation_ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE INGESTOR calculation_source
-        FROM ENDPOINT calculation_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR calculation_source
+        FROM calculation_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations
           INHERIT ALL

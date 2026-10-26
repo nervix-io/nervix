@@ -3,7 +3,7 @@ Feature: Cluster scheduling
     Given runtime replication is configured with replica count 1 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( id I64 );
@@ -23,12 +23,12 @@ Feature: Cluster scheduling
 
   Scenario Outline: All nodes can be terminated with an active session
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -42,11 +42,11 @@ Feature: Cluster scheduling
   @random_scheduler
   Scenario: The default three-node test scheduler executes a graph across node boundaries
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( id I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( id integer );
@@ -68,7 +68,7 @@ Feature: Cluster scheduling
       CREATE RELAY stage_12 SCHEMA event BRANCHED BY by_event;
       CREATE VHOST edge random-scheduler-{{test_id}}.example.com;
       CREATE ENDPOINT event_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_ingestor FROM ENDPOINT event_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO stage_0 INHERIT ALL BRANCHED BY by_event SET id = message.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR event_ingestor FROM event_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec TO stage_0 INHERIT ALL BRANCHED BY by_event SET id = message.id FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE DEDUPLICATOR hop_1 FROM stage_0 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_1 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR hop_2 FROM stage_1 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_2 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       CREATE DEDUPLICATOR hop_3 FROM stage_2 DEDUPLICATE ON input.id MAX TIME 10m BRANCHED BY by_event TO stage_3 INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
@@ -95,14 +95,14 @@ Feature: Cluster scheduling
       "id":42
       """
 
-  Scenario: Followers reject non-subscription NSPL commands
+  Scenario: Followers reject non-subscription Plexus commands
     Given a 2 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands fail on a follower node with "not-a-leader"
+    When these Plexus commands fail on a follower node with "not-a-leader"
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -111,12 +111,12 @@ Feature: Cluster scheduling
 
   Scenario: Client forwards follower commands to the leader
     Given a 2 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on a follower node
+    When these Plexus commands are executed through the client on a follower node
       """
       CREATE SCHEMA forwarded_event ( id I64 );
       CREATE RELAY forwarded_events SCHEMA forwarded_event UNBRANCHED;
@@ -126,7 +126,7 @@ Feature: Cluster scheduling
       """
       current_leader:
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE RELAY forwarded_events;
       """
@@ -137,14 +137,14 @@ Feature: Cluster scheduling
 
   Scenario Outline: Leadership loss after command admission returns a leader redirect
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then the current leader node is saved as placeholder "admitted_leader"
     And a node other than placeholder "admitted_leader" is saved as placeholder "successor"
     Given command admission on node "{{admitted_leader}}" pauses before proposal
-    When this NSPL command request begins executing in the background on the leader node
+    When this Plexus command request begins executing in the background on the leader node
       """
       <mutation>
       """
@@ -154,7 +154,7 @@ Feature: Cluster scheduling
     And node "{{admitted_leader}}" eventually reports leader "{{successor}}"
     When the command admission pause on node "{{admitted_leader}}" is released
     Then the background command request is rejected with a redirect to node "{{successor}}"
-    When these NSPL commands are executed through the client on a follower node
+    When these Plexus commands are executed through the client on a follower node
       """
       <mutation>
       <inspection>
@@ -173,13 +173,13 @@ Feature: Cluster scheduling
   Scenario: Scheduled deduplicators receive relay traffic across nodes
     Given Kafka is running
     Given a 2 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -199,13 +199,12 @@ Feature: Cluster scheduling
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
       CREATE RELAY forwarded_notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
-        }; CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        }; CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -226,7 +225,7 @@ Feature: Cluster scheduling
 
       START;
       """
-    And these NSPL commands are executed on node "node-2"
+    And these Plexus commands are executed on node "node-2"
       """
       CREATE SUBSCRIPTION forwarded_notifications_subscription TO forwarded_notifications;
       """
@@ -241,14 +240,14 @@ Feature: Cluster scheduling
 
   Scenario: Describe relay forwards to the scheduled owner node
     Given a 2 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -267,8 +266,8 @@ Feature: Cluster scheduling
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -282,7 +281,7 @@ Feature: Cluster scheduling
       """
       DESCRIBE RELAY notifications WHERE (user_id = 42);
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -298,7 +297,7 @@ Feature: Cluster scheduling
   Scenario: Describe deduplicator on the leader reports scheduled owner metrics
     Given Kafka is running
     Given a 2 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -306,7 +305,7 @@ Feature: Cluster scheduling
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
     Then the current leader node is saved as placeholder "leader"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CORDON NODE {{leader}};
 
@@ -334,15 +333,14 @@ Feature: Cluster scheduling
 
       CREATE RELAY routed_logs SCHEMA notification BRANCHED BY by_source_logs;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE INGESTOR source_logs
-        FROM KAFKA kafka_main TOPIC deduplicator_describe_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_deduplicator_describe_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+      CREATE KAFKA TOPIC INGESTOR source_logs
+        FROM kafka_main TOPIC 'deduplicator_describe_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_deduplicator_describe_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
         INHERIT ALL
@@ -372,7 +370,7 @@ Feature: Cluster scheduling
       """
     Then the last cluster status owner for scheduled "deduplicator" "remote_deduplicator" is saved as placeholder "deduplicator_owner"
     And within "5s" node "{{leader}}" eventually reports scheduled "deduplicator" "remote_deduplicator" owner different from placeholder "leader"
-    When these NSPL commands are executed on node "node-2"
+    When these Plexus commands are executed on node "node-2"
       """
       CREATE SUBSCRIPTION routed_logs_subscription TO routed_logs;
       """
@@ -384,7 +382,7 @@ Feature: Cluster scheduling
       """
       "id":42
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE DEDUPLICATOR remote_deduplicator;
       """
@@ -401,7 +399,7 @@ Feature: Cluster scheduling
     Given Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -409,12 +407,12 @@ Feature: Cluster scheduling
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         id I64,
@@ -438,15 +436,14 @@ Feature: Cluster scheduling
 
       CREATE RELAY routed_logs SCHEMA notification BRANCHED BY by_source_logs;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE INGESTOR source_logs
-        FROM KAFKA kafka_main TOPIC scheduled_dedup_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_scheduled_dedup_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+      CREATE KAFKA TOPIC INGESTOR source_logs
+        FROM kafka_main TOPIC 'scheduled_dedup_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_scheduled_dedup_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
         INHERIT ALL
@@ -456,7 +453,7 @@ Feature: Cluster scheduling
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       DRAIN NODE node-1;
@@ -466,12 +463,12 @@ Feature: Cluster scheduling
       """
       - domain={{domain}} kind=ingestor name=source_logs owner=node-2
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       CORDON NODE node-2;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DEDUPLICATOR remote_deduplicator FROM incoming_logs
         DEDUPLICATE ON input.id
@@ -482,7 +479,7 @@ Feature: Cluster scheduling
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -494,11 +491,11 @@ Feature: Cluster scheduling
       """
       - domain={{domain}} kind=deduplicator name=remote_deduplicator owner=node-1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
-    And these NSPL commands are executed on node "node-3"
+    And these Plexus commands are executed on node "node-3"
       """
       CREATE SUBSCRIPTION routed_logs_subscription TO routed_logs;
       """
@@ -518,7 +515,7 @@ Feature: Cluster scheduling
       """
       "id":7
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE DEDUPLICATOR remote_deduplicator;
       """
@@ -537,7 +534,7 @@ Feature: Cluster scheduling
 
   Scenario: All nodes report describe relay for a branched HTTP relay
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -548,7 +545,7 @@ Feature: Cluster scheduling
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
     And node "node-3" eventually reports interconnect to "node-1" as "connected"
     And node "node-3" eventually reports interconnect to "node-2" as "connected"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -567,8 +564,8 @@ Feature: Cluster scheduling
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -590,7 +587,7 @@ Feature: Cluster scheduling
       """
       DESCRIBE RELAY notifications WHERE (user_id = 42);
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
@@ -614,7 +611,7 @@ Feature: Cluster scheduling
   Scenario: Attached ACK propagates back across nodes
     Given Kafka is running
     Given a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -622,7 +619,7 @@ Feature: Cluster scheduling
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -636,14 +633,13 @@ Feature: Cluster scheduling
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 2s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -652,7 +648,7 @@ Feature: Cluster scheduling
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -674,9 +670,10 @@ Feature: Cluster scheduling
   @planned-ingestor-handoff
   Scenario: A planned Kafka ingestor handoff drains attached ACKs from two branches
     Given Kafka is running
+    And entity gate deadline is configured as "120s"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -684,12 +681,12 @@ Feature: Cluster scheduling
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -703,14 +700,13 @@ Feature: Cluster scheduling
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -720,7 +716,7 @@ Feature: Cluster scheduling
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -728,7 +724,7 @@ Feature: Cluster scheduling
       """
       - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-1
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       DRAIN NODE node-1;
@@ -738,20 +734,20 @@ Feature: Cluster scheduling
       """
       - domain={{domain}} kind=ingestor name=kafka_notifications owner=node-2
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       CORDON NODE node-2;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      CREATE EMITTER kafka_forward FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE KAFKA TOPIC EMITTER kafka_forward FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -759,7 +755,7 @@ Feature: Cluster scheduling
       """
       - domain={{domain}} kind=emitter name=kafka_forward owner=node-1
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-3;
       DRAIN NODE node-1;
@@ -773,14 +769,9 @@ Feature: Cluster scheduling
       """
       - domain={{domain}} kind=emitter name=kafka_forward owner=node-3
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION notifications_subscription TO notifications;
-      START;
-      """
-    Then within "10s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
-      """
-      status: running
       """
     When emitter "kafka_forward" enters stall mode
     And Kafka message is published to topic "notifications_{{test_id}}"
@@ -791,14 +782,22 @@ Feature: Cluster scheduling
       """
       {"user_id":84}
       """
-    Then within "10s" the relay subscription receives payloads
+    When these Plexus commands are executed on the leader node
+      """
+      START;
+      """
+    Then within "10s" DESCRIBE INGESTOR "kafka_notifications" on the leader node contains
+      """
+      status: running
+      """
+    And within "10s" the relay subscription receives payloads
       """
       "user_id":42
       "user_id":84
       """
     And the observed broker does not receive a payload within "1s"
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
       DRAIN NODE node-2;
       """
@@ -810,13 +809,13 @@ Feature: Cluster scheduling
       "user_id":84
       """
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And the last command output contains
       """
       quiesce level: ENTITY_PAUSE
       - kind=ingestor name=kafka_notifications from=node-2 to=
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -831,7 +830,7 @@ Feature: Cluster scheduling
     Given Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -839,12 +838,12 @@ Feature: Cluster scheduling
     And node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         id I64,
@@ -868,15 +867,14 @@ Feature: Cluster scheduling
 
       CREATE RELAY routed_logs SCHEMA notification BRANCHED BY by_source_logs;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE INGESTOR source_logs
-        FROM KAFKA kafka_main TOPIC moved_dedup_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_moved_dedup_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+      CREATE KAFKA TOPIC INGESTOR source_logs
+        FROM kafka_main TOPIC 'moved_dedup_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_moved_dedup_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO incoming_logs
         INHERIT ALL
@@ -886,7 +884,7 @@ Feature: Cluster scheduling
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       DRAIN NODE node-1;
@@ -896,12 +894,12 @@ Feature: Cluster scheduling
       """
       - domain={{domain}} kind=ingestor name=source_logs owner=node-2
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       CORDON NODE node-2;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DEDUPLICATOR remote_deduplicator FROM incoming_logs
         DEDUPLICATE ON input.id
@@ -912,7 +910,7 @@ Feature: Cluster scheduling
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
@@ -920,11 +918,11 @@ Feature: Cluster scheduling
       """
       - domain={{domain}} kind=deduplicator name=remote_deduplicator owner=node-1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START;
       """
-    And these NSPL commands are executed on node "node-3"
+    And these Plexus commands are executed on node "node-3"
       """
       CREATE SUBSCRIPTION routed_logs_subscription TO routed_logs;
       """
@@ -936,7 +934,7 @@ Feature: Cluster scheduling
       """
       "id":42
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-3;
       DRAIN NODE node-1;
@@ -950,7 +948,7 @@ Feature: Cluster scheduling
       """
       - domain={{domain}} kind=deduplicator name=remote_deduplicator owner=node-3
       """
-    When these NSPL commands are executed on node "node-3"
+    When these Plexus commands are executed on node "node-3"
       """
       CREATE SUBSCRIPTION routed_logs_after_move TO routed_logs;
       """
@@ -962,7 +960,7 @@ Feature: Cluster scheduling
       """
       "id":99
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE DEDUPLICATOR remote_deduplicator;
       """

@@ -8,6 +8,14 @@
 //!   executor, which admits, charges and cancels an execution that leaves the caller's task.
 //! - **Must not know.** Domains, branches, runtime clock installation or physical deadlines.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{cell::OnceCell, fmt, fmt::Write as _, num::NonZeroUsize, ops::Range};
 
 use ahash::{HashMap, HashMapExt};
@@ -755,6 +763,22 @@ impl ExecutionContext {
 }
 
 /// Executes a predicate without exposing constructed columns or invocations.
+///
+/// The execution entry point accepts the compiled predicate capability:
+///
+/// ```
+/// use nervix_execution::Executor;
+/// use nervix_vm::{CompiledPredicate, ExecutionContext, TypedBatch, execute_predicate_in_context};
+///
+/// async fn execute(
+///     executor: &Executor,
+///     predicate: &CompiledPredicate,
+///     batch: &TypedBatch,
+///     context: &ExecutionContext,
+/// ) {
+///     let _ = execute_predicate_in_context(executor, predicate, batch, context).await;
+/// }
+/// ```
 ///
 /// A construction-capable program cannot be passed through this entry point:
 ///
@@ -3101,15 +3125,21 @@ impl ListConstruction {
                 let child = if let Some(nulls) = child.nulls() {
                     let mask = BooleanArray::new(nulls.inner().clone(), None);
                     let empty = new_null_array(&child_type, 1);
-                    let empty = empty
-                        .to_data()
-                        .into_builder()
-                        .nulls(None)
-                        .build()
-                        .map(make_array)
-                        .map_err(|error| {
-                            collection_arrow_error("VEC null-element replacement", error)
-                        })?;
+                    let empty = {
+                        let mapping_input = empty
+                            .to_data()
+                            .into_builder()
+                            .nulls(None)
+                            .build()
+                            .map(make_array);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err(collection_arrow_error(
+                                "VEC null-element replacement",
+                                error,
+                            )),
+                        }
+                    }?;
                     zip(&mask, &child, &Scalar::new(empty)).map_err(|error| {
                         collection_arrow_error("VEC null-element replacement", error)
                     })?
@@ -6228,6 +6258,18 @@ mod tests {
             RuntimeError::CollectionArrow { operation: "VEC concat", source }
                 if source.to_string().contains("child arrays cannot interleave")
         ));
+        assert_eq!(
+            format!("{arrow:#}"),
+            "VEC concat Arrow kernel failed: Compute error: child arrays cannot interleave"
+        );
+        let text = Report::new(RuntimeError::TextKernel {
+            operation: "like",
+            source: ArrowError::ComputeError("pattern is too long".to_string()),
+        });
+        assert_eq!(
+            format!("{text:#}"),
+            "like Arrow string kernel failed: Compute error: pattern is too long"
+        );
         let capacity = collection_too_large("concat", CollectionLimit::VectorOffsets);
         assert!(matches!(
             capacity.current_context(),
@@ -9819,7 +9861,7 @@ mod tests {
             "SET bytes = octet_length(input.text), capture = regexp_extract(input.text, \
              input.pattern, input.group)",
         )
-        .verified("the string calls have valid NSPL syntax");
+        .verified("the string calls have valid Plexus syntax");
         let schema = schema(vec![
             Field::new("text", DataType::Utf8, true),
             Field::new("pattern", DataType::Utf8, true),
@@ -9898,7 +9940,7 @@ mod tests {
              input.pattern), any_match = contains_any(input.text, vec(input.needle, 'missing')), \
              normalized = normalize_nfc(input.decomposed)",
         )
-        .verified("the string calls have valid NSPL syntax");
+        .verified("the string calls have valid Plexus syntax");
         let fields = vec![
             Field::new("text", DataType::Utf8, true),
             Field::new("delimiter", DataType::Utf8, true),

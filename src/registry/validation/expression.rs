@@ -7,12 +7,18 @@
 //! - **Depends on.** The Models and the VM's program representation.
 //! - **Must not know.** What any caller concludes from what it finds.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::{HashMap, HashSet};
 use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
 use error_stack::{Report, ResultExt};
 use nervix_models::{
-    DomainName, EmitSink, Expression, FieldName, LookupName, MaterializedStatePolicy,
-    MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName, NodeRef, ProcessorOutputs,
+    DomainName, EmitterEntity, Expression, FieldName, HttpEmitter, HttpRequestEmitter, LookupName,
+    MaterializedStatePolicy, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName, NodeRef,
+    ProcessorOutputs,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -147,33 +153,17 @@ pub(in crate::registry) fn visit_model_expressions(
                     visitor(argument);
                 }
             }
-            if let EmitSink::Http { method, path, .. } = model.sink.as_ref() {
+            if let EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
+                method,
+                path,
+                ..
+            })) = model.connector.as_ref()
+            {
                 visitor(method);
                 visitor(path);
             }
-            if let EmitSink::Otel {
-                values,
-                attributes,
-                resource,
-                ..
-            } = model.sink.as_ref()
-            {
-                for value in values.iter().chain(attributes).chain(resource) {
-                    visitor(&value.expression);
-                }
-            }
-            let values = match model.sink.as_ref() {
-                EmitSink::ClickHouse { values, .. }
-                | EmitSink::Postgres { values, .. }
-                | EmitSink::MySql { values, .. }
-                | EmitSink::MongoDb { values, .. }
-                | EmitSink::Iceberg { values, .. } => Some(values.as_slice()),
-                _ => None,
-            };
-            if let Some(values) = values {
-                for value in values {
-                    visitor(&value.expression);
-                }
+            for value in model.connector.direct_value_mappings() {
+                visitor(&value.expression);
             }
             visit_error_policy(&model.error_policies.message, visitor);
         }

@@ -1,14 +1,15 @@
 Feature: Window processor runtime behavior
+  @metrics_checkpoint_handoff @deloxide_stress_restore
   Scenario: Graceful owner drain retains incomplete branch windows without emitting them early
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And graceful shutdown drain is enabled
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA window_input (tenant STRING, value I64);
       CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64);
@@ -20,8 +21,8 @@ Feature: Window processor runtime behavior
       CREATE RELAY window_outputs SCHEMA window_output BRANCHED BY by_tenant;
       CREATE VHOST edge window-drain-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR window_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR window_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
         TO window_inputs INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
@@ -38,7 +39,7 @@ Feature: Window processor runtime behavior
       """
     Then the last cluster status owner for scheduled "window_processor" "moving_window" is saved as placeholder "window_owner"
     And the first replica for scheduled "window_processor" "moving_window" in the last cluster status is saved as placeholder "window_destination"
-    When these NSPL commands are executed on node "{{window_destination}}"
+    When these Plexus commands are executed on node "{{window_destination}}"
       """
       CREATE SUBSCRIPTION window_subscription TO window_outputs;
       """
@@ -76,15 +77,16 @@ Feature: Window processor runtime behavior
       key={"tenant":"beta"} | "first_value":100 | "samples":3
       """
 
+  @metrics_checkpoint_handoff @deloxide_stress_restore
   Scenario: Relocating a window owner preserves incomplete branch-local exact aggregates
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA window_input (tenant STRING, value I64);
       CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64);
@@ -96,8 +98,8 @@ Feature: Window processor runtime behavior
       CREATE RELAY window_outputs SCHEMA window_output BRANCHED BY by_tenant;
       CREATE VHOST edge window-move-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR window_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR window_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
         TO window_inputs INHERIT ALL BRANCHED BY by_tenant
         SET tenant = message.tenant
@@ -123,7 +125,7 @@ Feature: Window processor runtime behavior
       """
       {"tenant":"beta","value":100}
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       RELOCATE WINDOW PROCESSOR moving_window ONTO NODE {{window_destination}} IGNORE PREFERENCES;
       """
@@ -153,11 +155,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Tumbling message windows emit non-overlapping aggregates per branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -185,8 +187,8 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_summaries_copy SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -258,11 +260,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Sliding message windows delete stepped entries from online aggregate state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -291,8 +293,8 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -364,11 +366,11 @@ Feature: Window processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -392,8 +394,8 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -430,7 +432,7 @@ Feature: Window processor runtime behavior
     Then within "5s" DESCRIBE DOMAIN section "processed" metric "messages_total" "received" relay "metrics" across physical nodes totals 4
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries;
       """
@@ -458,11 +460,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Linear histogram percentiles are configured declaratively in aggregate expressions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -486,8 +488,8 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -538,11 +540,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Linear histogram invalid configuration is rejected before runtime starts
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -558,7 +560,7 @@ Feature: Window processor runtime behavior
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_invalid_histogram_latency;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_invalid_histogram_latency;
       """
-    When these NSPL commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration 'not-a-duration': expected number at 0"
+    When these Plexus commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration 'not-a-duration': expected number at 0"
       """
       CREATE WINDOW PROCESSOR invalid_histogram_latency FROM metrics
         WIDTH 3 MESSAGES
@@ -568,7 +570,7 @@ Feature: Window processor runtime behavior
         SET tenant = FIRST(input.tenant), latency_p90 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 90, 10, 0, 100, 'not-a-duration')
         ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '18446744073709551615s 1000000000ns': it is longer than a duration can be"
+    And these Plexus commands fail with "invalid PERCENTILE_LINEAR_HISTOGRAM delay duration '18446744073709551615s 1000000000ns': it is longer than a duration can be"
       """
       CREATE WINDOW PROCESSOR invalid_histogram_latency FROM metrics
         WIDTH 3 MESSAGES
@@ -587,11 +589,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Describe window processor reports deduplicated aggregate structures
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -621,8 +623,8 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -707,11 +709,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Linear histogram delay retains removed step buckets for later windows
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -734,8 +736,8 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -784,11 +786,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Linear histogram delay expires on a scheduled timeout without new records
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -811,8 +813,8 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -860,11 +862,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Duration-only windows flush on a scheduled timeout
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -888,8 +890,8 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -931,11 +933,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Combined width conditions flush when either messages or duration expires
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -946,21 +948,17 @@ Feature: Window processor runtime behavior
         sample_count I64,
         total_latency I64
       );
-        CREATE WIRE JSON SCHEMA metric_wire MODE STRICT (
-        tenant string,
-        latency integer
-      );
         CREATE CODEC metric_codec
-        FROM WIRE JSON SCHEMA metric_wire
-        TO SCHEMA metric;
+        FROM JSON TO SCHEMA metric
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_metric_ingestor SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_metric_ingestor;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -976,44 +974,34 @@ Feature: Window processor runtime behavior
         TO metric_summaries
         SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency), total_latency = SUM(input.latency)
         ON MESSAGE ERROR LOG;
-        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries WHERE tenant = 'acme';
+        CREATE SUBSCRIPTION metric_summaries_subscription TO metric_summaries;
         START;
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"acme","latency":1}
+      [
+        {"tenant":"acme","latency":1},
+        {"tenant":"beta","latency":100},
+        {"tenant":"acme","latency":2},
+        {"tenant":"beta","latency":200},
+        {"tenant":"acme","latency":3},
+        {"tenant":"beta","latency":300}
+      ]
       """
-    And http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
+    Then within "10s" the relay subscription receives exactly one payload for each fragment set
       """
-      {"tenant":"acme","latency":2}
-      """
-    Then the relay subscription does not receive a payload within "300ms"
-    When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
-      """
-      {"tenant":"acme","latency":3}
-      """
-    Then the relay subscription receives a payload
-      """
-      "sample_count":3
-      """
-    And the last relay subscription payload contains
-      """
-      "total_latency":6
+      key={"tenant":"acme"} | payload={"sample_count":3,"tenant":"acme","total_latency":6}
+      key={"tenant":"beta"} | payload={"sample_count":3,"tenant":"beta","total_latency":600}
       """
     When http payload is posted to node "node-1" with host "http-{{test_id}}.example.com" path "/metrics"
       """
-      {"tenant":"acme","latency":10}
+      [{"tenant":"acme","latency":10},{"tenant":"beta","latency":1000}]
       """
-    Then the relay subscription does not receive a payload within "300ms"
-    Then the relay subscription receives a payload
+    Then within "10s" the relay subscription receives payloads no sooner than "3s" after they were published
       """
-      "sample_count":1
+      key={"tenant":"acme"} | payload={"sample_count":1,"tenant":"acme","total_latency":10}
+      key={"tenant":"beta"} | payload={"sample_count":1,"tenant":"beta","total_latency":1000}
       """
-    And the last relay subscription payload contains
-      """
-      "total_latency":10
-      """
-    And the last relay subscription payload contains key fragment '{"tenant":"acme"}'
 
     Examples:
       | cluster_size | replica_count |
@@ -1024,11 +1012,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Branched window chains preserve concrete branch keys through output routes
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -1059,8 +1047,8 @@ Feature: Window processor runtime behavior
         CREATE RELAY chain_summaries SCHEMA chain_summary BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -1131,11 +1119,11 @@ Feature: Window processor runtime behavior
   Scenario Outline: Window output routes read the aggregates their own route declared
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -1166,8 +1154,8 @@ Feature: Window processor runtime behavior
         CREATE RELAY metric_extremes SCHEMA metric_extreme BRANCHED BY by_metric_ingestor;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-        CREATE INGESTOR metric_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metric_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -1225,7 +1213,7 @@ Feature: Window processor runtime behavior
         references: 2
         input: input.latency
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION metric_extremes_subscription TO metric_extremes;
         START;
@@ -1284,11 +1272,12 @@ Feature: Window processor runtime behavior
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And Kafka topic "metrics_{{test_id}}" exists with 1 partitions
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -1316,12 +1305,12 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS BRANCH by_kafka_metrics SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
-        CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+        CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-        CREATE INGESTOR kafka_metrics
-        FROM KAFKA kafka_main TOPIC metrics_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_metrics
+        FROM kafka_main TOPIC 'metrics_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 30s ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -1337,7 +1326,7 @@ Feature: Window processor runtime behavior
         TO metric_summaries
         SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency)
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM metric_summaries TO KAFKA kafka_main TOPIC metric_summaries_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING metric_summary_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM metric_summaries TO kafka_main TOPIC 'metric_summaries_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING metric_summary_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1345,13 +1334,15 @@ Feature: Window processor runtime behavior
         CREATE SUBSCRIPTION metrics_subscription TO metrics;
         START;
       """
+    Then Kafka consumer group "nervix_cucumber_{{test_id}}" eventually has 1 consumers
+    And within "10s" DESCRIBE INGESTOR "kafka_metrics" on the leader node contains
+      """
+      ready: true
+      """
     When emitter "kafka_forward" enters fault mode
-    And Kafka message is published to topic "metrics_{{test_id}}"
+    And these Kafka messages are rapidly published to topic "metrics_{{test_id}}"
       """
       {"tenant":"acme","latency":10}
-      """
-    And Kafka message is published to topic "metrics_{{test_id}}"
-      """
       {"tenant":"acme","latency":20}
       """
     Then within "8s" the relay subscription receives payloads
@@ -1372,11 +1363,12 @@ Feature: Window processor runtime behavior
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And Kafka topic "metrics_{{test_id}}" exists with 1 partitions
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -1404,12 +1396,12 @@ Feature: Window processor runtime behavior
         CREATE IF NOT EXISTS BRANCH by_kafka_metrics SCHEMA tenant_branch TTL 5m;
         CREATE RELAY metrics SCHEMA metric BRANCHED BY by_kafka_metrics;
         CREATE RELAY metric_summaries SCHEMA metric_summary BRANCHED BY by_kafka_metrics;
-        CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+        CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-        CREATE INGESTOR kafka_metrics
-        FROM KAFKA kafka_main TOPIC metrics_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_metrics
+        FROM kafka_main TOPIC 'metrics_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK PARALLEL MAX 2 BATCH TIMEOUT 100ms ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING metric_codec
         TO metrics
         INHERIT ALL
@@ -1425,7 +1417,7 @@ Feature: Window processor runtime behavior
         TO metric_summaries
         SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency)
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM metric_summaries TO KAFKA kafka_main TOPIC metric_summaries_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING metric_summary_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM metric_summaries TO kafka_main TOPIC 'metric_summaries_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING metric_summary_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -1433,7 +1425,12 @@ Feature: Window processor runtime behavior
         CREATE SUBSCRIPTION metrics_subscription TO metrics;
         START;
       """
-    And emitter "kafka_forward" enters fault mode
+    Then Kafka consumer group "nervix_cucumber_{{test_id}}" eventually has 1 consumers
+    And within "10s" DESCRIBE INGESTOR "kafka_metrics" on the leader node contains
+      """
+      ready: true
+      """
+    When emitter "kafka_forward" enters fault mode
     And Kafka message is published to topic "metrics_{{test_id}}"
       """
       {"tenant":"acme","latency":10}

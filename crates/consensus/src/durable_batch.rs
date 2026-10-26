@@ -6,6 +6,14 @@
 //! - **Depends on.** Fjall, rkyv, and an admitted execution reservation.
 //! - **Must not know.** Raft scheduling, observers, or the meaning of a stored record.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     io::{self, Write},
     num::NonZeroUsize,
@@ -13,6 +21,7 @@ use std::{
 
 use fjall::{Database, Keyspace, PersistMode};
 use nervix_execution::Reservation;
+use nervix_models::RaftLogDurability;
 use rkyv::{
     Archive, Deserialize, Serialize,
     api::{access_with_context, deserialize_using, high::HighSerializer},
@@ -39,9 +48,9 @@ pub enum StorageFailure {
     InvalidState,
     #[error("the snapshot generation this transfer was reading has been superseded")]
     SnapshotSuperseded,
-    #[error("failed to encode consensus record: {0}")]
+    #[error("failed to encode consensus record")]
     Encode(#[source] RkyvError),
-    #[error("consensus database write failed: {0}")]
+    #[error("consensus database write failed")]
     Write(#[source] fjall::Error),
 }
 
@@ -89,19 +98,46 @@ where
     fn decode_record(bytes: &[u8]) -> io::Result<Self> {
         use meticulous::OptionExt as _;
 
-        let max_depth = NonZeroUsize::new(STORAGE_ARCHIVE_MAX_DEPTH)
-            .assured("the storage archive depth limit is nonzero");
-        let mut aligned = AlignedVec::<STORAGE_ARCHIVE_ALIGNMENT>::with_capacity(bytes.len());
-        aligned.extend_from_slice(bytes);
-        let mut validator = Validator::new(
-            ArchiveValidator::with_max_depth(&aligned, Some(max_depth)),
-            SharedValidator::new(),
-        );
-        let archived = access_with_context::<T::Archived, _, RkyvError>(&aligned, &mut validator)
-            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
-        let mut deserializer = Pool::default();
-        deserialize_using::<T, _, RkyvError>(archived, &mut deserializer)
-            .map_err(|_| io::Error::other(StorageFailure::InvalidState))
+        let decode = || {
+            let max_depth = NonZeroUsize::new(STORAGE_ARCHIVE_MAX_DEPTH)
+                .assured("the storage archive depth limit is nonzero");
+            let mut aligned = AlignedVec::<STORAGE_ARCHIVE_ALIGNMENT>::with_capacity(bytes.len());
+            aligned.extend_from_slice(bytes);
+            let mut validator = Validator::new(
+                ArchiveValidator::with_max_depth(&aligned, Some(max_depth)),
+                SharedValidator::new(),
+            );
+            let archived =
+                access_with_context::<T::Archived, _, RkyvError>(&aligned, &mut validator)
+                    .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+            let mut deserializer = Pool::default();
+            deserialize_using::<T, _, RkyvError>(archived, &mut deserializer)
+                .map_err(|_| io::Error::other(StorageFailure::InvalidState))
+        };
+
+        #[cfg(test)]
+        {
+            // Count the owning archive decoder, not the database recovery loop: Fjall may
+            // retain caches and background work after a recovered state is dropped.
+            drop(decode());
+            let before = alloc_count::stats();
+            drop(decode());
+            let after = alloc_count::stats();
+            let allocated = after
+                .alloc_calls
+                .checked_sub(before.alloc_calls)
+                .assured("a thread's allocation count only grows");
+            let freed = after
+                .dealloc_calls
+                .checked_sub(before.dealloc_calls)
+                .assured("a thread's deallocation count only grows");
+            assert_eq!(
+                freed, allocated,
+                "a consensus archive decoder retains no allocation"
+            );
+        }
+
+        decode()
     }
 }
 
@@ -259,8 +295,13 @@ impl<'a> DurableBatch<'a> {
         Ok(writer.bytes)
     }
 
+    /// Commits the batch with the synchronization [`crate::RAFT_LOG_DURABILITY`] promises, which
+    /// is the promise this node publishes among its prerequisites.
     pub(crate) fn commit(self, backend: &impl CommitBackend) -> io::Result<()> {
-        backend.commit(self.mutations, PersistMode::SyncAll)
+        let mode = match crate::RAFT_LOG_DURABILITY {
+            RaftLogDurability::FsyncEveryAppend => PersistMode::SyncAll,
+        };
+        backend.commit(self.mutations, mode)
     }
 
     fn charge_key(&mut self, key: &[u8]) -> io::Result<()> {
@@ -334,5 +375,31 @@ impl Write for RecordWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use error_stack::Report;
+    use rkyv::rancor::Source as _;
+
+    use super::*;
+
+    #[test]
+    fn a_failed_write_or_encoding_names_its_cause_once_in_a_rendered_chain() {
+        let database = fjall::Error::InvalidTrailer;
+        let database_cause = database.to_string();
+        let write = Report::new(io::Error::other(StorageFailure::Write(database)));
+        let encoding = RkyvError::new(io::Error::other("the record does not fit its archive"));
+        let encode = Report::new(io::Error::other(StorageFailure::Encode(encoding)));
+
+        assert_eq!(
+            format!("{write:#}"),
+            format!("consensus database write failed: {database_cause}")
+        );
+        assert_eq!(
+            format!("{encode:#}"),
+            "failed to encode consensus record: the record does not fit its archive"
+        );
     }
 }

@@ -5,8 +5,30 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 chaos_dir="$(cd "${script_dir}/.." && pwd)"
 # shellcheck source=../tool-images.sh
 source "${chaos_dir}/tool-images.sh"
+# shellcheck source=../require-jq.sh
+source "${chaos_dir}/require-jq.sh"
+
+if ! chaos_jq_supported; then
+    printf 'self-test failed: the chaos scripts need jq 1.8 or later, not %s\n' "$(chaos_jq_found)" >&2
+    exit 1
+fi
+# A scenario's verifier self-check names the directory in which a failed self-test keeps its
+# evidence.
+if [[ "$#" -eq 2 && "$1" == --evidence && -n "$2" ]]; then
+    export CHAOS_SELF_TEST_EVIDENCE="$2"
+elif [[ "$#" -ne 0 ]]; then
+    printf 'usage: self-test.sh [--evidence DIRECTORY]\n' >&2
+    exit 2
+fi
 
 "${script_dir}/role-wait-self-test.sh"
+"${script_dir}/pause-delivery-self-test.sh"
+"${script_dir}/hold-quorum-self-test.sh"
+"${script_dir}/output-boundary-self-test.sh"
+"${script_dir}/image-package-self-test.sh"
+"${script_dir}/startup-status-self-test.sh"
+"${script_dir}/backup-fixture-self-test.sh"
+"${script_dir}/verifier-self-check-self-test.sh"
 
 fail() {
     printf 'self-test failed: %s\n' "$*" >&2
@@ -103,6 +125,33 @@ jq '.[0].Mounts[0].Name = "other-volume"' \
 expect_restart_failure 'changed volume' started "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${inspection_before}" "${tmp_dir}/wrong-volume.json"
 
+drain_verifier="${chaos_dir}/verify-drain-evidence.sh"
+expect_drain_failure() {
+    local case_name="$1"
+    local shutdown_log_path="$2"
+    local status=0
+    "${drain_verifier}" nervix-2 "${shutdown_log_path}" >"${tmp_dir}/drain-failure.txt" 2>&1 \
+        || status=$?
+    [[ "${status}" -eq 1 ]] || fail "${case_name} returned ${status}, expected failure 1"
+}
+printf '%s\n' \
+    'INFO nervix_server::application::scheduling: drained local node before graceful shutdown node_id=node-2 leader=node-1' \
+    'INFO nervix_server::application::shutdown: shutdown drain-support phase finished outcome=Completed' \
+    >"${tmp_dir}/completed-drain.log"
+"${drain_verifier}" nervix-2 "${tmp_dir}/completed-drain.log"
+printf '%s\n' \
+    'WARN nervix_server::application::scheduling: the leader did not answer the graceful shutdown drain of the local node node_id=node-2 leader=node-1' \
+    'INFO nervix_server::application::shutdown: shutdown drain-support phase finished outcome=Abandoned' \
+    >"${tmp_dir}/abandoned-drain.log"
+expect_drain_failure 'abandoned drain' "${tmp_dir}/abandoned-drain.log"
+grep -Fq 'the leader did not answer the graceful shutdown drain' "${tmp_dir}/drain-failure.txt" \
+    || fail 'an abandoned drain verdict did not name the drain record'
+printf '%s\n' 'INFO nervix_server::application::shutdown: shutdown admission phase finished outcome=Completed' \
+    >"${tmp_dir}/missing-drain.log"
+expect_drain_failure 'missing drain phase' "${tmp_dir}/missing-drain.log"
+cat "${tmp_dir}/completed-drain.log" "${tmp_dir}/completed-drain.log" >"${tmp_dir}/two-drains.log"
+expect_drain_failure 'two drain phases' "${tmp_dir}/two-drains.log"
+
 crash_verifier="${chaos_dir}/verify-crash-evidence.sh"
 inspection_killed="${tmp_dir}/killed.json"
 crash_events="${tmp_dir}/crash-events.ndjson"
@@ -159,13 +208,20 @@ pause_resumed="${tmp_dir}/pause-resumed.json"
 pause_events="${tmp_dir}/pause-events.ndjson"
 pause_result="${tmp_dir}/pause-duration.json"
 jq '.[0].Config.Env = [
-    "NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms",
-    "NERVIX_RAFT_ELECTION_TIMEOUT_MIN=10s",
-    "NERVIX_RAFT_ELECTION_TIMEOUT_MAX=12s",
+    "NERVIX_RAFT_HEARTBEAT_INTERVAL=1500ms",
     "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s"
 ] | .[0].State.Paused = false' "${inspection_before}" >"${pause_before}"
 jq '.[0].State.Paused = true' "${pause_before}" >"${pause_active}"
 cp "${pause_before}" "${pause_resumed}"
+# These fixtures run the pause deployment, so the verifier checks them against its settings.
+pause_deployment=(CHAOS_RAFT_HEARTBEAT_INTERVAL CHAOS_NODE_UNAVAILABILITY_TIMEOUT)
+declare -A deployed_liveness=()
+for setting in "${pause_deployment[@]}"; do
+    if [[ -n "${!setting+set}" ]]; then
+        deployed_liveness["${setting}"]="${!setting}"
+    fi
+done
+export CHAOS_RAFT_HEARTBEAT_INTERVAL=1500ms CHAOS_NODE_UNAVAILABILITY_TIMEOUT=15s
 printf '%s\n' \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"pause",Actor:{ID:$id},timeNano:1800000000000000000}')" \
     "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"unpause",Actor:{ID:$id},timeNano:1800000006000000000}')" \
@@ -223,6 +279,20 @@ jq '.[0].Config.Env |= map(select(. != "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=15s")
     "${pause_before}" >"${tmp_dir}/pause-wrong-threshold.json"
 expect_pause_failure 'wrong configured threshold' before "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${tmp_dir}/pause-wrong-threshold.json" "${tmp_dir}/pause-wrong-threshold.json"
+# A run that passes no liveness settings deploys the Compose defaults, and its pauses are judged
+# against those defaults instead of the pause deployment's.
+unset "${pause_deployment[@]}"
+jq '.[0].Config.Env = [
+    "NERVIX_RAFT_HEARTBEAT_INTERVAL=250ms",
+    "NERVIX_NODE_UNAVAILABILITY_TIMEOUT=10s"
+]' "${pause_before}" >"${tmp_dir}/pause-default-deployment.json"
+"${pause_verifier}" before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${tmp_dir}/pause-default-deployment.json" "${tmp_dir}/pause-default-deployment.json"
+expect_pause_failure 'settings other than the deployed ones' before "${test_run_id}" "${test_project}" \
+    nervix-1 "${test_image_id}" "${pause_before}" "${pause_before}"
+for setting in "${!deployed_liveness[@]}"; do
+    export "${setting}=${deployed_liveness[${setting}]}"
+done
 
 expected="${tmp_dir}/expected.ndjson"
 observed="${tmp_dir}/observed.ndjson"
@@ -525,7 +595,7 @@ jq -e --slurpfile manifest "${crash_setup_dir}/manifest.json" '
 for script in "${chaos_dir}"/*.sh "${chaos_dir}"/tests/*.sh; do
     bash -n "${script}"
 done
-sh -n "${chaos_dir}/continuous-load.sh" "${chaos_dir}/observe-nodes.sh"
+sh -n "${chaos_dir}/continuous-load.sh" "${chaos_dir}/observe-nodes.sh" "${chaos_dir}/observe-clock.sh"
 
 # Every tool image a run starts is pinned in tool-images.sh by a registry-qualified digest.
 qualified_digest_reference='^[a-z0-9-]+(\.[a-z0-9-]+)+(:[0-9]+)?(/[a-z0-9._-]+)+@sha256:[a-f0-9]{64}$'
@@ -549,6 +619,11 @@ CHAOS_KCAT_IMAGE="${chaos_kcat_image}" \
 CHAOS_PROBE_IMAGE="${chaos_probe_image}" \
 CHAOS_SCRIPT_DIR="${chaos_dir}" \
 CHAOS_LOAD_FILE="${expected}" \
+CHAOS_LOAD_INTERVAL_MS="750" \
+CHAOS_STATE_LOAD_FILE="${expected}" \
+CHAOS_STATE_LOAD_INTERVAL_MS="1000" \
+CHAOS_PACED_LOAD_FILE="${expected}" \
+CHAOS_PACED_LOAD_INTERVAL_MS="250" \
 CHAOS_TRAFFIC_DIR="${tmp_dir}" \
 CHAOS_NODE_COUNT="3" \
 CHAOS_SUBNET="10.213.7.0/24" \
@@ -557,12 +632,14 @@ CHAOS_NODE_1_ADDRESS="10.213.7.11" \
 CHAOS_NODE_2_ADDRESS="10.213.7.12" \
 CHAOS_NODE_3_ADDRESS="10.213.7.13" \
     docker compose -f "${chaos_dir}/compose.yaml" --profile tools --profile three-node --profile rolling \
-    config --format json \
+    --profile stateful --profile paced config --format json \
     >"${compose_json}"
 
 jq -e --arg image "${placeholder_image}" \
-    --arg election_min "${CHAOS_RAFT_ELECTION_TIMEOUT_MIN:-1500ms}" \
-    --arg node_timeout "${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}" '
+    --arg heartbeat "${CHAOS_RAFT_HEARTBEAT_INTERVAL:-250ms}" \
+    --arg node_timeout "${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}" \
+    --arg snapshot_entries "${CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD:-10000}" \
+    --arg covered_entries "${CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED:-1000}" '
     ([.services.admin, .services["nervix-1"], .services["nervix-2"], .services["nervix-3"]]
       | all(.image == $image))
     and ([.services[]] | all(has("build") | not))
@@ -571,9 +648,18 @@ jq -e --arg image "${placeholder_image}" \
     and ([.services | to_entries[] | select(.key | test("^nervix-[123]$")) | .value]
          | all(.labels["io.nervix.chaos.run"] == "self-test"))
     and .services.load.labels["io.nervix.chaos.role"] == "load"
+    and .services.load.environment.CHAOS_LOAD_INTERVAL_MS == "750"
+    and .services["state-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["state-load"].environment.CHAOS_LOAD_INTERVAL_MS == "1000"
+    and .services["paced-load"].labels["io.nervix.chaos.role"] == "load"
+    and .services["paced-load"].environment.CHAOS_LOAD_INTERVAL_MS == "250"
     and .services.observer.labels["io.nervix.chaos.role"] == "observer"
-    and .services["nervix-1"].environment.NERVIX_RAFT_ELECTION_TIMEOUT_MIN == $election_min
+    and .services["clock-observer"].labels["io.nervix.chaos.role"] == "observer"
+    and .services["clock-observer"].image == $image
+    and .services["nervix-1"].environment.NERVIX_RAFT_HEARTBEAT_INTERVAL == $heartbeat
     and .services["nervix-1"].environment.NERVIX_NODE_UNAVAILABILITY_TIMEOUT == $node_timeout
+    and .services["nervix-1"].environment.NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD == $snapshot_entries
+    and .services["nervix-1"].environment.NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED == $covered_entries
 ' "${compose_json}" >/dev/null || fail "Compose does not pin every Nervix service or contains a build"
 
 jq -e --arg nervix "${placeholder_image}" \
@@ -581,7 +667,8 @@ jq -e --arg nervix "${placeholder_image}" \
     --arg kcat "${chaos_kcat_image}" \
     --arg probe "${chaos_probe_image}" '
     [.services.broker.image, .services["broker-admin"].image] == [$kafka, $kafka]
-    and [.services.kcat.image, .services.load.image] == [$kcat, $kcat]
+    and [.services.kcat.image, .services.load.image, .services["state-load"].image,
+         .services["paced-load"].image] == [$kcat, $kcat, $kcat, $kcat]
     and [.services.probe.image, .services.observer.image] == [$probe, $probe]
     and ([.services[].image] | all(. == $nervix or . == $kafka or . == $kcat or . == $probe))
 ' "${compose_json}" >/dev/null || fail "Compose does not start every tool service from its pinned image"
@@ -609,6 +696,69 @@ docker pause "${cleanup_container}" >/dev/null
 "${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --quiet
 if docker inspect "${cleanup_container}" >/dev/null 2>&1; then
     fail 'external cleanup left the paused target behind'
+fi
+
+# Cleanup after a controller that never ran its exit trap captures what the run left behind before
+# it removes anything, then confirms that nothing carries the run's label.
+cleanup_run_id="evidence-cleanup-$$-${RANDOM}"
+evidence_container="$(docker run --detach --rm \
+    --label "io.nervix.chaos.run=${cleanup_run_id}" \
+    --label io.nervix.chaos.role=node "${chaos_probe_image}" sh -c 'echo left-behind-marker; sleep 60')"
+docker network create --label "io.nervix.chaos.run=${cleanup_run_id}" "${cleanup_run_id}" >/dev/null
+marker_logged=false
+for _ in $(seq 1 50); do
+    if docker logs "${evidence_container}" 2>&1 | grep -q left-behind-marker; then
+        marker_logged=true
+        break
+    fi
+    sleep 0.2
+done
+[[ "${marker_logged}" == true ]] || fail 'the evidence exercise container logged nothing'
+docker pause "${evidence_container}" >/dev/null
+"${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --evidence "${tmp_dir}/evidence" --quiet \
+    || fail 'cleanup with evidence did not remove what the run left behind'
+jq -e --arg run_id "${cleanup_run_id}" '. == {run_id: $run_id, containers: 1, pumba_sidecars: 0, networks: 1,
+    volumes: 0, removal_rounds: 1, remaining: {containers: 0, networks: 0, volumes: 0}, exit_code: 0}' \
+    "${tmp_dir}/evidence/cleanup.json" >/dev/null || fail 'cleanup did not record what it found and removed'
+jq -e 'length == 1 and .[0].State.Paused == true' "${tmp_dir}/evidence/containers.json" >/dev/null \
+    || fail 'cleanup did not inspect the container before removing it'
+grep -q left-behind-marker "${tmp_dir}/evidence/logs/"*.log \
+    || fail 'cleanup did not capture the log of the container it removed'
+[[ -s "${tmp_dir}/evidence/networks.json" ]] || fail 'cleanup did not inspect the network before removing it'
+if docker inspect "${evidence_container}" >/dev/null 2>&1 || docker network inspect "${cleanup_run_id}" >/dev/null 2>&1; then
+    fail 'cleanup with evidence left a run-owned resource behind'
+fi
+"${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --evidence "${tmp_dir}/evidence-none" --quiet
+[[ ! -e "${tmp_dir}/evidence-none" ]] || fail 'cleanup recorded evidence for a run that left nothing'
+
+# A resource that removal cannot take is removed again in later rounds and, still there after the
+# last one, fails the cleanup: a container the run does not own keeps the run's network in use.
+cleanup_run_id="stuck-cleanup-$$-${RANDOM}"
+docker network create --label "io.nervix.chaos.run=${cleanup_run_id}" "${cleanup_run_id}" >/dev/null
+foreign_holder="$(docker run --detach --rm --network "${cleanup_run_id}" "${chaos_probe_image}" sleep 60)"
+status=0
+"${chaos_dir}/cleanup.sh" --run-id "${cleanup_run_id}" --evidence "${tmp_dir}/evidence-stuck" --quiet \
+    2>"${tmp_dir}/cleanup-stuck.txt" || status=$?
+docker rm --force "${foreign_holder}" >/dev/null 2>&1 || true
+docker network rm "${cleanup_run_id}" >/dev/null 2>&1 || true
+[[ "${status}" -eq 1 ]] || fail "cleanup of a network another container holds returned ${status}, expected 1"
+jq -e '.removal_rounds == 3 and .remaining == {containers: 0, networks: 1, volumes: 0} and .exit_code == 1' \
+    "${tmp_dir}/evidence-stuck/cleanup.json" >/dev/null \
+    || fail 'cleanup did not retry and report the network it could not remove'
+grep -Fq "chaos cleanup left run=${cleanup_run_id} containers=0 networks=1 volumes=0" \
+    "${tmp_dir}/cleanup-stuck.txt" || fail 'cleanup did not name what it left behind'
+
+# A replay recognizes a recorded image through the repository digest its reference pins, which names
+# the same content in an image store of either kind, and never through a tag or another digest.
+# shellcheck source=../image-identity.sh
+source "${chaos_dir}/image-identity.sh"
+chaos_image_carries_digest "${chaos_probe_image}" "${chaos_probe_image}" \
+    || fail 'the probe image does not carry the repository digest its pinned reference names'
+if chaos_image_carries_digest "${chaos_probe_image}" "${chaos_probe_image%@*}@sha256:$(printf '0%.0s' {1..64})"; then
+    fail 'an image was taken to carry a digest it was never pulled by'
+fi
+if chaos_image_carries_digest "${chaos_probe_image}" docker.io/library/alpine:3.22.6; then
+    fail 'a tag was taken for a repository digest'
 fi
 
 cleanup_run_id="pause-injector-failure-$$-${RANDOM}"
@@ -669,9 +819,10 @@ heal_sidecar="$(docker run --detach --label com.gaiaadm.pumba.skip=true \
     --network "container:${heal_target}" "${chaos_probe_image}" sleep 120)"
 "${network_faults}" heal --run-id "${cleanup_run_id}" --nettools "${chaos_nettools_image}" \
     --output "${tmp_dir}/heal-report.txt" || fail 'healing did not clear faults left by a killed injector'
-grep -Fq 'removed Pumba root qdisc 504d:' "${tmp_dir}/heal-report.txt" \
-    && grep -Fq 'removed Pumba INPUT rule' "${tmp_dir}/heal-report.txt" \
-    || fail 'healing did not report the owned rules it removed'
+if ! grep -Fq 'removed Pumba root qdisc 504d:' "${tmp_dir}/heal-report.txt" \
+    || ! grep -Fq 'removed Pumba INPUT rule' "${tmp_dir}/heal-report.txt"; then
+    fail 'healing did not report the owned rules it removed'
+fi
 if docker inspect "${heal_sidecar}" >/dev/null 2>&1; then
     fail 'healing left a Pumba sidecar joined to a run-owned namespace'
 fi
@@ -708,4 +859,14 @@ fi
 
 printf 'chaos harness self-test passed\n'
 "${script_dir}/degraded-self-test.sh"
+"${script_dir}/rate-probe-self-test.sh"
 "${script_dir}/docker-events-self-test.sh"
+"${script_dir}/recovery-self-test.sh"
+"${script_dir}/stateful-self-test.sh"
+"${script_dir}/backup-fault-self-test.sh"
+"${script_dir}/restore-self-test.sh"
+"${script_dir}/backup-state-self-test.sh"
+"${script_dir}/load-self-test.sh"
+"${script_dir}/mixed-self-test.sh"
+"${script_dir}/diagnostic-self-test.sh"
+"${script_dir}/suite-self-test.sh"

@@ -11,6 +11,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(edge, reason = "interactive terminal language adapter")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "CLI session and terminal coordination belong to the client edge"
@@ -44,7 +48,7 @@ use nervix_client_core::{
 };
 use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
-use nervix_nspl::client_statement::{
+use nervix_plexus::client_statement::{
     ClientStatement, local_path_fragment, parse_client_statements, parse_upload_resource_query,
 };
 use nervix_primitives::{
@@ -119,10 +123,13 @@ struct Args {
     /// Password for the registry user; prompted for interactively when unset
     #[arg(long, env = "NERVIX_PASSWORD")]
     password: Option<String>,
-    /// Run NSPL statements once and exit instead of starting the interactive REPL
+    /// Overall BACKUP command wait across all domain cuts, redirects and reconnects (default 10m)
+    #[arg(long, global = true, value_parser = nervix_models::parse_duration_text)]
+    backup_wait_timeout: Option<std::time::Duration>,
+    /// Run Plexus statements once and exit instead of starting the interactive REPL
     #[arg(long, conflicts_with = "suggest")]
     command: Option<String>,
-    /// Print completion candidates for NSPL input as JSON and exit
+    /// Print completion candidates for Plexus input as JSON and exit
     #[arg(long, conflicts_with = "command")]
     suggest: Option<String>,
     /// UTF-8 byte cursor in --suggest input; defaults to the end
@@ -154,7 +161,7 @@ enum Command {
         /// Optional per-arrival batch sample rate from 0.0 through 1.0
         #[arg(long)]
         batch_sample_rate: Option<String>,
-        /// Optional NSPL predicate applied to delivered records
+        /// Optional Plexus predicate applied to delivered records
         #[arg(long = "where")]
         where_clause: Option<String>,
     },
@@ -193,6 +200,18 @@ enum Command {
         /// Record every resource version and its digests without the version's bytes
         #[arg(long)]
         without_resources: bool,
+        /// Capture configuration only, without pausing domains
+        #[arg(long, conflicts_with = "without_pause")]
+        without_state: bool,
+        /// Capture the latest published state without pausing domains
+        #[arg(long)]
+        without_pause: bool,
+        /// Maximum time for each running domain's quiesced capture
+        #[arg(long, value_parser = nervix_models::parse_duration_text, conflicts_with_all = ["without_state", "without_pause"])]
+        timeout: Option<std::time::Duration>,
+        /// Recover the same backup with its original domain and capture options
+        #[arg(long, value_parser = |value: &str| CommandExecutionReference::parse(value))]
+        execution_reference: Option<CommandExecutionReference>,
         /// How the backup's report is printed
         #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
         format: CliReportFormat,
@@ -215,9 +234,18 @@ enum Command {
         /// when omitted
         #[arg(long, value_enum)]
         on_existing_user: Option<CliExistingUsers>,
+        /// Resume the archived start and clock mapping after installing all state
+        #[arg(long)]
+        resume: bool,
         /// Verify the archive and plan the restore, changing nothing
         #[arg(long)]
         dry_run: bool,
+        /// Restore configuration without runtime state
+        #[arg(long, conflicts_with = "without_source_offsets")]
+        without_state: bool,
+        /// Restore runtime state but leave source offsets empty
+        #[arg(long)]
+        without_source_offsets: bool,
         /// How the restore's report is printed
         #[arg(long, value_enum, default_value_t = CliReportFormat::Text)]
         format: CliReportFormat,
@@ -240,8 +268,16 @@ struct GrpcCompleter {
 
 #[derive(Debug, Error)]
 enum ClientError {
-    #[error(transparent)]
-    Core(#[from] CoreClientError),
+    /// The client's report of why no session opened is beneath.
+    #[error("failed to connect to the server")]
+    Connect,
+    /// The client's report of why the request failed is beneath.
+    #[error("the request to the server failed")]
+    Request,
+    #[error("failed to read the TLS CA certificate")]
+    LoadTlsCaCertificate,
+    #[error("failed to wait for the interrupt signal")]
+    InterruptSignal,
     #[error("failed to initialize history")]
     InitHistory,
     #[error("failed to read user input")]
@@ -272,8 +308,26 @@ enum ClientError {
     BackupArguments { reason: &'static str },
     #[error("the backup failed: {message}")]
     BackupFailed { message: String },
-    #[error("the backup archive could not be written")]
+    #[error("standard output could not be inspected for the backup archive")]
+    InspectStandardOutput,
+    #[error("the null device could not be identified")]
+    IdentifyNullDevice,
+    #[error(
+        "standard output was closed when the CLI started or is the null device, either of which \
+         would discard the backup archive"
+    )]
+    DiscardingStandardOutput,
+    #[error("the backup archive could not be staged for standard output")]
+    StageArchive,
+    #[error("the backup archive could not be read from its private staging file")]
+    ReadStagedArchive,
+    #[error("the backup archive could not be written to standard output")]
     WriteArchive,
+    #[error(
+        "the backup archive reached standard output, but its staging directory could not be \
+         removed"
+    )]
+    RemoveStaging,
     #[error("the backup archive could not be described")]
     DescribeBackup,
     #[error("invalid restore arguments: {reason}")]
@@ -295,7 +349,7 @@ async fn collect_suggestions(
         let page = client
             .suggest(input.clone(), cursor, 100, continuation.take())
             .await
-            .map_err(|error| StackReport::new(ClientError::from(error)))?;
+            .change_context(ClientError::Request)?;
         if page.status != nervix_client_core::SuggestionStatus::Ready {
             return Ok(page);
         }
@@ -442,7 +496,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 connect_options,
             )
             .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            .change_context(ClientError::Connect)?;
             execute_and_print(&client, format!("DROP NODE {node_id};")).await?;
             return Ok(());
         }
@@ -454,7 +508,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 connect_options,
             )
             .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            .change_context(ClientError::Connect)?;
             execute_and_print(&client, format!("CORDON NODE {node_id};")).await?;
             return Ok(());
         }
@@ -466,7 +520,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 connect_options,
             )
             .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            .change_context(ClientError::Connect)?;
             execute_and_print(&client, format!("UNCORDON NODE {node_id};")).await?;
             return Ok(());
         }
@@ -478,7 +532,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 connect_options,
             )
             .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            .change_context(ClientError::Connect)?;
             execute_and_print(&client, format!("DRAIN NODE {node_id};")).await?;
             return Ok(());
         }
@@ -487,6 +541,10 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             name,
             output,
             without_resources,
+            without_state,
+            without_pause,
+            timeout,
+            execution_reference,
             format,
         }) => {
             let connect_options = connect_options_from_args(&args)?;
@@ -498,6 +556,10 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 domain: name,
                 output,
                 without_resources,
+                without_state,
+                without_pause,
+                timeout,
+                execution_reference,
                 format,
             })
             .await;
@@ -509,6 +571,9 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             target,
             on_existing_user,
             dry_run,
+            resume,
+            without_state,
+            without_source_offsets,
             format,
         }) => {
             let connect_options = connect_options_from_args(&args)?;
@@ -522,6 +587,9 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 input,
                 existing_users: on_existing_user,
                 dry_run,
+                resume,
+                without_state,
+                without_source_offsets,
                 format,
             })
             .await;
@@ -544,7 +612,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
     let client =
         Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
             .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            .change_context(ClientError::Connect)?;
     if let Some(input) = args.suggest.as_deref() {
         let cursor = args.cursor.unwrap_or(input.len());
         let outcome = collect_suggestions(&client, input.to_string(), cursor).await?;
@@ -691,7 +759,7 @@ async fn run_json_inspection_mode(
     let options = match connect_options_from_args(args) {
         Ok(options) => options,
         Err(error) => {
-            print_json_inspection_error("CLIENT_CONFIGURATION", &error.to_string());
+            print_json_inspection_error("CLIENT_CONFIGURATION", &format!("{error:#}"));
             return Err(error);
         }
     };
@@ -704,16 +772,16 @@ async fn run_json_inspection_mode(
     {
         Ok(client) => client,
         Err(error) => {
-            print_json_inspection_error("CONNECTION_FAILED", &error.to_string());
-            return Err(StackReport::new(ClientError::from(error)));
+            print_json_inspection_error("CONNECTION_FAILED", &format!("{error:#}"));
+            return Err(error.change_context(ClientError::Connect));
         }
     };
     spawn_event_loggers(client.clone(), EventOutput::Stderr);
     let outcome = match client.execute(query).await {
         Ok(outcome) => outcome,
         Err(error) => {
-            print_json_inspection_error("REQUEST_FAILED", &error.to_string());
-            return Err(StackReport::new(ClientError::from(error)));
+            print_json_inspection_error("REQUEST_FAILED", &format!("{error:#}"));
+            return Err(error.change_context(ClientError::Request));
         }
     };
     if !outcome.succeeded() {
@@ -914,7 +982,7 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
         options.connect_options,
     )
     .await
-    .map_err(|err| StackReport::new(ClientError::from(err)))?;
+    .change_context(ClientError::Connect)?;
     spawn_event_loggers(client.clone(), EventOutput::Stdout);
     let request = subscribe_request(
         &options.name,
@@ -927,7 +995,7 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
     let result = client
         .subscribe(&request)
         .await
-        .map_err(|err| StackReport::new(ClientError::from(err)))?;
+        .change_context(ClientError::Request)?;
     if !result.succeeded() {
         println!("error: {}", result.message);
         if result.diagnostics.is_empty() {
@@ -945,7 +1013,7 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
     );
     signal::ctrl_c()
         .await
-        .map_err(|_| StackReport::new(ClientError::from(CoreClientError::SessionClosed)))?;
+        .change_context(ClientError::InterruptSignal)?;
     Ok(())
 }
 
@@ -954,7 +1022,7 @@ async fn run_domain_clock_mode(args: &Args) -> Result<(), StackReport<ClientErro
     let client =
         Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
             .await
-            .map_err(|error| StackReport::new(ClientError::from(error)))?;
+            .change_context(ClientError::Connect)?;
     let outcome = client
         .attach_domain_clock(args.domain.clone())
         .await
@@ -974,7 +1042,7 @@ async fn run_domain_clock_mode(args: &Args) -> Result<(), StackReport<ClientErro
                 }
             }
             interrupted = &mut interrupt => {
-                interrupted.map_err(|_| StackReport::new(ClientError::from(CoreClientError::SessionClosed)))?;
+                interrupted.change_context(ClientError::InterruptSignal)?;
                 let outcome = client
                     .detach_domain_clock(args.domain.clone())
                     .await
@@ -1034,12 +1102,7 @@ fn print_completions(shell: Shell) {
 
 fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<ClientError>> {
     let ca_certificate_pem = match args.tls_ca_cert.as_ref() {
-        Some(path) => Some(
-            std::fs::read(path)
-                .map_err(CoreClientError::LoadTlsCaCertificate)
-                .map_err(ClientError::from)
-                .map_err(StackReport::new)?,
-        ),
+        Some(path) => Some(std::fs::read(path).change_context(ClientError::LoadTlsCaCertificate)?),
         None => None,
     };
     let password = match args.password.clone() {
@@ -1064,6 +1127,9 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
         ca_certificate_pem,
         username: Some(args.username.clone()),
         password: Some(password),
+        backup_wait_timeout: args
+            .backup_wait_timeout
+            .unwrap_or(ConnectOptions::default().backup_wait_timeout),
         ..ConnectOptions::default()
     })
 }
@@ -1089,7 +1155,7 @@ async fn execute_and_print(client: &Client, query: String) -> Result<(), StackRe
     let result = client
         .execute(query)
         .await
-        .map_err(|err| StackReport::new(ClientError::from(err)))?;
+        .change_context(ClientError::Request)?;
     if !result.statements.is_empty() {
         for statement in &result.statements {
             print_outcome(&PrintedOutcome::of_statement(statement), &query_source);
@@ -1262,7 +1328,7 @@ async fn execute_upload_and_print(
         .reported("rendering the upload progress line");
     let total_uploaded = uploaded.load(Ordering::Relaxed);
     clear_progress_line();
-    let result = outcome.map_err(|err| StackReport::new(ClientError::from(err)))?;
+    let result = outcome.change_context(ClientError::Request)?;
     if result.succeeded() {
         emit_terminal_line(format!(
             "upload resource '{}' finished: {} sent, installed on every live node",
@@ -1427,7 +1493,7 @@ impl EventStream {
                     }
                 }
                 Err(error) => {
-                    let failure = self.failure(error.current_context());
+                    let failure = self.failure(&error);
                     sender.push(failure.line);
                     if failure.ended {
                         return;
@@ -1444,7 +1510,7 @@ impl EventStream {
     ) -> Result<Vec<String>, StackReport<CoreClientError>> {
         match self {
             Self::Subscriptions => {
-                let event = client.next_subscription().await.map_err(StackReport::new)?;
+                let event = client.next_subscription().await?;
                 Ok(format_subscription_event(&event))
             }
             Self::DomainClocks => {
@@ -1452,7 +1518,7 @@ impl EventStream {
                 Ok(vec![format_domain_clock_event(&event)])
             }
             Self::ServerNotices => {
-                let event = client.next_server_event().await.map_err(StackReport::new)?;
+                let event = client.next_server_event().await?;
                 Ok(vec![format_server_event(&event)])
             }
         }
@@ -1460,9 +1526,9 @@ impl EventStream {
 
     /// What the terminal prints when a read of the stream fails. Only a session that no known
     /// server can reopen ends the stream.
-    fn failure(self, error: &CoreClientError) -> StreamFailure {
+    fn failure(self, error: &StackReport<CoreClientError>) -> StreamFailure {
         let stream = self.as_ref();
-        match error {
+        match error.current_context() {
             CoreClientError::SessionClosed => StreamFailure {
                 line: format!(
                     "[events] notice: {stream} stopped because the session closed and no known \
@@ -1477,9 +1543,9 @@ impl EventStream {
                 ),
                 ended: false,
             },
-            other => StreamFailure {
+            _ => StreamFailure {
                 line: format!(
-                    "[events] notice: {stream} could not resume yet: {other}; the client keeps \
+                    "[events] notice: {stream} could not resume yet: {error:#}; the client keeps \
                      trying"
                 ),
                 ended: false,
@@ -1654,7 +1720,7 @@ fn subscribe_request(
     let Some(where_clause) = where_clause else {
         return Ok(request);
     };
-    let where_clause = nervix_nspl::parse_expression(where_clause)
+    let where_clause = nervix_plexus::parse_expression(where_clause)
         .change_context(ClientError::InvalidSubscriptionWhere)?;
     Ok(request.with_where_clause(where_clause))
 }
@@ -1702,20 +1768,86 @@ fn diagnostic_range(source: &str, span: Option<SourceSpan>) -> Option<Range<usiz
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
 
     #[test]
+    fn backup_wait_and_recovery_arguments_use_shared_connect_options() {
+        let args = Args::try_parse_from([
+            "nervix-cli",
+            "--password",
+            "secret",
+            "--backup-wait-timeout",
+            "7m",
+            "--command",
+            "BACKUP CLUSTER TO 'cluster.nvxb';",
+        ])
+        .assured("Plexus accepts the global backup wait option");
+        let options = connect_options_from_args(&args).assured("connect options are valid");
+        assert_eq!(
+            options.backup_wait_timeout,
+            std::time::Duration::from_secs(7 * 60)
+        );
+        assert_eq!(
+            options.request_timeout,
+            ConnectOptions::default().request_timeout
+        );
+        assert_eq!(
+            options.retry_timeout,
+            ConnectOptions::default().retry_timeout
+        );
+
+        let args = Args::try_parse_from([
+            "nervix-cli",
+            "--password",
+            "secret",
+            "backup",
+            "cluster",
+            "--output",
+            "-",
+            "--execution-reference",
+            "recovery.backup",
+            "--backup-wait-timeout",
+            "8m",
+        ])
+        .assured("the backup subcommand accepts recovery and global wait options");
+        let options = connect_options_from_args(&args).assured("connect options are valid");
+        assert_eq!(
+            options.backup_wait_timeout,
+            std::time::Duration::from_secs(8 * 60)
+        );
+        let Some(Command::Backup {
+            execution_reference: Some(reference),
+            ..
+        }) = args.subcommand
+        else {
+            panic!("the backup retains its explicit execution reference");
+        };
+        assert_eq!(reference.as_str(), "recovery.backup");
+        let args = Args::try_parse_from(["nervix-cli", "--password", "secret"])
+            .assured("the CLI's defaults parse");
+        let options = connect_options_from_args(&args).assured("default options are valid");
+        assert_eq!(
+            options.backup_wait_timeout,
+            std::time::Duration::from_secs(10 * 60)
+        );
+    }
+
+    #[test]
     fn event_line_queue_bounds_records_and_bytes_without_waiting_for_the_printer() {
         let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
-        let sink = EventLineSender::new(sender);
+        let connector = EventLineSender::new(sender);
         for _ in 0..EVENT_BUFFER_RECORDS {
-            sink.push("é".repeat(EVENT_LINE_BYTES));
+            connector.push("é".repeat(EVENT_LINE_BYTES));
         }
-        sink.push("one more line".to_string());
-        assert_eq!(sink.take_dropped(), 1);
+        connector.push("one more line".to_string());
+        assert_eq!(connector.take_dropped(), 1);
         let mut retained_bytes = 0;
         for _ in 0..EVENT_BUFFER_RECORDS {
             let line = receiver
@@ -1731,16 +1863,16 @@ mod tests {
     #[test]
     fn draining_events_resets_the_visible_gap_after_a_full_queue() {
         let (sender, mut receiver) = nervix_primitives::sync::mpsc::channel(2);
-        let sink = EventLineSender::new(sender);
-        sink.push("first".to_string());
-        sink.push("second".to_string());
-        sink.push("dropped".to_string());
+        let connector = EventLineSender::new(sender);
+        connector.push("first".to_string());
+        connector.push("second".to_string());
+        connector.push("dropped".to_string());
 
-        drain_event_queue(&mut receiver, &sink);
+        drain_event_queue(&mut receiver, &connector);
 
         assert!(receiver.try_recv().is_err());
         assert_eq!(
-            sink.take_dropped(),
+            connector.take_dropped(),
             0,
             "the gap was reported during the drain"
         );
@@ -1749,15 +1881,15 @@ mod tests {
     #[test]
     fn an_event_gap_clamps_and_a_closed_printer_discards_new_lines() {
         let (sender, receiver) = nervix_primitives::sync::mpsc::channel(1);
-        let sink = EventLineSender::new(sender);
-        sink.push("retained".to_string());
-        sink.dropped.store(u64::MAX, Ordering::Relaxed);
-        sink.push("overflow".to_string());
-        assert_eq!(sink.take_dropped(), u64::MAX);
+        let connector = EventLineSender::new(sender);
+        connector.push("retained".to_string());
+        connector.dropped.store(u64::MAX, Ordering::Relaxed);
+        connector.push("overflow".to_string());
+        assert_eq!(connector.take_dropped(), u64::MAX);
 
         drop(receiver);
-        sink.push("printer stopped".to_string());
-        assert_eq!(sink.take_dropped(), 0);
+        connector.push("printer stopped".to_string());
+        assert_eq!(connector.take_dropped(), 0);
     }
 
     #[test]
@@ -2026,7 +2158,7 @@ mod tests {
 
     #[test]
     fn use_domain_parser_accepts_repl_command() {
-        use nervix_nspl::client_statement::parse_use_domain;
+        use nervix_plexus::client_statement::parse_use_domain;
 
         assert_eq!(
             parse_use_domain("USE prod;")
@@ -2051,7 +2183,7 @@ mod tests {
             "CREATE DOMAIN default; CREATE SCHEMA notification ( user_id U32 )\n"
         ));
         assert!(command_buffer_is_complete(
-            "CREATE CLIENT http_main TYPE HTTP CONFIG { 'url' = 'http://example.com/a;b' }\n"
+            "CREATE HTTP CLIENT http_main CONFIG { 'url' = 'http://example.com/a;b' }\n"
         ));
     }
 
@@ -2713,7 +2845,7 @@ mod tests {
     #[test]
     fn a_failed_event_read_is_printed_and_only_an_unrecoverable_session_ends_the_stream() {
         assert_eq!(
-            EventStream::DomainClocks.failure(&CoreClientError::RetryDeadline),
+            EventStream::DomainClocks.failure(&StackReport::new(CoreClientError::RetryDeadline)),
             StreamFailure {
                 line: "[events] notice: domain clock events could not resume yet: session retry \
                        deadline expired; the client keeps trying"
@@ -2722,9 +2854,9 @@ mod tests {
             }
         );
         assert_eq!(
-            EventStream::ServerNotices.failure(&CoreClientError::EventOverflow {
+            EventStream::ServerNotices.failure(&StackReport::new(CoreClientError::EventOverflow {
                 stream: nervix_client_core::EventStreamKind::ServerNotice,
-            }),
+            })),
             StreamFailure {
                 line: "[events] notice: server notices were dropped because they arrived faster \
                        than they were read"
@@ -2733,13 +2865,25 @@ mod tests {
             }
         );
         assert_eq!(
-            EventStream::Subscriptions.failure(&CoreClientError::SessionClosed),
+            EventStream::Subscriptions.failure(&StackReport::new(CoreClientError::SessionClosed)),
             StreamFailure {
                 line: "[events] notice: subscription events stopped because the session closed \
                        and no known server can reopen it"
                     .to_string(),
                 ended: true,
             }
+        );
+        let unreadable = StackReport::new(std::io::Error::from(std::io::ErrorKind::NotFound))
+            .change_context(CoreClientError::LoadDnsConfiguration);
+        assert_eq!(
+            EventStream::ServerNotices.failure(&unreadable),
+            StreamFailure {
+                line: "[events] notice: server notices could not resume yet: failed to load \
+                       native DNS configuration: entity not found; the client keeps trying"
+                    .to_string(),
+                ended: false,
+            },
+            "a failed read prints every context of its report"
         );
     }
 

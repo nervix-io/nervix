@@ -1,9 +1,11 @@
 # Web Console
 
-Every Nervix node serves a browser console. It combines a live drawing of the running execution
-graph with an NSPL command line, so the same session can be used to read a graph and to change it.
+*Plexus, the Nervix graph definition language.*
 
-![The Nervix web console: entity sidebar, live execution graph, and NSPL REPL](images/console-overview.png)
+Every Nervix node serves a browser console. It combines a live drawing of the running execution
+graph with a Plexus command line, so the same session can be used to read a graph and to change it.
+
+![The Nervix web console: entity sidebar, live execution graph, and Plexus REPL](images/console-overview.png)
 
 ## Opening The Console
 
@@ -24,6 +26,13 @@ redirect, reconnects there, and reports which node it reached:
 ```text
 connected to leader 'node-2'
 ```
+
+The console reports the leader each time its session connects, so the notice appears again when
+the session reconnects: after a lost connection, after a command whose outcome is not yet known, or
+after a leader change. A reconnect keeps the session's place: the console connects again where the
+redirect took it, selects its domain, attaches its clock, restores its subscription tabs and
+attaches its transaction again, and then sends its pending commands under their execution
+references.
 
 ## Signing In
 
@@ -46,8 +55,8 @@ The console is one screen with three regions:
 - the **execution graph** in the upper right
 - the **REPL** below it, which also hosts any relay subscriptions you open
 
-The top bar carries the websocket connection state, the global **Create** menu, the domain
-lifecycle button, the selected clock state, and the theme picker. The clock panel below the domain
+The top bar carries the websocket connection state, the global **Create** menu, the **Backups**
+button, the domain lifecycle button, the selected clock state, and the theme picker. The clock panel below the domain
 selector shows the selected domain's clock in detail.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
@@ -57,16 +66,32 @@ domains, non-relay graph nodes, and relays across the current cluster graph.
 
 ### Following the selected domain clock
 
-Selecting a domain attaches the console session to its clock once. The console detaches the
-previous clock when the selection changes. After a connection interruption, it attaches the
-selected clock again on the new session; the server releases the earlier attachment when its
-session ends. The panel shows the attached clock's typed state and START
-generation. For a paced clock it also shows logical now, rate, period, skew, and the latest accepted
-tick id and logical boundary. Logical now is projected from the committed mapping at the browser's
-UTC, refreshed four times a second; a browser whose clock differs from the cluster's can show a
-different projection. The tick is the serving node's accepted observation. Stopped, uninstalled,
-and unpaced states have no projected logical time. A refused attachment shows its reason and is
-not retried until the selection or connection changes.
+Selecting a domain attaches the console session to its clock once. The console selects the first
+listed domain on its own when none is selected or the selected one disappears, and selecting another
+domain, from the domain menu or with a typed `USE`, detaches the previous clock first. The console's
+session is served by the leader, so after a connection interruption or a leader change it attaches
+the selected clock again on the new session; the server releases the earlier attachment when its
+session ends. A new connection attaches the clock before it attaches the console's transaction
+again, because a session that holds a transaction refuses clock attachments and detachments, so a
+console inside a transaction keeps following its clock across a reconnect. The panel shows the
+attached clock's typed state and START generation. For a paced clock it also shows logical now,
+rate, period, skew, the logical origin and UTC anchor, and the latest accepted tick id and logical
+boundary. Logical now is projected from the committed mapping at the browser's UTC, refreshed four
+times a second; a browser whose clock differs from the cluster's can show a different projection.
+The tick is the serving node's accepted observation. Stopped, uninstalled, and unpaced states have
+no projected logical time. A refused attachment shows its reason and is not retried until the
+selection or connection changes.
+
+The panel and the top bar's `CLOCK` state name the attachment's phase: `NO DOMAIN` without a
+selection, `ATTACHING` until the attach reply, `STOPPED`, `UNINSTALLED`, `UNPACED` or `PACED` while
+it follows the clock, `INTERRUPTED` while the connection is lost, which shows no projection,
+`REFUSED` with the server's reason, `DETACHED` after a typed detach, and `ENDED` with its reason
+once the server ends the attachment, which the console does not attach again until the selection
+or connection changes.
+
+The terminal's connected-to-leader message confirms the new session's serving node. The selected
+clock remains `ATTACHING` until its own attach reply arrives, including when a new session restores
+it after a leader change. Its `PACED` state and advancing ticks establish restored-clock readiness.
 
 ## Creating Entities From Forms
 
@@ -75,7 +100,7 @@ catalogs, schemas, codecs, signaling protocols, clients, VHOSTs, endpoints, hash
 relays, branches, ingestors, junctions, reingestors, and subscriptions. The resource group in the
 sidebar also provides a contextual create action. A form keeps its unfinished draft when it closes,
 restores focus to the action that opened it, reports validation and server failures inline, and
-shows the canonical NSPL statement before submission. An expression typed into a form, such as a
+shows the canonical Plexus statement before submission. An expression typed into a form, such as a
 filter, a `WHERE` predicate, an assigned value or an invocation argument, reads exactly as it does
 in a typed statement: its [string literals](filter-map-functions.md#literals) are verbatim, so a
 backslash is an ordinary character.
@@ -142,7 +167,7 @@ format, even when wire schemas of different formats share a name. JAQ-native and
 choose ingestion (decode), emitting (encode), or both, and may add an emitting-batch program after
 an emitting program. These are program editors: their contents remain jaq source in the current
 codec Model, including quotes and whitespace. RFC3339 field encoding rules can be added in order
-where the format supports them. The preview renders the complete codec Model as canonical NSPL.
+where the format supports them. The preview renders the complete codec Model as canonical Plexus.
 
 The Protobuf controls select an existing resource and one of its completed versions, including
 `LATEST`, then accept an optional `.proto` file and include root, additional compiler
@@ -200,25 +225,32 @@ keeps the entered path and selections for inspection. A successful hash map can 
 A Roto UDF form keeps arguments in declaration order, with exact scalar, vector, and fixed-array
 types and separate optional flags. The result has the same type controls. The current language is
 `ROTO_0_13`, with an explicit volatility control. The source editor preserves its complete text,
-including quotes, whitespace, the named function body, and Roto `test` blocks; canonical NSPL
+including quotes, whitespace, the named function body, and Roto `test` blocks; canonical Plexus
 chooses a safe dollar-quote delimiter around it. The server checks the declared signature exactly
 and runs the Roto tests before **Completed** appears. Compilation, type, or test failure keeps the
 signature and source editable. A completed function is available to `udf::` calls in later
 commands under the same session and domain.
 
-An ingestor form offers all 13 current source families: HTTP polling, Kafka, Pulsar, MQTT, NATS,
-RabbitMQ, Redis Pub/Sub, Prometheus, ZeroMQ, SQS, endpoint, WebSocket client, and Syslog. Its
-source client or endpoint is a typed choice limited to that source family. The source's own fields,
-delivery mode, quiesce mode, and required durations or sizes appear as explicit controls. The
-decoding codec list contains only codecs that support decoding. Timestamp behavior must be chosen
-explicitly: source timestamp, `NOW`, or `AT` a typed field from the codec's output schema.
+An ingestor form offers every connector and entity an ingestor reads through a transport:
+`HTTP REQUEST`, `HTTP ENDPOINT`, `KAFKA TOPIC`, `PULSAR TOPIC`, `MQTT TOPIC`, `NATS SUBJECT`,
+`RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
+`WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER`. Its client or endpoint is a
+typed choice limited to that pair: clients of its connector, or endpoints of the `TYPE` its head
+names. The preview writes the statement under that pair's head. The source's own fields,
+delivery mode, quiesce mode, and required durations or sizes appear as explicit controls. A topic,
+queue, subject, channel, consumer group, queue group or subscription keeps its text exactly as
+typed, case and spaces included, and the form refuses a name its entity's rule refuses. A
+`PULSAR TOPIC` subscription also requires an explicit ownership choice, `OWNED BY INGESTOR` or
+`PROVISIONED`, which the form never defaults. The decoding codec list contains only codecs that
+support decoding. Timestamp behavior must be chosen explicitly: source timestamp, `NOW`, or `AT` a
+typed field from the codec's output schema.
 
 Each ingestor route explicitly chooses an unbranched or named branch and a relay with that exact
 branch declaration. Routes can be added, removed, and moved in order. They edit inheritance,
 ordered output assignments and function invocations, an optional `WHERE` expression, branch key
 assignments, an explicit flush policy, and a route-local message error policy. An ingestor error
 route selects an unbranched relay and its own field assignments. The node-wide general error
-policy is also required. The draft retains incomplete values and shows the canonical NSPL preview
+policy is also required. The draft retains incomplete values and shows the canonical Plexus preview
 only when every required choice and expression is valid. It submits through the usual durable
 command path, including attached transactions and reconnect recovery.
 
@@ -276,9 +308,12 @@ Branch groups are drawn as a tinted region with a stacked outline around the par
 runs per branch, containing exactly the items that run per branch and nothing else. Regions of
 different branches never touch, even where they share a column. The region is
 headed with the branch name, its key fields, and how many branch instances are currently live; the
-outline thickens with that count. The ingestors and reingestors that construct the branch, and the
-emitters and reingestors that collapse it, sit on the region's border rather than inside it.
-Clicking the header opens the branch's key schema and its live instances.
+outline thickens with that count. The count comes from the per-branch statistics of the graph
+snapshot, which name each concrete branch by the lowercase hexadecimal fingerprint of its key, so a
+snapshot never carries key values a branch schema may declare `SENSITIVE`. The ingestors and
+reingestors that construct the branch, and the emitters and reingestors that collapse it, sit on
+the region's border rather than inside it. Clicking the header opens the branch's key schema and
+its live instances.
 
 The toolbar controls framing. Search highlights matching items, dims the rest, and brings the
 matches into view; the zoom buttons step in tens and `Ctrl`/`Cmd` with the scroll wheel is
@@ -300,7 +335,7 @@ Clicking any node or relay opens its action menu. Each action types the correspo
 into the REPL and runs it, so the console never does anything you could not have typed:
 
 - **DESCRIBE** — the runtime view of the item, where the item has a `DESCRIBE` form
-- **SHOW CREATE** — the NSPL that declares it
+- **SHOW CREATE** — the Plexus that declares it
 - **SUBSCRIBE** — relays only; opens the subscription form described below for that relay, whose
   tab runs the same `CREATE SUBSCRIPTION` the REPL accepts
 
@@ -360,11 +395,11 @@ Closing the tab ends the subscription; closing an ended tab only removes it, bec
 already ended its subscription. Subscriptions are read-only views: they cannot construct, inherit,
 or produce side effects. See [Sessions](sessions.md).
 
-## The NSPL REPL
+## The Plexus REPL
 
 ![The REPL with server-driven completions offered for a partial statement](images/console-repl.png)
 
-The REPL accepts the same NSPL as the command line client, including the client-local statements
+The REPL accepts the same Plexus as the command line client, including the client-local statements
 `USE`, `LIST DOMAINS`, `BEGIN`, `COMMIT`, `REVERT`, and the subscription statements. A typed
 `CREATE SUBSCRIPTION` opens a tab in the selected domain exactly as the subscription form does, and
 `DELETE SUBSCRIPTION <name>` closes the open tab of that name. The prompt shows the active domain,
@@ -380,19 +415,27 @@ The console sends a statement whether or not a domain is selected, and the serve
 it needs one: `SHOW CLUSTER STATUS` or `CREATE DOMAIN` runs with no domain selected, while a
 statement that acts on a domain fails with `no active domain selected`.
 
-The console event log renders attachment outcomes, domain-clock state and tick frames, and
-attachment ends. Tick entries include the id, boundary, authority UTC observation, and serving
-node's logical reading. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK` typed into the REPL use the
-same session-local requests as the automatic attachment. A typed second attach is refused as
-already attached. A typed detach releases the clock and leaves the panel detached until another
-domain selection or connection restores automatic following.
+A typed `BACKUP` runs through the [Backups](#backing-up-and-restoring) dialog, which opens to show
+its progress and downloads its archive. A typed `RESTORE` opens the dialog's restore form with the
+statement's options, because the browser cannot read the path the statement names. `BACKUP`,
+`RESTORE`, and `DESCRIBE BACKUP` must each be sent on their own, and `DESCRIBE BACKUP`, which reads
+an archive file on the client's machine, runs only in `nervix-cli`.
+
+The REPL renders attachment outcomes, domain-clock state and tick frames, and attachment ends.
+Tick entries include the id, boundary, authority UTC observation, and serving node's logical
+reading. Every tick adds a line, so a fast clock can push earlier output out of the REPL's latest
+256 lines. `ATTACH DOMAIN CLOCK` and `DETACH DOMAIN CLOCK` typed into the REPL use the same
+session-local requests as the automatic attachment, and the console refuses them itself while a
+transaction is active. A typed second attach is refused as already attached. A typed detach
+releases the clock and leaves the panel detached until a typed `ATTACH DOMAIN CLOCK`, another
+domain selection, or a new connection restores following.
 
 `BEGIN` requires a selected domain that already exists and binds the transaction to it. The
 console follows the transaction's domain, so attaching switches the domain selector to it.
 `DESCRIBE TRANSACTION` prints the open transaction's impact report between queued statements, and
 with an id it reads another transaction of the same user while the prompt, domain selector, and
 attached transaction stay as they were. See
-[NSPL Overview](nspl-overview.md) for its forms and output.
+[Plexus Overview](plexus-overview.md) for its forms and output.
 
 Every persistent command keeps one execution reference while the browser waits, reconnects, or
 follows leadership. The transaction id and status are replicated. If the WebSocket closes
@@ -405,7 +448,7 @@ The Create form then leaves **Queued until reconnect** with a completed or faile
 second session can attach the same owner's transaction and take it over; the displaced console
 then gets an explicit takeover error. A clean console session close reverts an open transaction,
 while an accepted commit continues on the leader without the browser. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and
+[Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions) and
 [Client Session Protocol](client-session-protocol.md).
 
 `Tab` cycles through completions offered by the server for the current cursor position. `ArrowUp`
@@ -440,6 +483,10 @@ its session delivers, and says where it left something out:
   rather than an empty list.
 - The execution graph and sidebar keep only the latest snapshot of the selected domain. Selecting
   another domain replaces it with that domain's snapshot, which the server sends at once.
+- A backup's download moves each 256 KiB chunk of the archive into the browser's own blob storage
+  as it arrives, and the page holds one chunk at a time. A restore reads its archive file one slice
+  at a time, at most 4 MiB while it digests the file and 256 KiB while it streams it, and keeps at
+  most 1 MiB queued on its connection.
 
 ## Inspecting a transaction
 
@@ -462,12 +509,15 @@ edges, including parallel data and materialized-state paths. Role marks and the 
 shape supplement the graph colors.
 
 The summary names the transaction, domain, state, accepted and applied counts, completeness,
-freshness, aggregate quiesce level, planning basis, relocations, rebuilds, and state resets.
-An incomplete report shows its diagnostics. A stale preview must be refreshed before retrying
-`COMMIT`. The console sends the inspected whole-transaction preview identity with `COMMIT`, even
-when an operation is selected. Inspecting another transaction leaves the attached transaction's
-commit basis intact. Retained reports keep their own graph geometry when the live execution graph
-changes.
+freshness, aggregate quiesce level, planning basis, relocations, rebuilds, and state resets. An
+incomplete report shows its diagnostics. A stale preview must be refreshed before retrying `COMMIT`.
+The console sends the inspected whole-transaction preview identity with `COMMIT`, even when an
+operation is selected. Without a complete inspection of the attached transaction at the position it
+commits, the console refuses `COMMIT` and asks for one first. A statement's outcome can arrive after
+an inspection whose report already includes that statement; the report becomes the commit basis once
+the outcome brings the transaction to its position. Inspecting another transaction leaves the
+attached transaction's commit basis intact. Retained reports keep their own graph geometry when the
+live execution graph changes.
 
 The inspector receives the same complete typed report as the Rust client and CLI. It does not
 silently omit nodes, edges, operations, or steps from a large retained report; search, focus, and
@@ -490,6 +540,90 @@ the selected domain. The successful upload result arrives after every current li
 verified and installed the version. An upload moves no binding: models keep the version they pin
 until [`REBIND RESOURCE`](resources.md#rebinding-existing-models) moves them. Version contents and
 how nodes consume them are covered in [Resources](resources.md).
+
+## Backing Up And Restoring
+
+The top bar's **Backups** button opens a dialog with two forms, **Back up** and **Restore**. They
+run the same `BACKUP` and `RESTORE` statements as `nervix-cli`, on the console's own session: they
+follow its leader redirect, and a statement typed in the REPL runs through the same dialog. Each
+form is bound to the statement's options and shows the canonical Plexus it sends before you submit
+it. [Backup And Restore](backup-and-restore.md) describes what the statements capture and restore.
+
+### Taking A Backup
+
+The **Back up** form backs up the cluster or one domain, the selected domain by default, into the
+archive file you name. It captures runtime state quiesced, optionally with a drain timeout, live
+(`WITHOUT PAUSE`), or not at all (`WITHOUT STATE`), and can leave resource bytes out (`WITHOUT
+RESOURCES`). **Back up and download** sends the `BACKUP` as a command. Once it completes, the
+dialog lists the summary the backup reported: the archive's size and BLAKE3 digest, when it was
+captured and until when it can be downloaded, the users, and each domain with its cut, revision,
+and sections. The REPL prints the outcome as it prints any command's.
+
+The console then downloads the archive from the leader that assembled it, and checks it as it
+arrives. It accepts the archive only once every byte arrived and the size and BLAKE3 digest match
+the summary, and only then hands it to the browser as a download, saved under the last component of
+the file the statement names; the browser chooses the directory. A partial or altered archive never
+reaches the browser's downloads. The first download whose last frame the leader queued releases
+the archive on the leader.
+
+A download that fails in transport, stalls, or ends early starts again from the first byte after a
+one-second pause, for up to eight attempts and redirects in all, while the leader retains the
+archive, and **Download again** retries one that stopped for such a reason.
+A download the leader refuses, because the archive expired, a download already collected it, or the
+node that assembled it restarted, ends with that reason; the backup itself completed, and running
+it again assembles a new archive.
+
+A backup whose answer a lost connection took is sent again under its execution reference once the
+session reconnects, and the leader answers with the backup's recorded outcome instead of running it
+again; the archive then downloads as it would have.
+
+The console records each backup it sends in the browser tab's session storage until the archive is
+downloaded. Reloading the page while the backup runs or downloads sends the same backup again under
+its execution reference: the leader answers with the backup's recorded outcome instead of running
+it twice, and the console downloads the archive again from its first byte. The node collects an
+archive once it has queued the archive's last bytes for a download, so a reload that comes after
+that moment finds the archive collected, and the backup must run again. Closing the tab or signing
+in as another user forgets the record. So does a reload that finds a record the console cannot read
+back as exactly what it wrote, such as one edited outside the console; the reload then resumes
+nothing. An archive stays downloadable only while it is
+retained, by default for 15 minutes from the moment the console sent the backup.
+
+The browser saves the archive with the permissions of its downloads directory. An archive holds
+password hashes, client secrets, and TLS private keys, so keep a downloaded archive where only its
+owner can read it.
+
+### Restoring An Archive
+
+The **Restore** form restores one domain of an archive, under its archived name or a new one, or a
+whole cluster archive with its policy for users the cluster already has. It can resume the restored
+domains at their archived lifecycle, and leave out source offsets or all runtime state.
+
+Choose the archive file, set the options, and select **Dry run**. The console reads the file once to
+measure its size and BLAKE3 digest, then streams it to the leader with the statement's `DRY RUN`
+form, showing how many bytes it has read and sent. The dry run reports what the restore would
+create: each domain under the name it would have, with its status, start version, models, and
+resource versions, and every step it would apply. The planned model run of each domain is drawn
+with the [transaction inspector's](#inspecting-a-transaction) view.
+
+**Restore** streams the archive again and runs the same statement without `DRY RUN`. It stays
+disabled until a dry run of the current options and file has planned the restore. The result lists
+each step as applied, failed, or not attempted: a restore that fails at a step keeps the steps
+before it, and the dialog names the step. A refusal shows the leader's reason, such as a domain
+that already exists or an archive that is not a valid backup archive, and changes nothing.
+
+A restore that skips archived state says so. The result lists the restore's warnings above its
+report, as `nervix-cli` prints them: the state the restored schedule cannot take, such as a window
+whose model changed, with the reason. The REPL prints the same warnings after the restore's
+message.
+
+A restore runs outside transactions, so the form refuses while the session holds one. Every attempt
+sends the same execution reference, statement, and archive: a lost connection or an unknown outcome
+streams the archive again, from its first byte, until the leader answers. If no answer arrives
+within about ten minutes, the dialog reports the restore's outcome as unknown and names its
+execution reference.
+
+The console never renders what an archive holds beyond the summary a backup reports and the report
+a restore returns.
 
 ## Domain Lifecycle
 

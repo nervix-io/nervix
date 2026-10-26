@@ -6,6 +6,14 @@
 //! - **Depends on.** Transaction consensus state, runtime revision application and impact Models.
 //! - **Must not know.** Session protocol presentation or transaction planning.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
@@ -58,6 +66,14 @@ impl SessionServiceImpl {
                     .await
                     {
                         Ok(()) => None,
+                        Err(error)
+                            if matches!(
+                                error.downcast_ref::<ConsensusError>(),
+                                Some(ConsensusError::LeadershipLost { .. })
+                            ) =>
+                        {
+                            return Ok(TransactionApplicationAttempt::Retry);
+                        }
                         Err(error) => Some(format!(
                             "transaction '{}' committed the WASM state reset, but it did not \
                              become usable: {error:#}",
@@ -89,16 +105,19 @@ impl SessionServiceImpl {
                                 }
                                 None
                             }
-                            Err(
-                                RuntimeError::RuntimeRevisionPreparation { .. }
-                                | RuntimeError::RuntimeRevisionReadiness { .. },
-                            ) => {
+                            Err(error)
+                                if matches!(
+                                    error.current_context(),
+                                    RuntimeError::RuntimeRevisionPreparation { .. }
+                                        | RuntimeError::RuntimeRevisionReadiness { .. }
+                                ) =>
+                            {
                                 sleep(Duration::from_millis(100)).await;
                                 return Ok(TransactionApplicationAttempt::Retry);
                             }
                             Err(error) => Some(format!(
                                 "transaction '{}' committed the effect beginning at statement {}, \
-                                 but it failed to become usable: {error}",
+                                 but it failed to become usable: {error:#}",
                                 transaction.id,
                                 applying.result.operation_range().first()
                             )),
@@ -143,6 +162,23 @@ impl SessionServiceImpl {
         transaction: &ReplicatedTransaction,
         actual: &TransactionStepImpactRecorder,
     ) -> Result<(), Report<TransactionCommitError>> {
+        Box::pin(self.recover_applying_domain_quiescence(transaction, actual)).await?;
+        for attempt in actual.pending_entity_attempts() {
+            actual.uncertain(
+                attempt,
+                nervix_models::ImpactDiagnosticKind::Recovery,
+                "the original coordinator left while the gate was engaged; its fenced lease owns \
+                 cleanup",
+            );
+        }
+        Ok(())
+    }
+
+    async fn recover_applying_domain_quiescence(
+        &self,
+        transaction: &ReplicatedTransaction,
+        actual: &TransactionStepImpactRecorder,
+    ) -> Result<(), Report<TransactionCommitError>> {
         if let Some(attempt) = actual.pending_domain_attempt() {
             let domain = &transaction.domain;
             let status = self
@@ -151,24 +187,26 @@ impl SessionServiceImpl {
                 .current_domain(domain)
                 .await
                 .map(|state| state.status);
+            // A resume may have committed even when its coordinator lost the response. Install
+            // that current state before confirming release, including when it is already running.
+            if let Err(error) = self.apply_current_cluster_state().await {
+                actual.fail(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Recovery,
+                    format!("{error:#}"),
+                );
+                return Err(
+                    error.change_context(TransactionCommitError::RecoverQuiescence {
+                        id: transaction.id.clone(),
+                    }),
+                );
+            }
             if matches!(status, Some(DomainStatus::Paused)) {
-                if let Err(error) = self.apply_current_cluster_state().await {
-                    actual.fail(
-                        attempt,
-                        nervix_models::ImpactDiagnosticKind::Recovery,
-                        error.to_string(),
-                    );
-                    return Err(Report::new(error).change_context(
-                        TransactionCommitError::RecoverQuiescence {
-                            id: transaction.id.clone(),
-                        },
-                    ));
-                }
                 if let Err(error) = self.wait_for_paused_domain_drain(domain).await {
                     actual.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Recovery,
-                        error.to_string(),
+                        format!("{error:#}"),
                     );
                     return Err(
                         error.change_context(TransactionCommitError::RecoverQuiescence {
@@ -193,14 +231,6 @@ impl SessionServiceImpl {
             } else {
                 actual.release(attempt);
             }
-        }
-        for attempt in actual.pending_entity_attempts() {
-            actual.uncertain(
-                attempt,
-                nervix_models::ImpactDiagnosticKind::Recovery,
-                "the original coordinator left while the gate was engaged; its fenced lease owns \
-                 cleanup",
-            );
         }
         Ok(())
     }
@@ -238,7 +268,7 @@ impl SessionServiceImpl {
         &self,
         actual: &TransactionStepImpactRecorder,
         transaction: &ReplicatedTransaction,
-    ) -> Option<RuntimeError> {
+    ) -> Option<Report<RuntimeError>> {
         if let Err(error) = self.apply_current_cluster_state().await {
             return Some(error);
         }
@@ -303,7 +333,7 @@ impl SessionServiceImpl {
         let restored_revision = self.inner.consensus.current_runtime_revision().await;
         if let Err(error) = self.apply_current_cluster_state().await {
             self.broadcast_error(format!(
-                "failed to apply the models restored in domain '{}': {error}",
+                "failed to apply the models restored in domain '{}': {error:#}",
                 domain.as_str()
             ));
             return;
@@ -338,11 +368,22 @@ impl SessionServiceImpl {
                 id: transaction.id.clone(),
             })
         })?;
+        let actual = match actual {
+            Some(actual) => actual,
+            None => applying.result.impact.actual().clone(),
+        };
+        let actual = TransactionStepImpactRecorder::from_actual(
+            applying.result.operation_range().first(),
+            actual,
+        );
+        // A terminal result releases mutation ownership. Finish the pause under that ownership
+        // first, including when the effect has a definitive failure to record.
+        Box::pin(self.recover_applying_domain_quiescence(transaction, &actual)).await?;
         let outcome = match application_failure {
             Some(error) => TransactionApplicationOutcome::Failed { error },
             None => Box::pin(self.https_listener_outcome(transaction, applying)).await,
         };
-        let actual = actual.unwrap_or_else(|| applying.result.impact.actual().clone());
+        let actual = actual.snapshot();
         let rolls_back = matches!(outcome, TransactionApplicationOutcome::RolledBack { .. });
         let completed = self
             .inner

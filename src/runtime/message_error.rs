@@ -4,7 +4,12 @@
 //! - **Owns.** Turning one failed record into the typed error context and executing its prepared
 //!   route program without recursively handling a failure in that handler.
 //! - **Depends on.** Bound error-route plans, Arrow batches, the VM and relay delivery.
-//! - **Must not know.** Scheduled Models, NSPL parsing or route selection from declarations.
+//! - **Must not know.** Scheduled Models, Plexus parsing or route selection from declarations.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use arrow_buffer::BooleanBuffer;
 
@@ -12,15 +17,15 @@ use super::{vm_compile::RuntimeVmCompileError, *};
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum MessageErrorRecordConstructionError {
-    #[error("failed to compute message-error lookup columns: {error}")]
+    #[error("failed to compute message-error lookup columns: {error:#}")]
     LookupColumns {
         error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
     },
-    #[error("failed to project the message-error VM input: {error}")]
+    #[error("failed to project the message-error VM input: {error:#}")]
     InputProjection {
         error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
     },
-    #[error("message-error SET execution failed: {report}")]
+    #[error("message-error SET execution failed: {report:#}")]
     Execution {
         report: error_stack::Report<nervix_vm::RuntimeError>,
     },
@@ -31,11 +36,11 @@ pub(super) enum MessageErrorRecordConstructionError {
         code: nervix_vm::ErrorCode,
         span: VmSpan,
     },
-    #[error("failed to project the message-error output: {error}")]
+    #[error("failed to project the message-error output: {error:#}")]
     OutputProjection {
         error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
     },
-    #[error("failed to materialize the message-error output row: {error}")]
+    #[error("failed to materialize the message-error output row: {error:#}")]
     OutputRow {
         error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
     },
@@ -61,12 +66,12 @@ pub(super) enum MessageErrorHandlingError {
     },
     #[error("partial output row {row} is outside batch with {rows} rows")]
     PartialOutputRowOutOfBounds { row: usize, rows: usize },
-    #[error("failed to construct a partial-output Arrow batch: {source}")]
+    #[error("failed to construct a partial-output Arrow batch")]
     PartialOutputArrow {
         #[source]
         source: arrow_schema::ArrowError,
     },
-    #[error("failed to construct a partial-output runtime batch: {error}")]
+    #[error("failed to construct a partial-output runtime batch: {error:#}")]
     PartialOutputRecord {
         error: error_stack::Report<crate::runtime_schema::RuntimeSchemaError>,
     },
@@ -85,14 +90,11 @@ pub(super) enum MessageErrorHandlingError {
     PreparedRouteUnavailable { route: MessageErrorRouteKey },
     #[error("duplicate prepared message-error route for {} '{}' to relay '{}'", .route.node.kind.as_str(), .route.node.identifier.as_str(), .route.error_relay.as_str())]
     DuplicatePreparedRoute { route: MessageErrorRouteKey },
-    #[error("{source}")]
-    FlushPolicy {
-        node: NodeRef,
-        #[source]
-        source: RuntimeError,
-    },
+    /// The route's flush policy does not parse; the setting that does not is beneath.
+    #[error("the message-error route for {} '{}' to relay '{}' has an invalid flush policy", .route.node.kind.as_str(), .route.node.identifier.as_str(), .route.error_relay.as_str())]
+    FlushPolicy { route: MessageErrorRouteKey },
     #[error(
-        "failed to compile the message-error route for {} '{}' in domain '{}' to relay '{}': {error}",
+        "failed to compile the message-error route for {} '{}' in domain '{}' to relay '{}': {error:#}",
         .node.kind.as_str(),
         .node.identifier.as_str(),
         .domain.as_str(),
@@ -105,7 +107,7 @@ pub(super) enum MessageErrorHandlingError {
         error: error_stack::Report<RuntimeVmCompileError>,
     },
     #[error(
-        "failed to construct message-error record {reference} for {}: {source}",
+        "failed to construct message-error record {reference} for {}",
         .operation.as_ref()
     )]
     RecordConstruction {
@@ -315,7 +317,7 @@ pub(super) fn captured_partial_output(
         Ok(partial_output) => Some(partial_output),
         Err(error) => {
             debug!(
-                error = %error,
+                error = %format_args!("{error:#}"),
                 row, "failed to capture the partial output view for a message error"
             );
             None
@@ -333,7 +335,7 @@ pub(super) fn finalized_partial_output(
         Ok(partial_output) => Some(partial_output),
         Err(error) => {
             debug!(
-                error = %error,
+                error = %format_args!("{error:#}"),
                 row, "failed to capture the partial output view for a message error"
             );
             None
@@ -637,43 +639,47 @@ impl Runtime {
                 if let Err(dispatch_error) =
                     self.dispatch_message_error_to_dlq(context, relay).await
                 {
+                    let reason = format!("{dispatch_error:#}");
                     self.inner.events.report_error(format!(
                         "{} '{}' failed to dispatch message error {} to DLQ '{}' in domain '{}': \
-                         {}",
+                         {reason}",
                         node_kind.as_str(),
                         node.as_str(),
                         error.reference,
                         relay.as_str(),
                         domain.as_str(),
-                        dispatch_error
                     ));
                     message.acks.no_ack(format!(
-                        "{} '{}' failed to dispatch message error {} to DLQ '{}': {}",
+                        "{} '{}' failed to dispatch message error {} to DLQ '{}': {reason}",
                         node_kind.as_str(),
                         node.as_str(),
                         error.reference,
                         relay.as_str(),
-                        dispatch_error
                     ));
                 }
             }
         }
     }
 
+    /// Applies a node's `ON GENERAL ERROR` policy to a failure that ended work holding `acks`.
+    ///
+    /// The policy names the node and its domain, so `error` begins at the failure itself. Its
+    /// whole chain is rendered here, once: the runtime event and every negative acknowledgement
+    /// carry it after the node's name, and the log records it beside the node's fields.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
             reason = "the caller supplies typed error conversion and the planned route iterator"
         )
     )]
-    pub(in crate::runtime) fn handle_general_error_for_acks<'a>(
+    pub(in crate::runtime) fn handle_general_error_for_acks<'a, C: error_stack::Context>(
         &self,
         domain: &DomainName,
         node_kind: ModelKind,
         node: impl Into<ModelName>,
         policies: &ErrorPolicies,
         acks: impl IntoIterator<Item = &'a AckSet>,
-        reason: String,
+        error: &Report<C>,
     ) {
         let node = node.into();
         match policies.general {
@@ -683,13 +689,15 @@ impl Runtime {
                 }
             }
             GeneralErrorPolicy::Log => {
-                self.inner.events.report_error(format!(
+                let reason = format!("{error:#}");
+                let report = format!(
                     "{} '{}' general error in domain '{}': {}",
                     node_kind.as_str(),
                     node.as_str(),
                     domain.as_str(),
                     reason
-                ));
+                );
+                self.inner.events.report_error(report.clone());
                 warn!(
                     domain = domain.as_str(),
                     node_kind = node_kind.as_str(),
@@ -698,35 +706,46 @@ impl Runtime {
                     "runtime node handled general error"
                 );
                 for ack in acks {
-                    ack.no_ack(reason.clone());
+                    ack.no_ack(report.clone());
                 }
             }
         }
     }
 
+    /// Reports a failure inside a node's own processing that ended work holding `acks`, and fails
+    /// every one of them. No policy can recover this work, so it is never acknowledged.
+    ///
+    /// The report names the node and its domain, so `error` begins at the failure itself. Its
+    /// whole chain is rendered here, once: the runtime event and every negative acknowledgement
+    /// carry it after the node's name, and the log records it beside the node's fields.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
             reason = "the caller supplies typed error conversion and the planned route iterator"
         )
     )]
-    pub(in crate::runtime) fn handle_internal_processor_error_for_acks<'a>(
+    pub(in crate::runtime) fn handle_internal_processor_error_for_acks<
+        'a,
+        C: error_stack::Context,
+    >(
         &self,
         domain: &DomainName,
         node_kind: ModelKind,
         node: impl Into<ModelName>,
         _policies: &ErrorPolicies,
         acks: impl IntoIterator<Item = &'a AckSet>,
-        reason: String,
+        error: &Report<C>,
     ) {
         let node = node.into();
-        self.inner.events.report_error(format!(
+        let reason = format!("{error:#}");
+        let report = format!(
             "{} '{}' internal error in domain '{}': {}",
             node_kind.as_str(),
             node.as_str(),
             domain.as_str(),
             reason
-        ));
+        );
+        self.inner.events.report_error(report.clone());
         warn!(
             domain = domain.as_str(),
             node_kind = node_kind.as_str(),
@@ -735,7 +754,7 @@ impl Runtime {
             "runtime processor handled internal error"
         );
         for ack in acks {
-            ack.no_ack(reason.clone());
+            ack.no_ack(report.clone());
         }
     }
 
@@ -862,7 +881,7 @@ impl Runtime {
                     domain: domain.clone(),
                     node: route_key.node.clone(),
                     relay: relay.clone(),
-                    reason: reason.to_string(),
+                    reason: format!("{reason:#}"),
                 })
             })?;
         if route_plan.flush_policy.is_some() {
@@ -1055,19 +1074,192 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use ahash::HashMap;
     use nervix_models::{
         FieldPath, MessageErrorCode, MessageErrorOperation, ParseAsType, StructuredMessageError,
         Timestamp,
     };
+    use nervix_primitives::time::timeout;
     use sorted_vec::SortedSet;
 
     use super::*;
     use crate::{
-        runtime_ack::AckSet,
+        runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
+
+    #[nervix_primitives::test]
+    async fn runtime_report_chain_partial_output_logs() {
+        use meticulous::ResultExt as _;
+
+        use crate::runtime::report_observer::ReportLogObserver;
+
+        let schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "output.total",
+            arrow_schema::DataType::Int64,
+            false,
+        )]));
+        let vm = VmTypedBatch::try_new(
+            schema,
+            vec![VmTypedArray::Int64(arrow_array::Int64Array::from(vec![1]))],
+        )
+        .assured("the test VM batch has one initialized I64 column");
+        let finalized = test_runtime_row([("total".into(), RuntimeValue::I64(1))]).one_row_batch();
+        let mut logs = ReportLogObserver::new();
+        logs.observe(async {
+            assert!(captured_partial_output(&vm, 1).is_none());
+            assert!(finalized_partial_output(&finalized, 1).is_none());
+        })
+        .await;
+        for _ in 0..2 {
+            let record = logs.next("failed to capture the partial output view for a message error");
+            assert_eq!(
+                record.fields["error"],
+                "partial output row 1 is outside batch with 1 rows"
+            );
+            assert_eq!(record.fields["row"], "1");
+        }
+    }
+
+    #[test]
+    fn runtime_report_chain_partial_output_arrow_names_the_source_once() {
+        let report = Report::new(MessageErrorHandlingError::PartialOutputArrow {
+            source: arrow_schema::ArrowError::InvalidArgumentError("invalid columns".into()),
+        });
+        assert_eq!(
+            format!("{report:#}"),
+            "failed to construct a partial-output Arrow batch: Invalid argument error: invalid \
+             columns"
+        );
+    }
+
+    #[test]
+    fn runtime_report_chain_partial_output_record_keeps_its_arrow_source_once() {
+        let report = Report::new(MessageErrorHandlingError::PartialOutputRecord {
+            error: Report::new(crate::runtime_schema::RuntimeSchemaError::ArrowOperation {
+                operation: crate::runtime_schema::RuntimeSchemaOperation::FinishBatch,
+                source: arrow_schema::ArrowError::InvalidArgumentError("invalid columns".into()),
+            }),
+        });
+        assert_eq!(
+            format!("{report:#}"),
+            "failed to construct a partial-output runtime batch: failed to finish an Arrow batch: \
+             Invalid argument error: invalid columns"
+        );
+    }
+
+    #[test]
+    fn runtime_report_chain_record_construction_keeps_nested_reports() {
+        let error = structured_message_error(
+            Timestamp::from_unix_nanos(1),
+            MessageErrorCode::Evaluation,
+            "sensitive original payload".into(),
+            MessageErrorOperation::Set,
+            None,
+            [],
+        );
+        let source = Report::new(
+            crate::runtime_schema::RuntimeSchemaError::ColumnCountMismatch {
+                expected: 2,
+                found: 1,
+            },
+        )
+        .change_context(crate::runtime_schema::RuntimeSchemaError::VmOperation {
+            operation: crate::runtime_schema::RuntimeVmOperation::BuildInputBatch,
+        });
+        let report = MessageErrorHandlingError::record_construction(
+            &error,
+            MessageErrorRecordConstructionError::InputProjection { error: source },
+        );
+        assert_eq!(
+            format!("{report:#}"),
+            format!(
+                "failed to construct message-error record {} for set: failed to project the \
+                 message-error VM input: failed to build a VM input batch: Arrow batch has 1 \
+                 columns for 2 schema fields",
+                error.reference
+            )
+        );
+    }
+
+    /// A node's policy is handed the failure's report and renders its whole chain once: the event
+    /// and every negative acknowledgement carry it after the node's kind, name and domain, and a
+    /// general error the policy ignores is acknowledged without an event.
+    #[nervix_primitives::test]
+    async fn node_error_policies_render_the_report_they_are_given_once() {
+        let runtime = Runtime::default();
+        let mut events = runtime.subscribe_events();
+        let domain = domain("orders");
+        let failure = || {
+            Report::new(super::super::relay_batch::RelayRecordBatchError::EmptyMessages)
+                .change_context(RouteOutputError::Concatenate {
+                    relay: named("totals"),
+                })
+        };
+        let chain = "failed to concatenate buffered output for relay 'totals': a relay batch must \
+                     contain at least one message";
+
+        let (ignored_acks, ignored_completion) = AckSet::root();
+        runtime.handle_general_error_for_acks(
+            &domain,
+            ModelKind::Ingestor,
+            named::<ModelName>("intake"),
+            &ErrorPolicies {
+                message: MessageErrorPolicy::Log,
+                general: GeneralErrorPolicy::Ignore,
+            },
+            [&ignored_acks],
+            &failure(),
+        );
+        assert_eq!(ignored_completion.wait().await, AckOutcome::Ack);
+
+        let (internal_acks, internal_completion) = AckSet::root();
+        runtime.handle_internal_processor_error_for_acks(
+            &domain,
+            ModelKind::Junction,
+            named::<ModelName>("route_totals"),
+            &ErrorPolicies::handled_by_log(),
+            [&internal_acks],
+            &failure(),
+        );
+        let internal_report =
+            format!("junction 'route_totals' internal error in domain 'orders': {chain}");
+        // Events arrive in the order they were reported, so the ignored error reported none.
+        let RuntimeEvent::Error(message) = events
+            .recv()
+            .await
+            .expect("an internal error is reported to the node's observers");
+        assert_eq!(message, internal_report);
+        assert_eq!(
+            internal_completion.wait().await,
+            AckOutcome::NoAck(internal_report)
+        );
+
+        let (logged_acks, logged_completion) = AckSet::root();
+        runtime.handle_general_error_for_acks(
+            &domain,
+            ModelKind::Ingestor,
+            named::<ModelName>("intake"),
+            &ErrorPolicies::handled_by_log(),
+            [&logged_acks],
+            &failure(),
+        );
+        let logged_report = format!("ingestor 'intake' general error in domain 'orders': {chain}");
+        let RuntimeEvent::Error(message) = events
+            .recv()
+            .await
+            .expect("a logged general error is reported to the node's observers");
+        assert_eq!(message, logged_report);
+        assert_eq!(
+            logged_completion.wait().await,
+            AckOutcome::NoAck(logged_report)
+        );
+    }
 
     fn lowered_set(source: &str) -> nervix_vm::program::SpannedNode<nervix_vm::program::Program> {
         lower_route_construction(
@@ -1075,6 +1267,123 @@ mod tests {
             SemanticScopePolicy::read_write("error_output", "error_output"),
         )
         .expect("the test error SET lowers")
+    }
+
+    #[nervix_primitives::test]
+    async fn runtime_report_chain_dlq_event_and_negative_acknowledgement() {
+        use meticulous::ResultExt as _;
+
+        let runtime = Runtime::default();
+        let mut events = runtime.subscribe_events();
+        let domain = domain("orders");
+        let node = named::<ModelName>("calculate");
+        let relay = named::<RelayName>("calculation_errors");
+        let key = MessageErrorRouteKey {
+            domain: domain.clone(),
+            node: NodeRef::new(ModelKind::Junction, node.clone()),
+            source_route: None,
+            error_relay: relay.clone(),
+        };
+        let schema = test_schema(&[("result", ParseAsType::I64)]);
+        let input_schema = test_schema(&[("amount", ParseAsType::I64)]);
+        let relay_services = HashMap::from_iter([(
+            relay.clone(),
+            Arc::new(RelayBoundaryServices::new(
+                RelayBoundaryFanout::direct_with_capacity(NonZeroUsize::MIN),
+                0,
+                0,
+                Vec::new(),
+                None,
+                Arc::new(BranchPresence::new()),
+                nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
+            )),
+        )]);
+        let plans = BoundMessageErrorRoutes::bind(
+            MessageErrorRouteSpecs {
+                routes: vec![MessageErrorRouteSpec {
+                    key,
+                    program: lowered_set("SET result = input.amount"),
+                    output_schema: schema,
+                    target_branching: ResolvedBranching::unbranched(),
+                    compile_schemas: MessageErrorCompileSchemas {
+                        input: Some(input_schema),
+                        ..Default::default()
+                    },
+                    flush_policy: None,
+                }],
+            },
+            MessageErrorRouteBindingContext {
+                relay_services: &relay_services,
+                materialized_stream_specs: &HashMap::default(),
+                lookups: &HashMap::default(),
+                udfs: &UdfExecutor::default(),
+            },
+        )
+        .assured("the error route projects the declared I64 field");
+        let routing = DomainRoutingSnapshot {
+            message_error_plans: Arc::new(plans),
+            ..Default::default()
+        };
+        let (acks, completion) = AckSet::root();
+        let error = structured_message_error(
+            Timestamp::from_unix_nanos(1),
+            MessageErrorCode::Evaluation,
+            "sensitive original payload".into(),
+            MessageErrorOperation::Set,
+            None,
+            [],
+        );
+        let reference = error.reference;
+        runtime
+            .handle_structured_message_error(MessageErrorHandling {
+                routing: Some(&routing),
+                domain: &domain,
+                node_kind: ModelKind::Junction,
+                node: &node,
+                source_route: None,
+                policy: &MessageErrorPolicy::Dlq {
+                    relay: relay.clone(),
+                    assignments: Vec::new(),
+                },
+                message: RelayMessage {
+                    key: None,
+                    record: test_runtime_row([(
+                        "amount".into(),
+                        RuntimeValue::String("sensitive input".into()),
+                    )]),
+                    acks,
+                },
+                error,
+                partial_output: None,
+                materialized_state: HashMap::default(),
+                ingest_metadata: None,
+                execution_now: Timestamp::from_unix_nanos(1),
+            })
+            .await;
+
+        let cause = format!(
+            "failed to construct message-error record {reference} for set: failed to project the \
+             message-error VM input: VM input field 'input.amount' expected Arrow type Int64, \
+             found Utf8"
+        );
+        let RuntimeEvent::Error(event) = timeout(Duration::from_secs(1), events.recv())
+            .await
+            .assured("the DLQ failure is queued before its observation deadline")
+            .assured("a failed DLQ dispatch publishes its report");
+        assert_eq!(
+            event,
+            format!(
+                "junction 'calculate' failed to dispatch message error {reference} to DLQ \
+                 'calculation_errors' in domain 'orders': {cause}"
+            )
+        );
+        assert_eq!(
+            completion.wait().await,
+            AckOutcome::NoAck(format!(
+                "junction 'calculate' failed to dispatch message error {reference} to DLQ \
+                 'calculation_errors': {cause}"
+            ))
+        );
     }
 
     #[test]

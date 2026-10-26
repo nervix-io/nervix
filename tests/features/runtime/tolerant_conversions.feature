@@ -2,11 +2,11 @@ Feature: Tolerant conversions
   Scenario Outline: TRY_CAST yields a typed null where AS fails the message
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_reading (
         id STRING,
@@ -43,8 +43,8 @@ Feature: Tolerant conversions
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge tolerant-conversions-{{test_id}}.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_reading_batch_codec
         TO raw_readings
           INHERIT ALL
@@ -108,11 +108,11 @@ Feature: Tolerant conversions
   Scenario Outline: TRY_CAST suppresses only the failure of the conversion it performs
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UDF add_one
         WITH ROTO_0_13
@@ -149,8 +149,8 @@ Feature: Tolerant conversions
       CREATE RELAY conversion_errors SCHEMA conversion_error UNBRANCHED;
       CREATE VHOST edge owned-conversion-{{test_id}}.example.com;
       CREATE ENDPOINT conversion_ingress ON edge PATH '/conversions' TYPE HTTP;
-      CREATE INGESTOR conversion_source
-        FROM ENDPOINT conversion_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR conversion_source
+        FROM conversion_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conversion_input_batch_codec
         TO conversion_inputs
           INHERIT ALL
@@ -197,11 +197,11 @@ Feature: Tolerant conversions
   Scenario Outline: A conditional arm converts only the messages that select it
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA routed_value (
         id STRING,
@@ -226,8 +226,8 @@ Feature: Tolerant conversions
       CREATE RELAY routed_errors SCHEMA routed_error UNBRANCHED;
       CREATE VHOST edge conversion-arms-{{test_id}}.example.com;
       CREATE ENDPOINT routed_ingress ON edge PATH '/routed-values' TYPE HTTP;
-      CREATE INGESTOR routed_value_source
-        FROM ENDPOINT routed_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR routed_value_source
+        FROM routed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_value_batch_codec
         TO routed_values
           INHERIT ALL
@@ -275,7 +275,7 @@ Feature: Tolerant conversions
 
   Scenario Outline: A tolerant conversion keeps the type contract of the field it initializes
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "<error>"
+    When these Plexus commands fail with "<error>"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA raw_amount (
@@ -311,16 +311,16 @@ Feature: Tolerant conversions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_measurement (
         id STRING,
@@ -337,8 +337,8 @@ Feature: Tolerant conversions
       CREATE RELAY inferred_measurements SCHEMA inferred_measurement UNBRANCHED;
       CREATE VHOST edge infer-tolerant-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/measurements' TYPE HTTP;
-      CREATE INGESTOR raw_measurement_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR raw_measurement_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_measurement_batch_codec
         TO raw_measurements
           INHERIT ALL
@@ -379,11 +379,11 @@ Feature: Tolerant conversions
 
   Scenario Outline: A materialized-state default converts only deterministic values
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         id STRING,
@@ -405,7 +405,7 @@ Feature: Tolerant conversions
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "materialized-state DEFAULT for 'latest_readings' must use deterministic side-effect-free expressions"
+    And these Plexus commands fail with "materialized-state DEFAULT for 'latest_readings' must use deterministic side-effect-free expressions"
       """
       CREATE JUNCTION generated_default
         FROM readings

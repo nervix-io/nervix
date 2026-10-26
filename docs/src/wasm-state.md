@@ -1,5 +1,7 @@
 # WASM State And Recovery
 
+*Plexus, the Nervix graph definition language.*
+
 A WASM processor runs one guest instance per concrete branch, and each guest keeps computation state
 that Nervix makes durable. The host checkpoints that state at the end of every guest callback,
 confirms it with the processor's replicas, restores it into every instance it recreates, and
@@ -11,7 +13,7 @@ failure leaves behind.
 
 The central rule is that guest state and message delivery are separate guarantees. A checkpoint
 makes the guest's computation state durable before the source acknowledgements it covers are
-released. It does not make the guest, its output, and external sinks one transaction, so a path
+released. It does not make the guest, its output, and external emitters one transaction, so a path
 through a WASM processor is at least once.
 
 [Execution Plans](./execution-plans.md) explains how the committed schedule carries a pinned
@@ -20,14 +22,14 @@ module and state-generation identity into node-local WASM preparation and recove
 This chapter describes the architecture. [WASM Processor Guests](./wasm-processor-guests.md) owns
 the guest ABI and the user-facing account of checkpoints, resets, and failure diagnostics, the [Rust
 WASM Guest SDK](./wasm-guest-sdk.md) owns the Rust guest surface, and [Runtime
-Nodes](./processors.md#wasm-processor) owns the NSPL statements.
+Nodes](./processors.md#wasm-processor) owns the Plexus statements.
 
 ## Ownership By Layer
 
 | Layer | Owner | What it owns |
 | --- | --- | --- |
 | Vocabulary | WASM state models | The guest-state generation of every branch, a reset's scope, phase, and reason, the recovery attempts refused lifetimes have spent, and the typed state inspection. The processor's entry in the committed domain schedule carries all of them. |
-| Language | NSPL | `ON REJECTED STATE`, `RESET WASM PROCESSOR ... STATE`, and `DESCRIBE WASM PROCESSOR`, lowered into Models. |
+| Language | Plexus | `ON REJECTED STATE`, `RESET WASM PROCESSOR ... STATE`, and `DESCRIBE WASM PROCESSOR`, lowered into Models. |
 | Engines and infrastructure | The WASM host | Compiling a pinned module, instantiating a branch store, the fuel and memory limits of every guest operation, the domain snapshot each operation reads, and answering a guest's reset request. |
 | Engines and infrastructure | The guest SDK | The guest side of the ABI: the snapshot envelope, strict restore verdicts, and keeping its own execution state out of every save. |
 | Engines and infrastructure | The runtime state store | Writing a checkpoint under its placement, and the durability barrier that synchronizes the node's storage for every writer waiting on it. |
@@ -37,11 +39,69 @@ Nodes](./processors.md#wasm-processor) owns the NSPL statements.
 | Data plane | The processor supervisor | Fencing the scope of an unfinished reset, and preparing, aborting, and committing a reset on the owner. |
 | Control plane | The reset coordinator on the leader | Validating a reset, gating its scope, preparing it, and publishing it through its `Publishing` and `Ready` phases. |
 | Control plane | The recovery coordinator on the leader | Deciding whether a refused lifetime still has its one recovery attempt, recording the decision, and driving the reset it admits. |
-| Edges | The session service and clients | Admitting an NSPL reset as a transaction step, and returning the typed state inspection beside the text of `DESCRIBE WASM PROCESSOR`. |
+| Edges | The session service and clients | Admitting a Plexus reset as a transaction step, and returning the typed state inspection beside the text of `DESCRIBE WASM PROCESSOR`. |
 
-Guest bytes never leave the data plane and the state store. The control plane decides lifetimes and
-never reads a checkpoint; the data plane executes the lifetime the committed schedule names and
-never decides one.
+During normal execution, guest bytes stay in the data plane and state store. A backup is an
+explicit control-plane export of durable checkpoints to an archive; restore installs those bytes
+under the generations of the newly published schedule. The data plane executes the lifetime the
+committed schedule names and never decides one.
+
+Registered representation properties compare complete guest snapshots, SDK restore values,
+archive state descriptors and stored checkpoint headers. The oracle includes every raw guest byte,
+typed name, schema, branch field, generation and revision; segmented headers retain their full
+length and digest. These serial conversions establish value preservation. Callback completion,
+replica durability and publication ordering retain the scenario and concurrency evidence of their
+production owners. The [WASM representation register](https://github.com/nervix-io/nervix/blob/main/tests/wasm-representation-coverage.md)
+records each conversion, its exact oracle and the limits of its claim.
+
+## Backup And Restore
+
+A normal backup holds a quiesced cut for each running domain. Once intake and acknowledged work
+drain, each owner applies the selected cut revision and its runtime plan, then requests a fresh
+branch lifecycle checkpoint from its active supervisors before
+reading durable WASM saves together with its other state from one database snapshot. The cut asks no
+guest to save: the checkpoint that completed each branch's last callback is the save it archives,
+so a cut never waits for a new save to reach the replicas.
+The archive stores a typed descriptor for each saved branch: processor, schema fingerprint, typed
+branch key and its fingerprint, generation, and checkpoint revision. Raw guest bytes occupy a
+separate section with a measured length and digest. `WITHOUT PAUSE` exports the latest published
+checkpoints with crash-consistent semantics; `WITHOUT STATE` omits them. Capture filters the
+current scheduled identity and active lifecycle before reconstructing branch keys. Retained
+checkpoints for TTL or LRU evicted branches are omitted; they remain available for local branch
+reappearance without preventing a backup of the current lifecycle.
+The owner checks the committed generation before opening each selected save from the cut's
+database view. It reads and stages one save at a time under an admitted `restore_metadata` charge
+for the inline checkpoint and three fixed 64 KiB bulk buffers, so an accepted guest save can exceed the
+node's bulk budget. The raw section and its descriptor take their bytes and revision from the same
+read; a superseded generation is not opened. A failed or interrupted write leaves no published
+archive, and retry takes a new cut.
+
+A restore creates the target domain stopped and publishes its models and schedule before installing
+state. It stages a complete replacement state set on each target node. It accepts a guest save
+only when its entity and schema fingerprint match the restored schedule, maps the saved branch to
+the generation that schedule names, and stages the checkpoint on the assigned owner and replicas.
+Branch lifecycle is staged first. Each node streams saves into bounded chunks in an invisible
+installation namespace, verifies the complete inventory, synchronizes the namespace and durably
+selects it with one atomic pointer. Lifecycle, offsets and saves become visible together. Passive
+handles are cleared only after pointer durability and bounded obsolete-namespace cleanup, under
+the same installation authority. The installation and publication jobs reserve 2 MiB independently
+of total guest bytes and checkpoint count; loading a saved guest at START still materializes its
+bytes under the WASM host's own limits. Snapshot readers retain one complete selected generation,
+and queued checkpoint writers cannot cross an installation namespace.
+The every-node checkpoint maintenance owner also reclaims restored chunks after ordinary,
+replica, handoff or recovery checkpoints replace their selected header, or after state purge.
+It retains the exact revision a selected segmented header names, and preexisting snapshot readers
+keep complete saves across deletion. [Backup And Restore
+Architecture](./backup-and-restore-architecture.md#restore-staging-maintenance) owns the sweep's
+bounded buffers, accounting, cancellation and separate database allocation limits.
+The replicated start gate remains closed until every node completes publication, even if the
+restore fails or its mutation lease is released. Authority binds leader tenure, execution, lease
+and installation generation; stale local and remote requests cannot republish or clear handles. A
+checkpoint from a different schema or an entity absent from the schedule is skipped with a
+diagnostic. The source domain name and owner node are not carried into the restored placement.
+The guest still validates its saved bytes when the restored domain later starts. The Rust SDK
+allows the domain name to change when the branch key, domain type, and input and output schemas
+match; a guest with its own snapshot format may apply stricter identity rules and reject the save.
 
 ## Branch Ownership
 
@@ -57,10 +117,14 @@ never has an unbranched instance.
 
 The committed schedule gives each processor one owner and zero or more replicas. The owner runs
 every branch's instance and is the only node that checkpoints guest state. A replica holds durable
-copies of the owner's checkpoints. Any other node runs a guest only to prove it can restore a
-checkpoint while an ownership move prepares that node as the new owner. The control plane and the
-inspection name a concrete branch by its fingerprint, a fixed-size digest of the canonical
-branch-key text, never by its field values.
+copies of the owner's checkpoints. An ownership move for an active domain runs a guest at the
+destination to prove it can restore a checkpoint. A passive revision for a stopped domain carries
+the complete validated checkpoint inventory and preserves its guest saves without executing guest
+callbacks or reading domain time. The guest validates the save when `START` installs the running
+revision. A stopped clock is not a missing-checkpoint outcome and cannot justify a state reset.
+The control plane, the inspection, and the diagnostics and logs of a branch's guest name a concrete
+branch by its fingerprint, a fixed-size digest of the canonical branch-key text, never by its field
+values.
 
 A concrete branch that is evicted for its `TTL` or its instance limit stops without a quiesce flush,
 and its live instance and the work it buffered are dropped with it, as for every evicted processor
@@ -134,6 +198,9 @@ A zero-length save means the guest has no state: the next instance is initialize
 `nervix_load_state` call. The Rust SDK wraps every save in a `GuestSnapshot` envelope that also
 carries the branch configuration, so empty application state is still restored as state, and a
 snapshot taken under another branch configuration is rejected.
+For a restore into a differently named domain, the SDK accepts that name change while still
+checking the domain type, concrete branch key, and input and output schemas. The saved application
+bytes are passed through unchanged.
 
 A restore either succeeds, or the guest rejects the saved state with one of the two reserved verdict
 codes, or it fails without a verdict: a trap, an exhausted limit, or another negative code. Only a
@@ -154,7 +221,11 @@ schemas the processor's records are laid out by, and the branch's guest-state ge
 places guest state only under the identity derived from the committed schedule in its applied typed
 execution revision, and acts on a placement only while that placement is current. The same revision
 carries the processor's reset and pinned module plans through a rebuild or owner change. A replica
-acknowledgement counts only toward the placement it names. See [Checkpoint
+acknowledgement counts only toward the placement it names. Installed replication routes retain the
+same entity assignment publication as guest checkpoint execution. Reset lifecycle confirmation
+retains its route, follows replica reassignment, and refuses replacement or loss of primary
+ownership before declaring confirmation; neither that wait nor its announcer reads execution maps.
+See [Checkpoint
 Identity](./shutdown.md#checkpoint-identity) and [Membership, Consensus, And Bulk
 Transfer](./interconnect.md#membership-consensus-and-bulk-transfer).
 
@@ -222,15 +293,36 @@ it would save is the state the reset discards.
 5. **Committed.** The checkpoint becomes the committed checkpoint, and the acknowledgements the
    callback held back are released. Only then does the branch run its next callback.
 
-The whole checkpoint, from the guest's save to the last replica's confirmation, has ten seconds.
+The whole checkpoint, from the guest's save to the last replica's confirmation, has ninety seconds.
+While it is under way, the branch reports every input the callback holds back alive to its source
+every 100 milliseconds, as a remote receiver reports an acknowledgement it holds. A checkpoint is
+progress of those inputs: a source whose `ACK TIMEOUT` is shorter than the checkpoint does not time
+them out and send them again while the checkpoint can still commit them, whether the source runs on
+the owner's node or on another. Input the guest keeps undecided past its callback is not held for a
+checkpoint and is not reported alive.
+The replica first receives a small revision, length, and digest description, then fetches that
+revision through the bulk pool in 64 KiB chunks. It verifies the complete byte count and digest
+before writing the checkpoint to its own storage. A save up to the host's 64 MiB guest buffer can
+therefore cross the 2 MiB replication-message limit. The bulk fetch has a sixty-second progress
+deadline inside the checkpoint's ninety-second completion budget.
+
+The fetch's bulk stream grants the owner a 1 MiB receive window, so the owner keeps sixteen 64 KiB
+chunks in flight. A save then crosses in one round trip per window rather than one per chunk, which
+matters on a loaded node, where every round trip waits for several scheduled tasks on both sides.
+The ninety seconds are fixed rather than derived from the save's size. A deadline that grew with
+the save would let a replica that falls behind its owner hold acknowledgements longer instead of
+failing the checkpoint, and the largest save the host allows, 64 MiB, crosses well inside it. See
+[Cluster Interconnect](./interconnect.md#wire-contract-and-payloads) for the window and the memory
+that backs it.
 
 ### Local Durability
 
 The state store's durability barrier issues a ticket to every writer after its write is applied. At
 most one writer runs a synchronization at a time; it covers every ticket issued before it started,
 and the writers still waiting elect the next runner when it did not cover them. Branches that
-checkpoint at the same time therefore share one synchronization instead of queuing one each. No lock
-is held across the wait; see [Bounded Synchronization Outside The Open
+checkpoint before a synchronization starts therefore share it, and those that checkpoint while it
+runs share the next one, instead of queuing one each. No lock is held across the wait; see
+[Bounded Synchronization Outside The Open
 Path](./data-plane-concurrency.md#bounded-synchronization-outside-the-open-path).
 
 A failed synchronization is not retried. The operating system may have dropped the writes it failed
@@ -241,9 +333,13 @@ node is reported durable and every later checkpoint there fails until the node r
 
 A replica acts on an announcement only while the placement is current on it and the announcing node
 is the owner its schedule names. The announcement wakes the replica task that keeps the processor's
-branches current, which fetches the checkpoint in its next round. That task also reads what changed
-in the owner's catalog of the processor's branch checkpoints at least once every replication poll
-interval, so a checkpoint whose announcement was lost still reaches the replica within one interval.
+branches current, which fetches the checkpoint in its next round. While idle, the task also starts a
+round after the one-second replication poll interval, so a lost announcement is recovered by
+periodic synchronization. Lifecycle, catalog and checkpoint requests each retain their typed
+five-second response deadline, including time waiting for transport capacity; the poll interval
+does not cancel a request still within that deadline. A busy or failing replica can take longer
+than one interval to catch up. The subsequent bulk fetch has a sixty-second deadline, and the
+owner's whole checkpoint has ninety seconds to complete.
 The replica installs a revision newer than the one it holds, synchronizes its storage, and only then
 acknowledges; a replica that already holds the announced revision or a newer one synchronizes and
 acknowledges what it holds, so a lost acknowledgement is replaced by the next announcement. Each
@@ -322,10 +418,15 @@ schedule, so a former owner cannot resume a branch the cluster moved while it wa
 boundary check at the start of every checkpoint, and the schedule rereads while it waits for
 replicas, refuse a checkpoint whose placement or ownership moved on while its callback ran.
 
-A planned ownership handoff keeps the generation. The source flushes each branch, checkpoints it,
-and transfers the checkpoints; the destination restores every one of them into a guest before the
-handoff activates, and a restore that fails fails the handoff before the schedule changes. The
-replacement instances then restore the transferred checkpoints. See [Planned Ownership Handoffs And
+A planned ownership handoff keeps the generation. Intake and boundary admission close first.
+Affected branches remain runnable until their admitted work and requested force flush complete;
+only then does the participant freeze their state for capture. The capture reads the completed
+checkpoints without asking a frozen guest to flush. The source sends the destination a small
+revision, length and digest description for each branch. The destination fetches each exact
+checkpoint that capture retained in the source's stable storage through the bulk stream and
+verifies it before restoring the guest. A fetch or restore failure ends the handoff before the
+schedule changes. The replacement instances then restore the transferred checkpoints. See
+[Planned Ownership Handoffs And
 Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
 ### Forced Recovery
@@ -339,6 +440,13 @@ is reset. The destination restores every staged checkpoint into a guest before t
 published, a promoted replica from the module it compiled while it was a replica, and activation
 publishes the staged checkpoints in the new generation. `SHOW CLUSTER STATUS` reports the transition
 with `state_recovery=reset` and `resets=wasm_processor:<cause>` when it reset branches.
+
+Before selecting checkpoints, the destination waits for its local execution schedule to finish
+installing within the same five-second preparation budget. Domain lifecycle publication alone
+does not release that wait: the schedule application must also finish. The installed schedule must
+match the requested fingerprint and still assign the processor to the former owner. A promoted
+replica whose graph is still starting therefore retains its checkpoints rather than treating that
+temporary absence as missing state.
 
 A preparation that fails for any reason — a guest that refuses or fails to restore a staged
 checkpoint, a module the destination cannot compile, or the five seconds running out — makes the
@@ -465,12 +573,18 @@ See [Execution-Time Snapshots](./domain-clock.md#execution-time-snapshots).
 
 ### Failure And Retry
 
-A failure before `Publishing` reports an ordinary reset failure, and the previous lifetime stays
-usable. A failure after it reports that the reset was committed but its new lifetime is not usable.
-Retrying the same request reference resumes the missing initial checkpoints and `Ready` publication
-without advancing the generation again. An NSPL reset completes only at `Ready`; its transaction
+A genuine failure before `Publishing` reports an ordinary reset failure, and the previous lifetime
+stays usable. A genuine failure after it reports that the reset was committed but its new lifetime
+is not usable. Loss of Raft leadership while publishing is an interrupted application attempt,
+rather than a terminal reset failure. The durable transaction step stays applying under the same
+request reference. Recovery checks the committed schedule before preparing or publishing again:
+an unpublished preparation is aborted, and an already published generation is resumed.
+Recovery of an applying reset uses the same request reference to resume the missing initial
+checkpoints and `Ready` publication without advancing the generation again. A Plexus reset
+completes only at `Ready`; its transaction
 step is recovered with its original execution reference after a leader change, a lost reply returns
-the retained outcome, and an expired reference cannot start another reset. See [Coordinated WASM
+the retained outcome, and an expired reference cannot start another reset. A definitive failure is
+also retained: replaying that command returns its failure. See [Coordinated WASM
 Reset Publications](./consensus-storage-and-replication.md#coordinated-wasm-reset-publications),
 [Command Completion](./command-completion.md#lifecycle-and-ownership), and [Coordinated WASM
 Guest-State Reset](./control-plane.md#coordinated-wasm-guest-state-reset).
@@ -586,7 +700,7 @@ an input, the guest state that reflects the input is on the stable storage of th
 of every replica the checkpoint was confirmed by. It is not an exactly-once guarantee for the guest
 or for external delivery:
 
-- output is dispatched before its checkpoint, so a sink can publish output whose input is later
+- output is dispatched before its checkpoint, so an emitter can publish output whose input is later
   negatively acknowledged and redelivered, and the redelivered input produces it again;
 - the state a branch continues from can already reflect a redelivered input: a guest counts buffered
   input as it accepts it, a checkpoint that failed at its replicas stays on the owner's storage, and
@@ -597,7 +711,7 @@ or for external delivery:
   local durability.
 
 A guest therefore applies a redelivered input again unless it recognizes the input itself, and
-exactly-once external effects need a sink whose writes are idempotent. See [Recovery, Replay And
+exactly-once external effects need an emitter whose writes are idempotent. See [Recovery, Replay And
 Duplicates](./wasm-processor-guests.md#recovery-replay-and-duplicates) and [ACK Semantics And
 Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery).
 
@@ -655,9 +769,12 @@ Nervix does not provide, and these limits apply:
 - **Exactly-once processing or delivery.** See [Replay, Duplicates, And
   Exactly-Once](#replay-duplicates-and-exactly-once).
 - **Guest state across module versions.** A binding change always starts a new lifetime.
-- **A checkpoint deadline of ten seconds**, from the save to the last replica, and one callback per
+- **A checkpoint deadline of ninety seconds**, from the save to the last replica, and one callback per
   branch at a time, whose acknowledgements are held for at most that long.
 - **A save of at most 64 MiB**, the host's guest buffer limit.
+- **Prepared handoff memory grows with its branch inventory.** The destination retains every
+  verified branch checkpoint until activation; the 256 MiB limit applies to each transfer, not the
+  entity's aggregate state.
 - **Loss of state without replicas.** Recovering a processor without its owner resets every branch
   whose only checkpoints were on that owner.
 - **Forced recovery can reset state without a verdict.** A recovery preparation that fails or runs
@@ -684,9 +801,12 @@ branches.
 | --- | --- |
 | Crash windows and replay | `wasm_state_qualification.feature`: the four checkpoint windows on a single-node restart, owner loss at the windows it can tell apart, a cluster stopped while its owner holds a checkpoint, and a reset committed but not usable across a cluster restart |
 | No acknowledgement before durability | `wasm_checkpoint_durability.feature`, and the Shuttle checks of `ReplicatedWasmProcessorState`, `WasmCheckpointHolds`, and `DurabilityBarrier` under random, PCT, and DFS schedules |
+| No replay while a checkpoint is under way | `wasm_checkpoint_durability.feature`: a checkpoint held past its source's `ACK TIMEOUT` on one node and on three nodes with one replica commits its input without the source sending it again, and the `WasmCheckpointHolds` Shuttle checks race its keepalive with the input's delivery |
 | No resurrection, no double reset | `wasm_state_reset.feature`: failover, retry, a lost reply across a leader change, an expired identity, and rebinding |
 | Recovery budget | `wasm_state_recovery.feature`: preserve, recover once, and a failed fresh initialization that spends the attempt across a restart |
 | Restart | `wasm_processor.feature`: guest state restored after a cluster restart and not resurrected by a returning former owner |
+| Large backup and restore | `backup_guest_saves.feature`: two 40 MiB branch saves on one and three nodes, bounded bulk capture, interrupted capture cleanup, exact restored bytes and the next guest callback |
+| Large saves within the replica deadline | `large_wasm_state_replication.feature`: 40 MiB saves of interleaved branches reach the checkpoint boundary on three nodes with one replica; the interconnect check that a bulk response puts one whole bulk receive window in flight before its reader reads, backed by exactly one `bulk_window` reservation |
 
 The [WASM state qualification
 ledger](https://github.com/nervix-io/nervix/blob/main/tests/wasm-state-qualification-ledger.md)

@@ -4,7 +4,7 @@ Feature: Web console visual relay and subscription creation
   Scenario Outline: Ordinary and materialized relays created visually keep their schema and branch identity
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE SCHEMA tenant_key (tenant STRING);
@@ -59,7 +59,7 @@ Feature: Web console visual relay and subscription creation
   Scenario Outline: A subscription created visually streams filtered interleaved branches in its tab
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA tenant_key ( tenant STRING );
@@ -70,7 +70,7 @@ Feature: Web console visual relay and subscription creation
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR notifications_source FROM ENDPOINT notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR notifications_source FROM notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL BRANCHED BY by_tenant SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -126,7 +126,7 @@ Feature: Web console visual relay and subscription creation
   Scenario: A visual subscription is restored after a leader change without a duplicate tab
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I32 );
@@ -135,7 +135,7 @@ Feature: Web console visual relay and subscription creation
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     Then the current leader node is saved as placeholder "old_leader"
@@ -177,7 +177,7 @@ Feature: Web console visual relay and subscription creation
   Scenario: Subscription statements typed in the REPL open and close tabs through the same lifecycle
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA metric ( value I64 );
@@ -186,7 +186,7 @@ Feature: Web console visual relay and subscription creation
       CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT raw_metrics_endpoint ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR raw_metrics_source FROM ENDPOINT raw_metrics_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR raw_metrics_source FROM raw_metrics_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec TO raw_metrics INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -204,7 +204,7 @@ Feature: Web console visual relay and subscription creation
       """
     Then selector ".terminal" contains ":2}"
     And selector ".terminal" does not contain ":1}"
-    When selector ".repl-toolbar button:has-text('NSPL REPL')" is clicked
+    When selector ".repl-toolbar button:has-text('Plexus REPL')" is clicked
     And selector ".prompt-row input" is filled with "DELETE SUBSCRIPTION typed_metrics;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".subscription-tab[data-subscription-name='typed_metrics']" eventually disappears
@@ -216,7 +216,7 @@ Feature: Web console visual relay and subscription creation
   Scenario Outline: A visual subscription filter reads a backslash in a string literal as a typed statement does
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( tenant STRING, user_id I64 );
@@ -225,7 +225,7 @@ Feature: Web console visual relay and subscription creation
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR notifications_source FROM ENDPOINT notifications_endpoint MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP ENDPOINT INGESTOR notifications_source FROM notifications_endpoint MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TO notifications INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
     And the web console is opened on the leader node
@@ -270,7 +270,7 @@ Feature: Web console visual relay and subscription creation
   Scenario: Failed visual subscriptions keep their draft and open no tab
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
@@ -308,7 +308,7 @@ Feature: Web console visual relay and subscription creation
     Then selector ".create-relay-ref [data-value='doomed_notifications']" exists
     When selector ".create-relay-ref [data-value='doomed_notifications']" is clicked
     Then selector ".create-selected-relay" contains "doomed_notifications"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DROP RELAY doomed_notifications;
       """
@@ -322,7 +322,7 @@ Feature: Web console visual relay and subscription creation
   Scenario: A relay staged in a transaction is selectable while its subscription is refused
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
@@ -361,7 +361,7 @@ Feature: Web console visual relay and subscription creation
   Scenario: Relay drafts keep unselected branching and changed references explicit
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       CREATE DOMAIN {{domain}}_other;
@@ -448,7 +448,7 @@ Feature: Web console visual relay and subscription creation
   Scenario: Subscription fields name the missing relay after a domain is selected
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN {{domain}};
       """
@@ -466,7 +466,7 @@ Feature: Web console visual relay and subscription creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='domain']" is clicked
     Then selector ".create-placement-options .create-choice-more" exists
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN visual_choice_revision;
       """

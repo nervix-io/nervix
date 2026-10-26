@@ -1,11 +1,11 @@
 Feature: Explicit branches
   Scenario Outline: Distinct named branches cannot be substituted when their key schemas match
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "branch name 'by_output_tenant' does not match relay 'input_notifications' branch name 'by_input_tenant'"
+    When these Plexus commands fail with "branch name 'by_output_tenant' does not match relay 'input_notifications' branch name 'by_input_tenant'"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -50,12 +50,12 @@ Feature: Explicit branches
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -88,8 +88,8 @@ Feature: Explicit branches
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

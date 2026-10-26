@@ -1,7 +1,7 @@
 //! Conversions between exact integers and floating point, for the pairs `From` and `TryFrom`
 //! cannot express.
 //!
-//! Nervix converts between integers and floating point at three boundaries: NSPL numeric builtins
+//! Nervix converts between integers and floating point at three boundaries: Plexus numeric builtins
 //! evaluate in `f64`, metric protocols carry every sample as `f64`, and layout arithmetic works in
 //! `f64` before it addresses a bucket, a rank, or a pixel. The standard library covers the pairs
 //! that are exact — `f64::from(u32)`, `f32::from(u16)` — and stops there, because the rest either
@@ -24,6 +24,11 @@
 //! - **Depends on.** The standard library.
 //! - **Must not know.** Anything in Nervix. It names no Model, no name type and no runtime concept,
 //!   which is what keeps it usable from the innermost layer outward.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
 
 /// A conversion into floating point that rounds to the nearest representable value.
 pub trait ApproxFrom<T>: Sized {
@@ -181,6 +186,10 @@ checked_approx_from_float_pointer_width! {
     usize => u64;
     isize => i64;
 }
+
+#[cfg(test)]
+#[path = "properties_tests.rs"]
+mod properties;
 
 #[cfg(test)]
 mod tests {

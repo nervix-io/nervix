@@ -3,10 +3,15 @@
 //! Layer: test harness.
 //!
 //! - **Owns.** The value, the null and the per-row error of every row `IN`, `BETWEEN`,
-//!   `IS [NOT] DISTINCT FROM`, `greatest`, `least` and `clamp` compute from NSPL source, in a route
+//!   `IS [NOT] DISTINCT FROM`, `greatest`, `least` and `clamp` compute from Plexus source, in a route
 //!   and in a read-only predicate.
-//! - **Depends on.** The NSPL parser, the VM frontend, compiler and runtime entry points.
+//! - **Depends on.** The Plexus parser, the VM frontend, compiler and runtime entry points.
 //! - **Must not know.** How the kernels traverse their Arrow buffers.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
 
 use arrow_array::{BooleanArray, Float64Array, Int32Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema};
@@ -459,7 +464,7 @@ async fn read_only_predicates_select_rows_with_the_new_tests() {
         Field::new("carrier", DataType::Utf8, true),
         Field::new("preferred", DataType::Utf8, true),
     ]));
-    let predicate = nervix_nspl::parse_expression(
+    let predicate = nervix_plexus::parse_expression(
         "input.status IN ('open', 'held') AND input.weight BETWEEN 1.0 AND 50.0 AND input.carrier \
          IS DISTINCT FROM input.preferred AND greatest(input.weight, 10.0) < 40.0",
     )

@@ -7,18 +7,23 @@
 //! - **Depends on.** Typed vocabulary, expression parsing, and source and route drafts.
 //! - **Must not know.** Connector execution, registry validation, or command transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
     CodecName, CreateIngestor, FieldName, GeneralErrorPolicy, IngestTimestampSource, IngestorInput,
     IngestorName, ModelKind, NodeRef, ProcessorOutputs, TransportIngestorInput,
 };
-use nervix_nspl::parse_expression;
+use nervix_plexus::parse_expression;
 use thiserror::Error;
 
 use super::{
     SelectedReference,
     ingestor_route_draft::{IngestRouteDraft, IngestRouteDraftError, RouteBranchDraft},
-    ingestor_source_draft::{IngestSourceDraft, IngestSourceDraftError},
+    ingestor_source_draft::{IngestorEntityDraft, IngestorEntityDraftError},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -63,7 +68,7 @@ impl TimestampDraft {
 pub(super) struct IngestorDraft {
     pub(super) name: String,
     pub(super) if_not_exists: bool,
-    pub(super) source: IngestSourceDraft,
+    pub(super) source: IngestorEntityDraft,
     pub(super) codec: Option<SelectedReference<CodecName>>,
     pub(super) timestamp: TimestampDraft,
     pub(super) filter: String,
@@ -77,7 +82,7 @@ impl Default for IngestorDraft {
         Self {
             name: String::new(),
             if_not_exists: false,
-            source: IngestSourceDraft::default(),
+            source: IngestorEntityDraft::default(),
             codec: None,
             timestamp: TimestampDraft::Unselected,
             filter: String::new(),
@@ -198,10 +203,16 @@ impl IngestorDraft {
     pub(super) fn build(&self) -> error_stack::Result<CreateIngestor, IngestorDraftError> {
         let name = IngestorName::parse(self.name.trim())
             .map_err(|_| Report::new(IngestorDraftError::Name))?;
-        let source = self.source.build().map_err(|error| {
-            let context = error.current_context().clone();
-            error.change_context(IngestorDraftError::Source(context))
-        })?;
+        let source = {
+            let mapping_input = self.source.build();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let context = error.current_context().clone();
+                    error.change_context(IngestorDraftError::Source(context))
+                }),
+            }
+        }?;
         let decode_using_codec = match &self.codec {
             Some(codec) => codec
                 .current_name()
@@ -220,13 +231,19 @@ impl IngestorDraft {
         }
         let mut routes = Vec::new();
         for (index, route) in self.routes.iter().enumerate() {
-            routes.push(route.build().map_err(|error| {
-                let context = error.current_context().clone();
-                error.change_context(IngestorDraftError::Route {
-                    index: index + 1,
-                    cause: context,
-                })
-            })?);
+            routes.push({
+                let mapping_input = route.build();
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let context = error.current_context().clone();
+                        error.change_context(IngestorDraftError::Route {
+                            index: index + 1,
+                            cause: context,
+                        })
+                    }),
+                }
+            }?);
         }
         let general_error_policy = self
             .general_error
@@ -251,7 +268,7 @@ pub(super) enum IngestorDraftError {
     #[error("Ingestor name is invalid")]
     Name,
     #[error("{0}")]
-    Source(IngestSourceDraftError),
+    Source(IngestorEntityDraftError),
     #[error("Choose a decoding codec")]
     Codec,
     #[error("The selected codec belongs to a changed context; select it again")]
@@ -276,12 +293,16 @@ pub(super) enum IngestorDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         BinaryOperator, CodecName, Expression, FieldName, FieldReference, FieldScope,
-        GeneralErrorPolicy, IngestQuiesceOverflow, IngestSourceKind, Inheritance, Literal,
-        ModelKind, ModelName, NodeRef,
+        GeneralErrorPolicy, HttpIngestorEntity, IngestQuiesceOverflow, IngestorEntityKind,
+        Inheritance, Literal, ModelKind, ModelName, NodeRef,
     };
 
     use super::{IngestorDraft, TimestampDraft};
@@ -300,7 +321,9 @@ mod tests {
             name: "incoming".into(),
             ..Default::default()
         };
-        draft.source.choose_kind(IngestSourceKind::Endpoint);
+        draft
+            .source
+            .choose_kind(IngestorEntityKind::Http(HttpIngestorEntity::Endpoint));
         draft
             .source
             .select_reference(&node(ModelKind::Endpoint, "edge"));

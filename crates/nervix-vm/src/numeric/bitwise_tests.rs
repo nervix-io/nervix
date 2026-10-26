@@ -8,6 +8,11 @@
 //! - **Depends on.** The bit kernels and Arrow arrays.
 //! - **Must not know.** Programs, registers or how the runtime records a failed lane.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use arrow_array::{
     Array, Int8Array, Int16Array, Int64Array, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };

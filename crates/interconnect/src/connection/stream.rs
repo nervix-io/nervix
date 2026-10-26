@@ -7,6 +7,14 @@
 //! - **Depends on.** The authenticated connection lease and bounded execution admission.
 //! - **Must not know.** Resource contents, snapshot formats, or runtime graph behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{future::poll_fn, time::Duration};
 
 use bytes::Bytes;
@@ -29,6 +37,9 @@ use crate::{
     request::{RequestAdmission, RequestEnvelope, StreamingResponse},
     wire,
 };
+
+#[cfg(test)]
+mod send_progress_tests;
 
 /// A bounded, flow-controlled response body. Dropping it cancels the HTTP/2 stream and releases
 /// its bulk slot; each returned chunk holds its own memory charge until the caller drops it.
@@ -96,10 +107,20 @@ impl IncomingByteStream {
             }
             return Ok(None);
         };
-        let chunk = next.map_err(|error| {
-            self.finished = true;
-            RequestError::stream_with_cause(Report::new(error), self.node.clone(), self.request)
-        })?;
+        let chunk = {
+            let mapping_input = next;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    self.finished = true;
+                    RequestError::stream_with_cause(
+                        Report::new(error),
+                        self.node.clone(),
+                        self.request,
+                    )
+                }),
+            }
+        }?;
         if chunk.is_empty() {
             self.finished = true;
             if !self.body.is_end_stream() {
@@ -296,9 +317,15 @@ impl TransportState {
     }
 }
 
+/// Writes one streamed chunk as the reader's flow-control window admits it.
+///
+/// Only a nonzero capacity grant restarts the progress bound, so a chunk larger than the window
+/// may span many bounds while its reader keeps reading. A reader that grants no capacity for
+/// `progress_timeout` has stopped reading, and the stream is reset.
 async fn send_stream_chunk(
     stream: &mut SendStream<Bytes>,
     body: ChargedBytes,
+    progress_timeout: Duration,
 ) -> Result<(), Report<TransportError>> {
     let mut offset = 0;
     while offset < body.len() {
@@ -309,18 +336,16 @@ async fn send_stream_chunk(
             .verified("the send offset never advances beyond the streamed chunk");
         let wanted = remaining.min(BODY_CHUNK_BYTES);
         stream.reserve_capacity(wanted);
-        let assigned = poll_fn(|context| stream.poll_capacity(context))
-            .await
-            .ok_or_else(|| {
-                TransportError::Decode(
-                    "HTTP/2 stream closed while assigning send capacity".to_string(),
-                )
-            })?
-            .map_err(TransportError::from)?;
+        let assigned = match timeout(progress_timeout, granted_send_capacity(stream)).await {
+            Ok(assigned) => assigned?,
+            Err(_) => {
+                stream.send_reset(Reason::CANCEL);
+                return Err(Report::new(TransportError::ProgressTimeout {
+                    timeout: progress_timeout,
+                }));
+            }
+        };
         let ready = assigned.min(wanted);
-        if ready == 0 {
-            continue;
-        }
         let end = offset
             .checked_add(ready)
             .verified("assigned capacity is bounded by the remaining streamed chunk");
@@ -334,6 +359,27 @@ async fn send_stream_chunk(
     }
     stream.reserve_capacity(0);
     Ok(())
+}
+
+/// The next nonzero send capacity the reader grants `stream`. A notification of zero capacity is
+/// no progress, so the wait continues through it.
+async fn granted_send_capacity(
+    stream: &mut SendStream<Bytes>,
+) -> Result<usize, Report<TransportError>> {
+    loop {
+        let assigned = poll_fn(|context| stream.poll_capacity(context))
+            .await
+            .ok_or_else(|| {
+                TransportError::Decode(
+                    "HTTP/2 stream closed while assigning send capacity".to_string(),
+                )
+            })?
+            .map_err(TransportError::from)?;
+        if assigned > 0 {
+            return Ok(assigned);
+        }
+        nervix_primitives::task::consume_budget().await;
+    }
 }
 
 impl TransportState {
@@ -397,15 +443,7 @@ impl TransportState {
                     "stream producer exceeded its declared content length".to_string(),
                 )));
             }
-            match timeout(progress_timeout, send_stream_chunk(&mut stream, chunk)).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    stream.send_reset(Reason::CANCEL);
-                    return Err(Report::new(TransportError::ProgressTimeout {
-                        timeout: progress_timeout,
-                    }));
-                }
-            }
+            send_stream_chunk(&mut stream, chunk, progress_timeout).await?;
             self.observations
                 .bulk_transferred(class, TransferDirection::Sent, chunk_bytes);
         }

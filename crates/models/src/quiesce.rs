@@ -6,6 +6,11 @@
 //! - **Depends on.** Self-contained model primitives.
 //! - **Must not know.** Parsing, planning, persistence, runtime buffers or coordination.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::num::NonZeroUsize;
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -14,9 +19,9 @@ use strum::{AsRefStr, IntoStaticStr};
 
 use crate::{
     CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
-    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitSink,
-    EmitterName, IngestorInput, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayName, VhostName, WasmStateReset,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitterName,
+    IngestorInput, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, RelayName, VhostName, WasmStateReset,
 };
 
 mod commit;
@@ -218,7 +223,7 @@ declare_model_change_aspects! {
     ReordererMaxTime => Dynamic, None, false;
     EmitterInput => DomainPause, None, false;
     EmitterInputWhere => EntityPause, None, false;
-    EmitterSink => EntityPause, None, false;
+    EmitterConnector => EntityPause, None, false;
     EmitterClient => EntityPause, None, false;
     EmitterCodec => EntityPause, None, false;
     EmitterCollectPolicy => EntityPause, None, false;
@@ -1289,11 +1294,10 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         name: base_name,
         from: base_from,
         body: base_body,
-        sink: base_sink,
+        connector: base_emitter,
         batch: base_batch,
         flush_policy: base_flush_policy,
         error_policies: base_error_policies,
-        publishing_mode: base_publishing_mode,
         mode: base_mode,
         construction: base_construction,
         materialized_state: base_materialized_state,
@@ -1302,11 +1306,10 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
         name: candidate_name,
         from: candidate_from,
         body: candidate_body,
-        sink: candidate_sink,
+        connector: candidate_emitter,
         batch: candidate_batch,
         flush_policy: candidate_flush_policy,
         error_policies: candidate_error_policies,
-        publishing_mode: candidate_publishing_mode,
         mode: candidate_mode,
         construction: candidate_construction,
         materialized_state: candidate_materialized_state,
@@ -1323,11 +1326,11 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_from.r#where != candidate_from.r#where {
         changes.push(ModelChangeAspect::EmitterInputWhere);
     }
-    if base_sink.client() != candidate_sink.client() {
+    if base_emitter.client() != candidate_emitter.client() {
         changes.push(ModelChangeAspect::EmitterClient);
     }
-    if !emitter_sink_definition_eq(base_sink, candidate_sink) {
-        changes.push(ModelChangeAspect::EmitterSink);
+    if !base_emitter.same_definition(candidate_emitter) {
+        changes.push(ModelChangeAspect::EmitterConnector);
     }
     if base_body != candidate_body {
         changes.push(ModelChangeAspect::EmitterCodec);
@@ -1338,7 +1341,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_mode != candidate_mode {
         changes.push(ModelChangeAspect::EmitterMode);
     }
-    if base_publishing_mode != candidate_publishing_mode {
+    if base_emitter.publishing() != candidate_emitter.publishing() {
         changes.push(ModelChangeAspect::EmitterPublishingMode);
     }
     if base_construction != candidate_construction {
@@ -1365,247 +1368,6 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     changes
 }
 
-fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
-    match (base, candidate) {
-        (
-            EmitSink::Client {
-                schema: base_schema,
-            },
-            EmitSink::Client {
-                schema: candidate_schema,
-            },
-        ) => base_schema == candidate_schema,
-        (
-            EmitSink::Http {
-                method: base_method,
-                path: base_path,
-                ..
-            },
-            EmitSink::Http {
-                method: candidate_method,
-                path: candidate_path,
-                ..
-            },
-        ) => base_method == candidate_method && base_path == candidate_path,
-        (
-            EmitSink::Kafka {
-                client: _,
-                topic: base_topic,
-            },
-            EmitSink::Kafka {
-                client: _,
-                topic: candidate_topic,
-            },
-        )
-        | (
-            EmitSink::Pulsar {
-                client: _,
-                topic: base_topic,
-            },
-            EmitSink::Pulsar {
-                client: _,
-                topic: candidate_topic,
-            },
-        )
-        | (
-            EmitSink::Mqtt {
-                client: _,
-                topic: base_topic,
-            },
-            EmitSink::Mqtt {
-                client: _,
-                topic: candidate_topic,
-            },
-        ) => base_topic == candidate_topic,
-        (
-            EmitSink::RabbitMq {
-                client: _,
-                queue: base_queue,
-            },
-            EmitSink::RabbitMq {
-                client: _,
-                queue: candidate_queue,
-            },
-        ) => base_queue == candidate_queue,
-        (
-            EmitSink::Sqs {
-                client: _,
-                queue: base_queue,
-                fifo_group: base_fifo_group,
-            },
-            EmitSink::Sqs {
-                client: _,
-                queue: candidate_queue,
-                fifo_group: candidate_fifo_group,
-            },
-        ) => base_queue == candidate_queue && base_fifo_group == candidate_fifo_group,
-        (
-            EmitSink::Redis {
-                client: _,
-                channel: base_channel,
-            },
-            EmitSink::Redis {
-                client: _,
-                channel: candidate_channel,
-            },
-        ) => base_channel == candidate_channel,
-        (
-            EmitSink::Nats {
-                client: _,
-                subject: base_subject,
-            },
-            EmitSink::Nats {
-                client: _,
-                subject: candidate_subject,
-            },
-        ) => base_subject == candidate_subject,
-        (EmitSink::ZeroMq { client: _ }, EmitSink::ZeroMq { client: _ })
-        | (EmitSink::Syslog { client: _ }, EmitSink::Syslog { client: _ })
-        | (EmitSink::Sentry { client: _ }, EmitSink::Sentry { client: _ }) => true,
-        (
-            EmitSink::Otel {
-                client: _,
-                signal: base_signal,
-                values: base_values,
-                attributes: base_attributes,
-                resource: base_resource,
-                scope: base_scope,
-            },
-            EmitSink::Otel {
-                client: _,
-                signal: candidate_signal,
-                values: candidate_values,
-                attributes: candidate_attributes,
-                resource: candidate_resource,
-                scope: candidate_scope,
-            },
-        ) => {
-            base_signal == candidate_signal
-                && base_values == candidate_values
-                && base_attributes == candidate_attributes
-                && base_resource == candidate_resource
-                && base_scope == candidate_scope
-        }
-        (
-            EmitSink::ClickHouse {
-                client: _,
-                table: base_table,
-                values: base_values,
-            },
-            EmitSink::ClickHouse {
-                client: _,
-                table: candidate_table,
-                values: candidate_values,
-            },
-        ) => base_table == candidate_table && base_values == candidate_values,
-        (
-            EmitSink::Postgres {
-                client: _,
-                table: base_table,
-                values: base_values,
-                conflict_action: base_conflict,
-            },
-            EmitSink::Postgres {
-                client: _,
-                table: candidate_table,
-                values: candidate_values,
-                conflict_action: candidate_conflict,
-            },
-        ) => {
-            base_table == candidate_table
-                && base_values == candidate_values
-                && base_conflict == candidate_conflict
-        }
-        (
-            EmitSink::MySql {
-                client: _,
-                table: base_table,
-                values: base_values,
-                conflict_action: base_conflict,
-            },
-            EmitSink::MySql {
-                client: _,
-                table: candidate_table,
-                values: candidate_values,
-                conflict_action: candidate_conflict,
-            },
-        ) => {
-            base_table == candidate_table
-                && base_values == candidate_values
-                && base_conflict == candidate_conflict
-        }
-        (
-            EmitSink::MongoDb {
-                client: _,
-                collection: base_collection,
-                values: base_values,
-                conflict_action: base_conflict,
-            },
-            EmitSink::MongoDb {
-                client: _,
-                collection: candidate_collection,
-                values: candidate_values,
-                conflict_action: candidate_conflict,
-            },
-        ) => {
-            base_collection == candidate_collection
-                && base_values == candidate_values
-                && base_conflict == candidate_conflict
-        }
-        (
-            EmitSink::Iceberg {
-                backend: base_backend,
-                client: _,
-                table: base_table,
-                values: base_values,
-                location: base_location,
-                catalog: base_catalog,
-                commit_each: base_commit_each,
-                max_commit_size: base_max_commit_size,
-            },
-            EmitSink::Iceberg {
-                backend: candidate_backend,
-                client: _,
-                table: candidate_table,
-                values: candidate_values,
-                location: candidate_location,
-                catalog: candidate_catalog,
-                commit_each: candidate_commit_each,
-                max_commit_size: candidate_max_commit_size,
-            },
-        ) => {
-            base_backend == candidate_backend
-                && base_table == candidate_table
-                && base_values == candidate_values
-                && base_location == candidate_location
-                && base_catalog == candidate_catalog
-                && base_commit_each == candidate_commit_each
-                && base_max_commit_size == candidate_max_commit_size
-        }
-        (
-            EmitSink::Client { .. }
-            | EmitSink::Http { .. }
-            | EmitSink::Kafka { .. }
-            | EmitSink::Pulsar { .. }
-            | EmitSink::RabbitMq { .. }
-            | EmitSink::Redis { .. }
-            | EmitSink::Mqtt { .. }
-            | EmitSink::Nats { .. }
-            | EmitSink::ZeroMq { .. }
-            | EmitSink::Sqs { .. }
-            | EmitSink::Sentry { .. }
-            | EmitSink::Syslog { .. }
-            | EmitSink::Otel { .. }
-            | EmitSink::ClickHouse { .. }
-            | EmitSink::Postgres { .. }
-            | EmitSink::MySql { .. }
-            | EmitSink::MongoDb { .. }
-            | EmitSink::Iceberg { .. },
-            _,
-        ) => false,
-    }
-}
-
 fn wire_schema_change_aspects<T>(
     base: &CreateWireSchema<T>,
     candidate: &CreateWireSchema<T>,
@@ -1627,13 +1389,14 @@ mod tests {
 
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
-        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterBody, EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FlushPolicy,
-        GeneralErrorPolicy, IngestSource, IngestTimestampSource, InputCollectPolicy, Literal,
-        MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
-        MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, ProcessorInputWhere,
+        CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer,
+        EmitterBody, EmitterEntity, EndpointIngestMode, ErrorPolicies, FlushPolicy,
+        GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, IngestTimestampSource,
+        IngestorEntity, InputCollectPolicy, Literal, MaterializedRelayState,
+        MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
+        ModelChangeAspect, ModelKind, NatsEmitter, NatsSubjectEmitter, ProcessorInputWhere,
         ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
-        RetryPolicy,
+        RetryPolicy, ZeroMqEmitter, ZeroMqPushEmitter,
     };
 
     fn named<N>(raw: &str) -> N
@@ -1719,21 +1482,23 @@ mod tests {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            sink: Box::new(EmitSink::ZeroMq {
-                client: named("sink"),
-            }),
+            connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+                ZeroMqPushEmitter {
+                    mode: crate::ZeroMqPushPublishingMode::NoAck {
+                        retry_policy: RetryPolicy {
+                            backoff: "250ms".to_string(),
+                            max_backoff: "30s".to_string(),
+                        },
+                    },
+                    client: named("emitter"),
+                },
+            ))),
             batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "1s".to_string(),
                 max_batch_size: "1MiB".to_string(),
             },
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode: EmitterPublishingMode::NoAck {
-                retry_policy: RetryPolicy {
-                    backoff: "250ms".to_string(),
-                    max_backoff: "30s".to_string(),
-                },
-            },
             mode: AckMode::Attached,
             construction: crate::RouteConstruction::default(),
             materialized_state: Vec::new(),
@@ -1786,13 +1551,13 @@ mod tests {
                 },
             )]),
             input: crate::IngestorInput::Transport(crate::TransportIngestorInput {
-                source: IngestSource::Endpoint {
+                source: IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
                     endpoint: named("ingress_a"),
-                    mode: EndpointIngestMode::NoAckSequential,
+                    mode: EndpointIngestMode::NoAck,
                     quiesce: crate::IngestQuiesceMode::EndpointBuffer {
                         max_size: "1MiB".to_string(),
                     },
-                },
+                })),
                 codec: named("event_codec"),
             }),
             timestamp_source: None,
@@ -2087,9 +1852,17 @@ mod tests {
         assert_eq!(dynamic.dynamic_updates().len(), 1);
 
         let mut client = base.clone();
-        client.sink = Box::new(EmitSink::ZeroMq {
-            client: named("sink_two"),
-        });
+        client.connector = Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
+            ZeroMqPushEmitter {
+                mode: crate::ZeroMqPushPublishingMode::NoAck {
+                    retry_policy: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: named("emitter_two"),
+            },
+        )));
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(client),
@@ -2097,15 +1870,23 @@ mod tests {
             QuiesceLevel::EntityPause,
         );
 
-        let mut sink = base.clone();
-        sink.sink = Box::new(EmitSink::Nats {
-            client: named("sink"),
-            subject: named("events"),
-        });
+        let mut connector = base.clone();
+        connector.connector = Box::new(EmitterEntity::Nats(NatsEmitter::Subject(
+            NatsSubjectEmitter {
+                mode: crate::NatsSubjectPublishingMode::NoAck {
+                    retry_policy: crate::RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: named("emitter"),
+                subject: named("events"),
+            },
+        )));
         assert_single_aspect(
             Model::Emitter(base.clone()),
-            Model::Emitter(sink),
-            ModelChangeAspect::EmitterSink,
+            Model::Emitter(connector),
+            ModelChangeAspect::EmitterConnector,
             QuiesceLevel::EntityPause,
         );
 
@@ -2167,7 +1948,12 @@ mod tests {
         );
 
         let mut publishing_mode = base.clone();
-        publishing_mode.publishing_mode = EmitterPublishingMode::NoAck {
+        let EmitterEntity::ZeroMq(ZeroMqEmitter::Push(destination)) =
+            publishing_mode.connector.as_mut()
+        else {
+            panic!("expected ZeroMQ");
+        };
+        destination.mode = crate::ZeroMqPushPublishingMode::NoAck {
             retry_policy: RetryPolicy {
                 backoff: "500ms".to_string(),
                 max_backoff: "45s".to_string(),
@@ -2216,13 +2002,14 @@ mod tests {
                     let crate::IngestorInput::Transport(input) = &mut candidate.input else {
                         panic!("the fixture ingestor reads an endpoint");
                     };
-                    input.source = IngestSource::Endpoint {
-                        endpoint: named("ingress_b"),
-                        mode: EndpointIngestMode::NoAckSequential,
-                        quiesce: crate::IngestQuiesceMode::EndpointBuffer {
-                            max_size: "1MiB".to_string(),
-                        },
-                    };
+                    input.source =
+                        IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
+                            endpoint: named("ingress_b"),
+                            mode: EndpointIngestMode::NoAck,
+                            quiesce: crate::IngestQuiesceMode::EndpointBuffer {
+                                max_size: "1MiB".to_string(),
+                            },
+                        }));
                     candidate
                 },
                 ModelChangeAspect::IngestorSource,

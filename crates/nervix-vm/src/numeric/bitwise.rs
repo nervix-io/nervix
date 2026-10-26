@@ -14,6 +14,14 @@
 //! constant folding applies too. A shift fails for a negative count, and a left shift also fails
 //! when the shifted value does not fit its type, so shifts use the checked lane loop instead.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use arrow_arith::arity::binary;
 use arrow_array::{Array, ArrowPrimitiveType, Int64Array, PrimitiveArray, types::Int64Type};
 use arrow_buffer::{ArrowNativeType, NullBuffer};

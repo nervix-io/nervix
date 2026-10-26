@@ -1,11 +1,11 @@
 Feature: Generator node
   Scenario Outline: Generators cannot cross named branch boundaries
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "generator 'synth_notifications' branch name 'output_branch' does not match relay 'notifications' branch name 'input_branch'"
+    When these Plexus commands fail with "generator 'synth_notifications' branch name 'output_branch' does not match relay 'notifications' branch name 'input_branch'"
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -53,11 +53,11 @@ Feature: Generator node
   Scenario Outline: Generator materialized state and output remain isolated per branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -102,8 +102,8 @@ Feature: Generator node
         PATH '/left'
         TYPE HTTP;
 
-      CREATE INGESTOR left_ingestor
-        FROM ENDPOINT left_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR left_ingestor
+        FROM left_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO left_notifications
@@ -152,11 +152,11 @@ Feature: Generator node
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (tenant STRING, amount I64);
       CREATE SCHEMA generated_notification (tenant STRING, total I64);
@@ -169,7 +169,7 @@ Feature: Generator node
       CREATE RELAY generated_notifications SCHEMA generated_notification BRANCHED BY tenant_branch;
       CREATE VHOST edge generator-lru-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR notification_source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR notification_source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec TIMESTAMP NOW
         TO notifications INHERIT ALL BRANCHED BY tenant_branch
           SET tenant = message.tenant FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -205,7 +205,7 @@ Feature: Generator node
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports status containing "{{domain}} status=Running"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION generated_after_restart TO generated_notifications;
       """
@@ -226,11 +226,11 @@ Feature: Generator node
   Scenario Outline: Generator projects columnar materialized state and branch keys
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA generator_metric (
         tenant STRING,
@@ -272,8 +272,8 @@ Feature: Generator node
         PATH '/metrics'
         TYPE HTTP;
 
-      CREATE INGESTOR generator_metric_ingestor
-        FROM ENDPOINT generator_metric_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR generator_metric_ingestor
+        FROM generator_metric_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_metric_codec
         TIMESTAMP NOW
         TO generator_metrics
@@ -320,11 +320,11 @@ Feature: Generator node
   Scenario Outline: Generator emits records from materialized relay state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -354,8 +354,8 @@ Feature: Generator node
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -396,11 +396,11 @@ Feature: Generator node
   Scenario Outline: Generator flushes buffered records on flush cadence
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -430,8 +430,8 @@ Feature: Generator node
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -472,11 +472,11 @@ Feature: Generator node
   Scenario Outline: Paced generators follow domain logical time
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -523,8 +523,8 @@ Feature: Generator node
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -570,11 +570,11 @@ Feature: Generator node
   Scenario Outline: Generator routes share one immutable state snapshot per tick
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA generator_source_value (
         id STRING,
@@ -600,8 +600,8 @@ Feature: Generator node
       CREATE RELAY generated_values SCHEMA generated_value UNBRANCHED;
       CREATE VHOST edge generator-snapshot-{{test_id}}.example.com;
       CREATE ENDPOINT generator_source_endpoint ON edge PATH '/values' TYPE HTTP;
-      CREATE INGESTOR generator_source
-        FROM ENDPOINT generator_source_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR generator_source
+        FROM generator_source_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_source_codec
         TIMESTAMP NOW
         TO generator_source_values
@@ -647,11 +647,11 @@ Feature: Generator node
   Scenario Outline: Generator message errors expose state and partial output to standard SET functions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA generator_error_source (
         id STRING,
@@ -681,8 +681,8 @@ Feature: Generator node
       CREATE RELAY generator_error_records SCHEMA generator_error_record UNBRANCHED;
       CREATE VHOST edge generator-errors-{{test_id}}.example.com;
       CREATE ENDPOINT generator_error_endpoint ON edge PATH '/values' TYPE HTTP;
-      CREATE INGESTOR generator_error_ingestor
-        FROM ENDPOINT generator_error_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR generator_error_ingestor
+        FROM generator_error_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING generator_error_codec
         TIMESTAMP NOW
         TO generator_error_sources

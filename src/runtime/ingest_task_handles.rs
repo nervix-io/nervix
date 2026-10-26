@@ -5,6 +5,11 @@
 //! - **Depends on.** Domain clock publication, acknowledgement roots and metric replication.
 //! - **Must not know.** Codecs, connector drivers, graph planning or payload construction.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::*;
 
 #[derive(Clone)]
@@ -71,6 +76,10 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::BTreeMap;
 

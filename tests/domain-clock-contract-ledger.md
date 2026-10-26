@@ -7,7 +7,7 @@ epic](https://app.clickup.com/t/86bbwcry1). The source audit began in [Domain cl
 that audit are represented by the current-source regressions below. Tasks 02–13 repaired and
 documented their owning product paths; task 14 records the final contract qualification.
 
-The Cucumber scenarios exercise NSPL and runtime behavior through public endpoints and session
+The Cucumber scenarios exercise Plexus and runtime behavior through public endpoints and session
 subscriptions. The clock-contract scenarios and direct arithmetic regressions run in the ordinary
 suite. Explicit tag selections isolate the focused cases; the validation records preserve the
 observed red baselines and subsequent results.
@@ -71,7 +71,7 @@ diagnostic; it cannot reset an anchor or survive behind an invariant claim.
 | F6 | VM contexts, `VALUES`, inference, and subscription expressions can read wall time. | [06](https://app.clickup.com/t/86bbwcrz9) | `Every expression context observes its domain execution time` |
 | F7 | Errors, tokenless WASM, and omitted generated timestamps use wall time. | [06](https://app.clickup.com/t/86bbwcrz9) | `Generated errors WASM timeouts and telemetry timestamps use their assigned clock classes` |
 | F8 | HTTP polling ignores pace; Prometheus polling reuses stale or duplicate due times. | [09](https://app.clickup.com/t/86bbwcrzf) | `Slow external polling coalesces missed cadence with fresh due timestamps` |
-| F9 | Branch activity is sampled before awaiting input. | [10](https://app.clickup.com/t/86bbwcrzh) | `Activity sampled after an awaited record keeps each logical branch alive` |
+| F9 | Branch activity is sampled before awaiting input. | [10](https://app.clickup.com/t/86bbwcrzh) | The production-owner unit `accepted_processor_input_records_branch_activity_at_its_own_domain_time`; public branch retirement and fresh pairings in `Fresh interleaved records correlate after all initial branch state retires` |
 | F10 | Timestamp range and clock arithmetic invariants are unenforced. | [02](https://app.clickup.com/t/86bbwcryd) | `Out-of-range paced starts and projections return typed timestamp diagnostics` |
 
 The cross-cutting physical deadline matrix belongs to [11](https://app.clickup.com/t/86bbwcrzy),
@@ -86,15 +86,25 @@ belongs to [14](https://app.clickup.com/t/86bbwct0e).
 | Origin, reached frontier, and inclusive `SKEW` | `A paced domain admits an event at its historical logical origin`, extended by `Admission retains exactly 256 reached logical tick windows with inclusive SKEW` in task 05 | One- and three-node random schedules |
 | Retained 256 centers and future-center exclusion | `Admission retains exactly 256 reached logical tick windows with inclusive SKEW`, task 05 | One- and three-node random schedules |
 | Delayed progress and local nondecrease | `Delayed clock progress cannot move observed logical time backwards`, tasks 02–04 | One- and three-node random schedules |
-| Mapping generations and stale lifecycle messages | `One fenced authority emits coalesced progress for each clock generation`, task 04 | Three nodes with the production sticky scheduler for owner loss; generic generation cases also run on one node |
+| Mapping generations and stale lifecycle messages | `One fenced authority emits coalesced progress for each clock generation`, task 04 | One scenario with the production sticky scheduler: two nodes, and a third added during the run |
 | Missed cadence coalescing and fresh due time | `Slow external polling coalesces missed cadence with fresh due timestamps`, task 09 | One- and three-node random schedules |
 | Logical collection/flush and physical minima | `Paced branch collection and flush follow logical time while Immediate and source idle remain physical`, task 07 | Two interleaved branches on one and three nodes, preserving fields |
-| Logical emitter cadence and physical retry/ACK | `Emitter cadence follows logical time while retry and ACK deadlines remain physical`, task 08 | One- and three-node random schedules with controlled sink failure |
-| Fresh branch activity and logical retention | `Activity sampled after an awaited record keeps each logical branch alive`, task 10 | Two interleaved branches on one and three nodes, preserving fields |
+| Logical emitter cadence and physical retry/ACK | `Emitter cadence follows logical time while retry and ACK deadlines remain physical`, task 08 | One- and three-node random schedules with controlled emitter failure |
+| Fresh branch activity and logical retention | `Fresh interleaved records correlate after all initial branch state retires`, task 10; `Paced branch expiration follows domain logical time`; the production-owner unit `accepted_processor_input_records_branch_activity_at_its_own_domain_time` | Two interleaved branches on one and three nodes preserve fields and retire initial state before fresh correlations; the expiration outline checks logical retention, and the unit checks that accepted input refreshes domain-clock activity |
 | One snapshot across expression contexts | `Every expression context observes its domain execution time`, task 06 | One- and three-node random schedules through ingestion, a junction, and a subscription, extended by focused generator, inferencer, SQS, database, Iceberg, Sentry, and OTEL scenarios |
 | Failure, guest, generated metadata, and telemetry clock classes | `Generated errors WASM timeouts and telemetry timestamps use their assigned clock classes`, task 06 | One- and three-node random schedules with historical domain time, error routing, WASM lifecycle callbacks, tokenless output, and external telemetry fixtures |
 | Client observation of the committed mapping, generations, and admission window | `A session attaches to a domain clock once and follows every generation` and `A client paces simulated events by the domain clock it is attached to`, [Clock Attach 01](https://app.clickup.com/t/86bc8azgz) | One- and three-node random schedules; the three-node attachment is served by a follower |
-| Attached tick progress and pacing | `A session attaches to a domain clock once and follows every generation`, `A client paces simulated events by the domain clock it is attached to`, and `Nonleader clock-owner loss preserves the committed mapping`, [Clock Attach 02](https://app.clickup.com/t/86bc8azjm) | One- and three-node sessions check increasing tick ids, boundaries and state ordering; direct owner-loss keeps the original mapping and resumes higher ids, while the runtime observer unit checks the unassigned-to-reassigned installation sequence |
+| Attached tick progress and pacing | `A session attaches to a domain clock once and follows every generation`, `A client paces simulated events by the domain clock it is attached to`, and `Nonleader clock-owner loss preserves the committed mapping`, [Clock Attach 02](https://app.clickup.com/t/86bc8azjm) | One- and three-node sessions check increasing tick ids, boundaries and state ordering; direct owner-loss keeps the original mapping and resumes higher ids, while the runtime observer unit `a_paced_generation_without_an_authority_is_observed_uninstalled` checks the unassigned-to-reassigned installation sequence |
+| Authority takeover independent of another node's activation | `An installed survivor takes over the clock while another survivor installs the authority revision` and `A prepared clock observer receives replacement ticks before another node activates the revision`, [Cluster Chaos 65](https://app.clickup.com/t/86bcg7bby) | Three nodes with the production sticky scheduler, health failure and held runtime preparation; local and remote attached sessions receive replacement ticks within ten seconds and keep the mapping through recovery |
+| Authority takeover from a lost consensus leader, ahead of a held graph installation | `A survivor takes the clock over from an authority that led consensus while the survivor's runtime installation waits` and `A survivor receives replacement clock ticks while its own runtime preparation waits`, with the leader retry unit test `leader_retries_an_authority_reassignment_its_leadership_refused`, [Cluster Chaos 66](https://app.clickup.com/t/86bcgad9k) | Three nodes with the production sticky scheduler. In the first, the lost authority also led consensus, the new leader's first authority proposal is refused, and the replacement authority's runtime installation is held; in the second, a receiver's runtime preparation is held. In both, a remote attached session receives replacement ticks within ten seconds and keeps the mapping through recovery |
+| Attach reply and frame order, and refusal inside a transaction | `A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both`, [Clock Attach 01](https://app.clickup.com/t/86bc8azgz); the production observer and delivery order under `shuttle_delivery_sends_state_before_ticks_without_regressing_progress`, [Clock Attach 02](https://app.clickup.com/t/86bc8azjm) | One- and three-node sessions over the raw protocol; the Shuttle check explores accepted ticks, same-generation unassignment and reassignment, and a generation change |
+| Attachment end when the domain leaves the serving node | The session unit `a_session_follows_a_domain_clock_until_it_detaches_or_the_domain_leaves_the_node`, [Clock Attach 01](https://app.clickup.com/t/86bc8azgz) | Unit only: no statement removes a domain from the committed state |
+| An attach that reaches a node before its first installation of the committed domains | `The CLI follows a domain clock across a cluster restart` and `The CLI refuses to follow the clock of a missing domain`, the Shuttle check `shuttle_an_attach_waiting_for_the_first_installation_observes_its_domains`, and the units `an_attach_answers_once_its_node_has_installed_the_committed_domains`, `an_attach_waiting_for_the_committed_domains_ends_with_its_session` and `committed_domains_are_installed_once_the_first_committed_state_is_applied`, [Clock Attach: Keep domain clock attachments across node restarts](https://app.clickup.com/t/86bc90n6k) | One and three nodes, the restart outline across a whole-cluster restart |
+| The CLI's clock output | `CLI attaches its session to the active domain's clock`, `The CLI follows a domain clock through its generations` and `The CLI restores a domain clock after transport loss`, [Clock Attach 03](https://app.clickup.com/t/86bc8azkb) | One and three nodes; the transport-loss scenario on one |
+| The console's clock display | `The selected domain clock follows its mapping, ticks, and lifecycle` and `A reconnected console restores one attachment to its selected domain`, [Clock Attach 04](https://app.clickup.com/t/86bc8azmc) | One and three nodes through the browser; the reconnect scenario on three nodes across a leader change |
+| Rust client restoration of followed clocks | `A producer and consumer resume their unchanged endpoint after a session restart`, and the client units `an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock`, `a_refused_clock_restoration_is_repeated_on_the_same_session`, `a_clock_restoration_answered_already_attached_follows_the_new_session`, `a_clock_restoration_that_reaches_no_server_is_tried_again_by_the_next_read`, `an_attachment_moved_before_its_old_session_ends_keeps_the_tick_it_reported`, `a_detach_sent_while_a_refused_restoration_waits_releases_the_clock_for_good`, `a_detach_the_old_session_answers_during_a_reconnect_stays_released_on_the_new_session`, `a_detach_refused_during_a_reconnect_leaves_the_clock_restored_on_the_new_session`, `a_clock_attached_while_a_reconnect_opens_its_exchange_is_attached_again_on_it` and `a_restoration_left_unanswered_past_the_request_timeout_wakes_the_waiting_reader`; the Shuttle check `shuttle_a_detach_racing_a_restoration_leaves_no_attachment_of_its_clock` over the production clock owner | One and three nodes; the units over a scripted session, whose exchanges the test answers through the client's own reader to stage a redirect move, a detach racing a restoration and an unanswered restoration |
+| The shared binding's attached clock and events | `A <runtime> client reads the running domain clock it attached to before its ticks and keeps its generations apart`, [Clock Attach 05](https://app.clickup.com/t/86bc8azn1) and [05A](https://app.clickup.com/t/86bc95p44); the [conformance ledger](client-conformance-ledger.md) records each runtime | One and three nodes for the C ABI in process, C, C++, Python, Java and Ruby |
+| Client producers and consumers paced by an attached clock | `paced_simulation.feature`: `The <driver> driver paces readings by the attached clock at time rate <time_rate>`, `… keeps pacing through a node that executes none of its endpoints while the clock authority moves away`, `… readings stamped before the admission window are rejected under TIMESTAMP AT and admitted under TIMESTAMP NOW …`, and `… stops with its domain and continues in the next START generation without mixing generations …`, [Client I/O 05](https://app.clickup.com/t/86bc8bj8d) | The Rust and the shared-binding driver, at time rates 0.5 to 4.0, on one node and on three; the authority-move case pins the endpoints and relays off the authority with the production sticky scheduler |
 
 ## Reusable fixtures
 
@@ -106,7 +116,7 @@ belongs to [14](https://app.clickup.com/t/86bbwct0e).
 | Time-dependent expressions | The delayed-progress scenario emits `now()` into a schema-backed `DATETIME` field before and after controlled progress delivery. |
 | Delayed progress | `domain clock progress for domain ... is paused before delivery`, its bounded reached assertion, and `... resumes` form a test-only barrier around the next delivery. Teardown releases an armed barrier. |
 | Recorded external source | The explicitly started HTTP mock exposes `/clock-source/{name}`. Each request records its actual UTC nanoseconds, monotonic nanoseconds, query parameters, and count. `delay_ms` controls response latency. `clock source recorder ... is reset` and its bounded request-count assertion use `/clock-source-observations/{name}`. |
-| Sink retry and ACK | Existing emitter fault/stall controls and broker observers drive the scenarios `Kafka ACK ingestor waits while an attached emitter is stalled`, `Kafka ACK SEQUENTIAL replays on attached emitter failure`, and task 08's named cadence scenario together with `A stalled emitter keeps its upstream acknowledgement alive on the physical clock`. ACK state remains in memory. |
+| Emitter retry and ACK | Existing emitter fault/stall controls and broker observers drive the scenarios `Kafka ACK ingestor waits while an attached emitter is stalled`, `Kafka ACK SEQUENTIAL replays on attached emitter failure`, and task 08's named cadence scenario together with `A stalled emitter keeps its upstream acknowledgement alive on the physical clock`. ACK state remains in memory. |
 | Join, restart, leader, and owner loss | Existing cluster start/stop/restart, leadership transfer, placement inspection, and entity-gate controls are reused. Clock-owner scenarios select the production sticky scheduler before startup, following `Losing the former owner during a held drain leaves relocation to failover`. |
 
 The fixture endpoints do not provision product-owned external objects. A scenario starts the mock
@@ -116,13 +126,13 @@ dependency explicitly and scopes recorder names with `{{test_id}}`.
 
 Task 11 audited physical waits at their semantic owner. A `Duration` is configuration, not a clock
 coordinate; it becomes physical only when the owner starts a monotonic timer. A domain clock is
-introduced only for an explicit NSPL cadence or semantic lifetime. The resulting ownership is:
+introduced only for an explicit Plexus cadence or semantic lifetime. The resulting ownership is:
 
 | Semantic owner | Physical operations retained by that owner | Bound and evidence |
 | --- | --- | --- |
 | Connector HTTP client | DNS, socket connection, TLS, request, response headers, and response-body transfer | The client's request timeout spans the request future and is separate from an ingestor's domain-bound `EVERY`. `HTTP request timeout stays physical while logical polling cadence scales` observes one timed-out request at rate `0.0001`, at least three at rate `100`, and at least 200 milliseconds between starts under a 250 millisecond timeout. |
 | Polling ingestor lifecycle | Quiesce and shutdown cancellation of an in-flight HTTP or Prometheus operation | The HTTP request, HTTP response body, and complete Prometheus query futures now race their task's shutdown and quiesce signals. `Cancelling an external poll stays physical across extreme clock generations` bounds `STOP` by 1500 milliseconds while a 30-second request is in flight, before and after replacing the historical clock generation. |
-| Broker and connector runtime | Reconnect backoff, broker RPC/confirmation timeout, ACK timeout, and ACK-alive refresh | `RuntimeReconnectBackoff` and sink confirmation waits use monotonic timers. `EmitterRetrySchedule` holds physical retry and ACK-alive deadlines separately from its still-armed logical flush or commit cadence. `Delayed acknowledgements stay alive on physical time at extreme domain rates` holds a Kafka delivery for 1200 milliseconds without replay at both extreme rates and both topologies. |
+| Broker and connector runtime | Reconnect backoff, broker RPC/confirmation timeout, ACK timeout, and ACK-alive refresh | `RuntimeReconnectBackoff` and emitter confirmation waits use monotonic timers. `EmitterRetrySchedule` holds physical retry and ACK-alive deadlines separately from its still-armed logical flush or commit cadence. `Delayed acknowledgements stay alive on physical time at extreme domain rates` holds a Kafka delivery for 1200 milliseconds without replay at both extreme rates and both topologies. |
 | Interconnect connection | TCP and TLS setup, certificate lifetime, reconnect, stream progress, request completion, idle retirement, and drain | Setup and progress waits use monotonic time. Certificate validity is read in actual UTC once and its remaining lifetime becomes a monotonic expiration deadline. A request constructs one deadline before acquiring its local queue lease and passes only the remaining duration to transfer, so queueing consumes the operation's bound. `stream_slot_queueing_consumes_the_request_deadline`, `membership_removal_cancels_an_active_request`, and `shutdown_cancels_an_active_request` are the direct unit controls. |
 | Cluster liveness | Gossip probing, health RPCs, node-unavailability detection, TLS reload, and peer retirement | These are process and node liveness operations driven by monotonic intervals and cancellation tokens. `Silent peers obey the same shutdown bound without and after a domain clock` applies the same 12-second node-shutdown bound with no installed clock and after a `0.0001` to `100` generation change. |
 | Raft | Election, heartbeat, membership mutation, replication RPC, snapshot transfer, and retained-log admission | OpenRaft receives physical heartbeat and election durations. RPC options become interconnect request deadlines; heartbeat traffic has a dedicated management connection, while snapshot chunks carry the remaining monotonic transfer deadline. Retention admission is bounded by one physical timeout around its queueing loop. |
@@ -206,10 +216,15 @@ task 02's F10 public coverage. Task 06 adds `domain_execution_time.feature` and 
 coverage in the listed runtime feature files for F6 and F7. Task 07 adds
 `domain_buffer_timing.feature` for F5's branch-local collection and flush clock classes. Task 08
 adds `domain_emitter_cadence.feature` for the remainder of F5 at the connector boundary: logical
-emitter and Iceberg cadence, the physical `FLUSH IMMEDIATE` minimum across sink families, the
+emitter and Iceberg cadence, the physical `FLUSH IMMEDIATE` minimum across emitter families, the
 physical retry and acknowledgement keepalive, and force-flush drain. Task 09
 adds the `domain_cadence` cases for recurring HTTP, Prometheus, and generator work. Task 10 adds
-`branch_activity_sampling.feature` for F9's accepted-input activity and logical retention.
+`branch_activity_sampling.feature` for F9's public branch re-creation and exact fresh pairings.
+The production-owner unit `accepted_processor_input_records_branch_activity_at_its_own_domain_time`
+asserts that accepted input refreshes domain-clock activity; `Paced branch expiration follows domain logical
+time` checks logical retention. The fresh-correlation outline observes initial retirement before
+posting new inputs and final retirement after matching, without requiring a pending input to
+survive beyond its TTL or treating a relay's disappearance as another owner's scan-phase witness.
 Task 11 adds `physical_infrastructure_deadlines.feature` for the cross-cutting physical boundary:
 poll cancellation, request timeout versus logical cadence, materialized `REQUIRED WAIT`, delayed
 ACK keepalive, and silent-peer shutdown before and after a clock-generation change.
@@ -264,7 +279,7 @@ Recorded on 8 September 2026 against the task 02 worktree:
 | `Delayed clock progress cannot move observed logical time backwards` | Pass in both one- and three-node examples; 32 steps passed. |
 | `nervix-models` unit suite | Pass; 98 tests covered timestamp endpoints, validated rates and periods, rounding, direct advancement, and overflow. |
 | Runtime domain-clock unit suite | Pass; six task 02 tests passed. The historical-origin probe remains ignored for task 05. |
-| `just validate` | Pass, including all-feature workspace Clippy and all 139 executable NSPL documentation blocks. |
+| `just validate` | Pass, including all-feature workspace Clippy and all 139 executable Plexus documentation blocks. |
 | `just ratchet` | Pass with the new clock model included; the checked-in string-error debt fell from 520 to 516. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -282,7 +297,7 @@ Recorded on 9 September 2026 against the task 03 worktree:
 | Physical monotonic deadline unit | Pass; the opaque physical capability waited on Tokio's monotonic timer. |
 | WASM explicit invocation-time unit | Pass; one explicit context supplied guest time and timeout-request time without leaking into the next invocation. |
 | `nervix-server` library suites | Pass; default features ran 789 tests with one task-05 probe ignored, and `testing` ran 797 tests with the same probe ignored. |
-| `just validate` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable NSPL documentation blocks. |
+| `just validate` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline, and the checked-in string-error debt fell from 514 to 512. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -298,7 +313,7 @@ Recorded on 9 September 2026 against the task 04 worktree:
 | `A joining or restarted node installs the current clock generation before execution` | Pass; one scenario and all 12 steps verified join and full-cluster restart installation before node-local HTTP execution. |
 | `Delayed clock progress cannot move observed logical time backwards` | Pass in both the one- and three-node examples; all 32 steps passed with progress held across physical time and then released. |
 | Authority and progress unit coverage | Pass; pure selection covered membership and incarnation changes, consensus covered revision fencing and identical direct/transactional lifecycle commits, and runtime covered exact generation/revision/incarnation/peer fences, stopped and restarted generations, missing domains, bounded tick history, and execution refusal without installed authority. |
-| `just validate` with `RUSTC_WRAPPER=kache` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable NSPL documentation blocks. |
+| `just validate` with `RUSTC_WRAPPER=kache` | Pass, including all-feature workspace Clippy with warnings denied, skill publication validation, and all 139 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. Clamped-arithmetic debt fell from 13 to 11 and string-error debt fell from 512 to 510. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -311,12 +326,12 @@ Recorded on 9 September 2026 against the task 05 worktree:
 | --- | --- |
 | Public historical-origin reproducer before product changes | Expected red in both the one- and three-node examples; the event at the exact logical origin produced no relay payload. |
 | `Logical ingestion time and admission` | Pass; 16 one- and three-node scenarios and all 140 steps covered `TIMESTAMP NOW` at delivery, preserved `TIMESTAMP AT`, slow and fast rates, inclusive skew edges, future rejection, exactly 256 retained positions, delayed progress delivery, quiesce-buffer release, interleaved branches, and duration-window membership. |
-| `Domain clock contract and regression ledger` | Pass; all 13 scenarios and 156 steps passed, including the enabled historical-origin scenario. |
+| `Domain clock contract regressions` | Pass; all 13 scenarios and 156 steps passed, including the enabled historical-origin scenario. |
 | Source-timestamp controls | Pass; all three HTTP examples and 18 steps, and all three Kafka examples and 21 steps, preserved explicit external timestamps in unpaced domains. |
 | `nervix-models` unit suite | Pass; 103 tests included exact integer admission arithmetic across inclusive edges, gaps, overlapping windows, the 256-position bound, and the full timestamp range. |
 | `nervix-server` library suite | Pass; 799 tests passed with no ignored tests. |
 | `just book 0.1.0-dev` | Pass; executable documentation, console screenshots, and the HTML, LLM, and Markdown book renderers completed. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and executable NSPL documentation. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and executable Plexus documentation. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell by two. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -331,7 +346,7 @@ Recorded on 10 September 2026 against the task 06 worktree, including the merged
 | Focused generator, inferencer, emitter, and telemetry scenarios | Pass; 24 scenarios and 272 steps covered generator and inferencer mappings, SQS groups, PostgreSQL, MySQL, ClickHouse, MongoDB, Iceberg, Sentry, and OTEL clock classes. |
 | `nervix-vm` unit suite | Pass; 102 tests covered explicit execution contexts with no context-free runtime execution entry point. |
 | `nervix-server` library suite | Pass; 793 tests passed after merging the current consensus and startup paths. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. The relay-boundary tests moved to their focused module, and bare-error signature debt fell from 844 to 843. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -347,7 +362,7 @@ Recorded on 10 September 2026 against the task 07 worktree, including the merged
 | Reingestor branch-buffering regressions | Pass; staggered branches retained independent deadlines and acknowledgement ownership, forced and shutdown drains completed, and per-route byte bounds flushed independently. |
 | Generator flush regressions | Pass; route buffers honored `EACH` byte boundaries and drained on source gating, domain pause, and task exit. |
 | `nervix-server` library suite | Pass; 801 tests passed with no ignored tests. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline, and string-error debt fell from 497 to 496. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -371,7 +386,7 @@ branched from:
 | Merged `origin/main` re-run | Pass; after merging the current `origin/main`, the ten emitter cadence scenarios and 121 scenarios across Kafka emission and ingestion, Iceberg, emitter inputs, metrics and publishing modes, branch buffering, materialized relays, and reingestors passed again. |
 | `nervix-server` library suite | Pass; 840 tests passed with no ignored tests on the merged tree. |
 | `just book 0.1.0-dev` | Pass; documentation tests, console screenshots, and the HTML, LLM, and Markdown renderers completed successfully. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record. The full `just
@@ -391,7 +406,7 @@ Recorded on 10 September 2026 against the task 09 worktree:
 | Cadence arithmetic unit coverage | Pass; four tests covered newest-due coalescing, direct full-range advancement, a typed terminal-boundary error, and generation revalidation after wake. |
 | Focused generator unit coverage | Pass; three tests covered logical flush size, columnar state and branch projection, and branch validation. |
 | `just book 0.1.0-dev` | Pass; documentation tests, console screenshots, and the HTML, LLM, and Markdown renderers completed successfully. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record.
@@ -411,7 +426,7 @@ Recorded on 11 September 2026 against the task 10 worktree:
 | Clock-contract and metric regressions | Pass; domain clock contract, execution time, ingestion time, domain, junction, and reingestor metric scenarios covered 45 scenarios and 510 steps. |
 | Ownership handoff and scheduling regressions | Pass; relocation and cluster scheduling covered 40 scenarios and 640 steps with the production sticky scheduler where those scenarios select it. |
 | `nervix-server` library suite | Pass; 833 tests passed with no ignored tests, and 838 after merging the current `origin/main`. |
-| `just validate` | Pass before and after merging `origin/main`, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass before and after merging `origin/main`, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass before and after merging `origin/main`; every architecture-debt count is at or below its checked-in baseline. |
 | Post-merge re-verification | Pass; against the merged `origin/main` the fresh-activity scenario, branched expiration, correlator, domain buffer timing, materialized relay, and window processor features covered 77 scenarios and 965 steps, including the columnar snapshot streaming and shared cadence work that landed on main. |
 
@@ -437,7 +452,7 @@ Recorded on 11 September 2026 against the task 11 worktree:
 | Complete task 11 public matrix | Pass; all 15 scenarios and all 183 steps in `physical_infrastructure_deadlines.feature` passed together. This is the task 11 matrix, not the complete repository Cucumber qualification owned by task 14. |
 | Interconnect suite | Pass; all 34 tests covered queued stream deadlines, streaming progress timeouts, membership cancellation, shutdown cancellation, management isolation, relay admission, and duplex streams. |
 | Server, consensus, and executor unit suites | Pass; all 837 `nervix-server` library tests, all 43 consensus unit tests and 12 consensus documentation tests, and all 16 executor tests passed. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable NSPL documentation blocks. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, and all 140 executable Plexus documentation blocks. |
 | `just ratchet` | Pass; every architecture-debt count remained at or below its checked-in baseline. |
 
 The actual-UTC source audit found only the observation owners enumerated above. None of the
@@ -461,7 +476,7 @@ Recorded on 13 September 2026 against the task 12 worktree:
 | Logical branch expiry | Pass; both one- and three-node paced-expiration scenarios and all 16 steps expired branch-local processor state on logical time. |
 | Interconnect unit suite | Pass; all 35 tests covered progress and liveness reservations, bulk isolation, relay admission, cancellation, terminal outcomes, membership removal, shutdown, and request deadlines. The request-policy control fixes `DomainClockProgressRequest` to `Management/Progress`, a unit response, and a two-second physical timeout. |
 | Server library suite | Pass; all 848 tests covered current generation and authority fences, delayed and reordered progress, the newest accepted report, local nondecrease, placement, failover, recovery, and runtime shutdown. |
-| `just validate` with `RUSTC_WRAPPER=kache` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all 140 executable NSPL documentation blocks, and the clock architecture boundary check. |
+| `just validate` with `RUSTC_WRAPPER=kache` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all 140 executable Plexus documentation blocks, and the clock architecture boundary check. |
 | `just ratchet` with `RUSTC_WRAPPER=kache` | Pass; every architecture-debt count is at or below its checked-in baseline. |
 
 The transport carries only the current typed request. Its payload contains the domain and fenced
@@ -482,13 +497,13 @@ Recorded on 13 September 2026 against the task 13 worktree:
 | Public bound-engine-clock reproducer before product changes | Pass in both the one- and three-node examples. The running data-plane path already supplied the paced domain snapshot to Roto, so the behavioral scenario did not expose the dormant context-free APIs. The source and API audit found those paths in the generic VM injector and WASM host and found a data-plane-wide actual-UTC helper. |
 | `A volatile Roto UDF receives the bound domain execution time` | Pass; both one- and three-node examples and all 12 steps evaluated `now()` near the domain's 2000 logical origin rather than actual UTC. |
 | Clock architecture source check | Pass; direct actual-UTC reads, actual-UTC boundary imports, physical-deadline capability construction, VM injection, WASM guest operations, and ownership headers conform to their declared owner sets. The check runs in `just validate` and `just validate-ci`. |
-| Typed model and language coverage | Pass; all 104 model and 780 NSPL unit tests covered typed domain periods and skew, typed HTTP, Prometheus, and generator cadence, canonical rendering, and current-shape persistence. |
+| Typed model and language coverage | Pass; all 104 model and 780 Plexus unit tests covered typed domain periods and skew, typed HTTP, Prometheus, and generator cadence, canonical rendering, and current-shape persistence. |
 | Engine coverage | Pass; all 105 VM, 6 Roto, and 38 WASM unit tests covered explicit execution snapshots across injection, initialization, input, timeout, flush, and state operations, including Rust and Go guests. |
 | Stopped-domain direct lookup regression | Fixed after the complete suite exposed all 11 examples in `lookup.feature` requesting an active domain snapshot only to timestamp a metric. All 11 lookup scenarios and 144 steps now pass across stopped domains, remote owners, replicas, and cluster restarts. Both hash-map metric scenarios and all 42 steps also pass; direct control-plane lookups retain wall-rate metrics and correctly leave domain-rate metrics unavailable because no graph record or execution timestamp exists. |
 | Server and consensus suites | Pass; all 848 `nervix-server` library tests and all 43 consensus unit tests passed. |
-| Public documentation and skill | Pass; the NSPL skill publication dry-run, all 140 executable NSPL documentation blocks, 90 documentation-generator tests, and 6 documentation-worker tests passed. |
+| Public documentation and skill | Pass; the Plexus skill publication dry-run, all 140 executable Plexus documentation blocks, 90 documentation-generator tests, and 6 documentation-worker tests passed. |
 | `just book 0.1.0-dev` | Pass; fresh console screenshots and the HTML, LLM, and Markdown renderers completed successfully. |
-| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all executable NSPL documentation blocks, and the clock architecture boundary check. |
+| `just validate` | Pass, including formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all executable Plexus documentation blocks, and the clock architecture boundary check. |
 | `just ratchet` | Pass; every architecture-debt count is at or below its checked-in baseline. String error signatures fell from 487 to 485 and bare error signatures fell from 838 to 834, and the baseline records both reductions. |
 
 No complete Cucumber-suite or final qualification result is claimed by this record. The full
@@ -526,7 +541,7 @@ The final execution record is:
 | Bounded HTTP/2 progress selection with retries disabled | Pass; all 3 scenarios and all 63 steps covered slow and fast historical bulk load plus independent relay admission. Progress used its reserved management subquota without spending liveness capacity. |
 | Domain-clock unit suite | Pass; all 24 tests covered arithmetic bounds, admission origin, monotonic reads, lifecycle outcomes, generation binding, wait cancellation and revalidation, cadence coalescing, progress fencing, and retained latest progress. |
 | Interconnect unit suite | Pass; all 35 tests covered current request policy, independent progress and liveness reservations, bulk isolation, relay admission, cancellation, terminal outcomes, membership removal, shutdown, and request or streaming deadlines. |
-| `RUSTC_WRAPPER=kache just validate` | Pass. Formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all executable NSPL documentation blocks, and the clock architecture boundary check completed successfully. |
+| `RUSTC_WRAPPER=kache just validate` | Pass. Formatting, all-feature workspace Clippy with warnings denied, skill publication validation, all executable Plexus documentation blocks, and the clock architecture boundary check completed successfully. |
 | `RUSTC_WRAPPER=kache just ratchet` | Pass. Every architecture-debt count is at or below its checked-in baseline. |
 
 The public matrix ran one- and three-node topologies, historical, unpaced, slow, and fast clocks,
@@ -546,6 +561,6 @@ which passed here under both slow and fast bulk-load cases.
 Only the current stored and protocol shapes remain. Clock progress uses the typed HTTP/2 request
 and never serializes a process-local monotonic instant. Runtime batches, suspended work,
 acknowledgement guards, tokens, and maps remain in memory. The architecture, domain-time public
-documentation, and published NSPL skill describe the qualified clock classes and failure
+documentation, and published Plexus skill describe the qualified clock classes and failure
 semantics. No product correction or additional clock work was required by this final run; F1–F10
 are qualified for closure.

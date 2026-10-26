@@ -5,6 +5,11 @@
 //! May depend on: runtime internals and test-only storage fixtures.
 //! Must not know: production control-plane orchestration or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::time::Duration;
 
 use fjall::Database;
@@ -36,6 +41,38 @@ fn schema() -> SchemaFingerprint {
     SchemaFingerprint::from_digest([7; 32])
 }
 
+#[nervix_primitives::test]
+async fn runtime_report_chain_checkpoint_notification_log() {
+    use crate::runtime::report_observer::ReportLogObserver;
+
+    let runtime = Runtime::default();
+    let mut remote = placement(
+        RuntimeState::BranchLru { schema: schema() },
+        ModelKind::Deduplicator,
+        "dedup_orders",
+        None,
+    )
+    .to_remote();
+    remote.branch_key = Some(Vec::new());
+    let mut logs = ReportLogObserver::new();
+    logs.observe(async {
+        runtime.handle_state_checkpoint_available(
+            &named("node-1"),
+            nervix_interconnect::StateCheckpointAvailable {
+                placement: remote,
+                lsm: REVISION,
+            },
+        );
+    })
+    .await;
+    assert_eq!(
+        logs.next("ignored invalid runtime state checkpoint notification")
+            .fields["error"],
+        "runtime state placement for branch_lru state of deduplicator 'dedup_orders' in domain \
+         'default' carries an invalid branch key: a concrete branch key names at least one field"
+    );
+}
+
 fn held_by(replication: &CheckpointReplication, replica: &ClusterNodeName) -> Option<u64> {
     replication.with_progress(|progress| progress.held(replica))
 }
@@ -50,6 +87,155 @@ fn acknowledge(runtime: &Runtime, replica: &ClusterNodeName, placement: &Runtime
     );
 }
 
+fn publish_current_assignment(runtime: &Runtime, placement: &RuntimeStatePlacement) {
+    runtime.publish_state_assignment(
+        placement.entity(),
+        ScheduledStateAssignment {
+            identity: ScheduledStateIdentity {
+                schema_fingerprint: schema(),
+                wasm_state_generations: match placement.state {
+                    RuntimeState::WasmProcessor { .. } => {
+                        Some(nervix_models::WasmStateGenerations::first())
+                    }
+                    _ => None,
+                },
+            },
+            checkpoint_owners: None,
+        },
+    );
+}
+
+#[nervix_primitives::test]
+async fn branch_lifecycle_confirmation_keeps_its_replica_minimum_and_generation() {
+    let runtime = Runtime::new();
+    let local = named::<ClusterNodeName>("node-1");
+    let first_replica = named::<ClusterNodeName>("node-2");
+    let second_replica = named::<ClusterNodeName>("node-3");
+    attach_loopback_cluster(&runtime, &local).await;
+    let placement = placement(
+        RuntimeState::BranchLru { schema: schema() },
+        ModelKind::Deduplicator,
+        "dedup_orders",
+        None,
+    );
+    let publish = |fingerprint, replicas| {
+        runtime.publish_state_assignment(
+            placement.entity(),
+            ScheduledStateAssignment {
+                identity: ScheduledStateIdentity {
+                    schema_fingerprint: fingerprint,
+                    wasm_state_generations: None,
+                },
+                checkpoint_owners: Some(CheckpointOwners {
+                    primary: Some(local.clone()),
+                    executors: BTreeSet::from([local.clone()]),
+                    replicas,
+                }),
+            },
+        );
+    };
+    publish(
+        schema(),
+        BTreeSet::from([first_replica.clone(), second_replica.clone()]),
+    );
+    let lifecycle = runtime.replicated_branch_lifecycle(&placement);
+    let deadline = || Instant::now() + Duration::from_secs(10);
+    let expired = runtime
+        .confirm_branch_lru_checkpoint(&placement, REVISION, Instant::now())
+        .await
+        .expect_err("an unconfirmed lifecycle reaches its physical deadline");
+    assert!(matches!(
+        expired.current_context(),
+        StateReplicationError::ReplicaConfirmation { awaiting, .. }
+            if awaiting.0 == BTreeSet::from([first_replica.clone(), second_replica.clone()])
+    ));
+
+    let mut confirmation =
+        Box::pin(runtime.confirm_branch_lru_checkpoint(&placement, REVISION, deadline()));
+    assert!(confirmation.as_mut().now_or_never().is_none());
+    acknowledge(&runtime, &first_replica, &placement);
+    acknowledge(&runtime, &second_replica, &placement);
+    confirmation
+        .await
+        .expect("the selected lifecycle confirms after both replicas acknowledge it");
+
+    let mut confirmation =
+        Box::pin(runtime.confirm_branch_lru_checkpoint(&placement, REVISION + 1, deadline()));
+    assert!(confirmation.as_mut().now_or_never().is_none());
+    publish(schema(), BTreeSet::from([first_replica.clone()]));
+    lifecycle.replication().record(&first_replica, REVISION + 1);
+    let shrunk = confirmation
+        .await
+        .expect_err("reassignment cannot reduce a pending checkpoint's replica minimum");
+    assert!(matches!(
+        shrunk.current_context(),
+        StateReplicationError::ReplicaPlanShrunk {
+            required: 2,
+            assigned: 1,
+            ..
+        }
+    ));
+
+    let mut confirmation =
+        Box::pin(runtime.confirm_branch_lru_checkpoint(&placement, REVISION + 2, deadline()));
+    assert!(confirmation.as_mut().now_or_never().is_none());
+    publish(
+        SchemaFingerprint::from_digest([8; 32]),
+        BTreeSet::from([first_replica.clone()]),
+    );
+    lifecycle.replication().record(&first_replica, REVISION + 2);
+    let replaced = confirmation
+        .await
+        .expect_err("replaced assignments fence a retained lifecycle's confirmation");
+    assert!(matches!(
+        replaced.current_context(),
+        StateReplicationError::Superseded { .. }
+    ));
+}
+
+#[test]
+fn a_replaced_assignment_fences_acknowledgements_for_the_retained_state() {
+    let runtime = Runtime::new();
+    let replica = named::<ClusterNodeName>("node-2");
+    let entity = DomainNodeRef::node_in(
+        domain("default"),
+        ModelKind::Deduplicator,
+        named::<ModelName>("dedup_orders"),
+    );
+    runtime.publish_state_assignment(
+        entity.clone(),
+        ScheduledStateAssignment {
+            identity: ScheduledStateIdentity {
+                schema_fingerprint: schema(),
+                wasm_state_generations: None,
+            },
+            checkpoint_owners: None,
+        },
+    );
+    let placed = placement(
+        RuntimeState::Deduplicator { schema: schema() },
+        ModelKind::Deduplicator,
+        "dedup_orders",
+        string_branch_key("tenant", "acme"),
+    );
+    let state = runtime
+        .replicated_deduplicator_state(placed.clone())
+        .assured("a current deduplicator state initializes");
+    runtime.publish_state_assignment(
+        entity,
+        ScheduledStateAssignment {
+            identity: ScheduledStateIdentity {
+                schema_fingerprint: SchemaFingerprint::from_digest([8; 32]),
+                wasm_state_generations: None,
+            },
+            checkpoint_owners: None,
+        },
+    );
+
+    acknowledge(&runtime, &replica, &placed);
+    assert_eq!(held_by(state.replication(), &replica), None);
+}
+
 #[test]
 fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
     let runtime = Runtime::default();
@@ -62,6 +248,7 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
         "orders",
         None,
     );
+    publish_current_assignment(&runtime, &kafka);
     let kafka_state = runtime
         .replicated_kafka_offset_state(kafka.clone(), None, Vec::new(), 0, None)
         .expect("Kafka offset state initializes");
@@ -70,6 +257,7 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
         held_by(kafka_state.persistence.read().replication(), &replica),
         Some(REVISION)
     );
+    publish_current_assignment(&runtime, &kafka);
 
     let deduplicator = placement(
         RuntimeState::Deduplicator { schema: schema() },
@@ -77,6 +265,7 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
         "dedup_orders",
         branch.clone(),
     );
+    publish_current_assignment(&runtime, &deduplicator);
     let deduplicator_state = runtime
         .replicated_deduplicator_state(deduplicator.clone())
         .expect("deduplicator state initializes");
@@ -92,6 +281,7 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
         "window_orders",
         branch.clone(),
     );
+    publish_current_assignment(&runtime, &window);
     let window_state = runtime
         .replicated_window_processor_state(window.clone())
         .expect("window state initializes");
@@ -110,6 +300,7 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
         "guest",
         branch.clone(),
     );
+    publish_current_assignment(&runtime, &wasm);
     let wasm_state = runtime
         .replicated_wasm_processor_state(wasm.clone())
         .expect("WASM state initializes");
@@ -122,15 +313,14 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
         "latest_orders",
         None,
     );
-    let materialized_state = runtime
-        .replicated_materialized_stream_state(
-            materialized.clone(),
-            StdArc::new(arrow_schema::Schema::empty()),
-            None,
-            Vec::new(),
-            None,
-        )
-        .expect("materialized state initializes");
+    publish_current_assignment(&runtime, &materialized);
+    let materialized_state = runtime.replicated_materialized_stream_state(
+        materialized.clone(),
+        StdArc::new(arrow_schema::Schema::empty()),
+        None,
+        Vec::new(),
+        None,
+    );
     acknowledge(&runtime, &replica, &materialized);
     assert_eq!(
         held_by(
@@ -146,6 +336,7 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
         "dedup_orders",
         None,
     );
+    publish_current_assignment(&runtime, &aggregated);
     let aggregated_state = runtime
         .replicated_branch_aggregated_state(aggregated.clone(), None, named("node-1"))
         .expect("branch-aggregated state initializes");
@@ -161,12 +352,50 @@ fn every_acknowledgement_reaches_the_replication_of_the_state_it_names() {
         "dedup_orders",
         None,
     );
+    publish_current_assignment(&runtime, &lifecycle);
     let lifecycle_state = runtime.replicated_branch_lifecycle(&lifecycle);
     acknowledge(&runtime, &replica, &lifecycle);
     assert_eq!(
         held_by(lifecycle_state.replication(), &replica),
         Some(REVISION)
     );
+
+    for placement in [
+        &kafka,
+        &deduplicator,
+        &window,
+        &wasm,
+        &materialized,
+        &aggregated,
+        &lifecycle,
+    ] {
+        let route = runtime
+            .inner
+            .state_replication_routing
+            .resolve(placement)
+            .assured("every installed replicated state has a resolved frame route");
+        let admitted = route
+            .state()
+            .assured("a frame can borrow the current state");
+        runtime.inner.state_replication_routing.retire(placement);
+        runtime.handle_state_replication_ack(
+            &replica,
+            StateSyncAck {
+                placement: placement.clone(),
+                lsm: REVISION + 1,
+            },
+        );
+        runtime.with_placement_replication(placement, CheckpointReplication::announced);
+        assert!(route.state().is_none());
+        assert_eq!(held_by(admitted.replication(), &replica), Some(REVISION));
+        assert!(
+            admitted
+                .replication()
+                .next_announcement()
+                .now_or_never()
+                .is_none()
+        );
+    }
 }
 
 #[test]
@@ -212,6 +441,7 @@ fn an_owners_announcement_wakes_the_replica_task_of_the_state_it_names() {
         "orders",
         None,
     );
+    publish_current_assignment(&runtime, &kafka);
     let kafka_state = runtime
         .replicated_kafka_offset_state(kafka.clone(), None, Vec::new(), 0, None)
         .expect("Kafka offset state initializes");
@@ -236,8 +466,12 @@ async fn an_announcer_without_replicas_hands_its_announcement_back() {
         "orders",
         None,
     );
-    let replication = CheckpointReplication::new();
-    runtime.announce_checkpoint(&kafka, &replication, 1);
+    publish_current_assignment(&runtime, &kafka);
+    let assignment = runtime
+        .replicated_kafka_offset_state(kafka.clone(), None, Vec::new(), 0, None)
+        .assured("an installed offset state owns the announcer");
+    let replication = assignment.persistence.read().replication();
+    runtime.announce_checkpoint(&kafka, replication, 1);
     // A runtime that has not joined a cluster has no replicas, so its announcer ends at its first
     // step and hands the announcement back.
     nervix_primitives::task::yield_now().await;
@@ -258,13 +492,81 @@ async fn an_announcer_of_a_stopping_runtime_ends() {
         "orders",
         None,
     );
-    let replication = CheckpointReplication::new();
+    publish_current_assignment(&runtime, &kafka);
+    let assignment = runtime
+        .replicated_kafka_offset_state(kafka.clone(), None, Vec::new(), 0, None)
+        .assured("an installed offset state owns the announcer");
+    let replication = assignment.persistence.read().replication();
     runtime.inner.state_replication_tasks.close();
-    runtime.announce_checkpoint(&kafka, &replication, 1);
+    runtime.announce_checkpoint(&kafka, replication, 1);
     runtime.inner.state_replication_tasks.wait().await;
     assert!(
         replication.offer(2).is_some(),
         "an announcer that ended with its runtime hands its announcement back"
+    );
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn runtime_shutdown_cancels_an_in_flight_checkpoint_announcement() {
+    let runtime = Runtime::new();
+    let local = named::<ClusterNodeName>("node-1");
+    let replica = named::<ClusterNodeName>("node-2");
+    attach_loopback_cluster(&runtime, &local).await;
+    let kafka = placement(
+        RuntimeState::KafkaOffset,
+        ModelKind::Ingestor,
+        "orders",
+        None,
+    );
+    runtime.publish_state_assignment(
+        kafka.entity(),
+        ScheduledStateAssignment {
+            identity: ScheduledStateIdentity {
+                schema_fingerprint: schema(),
+                wasm_state_generations: None,
+            },
+            checkpoint_owners: Some(CheckpointOwners {
+                primary: Some(local.clone()),
+                executors: BTreeSet::from([local.clone()]),
+                replicas: BTreeSet::from([replica.clone()]),
+            }),
+        },
+    );
+    let state = runtime
+        .replicated_kafka_offset_state(kafka.clone(), Some(local), vec![replica], 0, None)
+        .assured("the current offset state installs");
+    let replication = state.persistence.read().replication();
+    let route = runtime
+        .inner
+        .state_replication_routing
+        .resolve(&kafka)
+        .assured("the installed state publishes its announcement route");
+    let announcer = route
+        .offer(replication, 1)
+        .assured("the first checkpoint starts an announcer");
+    let announcing_runtime = runtime.clone();
+    let mut announcing = Box::pin(async move {
+        announcing_runtime
+            .offer_to_lagging_replicas(route, announcer)
+            .await;
+    });
+    assert!(
+        announcing.as_mut().now_or_never().is_none(),
+        "dispatch to a replica outside the loopback cluster is pending"
+    );
+    let announcing = runtime.inner.state_replication_tasks.spawn(announcing);
+    let started = Instant::now();
+    let (_, joined) =
+        futures_util::join!(runtime.shutdown(runtime.domain_drain_timeout()), announcing);
+    joined.assured("the cancelled announcement exits without a task failure");
+    assert_eq!(
+        Instant::now(),
+        started,
+        "terminal teardown cancels the pending offer without waiting for its dispatch deadline"
+    );
+    assert!(
+        replication.offer(2).is_some(),
+        "cancelling the task returns its announcement to the retained state"
     );
 }
 
@@ -274,6 +576,22 @@ async fn an_announcer_of_a_stopping_runtime_ends() {
 /// can run.
 #[nervix_primitives::test(start_paused = true)]
 async fn a_committed_offset_completes_when_its_replica_acknowledges_it() {
+    committed_offset_after_replica_delay(Some(Duration::ZERO)).await;
+}
+
+/// A native checkpoint may finish after a small command response deadline while still making
+/// progress within its bulk operation. Its replica acknowledgement must complete the commit.
+#[nervix_primitives::test(start_paused = true)]
+async fn a_committed_offset_accepts_a_replica_finishing_a_native_bulk_transfer() {
+    committed_offset_after_replica_delay(Some(Duration::from_secs(6))).await;
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_committed_offset_without_replica_progress_expires_within_the_native_bulk_budget() {
+    committed_offset_after_replica_delay(None).await;
+}
+
+async fn committed_offset_after_replica_delay(delay: Option<Duration>) {
     let runtime = Runtime::default();
     let owner = named::<ClusterNodeName>("node-1");
     let replica = named::<ClusterNodeName>("node-2");
@@ -283,6 +601,7 @@ async fn a_committed_offset_completes_when_its_replica_acknowledges_it() {
         "orders",
         None,
     );
+    publish_current_assignment(&runtime, &kafka);
     let mut assignment = runtime
         .replicated_kafka_offset_state(
             kafka.clone(),
@@ -325,6 +644,32 @@ async fn a_committed_offset_completes_when_its_replica_acknowledges_it() {
         !committing.is_finished(),
         "an acknowledgement of an older revision does not complete the commit"
     );
+    let Some(delay) = delay else {
+        let refused = committing
+            .await
+            .expect("the commit task does not panic")
+            .expect_err("an absent replica acknowledgement does not complete a commit");
+        assert!(matches!(
+            refused.current_context(),
+            StateReplicationError::ReplicaQuorum {
+                lsm: 1,
+                required_acks: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            Instant::now(),
+            started + SyncKafkaOffsets::TIMEOUT,
+            "an absent replica ends the commit at its bounded native operation deadline"
+        );
+        return;
+    };
+    nervix_primitives::time::advance(delay).await;
+    nervix_primitives::task::yield_now().await;
+    assert!(
+        !committing.is_finished(),
+        "the commit must wait for the native checkpoint's replica acknowledgement"
+    );
     runtime.handle_state_replication_ack(
         &replica,
         StateSyncAck {
@@ -338,7 +683,7 @@ async fn a_committed_offset_completes_when_its_replica_acknowledges_it() {
         .expect("the replica's acknowledgement completes the commit");
     assert_eq!(
         Instant::now(),
-        started,
+        started + delay,
         "the acknowledgement, not the deadline, completed the commit"
     );
 }
@@ -354,6 +699,7 @@ fn an_older_acknowledgement_never_lowers_what_a_replica_holds() {
         "orders",
         None,
     );
+    publish_current_assignment(&runtime, &kafka);
     let assignment = runtime
         .replicated_kafka_offset_state(
             kafka.clone(),
@@ -388,21 +734,24 @@ fn holding_a_replica_copy_keeps_the_newer_revision_and_moves_its_payload() {
     );
     let payload = vec![7_u8; 64];
     let payload_address = payload.as_ptr();
-    runtime.hold_passive_state_replica_snapshot(
+    let lifecycle = runtime.replicated_branch_lifecycle(
+        &deduplicator
+            .branch_lifecycle()
+            .assured("a branch state has a lifecycle"),
+    );
+    lifecycle.hold_passive_checkpoint(
         &deduplicator,
         PersistedRuntimeStateEntry { lsm: 2, payload },
     );
-    runtime.hold_passive_state_replica_snapshot(
+    lifecycle.hold_passive_checkpoint(
         &deduplicator,
         PersistedRuntimeStateEntry {
             lsm: 1,
             payload: vec![1],
         },
     );
-    let held = runtime
-        .inner
-        .passive_runtime_state_snapshots
-        .get(&deduplicator)
+    let held = lifecycle
+        .passive_checkpoint(&deduplicator)
         .expect("the replica holds a copy");
     assert_eq!(held.lsm, 2, "an older copy never replaces a newer one");
     assert_eq!(
@@ -449,7 +798,7 @@ fn a_replica_decodes_each_branch_lifecycle_once_and_prunes_the_branches_it_drops
     let acme_placement = branch_placement(&acme);
     let beta_placement = branch_placement(&beta);
     for placement in [&acme_placement, &beta_placement] {
-        runtime.hold_passive_state_replica_snapshot(
+        lifecycle.hold_passive_checkpoint(
             placement,
             PersistedRuntimeStateEntry {
                 lsm: 1,
@@ -497,17 +846,9 @@ fn a_replica_decodes_each_branch_lifecycle_once_and_prunes_the_branches_it_drops
             .names(beta.as_ref())
             .expect("the lifecycle decodes")
     );
+    assert!(lifecycle.passive_checkpoint(&acme_placement).is_some());
     assert!(
-        runtime
-            .inner
-            .passive_runtime_state_snapshots
-            .contains_key(&acme_placement)
-    );
-    assert!(
-        !runtime
-            .inner
-            .passive_runtime_state_snapshots
-            .contains_key(&beta_placement),
+        !lifecycle.passive_checkpoint(&beta_placement).is_some(),
         "the checkpoint of a branch the lifecycle dropped is dropped with it"
     );
 
@@ -528,6 +869,83 @@ fn a_replica_decodes_each_branch_lifecycle_once_and_prunes_the_branches_it_drops
         !lifecycle
             .names(beta.as_ref())
             .expect("the lifecycle decodes")
+    );
+}
+
+#[test]
+fn assignment_replacement_purges_superseded_passive_guest_generations() {
+    use nervix_models::{WasmStateGeneration, WasmStateGenerations};
+
+    let runtime = Runtime::new();
+    let branch = string_branch_key("tenant", "acme");
+    let guest = placement(
+        RuntimeState::WasmProcessor {
+            schema: schema(),
+            generation: WasmStateGeneration::FIRST,
+        },
+        ModelKind::WasmProcessor,
+        "guest",
+        branch.clone(),
+    );
+    let publish = |generations| {
+        runtime.publish_state_assignment(
+            guest.entity(),
+            ScheduledStateAssignment {
+                identity: ScheduledStateIdentity {
+                    schema_fingerprint: schema(),
+                    wasm_state_generations: Some(generations),
+                },
+                checkpoint_owners: None,
+            },
+        );
+    };
+    let mut generations = WasmStateGenerations::first();
+    publish(generations.clone());
+    let lifecycle = runtime.replicated_branch_lifecycle(
+        &guest
+            .branch_lifecycle()
+            .assured("a guest branch has an entity lifecycle"),
+    );
+    lifecycle.hold_passive_checkpoint(
+        &guest,
+        PersistedRuntimeStateEntry {
+            lsm: 9,
+            payload: vec![7],
+        },
+    );
+    let retained = lifecycle
+        .passive_checkpoint(&guest)
+        .assured("the current generation is held");
+    let mut current = guest.clone();
+    current.state = RuntimeState::WasmProcessor {
+        schema: schema(),
+        generation: generations.begin_branch(
+            branch
+                .as_ref()
+                .assured("the test names a branch")
+                .fingerprint(),
+        ),
+    };
+    publish(generations);
+    lifecycle.hold_passive_checkpoint(
+        &current,
+        PersistedRuntimeStateEntry {
+            lsm: 1,
+            payload: vec![8],
+        },
+    );
+    runtime
+        .purge_stale_runtime_state(&guest.domain)
+        .assured("assignment cleanup succeeds");
+    assert!(lifecycle.passive_checkpoint(&guest).is_none());
+    let held = lifecycle
+        .passive_checkpoint(&current)
+        .assured("the current generation remains held");
+    assert_eq!(held.payload, vec![8]);
+    assert_eq!(
+        retained.payload,
+        vec![7],
+        "an already borrowed checkpoint can finish after cleanup"
     );
 }
 

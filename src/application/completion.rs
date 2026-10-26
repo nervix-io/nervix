@@ -1,17 +1,27 @@
-//! Completion of authoritative control-plane effects on every live node.
+//! Completion of authoritative control-plane effects on every live node, or on the live nodes an
+//! effect names.
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** The all-live-node barriers for a fixed revision: authoritative visibility, runtime
-//!   preparation and readiness, and HTTPS listener installation.
+//! - **Owns.** The barriers for a fixed revision over every live node or over named live nodes:
+//!   authoritative visibility, runtime preparation and readiness, and HTTPS listener installation.
 //! - **Depends on.** Consensus for the committed revision, cluster availability, and authenticated
 //!   incarnation-aware progress observations.
-//! - **Must not know.** Session transports, NSPL syntax, runtime tasks, or data-plane payloads.
+//! - **Must not know.** Session transports, Plexus syntax, data-plane tasks, or payloads.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
 
 use std::collections::BTreeSet;
 
 use error_stack::Report;
 use futures_util::{StreamExt as _, stream::FuturesUnordered};
+use meticulous::ResultExt as _;
 use nervix_consensus::{LeaderTenure, Observer};
 use nervix_interconnect::{
     ApplicationCompletionPeersRequest, ApplicationCompletionPeersResponse,
@@ -21,7 +31,7 @@ use nervix_interconnect::{
 use nervix_models::{ClusterNodeIdentity, ClusterNodeName};
 use nervix_primitives::{
     sync::{Arc, CancellationToken},
-    task::JoinHandle,
+    task::{AbortOnDropHandle, JoinHandle},
 };
 use thiserror::Error;
 
@@ -36,10 +46,20 @@ const APPLICATION_REVISION_PROBE_RETRY: std::time::Duration = std::time::Duratio
 pub(in crate::application) fn register_application_revision_handler(
     cluster: Arc<ClusterHandle>,
     interconnect: &Transport,
+    #[cfg(feature = "testing")] fault_injection: crate::FaultInjection,
 ) -> Result<(), Report<HandlerRegistrationError>> {
     interconnect.register_handler::<ApplicationRevisionRequest, _, _>(move |_context, _request| {
         let cluster = cluster.clone();
-        async move { cluster.local_application_revision().await }
+        #[cfg(feature = "testing")]
+        let fault_injection = fault_injection.clone();
+        async move {
+            let response = cluster.local_application_revision().await;
+            #[cfg(feature = "testing")]
+            fault_injection
+                .pause_application_revision_response_if_armed(response.identity.node_id())
+                .await;
+            response
+        }
     })
 }
 
@@ -154,14 +174,34 @@ impl ApplicationRevisionPhase {
     }
 }
 
+/// The live process incarnations a revision barrier waits for, of those the leader's effective
+/// availability view requires.
+#[derive(Clone, Copy)]
+pub(in crate::application) enum ApplicationRevisionParticipants<'a> {
+    /// Every live incarnation, the local one included.
+    EveryLiveNode,
+    /// The live incarnations of these nodes alone. The local incarnation takes part only when its
+    /// node is named.
+    LiveAmong(&'a BTreeSet<ClusterNodeName>),
+}
+
+impl ApplicationRevisionParticipants<'_> {
+    /// Keeps, of the incarnations the leader's view requires, those this barrier waits for.
+    fn retain(self, expected_nodes: &mut BTreeSet<ClusterNodeIdentity>) {
+        if let Self::LiveAmong(nodes) = self {
+            expected_nodes.retain(|identity| nodes.contains(identity.node_id()));
+        }
+    }
+}
+
 pub(in crate::application) struct ApplicationRevisionTimeout {
     pub(in crate::application) pending_nodes: Vec<ClusterNodeName>,
 }
 
 async fn probe_application_revisions(
-    interconnect: &Transport,
-    pending_nodes: &BTreeSet<ClusterNodeIdentity>,
-    local_identity: &ClusterNodeIdentity,
+    interconnect: Transport,
+    pending_nodes: BTreeSet<ClusterNodeIdentity>,
+    local_identity: ClusterNodeIdentity,
     revision: u64,
     phase: ApplicationRevisionPhase,
 ) -> BTreeSet<ClusterNodeIdentity> {
@@ -170,7 +210,6 @@ async fn probe_application_revisions(
         if expected_identity == local_identity {
             continue;
         }
-        let expected_identity = expected_identity.clone();
         let interconnect = interconnect.clone();
         probes.push(async move {
             let response = match interconnect
@@ -258,18 +297,20 @@ pub(in crate::application) async fn wait_for_application_revision(
     interconnect: &Transport,
     revision: u64,
     phase: ApplicationRevisionPhase,
+    participants: ApplicationRevisionParticipants<'_>,
     deadline: nervix_primitives::time::Instant,
 ) -> Result<(), ApplicationRevisionTimeout> {
     let local_identity = cluster.local_node_identity().await;
     let mut directly_completed_nodes = BTreeSet::new();
     let mut deadline_elapsed = false;
+    let mut pending_probes = None;
 
     loop {
         nervix_primitives::task::consume_budget().await;
         let mut cluster_state = cluster.subscribe_state_changes().await;
         let cluster_change = cluster_state.wait_for_change_or_next_unavailability();
         tokio::pin!(cluster_change);
-        let Some((tenure, expected_nodes)) =
+        let Some((tenure, mut expected_nodes)) =
             completion_peers(cluster, consensus, interconnect, &local_identity).await
         else {
             if deadline_elapsed || nervix_primitives::time::Instant::now() >= deadline {
@@ -289,6 +330,7 @@ pub(in crate::application) async fn wait_for_application_revision(
             }
             continue;
         };
+        participants.retain(&mut expected_nodes);
         directly_completed_nodes.retain(|identity| expected_nodes.contains(identity));
 
         let mut completed_nodes = phase.gossiped_nodes(cluster, revision).await;
@@ -312,21 +354,35 @@ pub(in crate::application) async fn wait_for_application_revision(
             });
         }
 
-        let probes = probe_application_revisions(
-            interconnect,
-            &pending_nodes,
-            &local_identity,
-            revision,
-            phase,
-        );
-        tokio::pin!(probes);
+        // Poll the batch independently of leader-view requests: an unpolled probe may already
+        // own the executor permit a view request needs. The barrier owns and cancels the batch.
+        let probes = pending_probes.get_or_insert_with(|| {
+            AbortOnDropHandle::new(nervix_primitives::task::spawn(probe_application_revisions(
+                interconnect.clone(),
+                pending_nodes,
+                local_identity.clone(),
+                revision,
+                phase,
+            )))
+        });
         let completed_before_probe = directly_completed_nodes.len();
         nervix_primitives::select! {
             biased;
             _ = nervix_primitives::time::sleep_until(deadline) => {
                 deadline_elapsed = true;
             }
-            observed_nodes = &mut probes => {
+            observed_nodes = probes => {
+                pending_probes = None;
+                let observed_nodes = match observed_nodes {
+                    Ok(nodes) => nodes,
+                    Err(failure) => {
+                        let panic = failure.try_into_panic().assured(
+                            "the barrier owns the probe task's only abort handle, so nothing \
+                             cancelled it while the barrier awaited it",
+                        );
+                        std::panic::resume_unwind(panic)
+                    }
+                };
                 directly_completed_nodes.extend(observed_nodes);
                 if directly_completed_nodes.len() == completed_before_probe {
                     nervix_primitives::select! {
@@ -339,6 +395,7 @@ pub(in crate::application) async fn wait_for_application_revision(
                     }
                 }
             }
+            _ = &mut cluster_change => {}
         }
     }
 }
@@ -453,6 +510,7 @@ impl SessionServiceImpl {
             &self.inner.interconnect,
             revision,
             ApplicationRevisionPhase::Authoritative,
+            ApplicationRevisionParticipants::EveryLiveNode,
             deadline,
         )
         .await
@@ -577,6 +635,7 @@ impl SessionServiceImpl {
             &self.inner.interconnect,
             revision,
             ApplicationRevisionPhase::RuntimeReady,
+            ApplicationRevisionParticipants::EveryLiveNode,
             deadline,
         )
         .await
@@ -591,9 +650,8 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, time::Duration};
 
-    use futures_util::FutureExt as _;
     use meticulous::ResultExt as _;
     use nervix_interconnect::ApplicationCompletionPeersResponse;
     use nervix_models::{
@@ -602,7 +660,8 @@ mod tests {
 
     use super::{
         super::test_fixtures::{TestService, build_test_service},
-        accepted_completion_peers,
+        ApplicationRevisionParticipants, ApplicationRevisionPhase, accepted_completion_peers,
+        wait_for_application_revision,
     };
 
     #[test]
@@ -650,21 +709,114 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn a_barrier_among_named_nodes_waits_for_them_and_for_no_other_live_node() {
+        let bound = Duration::from_secs(30);
+        let TestService { service, path, .. } =
+            nervix_primitives::time::timeout(bound, build_test_service(false))
+                .await
+                .assured("the revision barrier fixture starts within its test deadline");
+        let cluster = &service.inner.cluster;
+        let consensus = &service.inner.consensus;
+        let interconnect = &service.inner.interconnect;
+        let local = cluster.local_node_identity().await;
+        let named = BTreeSet::from([local.node_id().clone()]);
+        let elsewhere = BTreeSet::from([
+            ClusterNodeName::parse("node-elsewhere").assured("the test node name is valid")
+        ]);
+        // The only live node has prepared no revision this far ahead, and every barrier below is
+        // already past its deadline, so a barrier that waits for that node ends pending on it.
+        let revision = 1_000;
+        let elapsed = nervix_primitives::time::Instant::now();
+
+        let unnamed = wait_for_application_revision(
+            cluster,
+            consensus,
+            interconnect,
+            revision,
+            ApplicationRevisionPhase::RuntimePrepared,
+            ApplicationRevisionParticipants::LiveAmong(&elsewhere),
+            elapsed,
+        )
+        .await;
+        assert!(
+            unnamed.is_ok(),
+            "a live node the barrier does not name cannot hold it"
+        );
+
+        let Err(named_timeout) = wait_for_application_revision(
+            cluster,
+            consensus,
+            interconnect,
+            revision,
+            ApplicationRevisionPhase::RuntimePrepared,
+            ApplicationRevisionParticipants::LiveAmong(&named),
+            elapsed,
+        )
+        .await
+        else {
+            panic!("a named live node that has not prepared the revision must hold the barrier");
+        };
+        assert_eq!(named_timeout.pending_nodes, vec![local.node_id().clone()]);
+
+        let Err(every_timeout) = wait_for_application_revision(
+            cluster,
+            consensus,
+            interconnect,
+            revision,
+            ApplicationRevisionPhase::RuntimePrepared,
+            ApplicationRevisionParticipants::EveryLiveNode,
+            elapsed,
+        )
+        .await
+        else {
+            panic!("a barrier over every live node must wait for the local node");
+        };
+        assert_eq!(every_timeout.pending_nodes, vec![local.node_id().clone()]);
+
+        cluster.set_local_runtime_revision_prepared(revision).await;
+        let prepared = wait_for_application_revision(
+            cluster,
+            consensus,
+            interconnect,
+            revision,
+            ApplicationRevisionPhase::RuntimePrepared,
+            ApplicationRevisionParticipants::LiveAmong(&named),
+            elapsed,
+        )
+        .await;
+        assert!(
+            prepared.is_ok(),
+            "the named node prepared the revision, so the barrier completes"
+        );
+
+        drop(service);
+        std::fs::remove_dir_all(&path).expect("the test database directory is removed");
+    }
+
+    #[nervix_primitives::test]
     async fn the_https_listener_barrier_waits_until_the_listener_installs_the_revision() {
-        let TestService { service, path, .. } = build_test_service(false).await;
+        let bound = Duration::from_secs(30);
+        let TestService { service, path, .. } =
+            nervix_primitives::time::timeout(bound, build_test_service(false))
+                .await
+                .assured("the listener barrier fixture starts within its test deadline");
         let certificates = service.inner.https_certificates.clone();
         let mut barrier = Box::pin(service.wait_for_https_listener_installation(4));
 
         assert!(
-            barrier.as_mut().now_or_never().is_none(),
+            futures_util::poll!(barrier.as_mut()).is_pending(),
             "no listener installed revision 4 yet"
         );
-        certificates
-            .install(4, &ClusterSchedule::default())
+        nervix_primitives::time::timeout(
+            bound,
+            certificates.install(4, &ClusterSchedule::default()),
+        )
+        .await
+        .assured("the listener installs within its test deadline")
+        .expect("a runtime state without TLS VHOSTs installs");
+        nervix_primitives::time::timeout(bound, barrier)
             .await
-            .expect("a runtime state without TLS VHOSTs installs");
-        barrier
-            .await
+            .assured("the listener barrier completes within its test deadline")
             .expect("the barrier completes once the listener installed revision 4");
 
         drop(service);

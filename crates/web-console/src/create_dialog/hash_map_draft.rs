@@ -7,6 +7,11 @@
 //! - **Depends on.** Typed semantic names, the resource pin draft, and the current lookup Model.
 //! - **Must not know.** Resource loading, codec execution, or version resolution at application.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{
     CodecName, CreateLookup, FieldName, LookupName, ModelKind, NodeRef, RequestedResourceVersion,
@@ -75,10 +80,16 @@ impl HashMapDraft {
     ) -> error_stack::Result<CreateLookup<RequestedResourceVersion>, HashMapDraftError> {
         let name = LookupName::parse(self.name.trim())
             .map_err(|_| Report::new(HashMapDraftError::Name))?;
-        let pin = self.pin.build().map_err(|error| {
-            let context = error.current_context().clone();
-            error.change_context(HashMapDraftError::ResourcePin(context))
-        })?;
+        let pin = {
+            let mapping_input = self.pin.build();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let context = error.current_context().clone();
+                    error.change_context(HashMapDraftError::ResourcePin(context))
+                }),
+            }
+        }?;
         let codec = match &self.codec {
             None => return Err(Report::new(HashMapDraftError::CodecRequired)),
             Some(selected) => selected
@@ -126,13 +137,17 @@ pub(super) enum HashMapDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         CodecName, CreateStatement, FieldName, Model, ModelKind, NodeRef, RequestedResourceVersion,
         ResourceName, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{HashMapDraft, HashMapDraftError};
 
@@ -163,7 +178,7 @@ mod tests {
         draft.select_key(FieldName::parse("id").assured("valid field"));
         let model = Model::Lookup(draft.build().assured("complete lookup"));
         let statement = Statement::Create(CreateStatement::new(Box::new(model), false));
-        let source = statement.to_canonical_nspl().assured("lookup renders");
+        let source = statement.to_canonical_plexus().assured("lookup renders");
         assert!(source.contains("VERSION LATEST"));
         assert_eq!(
             parse_client_statement(&source).assured("lookup parses"),

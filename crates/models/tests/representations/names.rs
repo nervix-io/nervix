@@ -8,13 +8,12 @@
 
 use nervix_arbitrary::{Arbitrary, Domain, Entropy};
 use nervix_models::{
-    BranchName, BuiltinFunctionName, ChannelName, ClientName, ClusterNodeName, CodecName,
-    CollectionName, ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainName, DotPolicy,
-    EmitterName, EndpointName, FieldName, GeneratorName, InferencerName, IngestorName,
-    JunctionName, LookupName, ModelName, NameError, PlacementName, PulsarSubscriptionName,
-    QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName, ResourceName, SchemaName,
-    SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName, UdfName, UserName,
-    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    BranchName, BuiltinFunctionName, ClientName, ClusterNodeName, CodecName, CorrelatorName,
+    DeduplicatorName, DomainName, DotPolicy, EmitterName, EndpointName, FieldName, GeneratorName,
+    InferencerName, IngestorName, JunctionName, LookupName, ModelName, NameError, PlacementName,
+    ReingestorName, RelayName, ReordererName, ResourceName, SchemaName, SignalingProtocolName,
+    SubscriptionName, UdfName, UserName, VhostName, WasmProcessorName, WindowProcessorName,
+    WireSchemaName,
 };
 
 /// The longest name the vocabulary accepts, in bytes, as `NameError::TooLong` reports it.
@@ -209,15 +208,6 @@ macro_rules! for_every_name_type {
         $assertion!(FieldName, $text);
         $assertion!(BuiltinFunctionName, $text);
         $assertion!(ClusterNodeName, $text);
-        $assertion!(TopicName, $text);
-        $assertion!(QueueName, $text);
-        $assertion!(QueueGroupName, $text);
-        $assertion!(ChannelName, $text);
-        $assertion!(SubjectName, $text);
-        $assertion!(TableName, $text);
-        $assertion!(CollectionName, $text);
-        $assertion!(ConsumerGroupName, $text);
-        $assertion!(PulsarSubscriptionName, $text);
     };
 }
 

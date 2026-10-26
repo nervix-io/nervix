@@ -90,10 +90,17 @@ fn endpoint_fields() -> Vec<SchemaField> {
     ]
 }
 
-/// The same fields, as a host builds them.
-struct HostFields(*mut Fields);
+/// A field list as a host builds it, freed when dropped.
+pub(super) struct HostFields(pub(super) *mut Fields);
 
 impl HostFields {
+    /// The fields the list holds, or the failure an incomplete last field leaves.
+    pub(super) fn schema_fields(&self) -> Result<Vec<SchemaField>, crate::Failure> {
+        // SAFETY: the field list is live, and nothing changes it while it is read.
+        unsafe { &*self.0 }.schema_fields()
+    }
+
+    /// [`endpoint_fields`], as a host builds them.
     fn endpoint() -> Self {
         let fields = Self(nx_fields_new());
         // SAFETY: the field list is live and the names address their lengths.

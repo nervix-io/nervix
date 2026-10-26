@@ -1,5 +1,7 @@
+@remote_ack_owners
 Feature: Remote acknowledgements across a producer restart
 
+  @deloxide_stress
   Scenario: An acknowledgement addressed to a restarted producer's earlier process leaves its new records pending
     Given Kafka is running
     And the production sticky scheduler is configured
@@ -7,11 +9,11 @@ Feature: Remote acknowledgements across a producer restart
     And Kafka topic "restart_ack_before_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "restart_ack_after_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "restart_ack_out_{{test_id}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA restart_ack_event ( event_id STRING, branch_name STRING, sequence I64 );
       CREATE WIRE JSON SCHEMA restart_ack_wire MODE STRICT (
@@ -25,43 +27,43 @@ Feature: Remote acknowledgements across a producer restart
         BRANCHED BY restart_ack_branch;
       CREATE RELAY restart_ack_after_records SCHEMA restart_ack_event
         BRANCHED BY restart_ack_branch;
-      CREATE CLIENT restart_ack_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT restart_ack_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR restart_ack_before_source
-        FROM KAFKA restart_ack_kafka TOPIC restart_ack_before_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP restart_ack_before_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR restart_ack_before_source
+        FROM restart_ack_kafka TOPIC 'restart_ack_before_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'restart_ack_before_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING restart_ack_codec
         TO restart_ack_before_records INHERIT ALL
           BRANCHED BY restart_ack_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR restart_ack_after_source
-        FROM KAFKA restart_ack_kafka TOPIC restart_ack_after_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP restart_ack_after_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR restart_ack_after_source
+        FROM restart_ack_kafka TOPIC 'restart_ack_after_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'restart_ack_after_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5m RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING restart_ack_codec
         TO restart_ack_after_records INHERIT ALL
           BRANCHED BY restart_ack_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER restart_ack_before_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER restart_ack_before_sink
         FROM restart_ack_before_records
-        TO KAFKA restart_ack_kafka TOPIC restart_ack_out_{{test_id}}
+        TO restart_ack_kafka TOPIC 'restart_ack_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING restart_ack_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER restart_ack_after_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER restart_ack_after_sink
         FROM restart_ack_after_records
-        TO KAFKA restart_ack_kafka TOPIC restart_ack_out_{{test_id}}
+        TO restart_ack_kafka TOPIC 'restart_ack_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING restart_ack_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR restart_ack_before_source ONTO NODE node-2 IGNORE PREFERENCES;
       RELOCATE INGESTOR restart_ack_after_source ONTO NODE node-1 IGNORE PREFERENCES;
@@ -107,7 +109,10 @@ Feature: Remote acknowledgements across a producer restart
     When node "node-2" is started
     Then node "node-1" eventually reports interconnect to "node-2" as "connected"
     And node "node-3" eventually reports interconnect to "node-2" as "connected"
-    When these NSPL commands are executed on the leader node
+    And within "30s" node "node-3" observability metric "nervix_interconnect_relay_attempts" with labels eventually equals 0
+      """
+      """
+    When these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR restart_ack_after_source ONTO NODE node-2 IGNORE PREFERENCES;
       SHOW CLUSTER STATUS;

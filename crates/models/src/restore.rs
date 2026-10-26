@@ -9,16 +9,37 @@
 //! - **Must not know.** The archive's encoding, how an archive travels to the leader or is staged
 //!   there, or how a step reaches consensus.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::{fmt, num::NonZeroU64};
 
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
-use strum::AsRefStr;
+use strum::{AsRefStr, EnumString};
 
-use crate::{ArchiveDigest, DomainName, Timestamp, TransactionImpactReport};
+use crate::{
+    ArchiveDigest, ClusterNodeName, CommandExecutionReference, DomainName, Timestamp,
+    TransactionImpactReport,
+};
 
-/// `RESTORE CLUSTER FROM '<file>' [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]` or
-/// `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [DRY RUN]`.
+/// Authority for one stopped-domain state installation. The generation is the committed log
+/// position that admitted this attempt; checkpoint revisions describe guest history instead.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct RestoreStateAuthority {
+    pub leader: ClusterNodeName,
+    pub term: u64,
+    pub execution: CommandExecutionReference,
+    pub mutation_revision: u64,
+    pub generation: u64,
+}
+
+/// `RESTORE CLUSTER FROM '<file>' [RESUME] [ON EXISTING USER FAIL | SKIP | REPLACE] [DRY RUN]` or
+/// `RESTORE DOMAIN <name> [AS <new_name>] FROM '<file>' [RESUME] [DRY RUN]`.
 ///
 /// The client that sent the statement reads the archive from `source` and streams it to the
 /// leader, which never reads the path.
@@ -30,6 +51,53 @@ pub struct Restore {
     /// The local archive file the client reads.
     pub source: String,
     pub mode: RestoreMode,
+    /// Which archived runtime state the restore installs.
+    pub state: RestoreState,
+    /// The lifecycle installed after the complete state generation is published.
+    pub lifecycle: RestoreLifecycle,
+}
+
+/// Whether restoration leaves a domain stopped or resumes its archived start.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum RestoreLifecycle {
+    #[default]
+    Stopped,
+    Resume,
+}
+
+/// The runtime state a restore installs into each stopped domain.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum RestoreState {
+    #[default]
+    All,
+    /// Install state other than source positions.
+    WithoutSourceOffsets,
+    /// Install configuration only.
+    ConfigurationOnly,
 }
 
 /// What a restore recreates.
@@ -76,6 +144,7 @@ impl RestoreScope {
     RkyvSerialize,
     RkyvDeserialize,
     AsRefStr,
+    EnumString,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExistingUserPolicy {
@@ -244,6 +313,10 @@ pub struct RestoredDomain {
     pub resource_versions: u64,
     /// The models the restore applies.
     pub models: u64,
+    /// The lifecycle after complete publication, or planned lifecycle for a dry run.
+    pub status: crate::DomainStatus,
+    /// The archived start generation, preserved even when restoration resumes execution.
+    pub start_version: u64,
     /// For a dry run, the transaction planner's report on the domain's model run. Absent when the
     /// restore applies, and when the domain holds no models.
     pub planned_models: Option<TransactionImpactReport>,
@@ -324,6 +397,17 @@ mod tests {
             RestoreStep::ApplyModels(domain("prod")).to_string(),
             "apply models of domain 'prod'"
         );
+    }
+
+    #[test]
+    fn existing_user_policies_parse_from_their_own_names() {
+        for policy in [
+            ExistingUserPolicy::Fail,
+            ExistingUserPolicy::Skip,
+            ExistingUserPolicy::Replace,
+        ] {
+            assert_eq!(policy.as_ref().parse::<ExistingUserPolicy>(), Ok(policy));
+        }
     }
 
     #[test]

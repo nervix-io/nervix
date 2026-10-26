@@ -1,5 +1,7 @@
 # Domains And Time
 
+*Plexus, the Nervix graph definition language.*
+
 Every runtime graph in Nervix runs inside a domain.
 
 This chapter describes the public language and runtime behavior. See
@@ -15,7 +17,7 @@ Nervix currently supports:
 
 Domain creation is never transaction content. A transaction is bound to one already-existing
 domain, so `CREATE DOMAIN` runs on its own before `BEGIN`; queueing it is rejected. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions).
+[Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions).
 
 ## Paced Domains
 
@@ -23,7 +25,7 @@ Paced domains maintain a domain clock.
 
 `PERIOD` must be positive and no larger than `18446744073709551615ns`. `SKEW` may be zero but must
 fit in that same 64-bit nanosecond duration range. Invalid durations are rejected before the domain
-is stored. Duration text anywhere in NSPL whose spans could add up to 18446744073709551615 seconds,
+is stored. Duration text anywhere in Plexus whose spans could add up to 18446744073709551615 seconds,
 however they are written, is rejected: a duration literal when the statement is parsed, and a
 duration string argument, such as the delay of `PERCENTILE_LINEAR_HISTOGRAM`, when the statement is
 validated.
@@ -81,7 +83,7 @@ producer-to-relay edge and a relay-to-consumer edge each receive the default ind
 clause is optional on every domain-creation form, and omission means `NEUTRAL` so ordinary
 scheduler heuristics remain active:
 
-```nspl
+```plexus
 CREATE PACED DOMAIN production
   WITH PERIOD 1s SKEW 100ms
   PLACEMENT REQUIRE COLOCATION;
@@ -92,7 +94,7 @@ CREATE UNPACED DOMAIN archive
 
 Change the default for the session's active domain with the nameless domain alteration:
 
-```nspl
+```plexus
 ALTER DOMAIN SET PLACEMENT PREFER COLOCATION;
 ```
 
@@ -120,8 +122,9 @@ Important runtime consequences:
 Successful lifecycle commands are completion boundaries. `START` returns after every current live
 node has prepared the same revision and every configured listener and assigned source has completed
 startup. `STOP` returns after intake and runtime work have stopped remotely, including when it is the
-last running domain. A dependent connection, observation, or publish can follow immediately through
-any live node.
+last running domain, and after every deduplicator and window branch it ended has written the state
+it published last, so a backup taken as soon as `STOP` returns holds that state. A dependent
+connection, observation, or publish can follow immediately through any live node.
 
 The lifecycle state, active paced-clock anchor, and one clock authority are replicated. The
 authority identifies a concrete incarnation of a named cluster node and carries a revision that
@@ -147,22 +150,26 @@ offset affects a newly established `START AT NOW`, unpaced observations, and eac
 of a paced mapping; `TIME RATE` multiplies that projection error. `SKEW` is event-admission
 tolerance around logical tick centers, not an allowance for unsynchronized hosts.
 
-The authority begins producing only after every live node reports that it installed the consensus
-runtime revision containing the mapping and fence. Join, restart, owner loss, and membership change
-can select a new authority without changing the clock mapping. A progress report is accepted only
-when its `START` generation, authority revision, node incarnation, and authenticated peer match the
-committed authority. Duplicate, delayed, reordered, or superseded progress is ignored and cannot
-create a domain. `STOP` revokes the authority in the same replicated lifecycle transition; a later
-`START` commits a new generation and mapping. Automatic ALTER quiescing keeps the authority and
-clock running.
+The authority begins producing once its own node installs the mapping and fence of the consensus
+revision that assigns it. Each live peer receives progress once it has installed that fence. A
+node installs a reassigned fence ahead of its graph installation, so neither the authority nor a
+peer waits for its own or another node's graph installation or activation. Join, restart, owner
+loss, and membership change can select a new authority without changing the clock mapping. When
+the authority's node becomes unavailable, the consensus leader commits a replacement and retries a
+proposal its new leadership could not yet accept; if that node also led consensus, the remaining
+voters elect a leader first. A progress report is accepted only when its `START` generation,
+authority revision, node incarnation, and authenticated peer match the committed authority.
+Duplicate, delayed, reordered, or superseded progress is ignored and cannot create a domain. `STOP`
+revokes the authority in the same replicated lifecycle transition; a later `START` commits a new
+generation and mapping. Automatic ALTER quiescing keeps the authority and clock running.
 
 Progress crosses the interconnection as a typed HTTP/2 management request in the reserved progress
-subquota. For each ready remote node and domain, the authority retains one replaceable pending
-report and permits one delivery attempt at a time. A newer frontier replaces an older pending
-frontier while connection capacity or a response is delayed. The interconnection bounds all
-in-flight progress requests independently of the stream and memory reservations for health,
-cancellation, admission, and terminal outcomes. A joining or reconnected node receives the newest
-retained frontier after it installs the required runtime revision.
+subquota. For each domain and each remote node that installed its clock, the authority retains one
+replaceable pending report and permits one delivery attempt at a time. A newer frontier replaces an
+older pending frontier while connection capacity or a response is delayed. The interconnection
+bounds all in-flight progress requests independently of the stream and memory reservations for
+health, cancellation, admission, and terminal outcomes. A joining or reconnected node receives the
+newest retained frontier once it advertises that it installed the required domain clocks.
 
 Each progress attempt has a two-second physical deadline. A failed attempt retries the newest
 frontier after a 200-millisecond physical backoff, and authority shutdown cancels both the request
@@ -209,7 +216,10 @@ emitters exactly as in every other flush-based node. A paced domain's `TIME RATE
 accelerates or slows them, and a stopped clock cannot silently turn any of them into a wall-clock
 wait. Each source relay and concrete branch owns its collection deadline; each concrete output
 branch owns its route deadline. A deadline starts only when data enters an empty buffer and is
-cleared when that buffer is released by time, size, force flush, shutdown, or error handling.
+cleared when that buffer is released by time, size, force flush, shutdown, or error handling. For
+`COMMIT EACH` that buffer is the Iceberg emitter's staged files: its deadline starts when a flush
+stages rows while none are staged, not at the domain time those rows' batch was accepted at, and a
+retry or drain commits them without reading the clock.
 
 `FLUSH IMMEDIATE` instead uses a physical 100 µs minimum on the process monotonic clock, regardless
 of domain rate. The ingestor source-group bound of 1,024 messages and 5 ms idle close are also
@@ -217,8 +227,8 @@ physical and run before route-local flushing. Connector retry and backoff timers
 physical controls; none of these operational waits is projected through the domain clock.
 
 An emitter's publish cadence and its publish attempts are separate state. Retry backoff, the
-acknowledgement keepalive that holds an upstream `MODE ACK` source open while a sink is
-unavailable, the sink acknowledgement timeout, the stop and drain deadlines, and an HTTP
+acknowledgement keepalive that holds an upstream `MODE ACK` source open while an emitter is
+unavailable, the emitter acknowledgement timeout, the stop and drain deadlines, and an HTTP
 `Retry-After` a server returns are all physical: a paced domain never shortens or lengthens the
 real wait an external system asked for. A failed attempt keeps the emitter's pending batches, their
 acknowledgements, and its unchanged cadence deadline; while a retry is scheduled the emitter waits
@@ -229,29 +239,32 @@ maximum batch size releases a buffer that has reached it as soon as no retry is 
 
 A client session can follow the active domain's clock instead of inferring it from the domain list:
 
-```nspl
+```plexus
 ATTACH DOMAIN CLOCK;
 DETACH DOMAIN CLOCK;
 ```
 
-The attach reply, and a frame on every later change, carry the `START` generation and the clock as
-the serving node has it installed: stopped, uninstalled, unpaced, or paced with its `PERIOD`,
-`SKEW`, logical origin, UTC anchor, and `TIME RATE`. A paced clock is the committed mapping this
+The attach reply, and a frame after later changes of the installed clock, carry the `START`
+generation and the clock as the serving node has it installed: stopped, uninstalled, unpaced, or
+paced with its `PERIOD`, `SKEW`, logical origin, UTC anchor, and `TIME RATE`. Changes made before a
+frame is sent arrive together as the newest clock. A paced clock is the committed mapping this
 chapter describes, so a client projects the domain's logical time for its own UTC observation with
 the same arithmetic every node uses, including rounding down, and reconstructs the admission window
 from the origin, `PERIOD`, and `SKEW`. A driver of a paced simulation can therefore choose
 `TIMESTAMP AT` values the ingestor admits, such as the newest reached center, and compute how long
-to wait until a logical instant. The projection uses the client host's UTC, so the synchronization
-requirement above extends to such a client: its offset from the cluster's hosts, multiplied by
-`TIME RATE`, shifts every projection. The session also receives each newest accepted tick as a
+to wait until a logical instant; the [Paced Simulation Drivers](paced-simulation-drivers.md) are two
+runnable such drivers. The projection uses the client host's UTC, so the synchronization requirement
+above extends to such a client: its offset from the cluster's hosts, multiplied by `TIME RATE`,
+shifts the logical instants and admission centers it projects, and the offset itself moves the end
+of every physical wait it computes. The session also receives each newest accepted tick as a
 replaceable frame with its id, logical boundary, authority UTC observation, and serving node's
-logical reading. A client can pace from those accepted boundaries even if its own UTC is offset;
-the serving node's reading gives it a cluster-side anchor.
+logical reading. A client can pace from those accepted boundaries even if its own UTC is offset; the
+serving node's reading gives it a cluster-side anchor.
 
-Both statements are session-local, are refused while a transaction is open, and follow each domain
-at most once. See [Domain Clock Attachment](sessions.md#domain-clock-attachment) for the delivery
-contract and [Rust Client Library](client-library.md#following-a-domain-clock) for the helper that
-performs this arithmetic, which the shared C binding exposes to its hosts through
+Both statements are session-local and are refused while a transaction is open, and a session follows
+each domain clock at most once. See [Domain Clock Attachment](sessions.md#domain-clock-attachment)
+for the delivery contract and [Rust Client Library](client-library.md#following-a-domain-clock) for
+the helper that performs this arithmetic, which the shared C binding exposes to its hosts through
 `nx_session_domain_clock`.
 
 ## Execution-Time Snapshots
@@ -282,7 +295,7 @@ physical monotonic wait.
 Nervix derives a quiesce level from the complete validated model diff. `ALTER SCHEMA`,
 `ALTER WIRE ... SCHEMA`, relay schema changes, and relay branching changes use an internal paused
 lifecycle state when their domain is running. Dynamic changes such as relay capacity do not pause
-the domain. There is no NSPL `PAUSE` or `RESUME` statement.
+the domain. There is no Plexus `PAUSE` or `RESUME` statement.
 
 Before changing the live graph, the leader validates the complete candidate graph without writing
 it while holding the domain's exclusive ALTER lock. For an entity-pause alteration, Nervix gates
@@ -312,13 +325,26 @@ eligible handoff residue are preserved across the quiesce cycle.
 
 ## Ingestion Timestamps
 
+`RESTORE ... RESUME` retains the archived start generation, latest start point and paced clock
+mapping after installing all compatible runtime state. That mapping projects the downtime, so
+`TIMESTAMP AT` admission uses the restored clock's reached windows. Unpaced domains resume without
+a mapping. A default restore stays stopped. A later normal `START` advances the generation and
+clears materialized relay rows while preserving compatible WASM state, source offsets, branch
+lifecycle, deduplicator keys and windows. To start from the archived frontier with a new mapping, use a default restore and
+explicit `START AT '<frontier>' TIME RATE <rate>`. `DESCRIBE DOMAIN` exposes the generation, start
+point and mapping; `LIST DOMAINS` exposes pace, status and generation. See
+[Backup And Restore](backup-and-restore.md#restoring).
+
 Every ingested record receives internal ingestion metadata, including mandatory low and high watermarks with nanosecond precision.
 
 Timestamp sources:
 
 - `TIMESTAMP NOW` selects the installed domain's logical time when the ingest group is delivered.
   Buffered intake released after automatic quiescing receives that delivery time. In an unpaced
-  domain, the same clock capability supplies actual UTC.
+  domain, the same clock capability supplies actual UTC. In a paced domain that delivery time is
+  tested against the admission window like any event time: it lies less than one `PERIOD` after
+  the newest reached tick center, so a `SKEW` smaller than `PERIOD` rejects the records delivered
+  between two windows, and a `SKEW` of at least `PERIOD` admits every delivery.
 - `TIMESTAMP AT <field>` preserves the decoded `DATETIME` field as the event time. Connector
   timestamps selected when this clause is omitted in an unpaced domain, and broker metadata,
   retain their external values. None of these values is multiplied by `TIME RATE`.

@@ -3,7 +3,15 @@
 //! - **Owns.** Lowering semantic window assignments into VM expressions and aggregate demands, and
 //!   which shared aggregate structure and per-row arguments each aggregate function reads.
 //! - **Depends on.** The vocabulary and the VM's program frontend.
-//! - **Must not know.** NSPL tokens or diagnostics, registry state, or runtime tasks.
+//! - **Must not know.** Plexus tokens or diagnostics, registry state, or runtime tasks.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
 
 mod route;
 
@@ -19,7 +27,7 @@ use thiserror::Error;
 pub use self::route::{
     CompiledWindowAssignment, CompiledWindowDemand, CompiledWindowExpr, CompiledWindowInvocation,
     CompiledWindowRoute, WINDOW_ARGUMENT_NAMESPACE, WindowArgumentColumn, WindowRouteCompileError,
-    WindowRouteSchemas,
+    WindowRouteSchemas, argument_snapshot_schema,
 };
 pub use crate::program::{WindowAggregateFunction, WindowAggregateInvocation};
 use crate::{
@@ -286,7 +294,7 @@ impl WindowAggregateStorageKind {
         }
     }
 
-    pub fn nspl_name(self) -> &'static str {
+    pub fn plexus_name(self) -> &'static str {
         match self {
             Self::DistinctSketch => "hll",
             Self::QuantileSketch => "quantile_sketch",
@@ -415,11 +423,17 @@ fn lower_window_expression(
             ))
         }
         _ => {
-            let expression = lower_expression(expression, SemanticScopePolicy::read_only("output"))
-                .map_err(|error| {
-                    let message = error.current_context().to_string();
-                    error.change_context(WindowAggregateError { message })
-                })?;
+            let expression = {
+                let mapping_input =
+                    lower_expression(expression, SemanticScopePolicy::read_only("output"));
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let message = error.current_context().to_string();
+                        error.change_context(WindowAggregateError { message })
+                    }),
+                }
+            }?;
             validate_aggregate_expr(&expression)?;
             validate_window_input_scope(&expression.inner, false)?;
             Ok(spanned(WindowAggregateExpr::Scalar(expression), span))
@@ -674,7 +688,7 @@ fn validate_aggregate_call(
     if args.len() != function.expected_arity() {
         return Err(invalid_window_aggregate(format!(
             "{} expects {} argument(s), found {}",
-            function.nspl_name(),
+            function.plexus_name(),
             function.expected_arity(),
             args.len()
         )));
@@ -710,14 +724,14 @@ fn percentage_arg(
         _ => {
             return Err(invalid_window_aggregate(format!(
                 "{} percentile argument must be a numeric constant",
-                function.nspl_name()
+                function.plexus_name()
             )));
         }
     };
     if !(0.0..=100.0).contains(&value) {
         return Err(invalid_window_aggregate(format!(
             "{} percentile argument must be between 0 and 100",
-            function.nspl_name()
+            function.plexus_name()
         )));
     }
     Ok(value)
@@ -740,13 +754,13 @@ fn sketch_integer_arg(
     let Expr::Literal(Literal::Int64(value)) = &expr.inner else {
         return Err(invalid_window_aggregate(format!(
             "{} {argument} must be an integer constant",
-            function.nspl_name()
+            function.plexus_name()
         )));
     };
     usize::try_from(*value).map_err(|_| {
         invalid_window_aggregate(format!(
             "{} {argument} must be non-negative and fit the platform",
-            function.nspl_name()
+            function.plexus_name()
         ))
     })
 }
@@ -1119,6 +1133,10 @@ fn collect_expr_field_refs<'a>(expr: &'a Expr, refs: &mut Vec<&'a FieldRef>) {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nonzero_ext::nonzero;
 
@@ -1128,7 +1146,7 @@ mod tests {
     fn lower_aggregate_program(
         assignments: &str,
     ) -> Result<SpannedNode<WindowAggregateProgram>, String> {
-        let construction = nervix_nspl::parse_route_construction(&format!("SET {assignments}"))
+        let construction = nervix_plexus::parse_route_construction(&format!("SET {assignments}"))
             .map_err(|error| error.to_string())?;
         lower_window_assignments(&construction).map_err(|error| error.to_string())
     }
@@ -1247,8 +1265,9 @@ mod tests {
 
     #[test]
     fn route_aggregate_arguments_reject_output_fields() {
-        let construction = nervix_nspl::parse_route_construction("SET total = COUNT(output.total)")
-            .expect("route construction should parse");
+        let construction =
+            nervix_plexus::parse_route_construction("SET total = COUNT(output.total)")
+                .expect("route construction should parse");
 
         let error = lower_window_assignments(&construction)
             .expect_err("aggregate arguments must read the original input");
@@ -1262,7 +1281,7 @@ mod tests {
 
     #[test]
     fn route_array_values_preserve_ordered_aggregate_expressions() {
-        let construction = nervix_nspl::parse_route_construction(
+        let construction = nervix_plexus::parse_route_construction(
             "SET percentiles = [MIN(input.value), MAX(input.value)]",
         )
         .expect("route array construction should parse");

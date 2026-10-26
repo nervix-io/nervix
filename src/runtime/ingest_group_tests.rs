@@ -7,6 +7,11 @@
 //! - **Depends on.** The runtime ingest grouping implementation and its test fixtures.
 //! - **Must not know.** Production control-plane orchestration or external connector behavior.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::time::Duration;
 
 use ahash::HashMap;
@@ -149,7 +154,7 @@ fn two_ingest_rows() -> IngestGroupRows {
             RuntimeRecordMetadata::test(),
         ]),
         ingest_metadata: ingest_metadata_for_test(
-            IngestMetadataKind::Headers,
+            IngestorMetadataScope::Headers,
             &[
                 IngestMetadataRow::Headers {
                     headers: &NoIngestHeaders,
@@ -193,7 +198,7 @@ fn expect_failure<T, E>(result: Result<T, E>, reason: &str) -> E {
 async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -256,7 +261,7 @@ async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
 async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         3,
         grouped_event_ingestor_metrics(),
     );
@@ -302,7 +307,7 @@ async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
 async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode() {
     let codec = grouped_event_codec();
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -369,13 +374,111 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
     );
 }
 
+/// A batch keeps decoding after its codec refuses one payload: the payloads around it decode into
+/// the group and keep their entries in order, and the refused payload's entry comes back with the
+/// codec's report.
+#[nervix_primitives::test]
+async fn a_batch_keeps_decoding_after_its_codec_refuses_a_payload() {
+    let runtime = Runtime::default();
+    let codec = grouped_event_codec();
+    let mut collector = IngestRouteCollector::new(
+        IngestorMetadataScope::Headers,
+        8,
+        grouped_event_ingestor_metrics(),
+    );
+    let batch = [
+        BatchPayload {
+            payload: br#"{"user_id":1}"#.as_slice(),
+            entry: "first",
+        },
+        BatchPayload {
+            payload: br#"{"user_id":"two"}"#.as_slice(),
+            entry: "second",
+        },
+        BatchPayload {
+            payload: br#"{"user_id":3}"#.as_slice(),
+            entry: "third",
+        },
+    ];
+
+    let payloads = runtime
+        .decode_raw_ingest_payload(
+            &mut collector,
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            batch,
+        )
+        .await
+        .expect("a codec refusal leaves the batch's other payloads to decode");
+
+    assert_eq!(payloads.decoded, ["first", "third"]);
+    assert_eq!(payloads.refused.len(), 1);
+    let refusal = &payloads.refused[0];
+    assert_eq!(refusal.entry, "second");
+    assert!(
+        matches!(
+            refusal.report.current_context(),
+            CodecError::ParseField { field, .. } if field == "user_id"
+        ),
+        "the refusal keeps the codec's report: {:?}",
+        refusal.report
+    );
+    assert_eq!(
+        collector.pending.undispatched_payloads(),
+        2,
+        "the group holds the two payloads that decoded, waiting for their source to accept them"
+    );
+}
+
+/// A payload the node cannot unfold now was judged by nothing, so the whole batch is refused
+/// rather than consumed, even a payload its codec would have refused, and the group keeps nothing
+/// of it.
+#[nervix_primitives::test]
+async fn a_batch_the_node_cannot_unfold_is_refused_whole() {
+    let executor = single_worker_executor();
+    let runtime = Runtime::with_executor(executor.clone());
+    let filled = FilledCpuClass::fill(&executor, CpuClass::Extension).await;
+    let codec = unfolding_event_codec(".");
+    let mut collector = IngestRouteCollector::new(
+        IngestorMetadataScope::Headers,
+        8,
+        grouped_event_ingestor_metrics(),
+    );
+    let batch = [
+        BatchPayload {
+            payload: br#"{"user_id":"one"}"#.as_slice(),
+            entry: 0_usize,
+        },
+        BatchPayload {
+            payload: br#"{"user_id":2}"#.as_slice(),
+            entry: 1,
+        },
+    ];
+
+    let refused = runtime
+        .decode_raw_ingest_payload(
+            &mut collector,
+            QueueAdmission::RefuseWhenFull,
+            &codec,
+            batch,
+        )
+        .await;
+
+    assert!(
+        refused.is_err(),
+        "a full extension class refuses the batch instead of judging its payloads"
+    );
+    assert_eq!(collector.pending.undispatched_payloads(), 0);
+    filled.release().await;
+}
+
 /// Every message a payload unfolds into takes the payload's metadata and a share of its ACK
 /// set, so the source's acknowledgement waits for all of them.
 #[nervix_primitives::test]
 async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_ack_share() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -439,7 +542,7 @@ async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_a
 async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
     let codec = unfolding_event_codec(".[] | select(.keep)");
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -481,7 +584,7 @@ async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
 async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_unfolding() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -546,7 +649,7 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
 async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty_group() {
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -592,7 +695,7 @@ fn pending_ingest_group_rejects_misaligned_payload_sidecars() {
     let headers = NoIngestHeaders;
     let metadata = [IngestMetadataRow::Headers { headers: &headers }];
     let ingested_at = Timestamp::from_unix_nanos(1);
-    let mut pending = PendingIngestGroup::new(IngestMetadataKind::Headers, 1);
+    let mut pending = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
 
     let missing_ack = expect_failure(
         pending.append(&metadata, Vec::new(), ingested_at),
@@ -621,7 +724,7 @@ fn pending_ingest_group_rejects_misaligned_payload_sidecars() {
 
 #[test]
 fn pending_ingest_group_reports_structural_close_errors() {
-    let mut timestamp_mismatch = PendingIngestGroup::new(IngestMetadataKind::Headers, 1);
+    let mut timestamp_mismatch = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
     timestamp_mismatch.acks.push(AckSet::empty());
     let timestamp_error = expect_failure(
         timestamp_mismatch.into_rows(),
@@ -636,7 +739,7 @@ fn pending_ingest_group_reports_structural_close_errors() {
     ));
 
     let missing_metadata = expect_failure(
-        PendingIngestGroup::new(IngestMetadataKind::Headers, 1).into_rows(),
+        PendingIngestGroup::new(IngestorMetadataScope::Headers, 1).into_rows(),
         "a closed group must have opened metadata builders",
     );
     assert!(matches!(
@@ -644,8 +747,11 @@ fn pending_ingest_group_reports_structural_close_errors() {
         IngestGroupError::MissingMetadataBuilders
     ));
 
-    let mut missing_records = PendingIngestGroup::new(IngestMetadataKind::Headers, 1);
-    missing_records.metadata = Some(IngestMetadataBuilders::new(IngestMetadataKind::Headers, 1));
+    let mut missing_records = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
+    missing_records.metadata = Some(
+        IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
+            .expect("one header metadata row fits"),
+    );
     let missing_record_error = expect_failure(
         missing_records.into_rows(),
         "a closed group must have opened a record builder",
@@ -655,8 +761,9 @@ fn pending_ingest_group_reports_structural_close_errors() {
         IngestGroupError::MissingRecordBuilder
     ));
 
-    let mut metadata_mismatch = PendingIngestGroup::new(IngestMetadataKind::Headers, 1);
-    let mut metadata = IngestMetadataBuilders::new(IngestMetadataKind::Headers, 1);
+    let mut metadata_mismatch = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
+    let mut metadata = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
+        .expect("one header metadata row fits");
     metadata
         .append(&IngestMetadataRow::Headers {
             headers: &NoIngestHeaders,
@@ -675,8 +782,9 @@ fn pending_ingest_group_reports_structural_close_errors() {
         }
     ));
 
-    let mut decoded_mismatch = PendingIngestGroup::new(IngestMetadataKind::Headers, 1);
-    let mut metadata = IngestMetadataBuilders::new(IngestMetadataKind::Headers, 1);
+    let mut decoded_mismatch = PendingIngestGroup::new(IngestorMetadataScope::Headers, 1);
+    let mut metadata = IngestMetadataBuilders::new(IngestorMetadataScope::Headers, 1)
+        .expect("one header metadata row fits");
     metadata
         .append(&IngestMetadataRow::Headers {
             headers: &NoIngestHeaders,
@@ -767,7 +875,7 @@ fn ingest_group_rows_validate_views_and_selection_alignment() {
 async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     let codec = grouped_event_codec();
     let mut undispatched = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -791,7 +899,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
     assert_eq!(undispatched.pending.undispatched_payloads(), 0);
 
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         2,
         grouped_event_ingestor_metrics(),
     );
@@ -868,7 +976,7 @@ async fn ingest_collector_flush_reports_missing_route_dependencies() {
     };
 
     let mut missing_schema_collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -902,7 +1010,7 @@ async fn ingest_collector_flush_reports_missing_route_dependencies() {
             ..DomainRoutingSnapshot::default()
         }));
     let mut missing_entrypoint_collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         1,
         grouped_event_ingestor_metrics(),
     );
@@ -1096,7 +1204,7 @@ async fn branched_root_without_children_acks_success() {
             relay: &root_relay,
             physical_node_id: None,
             direction: "sent",
-            branch_key: Some(branch_key_display(&root_key)),
+            branch: root_key.as_ref().map(BranchKey::fingerprint),
         });
     let mut root = BranchRuntime {
         key: root_key.clone(),
@@ -1105,7 +1213,7 @@ async fn branched_root_without_children_acks_success() {
         routing: None,
         routing_snapshot: None,
         domain_clock: test_domain_clock(&root_domain),
-        source_kind: ModelKind::Ingestor,
+        entity_kind: ModelKind::Ingestor,
         source: root_source,
         root_relay: root_relay.clone(),
         error_policies: ErrorPolicies::handled_by_log(),
@@ -1178,6 +1286,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         Vec::new(),
         None,
         Arc::new(BranchPresence::new()),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ));
     let owner_task = runtime.spawn_relay_owner_task(
         &domain,
@@ -1192,7 +1301,7 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         named("notifications_ingestor"),
         BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            source_kind: ModelKind::Ingestor,
+            entity_kind: ModelKind::Ingestor,
             source: named("notifications_ingestor"),
             root_relay: root_relay.clone(),
             branch: None,
@@ -1254,7 +1363,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             "notifications_reingestor",
         ),
     ];
-    for (source_kind, ack_boundary, source) in cases {
+    for (entity_kind, ack_boundary, source) in cases {
         nervix_primitives::task::consume_budget().await;
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -1270,6 +1379,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             Vec::new(),
             None,
             Arc::new(BranchPresence::new()),
+            nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
@@ -1305,7 +1415,7 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    source_kind,
+                    entity_kind,
                     source: named(source),
                     root_relay: root_relay.clone(),
                     branch: None,
@@ -1418,7 +1528,7 @@ async fn an_unfolding_payload_runs_on_the_extension_workers() {
     let executor = Executor::default();
     let codec = unfolding_event_codec(".[]");
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );
@@ -1483,7 +1593,7 @@ async fn a_node_without_room_to_unfold_a_payload_refuses_it_without_judging_it()
     let codec = unfolding_event_codec(".[]");
     let payload = br#"[{"user_id":1},{"user_id":2}]"#;
     let mut collector = IngestRouteCollector::new(
-        IngestMetadataKind::Headers,
+        IngestorMetadataScope::Headers,
         8,
         grouped_event_ingestor_metrics(),
     );

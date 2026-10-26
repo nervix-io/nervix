@@ -2,11 +2,11 @@ Feature: Reingestor repartitioning
   Scenario Outline: Reingestor evaluates branch construction through the VM and changes grouping
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -30,8 +30,8 @@ Feature: Reingestor repartitioning
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -73,12 +73,12 @@ Feature: Reingestor repartitioning
   Scenario Outline: Branch collapse feeds subscriptions, reingestors, and emitters
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -104,8 +104,8 @@ Feature: Reingestor repartitioning
       CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
 
       CREATE VHOST edge http-{{test_id}}-fan-in.example.com;
-      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP; CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -121,14 +121,13 @@ Feature: Reingestor repartitioning
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
 
-      CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
 
-      CREATE EMITTER source_notifications_out FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE ZEROMQ PUSH EMITTER source_notifications_out FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -170,12 +169,12 @@ Feature: Reingestor repartitioning
   Scenario Outline: Unbranched relay fan-out feeds subscriptions, reingestors, and emitters directly
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -197,8 +196,8 @@ Feature: Reingestor repartitioning
       CREATE VHOST edge http-{{test_id}}-direct-fanout.example.com;
       CREATE ENDPOINT http_notifications_endpoint ON edge PATH '/ingest' TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -214,14 +213,13 @@ Feature: Reingestor repartitioning
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
 
-      CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
 
-      CREATE EMITTER source_notifications_out FROM notifications TO ZEROMQ zeromq_main MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE ZEROMQ PUSH EMITTER source_notifications_out FROM notifications TO zeromq_main MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -252,11 +250,11 @@ Feature: Reingestor repartitioning
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -275,14 +273,13 @@ Feature: Reingestor repartitioning
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -298,7 +295,7 @@ Feature: Reingestor repartitioning
         SET tenant = message.tenant
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM tenant_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM tenant_notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -330,11 +327,11 @@ Feature: Reingestor repartitioning
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -353,14 +350,13 @@ Feature: Reingestor repartitioning
         CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
         CREATE IF NOT EXISTS BRANCH by_tenant_partition SCHEMA tenant_branch TTL 5m;
         CREATE RELAY tenant_notifications SCHEMA notification BRANCHED BY by_tenant_partition;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -376,7 +372,7 @@ Feature: Reingestor repartitioning
         SET tenant = message.tenant
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE EMITTER kafka_forward FROM tenant_notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_forward FROM tenant_notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -404,11 +400,11 @@ Feature: Reingestor repartitioning
   Scenario Outline: Reingestor routes read defaulted materialized state
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -443,8 +439,8 @@ Feature: Reingestor repartitioning
         ON edge
         PATH '/reingest-default'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -483,11 +479,11 @@ Feature: Reingestor repartitioning
   Scenario Outline: Reingestor source and node filters drop input before its routes construct a branch
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading ( tenant STRING, sensor STRING, value I64 );
       CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sensor string, value integer );
@@ -500,8 +496,8 @@ Feature: Reingestor repartitioning
       CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_reading_sensor;
       CREATE VHOST edge http-{{test_id}}-reingestor-filters.example.com;
       CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings
         INHERIT ALL

@@ -6,21 +6,158 @@
 //! - **Depends on.** The application scheduling decisions and the shared application test fixtures.
 //! - **Must not know.** Runtime execution, consensus storage or edge protocols.
 
-use std::collections::BTreeSet;
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
 
+use std::{collections::BTreeSet, time::Duration};
+
+use nervix_consensus::{GossipNode, GossipState};
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, KafkaPartitionSchedule, Model, ModelKind,
-    WasmStateGenerations,
+    ClusterNodeIncarnation, ClusterNodeName, DomainName, DomainSchedule, KafkaPartitionSchedule,
+    Model, ModelKind, WasmStateGenerations,
 };
 use nonzero_ext::nonzero;
 
-use super::super::{
-    ownership_handoff::{DrainMove, prefer_former_owners_as_replicas},
-    session_service::SessionServiceImpl,
-    test_fixtures::{
-        named, node_named, placement_group, placement_member, scheduled_node, scheduled_node_on,
+use super::{
+    super::{
+        ownership_handoff::{DrainMove, prefer_former_owners_as_replicas},
+        session_service::SessionServiceImpl,
+        test_fixtures::{
+            named, node_named, placement_group, placement_member, scheduled_node, scheduled_node_on,
+        },
     },
+    StartupVoterObservations, VOTER_OBSERVATION_GRACE,
 };
+
+fn voter_gossip(live: &[&str], dead: &[&str]) -> GossipState {
+    GossipState {
+        live_nodes: live
+            .iter()
+            .map(|name| GossipNode {
+                node_id: named(name),
+                incarnation: ClusterNodeIncarnation::new(1),
+                terminating: false,
+                client_url: None,
+                console_url: None,
+                interconnect_endpoint: None,
+                prerequisites: None,
+            })
+            .collect(),
+        dead_node_ids: dead.iter().map(|name| named(name)).collect(),
+        dead_node_identities: BTreeSet::new(),
+    }
+}
+
+#[test]
+fn startup_voter_observations_wait_for_dead_and_unknown_voters_never_seen_live() {
+    let voters = ["node-1", "node-2", "node-3", "node-4"].map(named::<ClusterNodeName>);
+    let mut observations = StartupVoterObservations::default();
+    observations.observe(
+        &voter_gossip(&["node-1", "node-2", "node-3"], &["node-3"]),
+        Duration::from_secs(1),
+    );
+
+    assert_eq!(
+        observations.unobserved_voters(&voters, Duration::from_secs(1)),
+        BTreeSet::from([named("node-3"), named("node-4")])
+    );
+}
+
+#[test]
+fn startup_voter_observations_retain_live_evidence_before_leadership_and_after_failure() {
+    let voters = ["node-1", "node-2", "node-3"].map(named);
+    let mut observations = StartupVoterObservations::default();
+    observations.observe(
+        &voter_gossip(&["node-1", "node-2", "node-3"], &[]),
+        Duration::from_secs(1),
+    );
+    observations.observe(
+        &voter_gossip(&["node-1", "node-2"], &["node-3"]),
+        Duration::from_secs(2),
+    );
+
+    assert!(
+        observations
+            .unobserved_voters(&voters, Duration::from_secs(2))
+            .is_empty()
+    );
+}
+
+#[test]
+fn startup_voter_observations_expire_at_the_grace_boundary_for_a_missing_voter() {
+    let voters = [named("node-1"), named("node-3")];
+    let gossip = voter_gossip(&["node-1"], &["node-3"]);
+    let mut observations = StartupVoterObservations::default();
+    let before_expiry = VOTER_OBSERVATION_GRACE - Duration::from_nanos(1);
+    observations.observe(&gossip, before_expiry);
+    assert_eq!(
+        observations.unobserved_voters(&voters, before_expiry),
+        BTreeSet::from([named("node-3")])
+    );
+
+    assert!(
+        observations
+            .unobserved_voters(&voters, VOTER_OBSERVATION_GRACE)
+            .is_empty()
+    );
+    observations.observe(&gossip, VOTER_OBSERVATION_GRACE);
+    assert!(observations.observed_live.is_empty());
+    assert!(
+        observations
+            .unobserved_voters(&voters, VOTER_OBSERVATION_GRACE + Duration::from_secs(1))
+            .is_empty()
+    );
+}
+
+#[test]
+fn startup_voter_observations_follow_the_current_voting_membership() {
+    let mut observations = StartupVoterObservations::default();
+    observations.observe(&voter_gossip(&["node-1", "node-2"], &[]), Duration::ZERO);
+    let voters = ["node-1", "node-2", "node-3"].map(named);
+    assert_eq!(
+        observations.unobserved_voters(&voters, Duration::from_secs(1)),
+        BTreeSet::from([named("node-3")])
+    );
+
+    let voters = ["node-1", "node-2"].map(named);
+    assert!(
+        observations
+            .unobserved_voters(&voters, Duration::from_secs(2))
+            .is_empty()
+    );
+    let voters = ["node-1", "node-2", "node-4"].map(named);
+    assert_eq!(
+        observations.unobserved_voters(&voters, Duration::from_secs(3)),
+        BTreeSet::from([named("node-4")])
+    );
+}
+
+#[test]
+fn startup_voter_observations_belong_to_one_reconciliation_process() {
+    let voters = ["node-1", "node-2", "node-3"].map(named);
+    let mut first_process = StartupVoterObservations::default();
+    first_process.observe(
+        &voter_gossip(&["node-1", "node-2", "node-3"], &[]),
+        Duration::ZERO,
+    );
+    assert!(
+        first_process
+            .unobserved_voters(&voters, Duration::ZERO)
+            .is_empty()
+    );
+
+    let mut restarted_process = StartupVoterObservations::default();
+    restarted_process.observe(
+        &voter_gossip(&["node-1"], &["node-2", "node-3"]),
+        Duration::ZERO,
+    );
+    assert_eq!(
+        restarted_process.unobserved_voters(&voters, Duration::ZERO),
+        BTreeSet::from([named("node-2"), named("node-3")])
+    );
+}
 
 #[test]
 fn drop_node_quorum_error_allows_available_current_quorum() {
@@ -300,7 +437,7 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let members = vec![
         placement_member("corridor_source", ModelKind::Junction),
-        placement_member("corridor_sink", ModelKind::Junction),
+        placement_member("corridor_emitter", ModelKind::Junction),
     ];
     let mut schedule = DomainSchedule::new(
         domain.clone(),
@@ -309,7 +446,7 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
                 Some(node_named("node-2")),
                 vec![node_named("node-2"), node_named("node-3")],
             ),
-            scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
+            scheduled_node("corridor_emitter", ModelKind::Junction).placed_on(
                 Some(node_named("node-2")),
                 vec![node_named("node-2"), node_named("node-3")],
             ),
@@ -326,7 +463,7 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
                 Some(node_named("node-1")),
                 vec![node_named("node-1"), node_named("node-3")],
             ),
-            scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
+            scheduled_node("corridor_emitter", ModelKind::Junction).placed_on(
                 Some(node_named("node-1")),
                 vec![node_named("node-1"), node_named("node-3")],
             ),
@@ -355,7 +492,7 @@ fn drain_require_group_prefers_policy_target_over_common_replica() {
     assert_eq!(
         moved,
         Some(DrainMove {
-            label: "placement group [corridor_source, corridor_sink]".to_string(),
+            label: "placement group [corridor_source, corridor_emitter]".to_string(),
             promoted_replica: None,
             fallback_node: Some(ClusterNodeName::parse("node-1").expect("valid name")),
         })
@@ -608,6 +745,53 @@ fn merge_existing_schedule_data_preserves_matching_ingestor_schedule_and_assignm
 }
 
 #[test]
+fn server_intakes_follow_live_membership_through_schedule_reconciliation() {
+    let domain = named::<DomainName>("payments");
+    let template = scheduled_node("source", ModelKind::Ingestor);
+    let Model::Ingestor(mut ingestor) = template.config.as_ref().clone() else {
+        panic!("the fixture creates an ingestor");
+    };
+    ingestor.input =
+        nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
+            source: nervix_models::IngestorEntity::Http(nervix_models::HttpIngestor::Endpoint(
+                nervix_models::HttpEndpointIngestor {
+                    endpoint: named("ingress"),
+                    mode: nervix_models::EndpointIngestMode::NoAck,
+                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                        max_size: "1MiB".to_string(),
+                    },
+                },
+            )),
+            codec: named("event_codec"),
+        });
+    let desired = DomainSchedule::new(
+        domain,
+        vec![
+            nervix_models::ScheduledNode::new(
+                Model::Ingestor(ingestor),
+                template.schema_fingerprint,
+            )
+            .placed_on(Some(node_named("node-2")), vec![node_named("node-2")]),
+        ],
+        Vec::new(),
+    );
+    let live = [
+        node_named("node-1"),
+        node_named("node-2"),
+        node_named("node-3"),
+    ];
+    for predecessor in [None, Some(&desired)] {
+        let mut next = desired.clone();
+        SessionServiceImpl::merge_existing_schedule_data(&mut next, predecessor, &live);
+        assert_eq!(next.nodes[0].assigned_nodes, live);
+        assert!(live.iter().all(|node| next.nodes[0].executes_on(node)));
+        let previous = next.clone();
+        SessionServiceImpl::merge_existing_schedule_data(&mut next, Some(&previous), &live[..2]);
+        assert_eq!(next.nodes[0].assigned_nodes, live[..2]);
+    }
+}
+
+#[test]
 fn merge_existing_schedule_data_ignores_non_matching_nodes() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let mut next = DomainSchedule::new(
@@ -640,13 +824,13 @@ fn merge_existing_schedule_data_rejects_a_split_require_group() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let members = vec![
         placement_member("corridor_source", ModelKind::Junction),
-        placement_member("corridor_sink", ModelKind::Junction),
+        placement_member("corridor_emitter", ModelKind::Junction),
     ];
     let mut next = DomainSchedule::new(
         domain.clone(),
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-1"),
         ],
         vec![placement_group(
             members.clone(),
@@ -657,7 +841,7 @@ fn merge_existing_schedule_data_rejects_a_split_require_group() {
         domain,
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-3"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-3"),
         ],
         vec![placement_group(
             members,
@@ -688,13 +872,13 @@ fn merge_existing_schedule_data_preserves_an_intact_require_group() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let members = vec![
         placement_member("corridor_source", ModelKind::Junction),
-        placement_member("corridor_sink", ModelKind::Junction),
+        placement_member("corridor_emitter", ModelKind::Junction),
     ];
     let mut next = DomainSchedule::new(
         domain.clone(),
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-1"),
         ],
         vec![placement_group(
             members.clone(),
@@ -705,7 +889,7 @@ fn merge_existing_schedule_data_preserves_an_intact_require_group() {
         domain,
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-2"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-2"),
         ],
         vec![placement_group(
             members,
@@ -735,13 +919,13 @@ fn drain_relocates_a_require_group_as_one_unit() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let members = vec![
         placement_member("corridor_source", ModelKind::Junction),
-        placement_member("corridor_sink", ModelKind::Junction),
+        placement_member("corridor_emitter", ModelKind::Junction),
     ];
     let mut schedule = DomainSchedule::new(
         domain.clone(),
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-2"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-2"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-2"),
         ],
         vec![placement_group(
             members.clone(),
@@ -752,7 +936,7 @@ fn drain_relocates_a_require_group_as_one_unit() {
         domain,
         vec![
             scheduled_node_on("corridor_source", ModelKind::Junction, "node-1"),
-            scheduled_node_on("corridor_sink", ModelKind::Junction, "node-1"),
+            scheduled_node_on("corridor_emitter", ModelKind::Junction, "node-1"),
         ],
         vec![placement_group(
             members,
@@ -794,7 +978,7 @@ fn failover_relocates_a_require_group_to_one_target() {
     let domain = DomainName::parse("payments").expect("valid domain");
     let members = vec![
         placement_member("corridor_source", ModelKind::Junction),
-        placement_member("corridor_sink", ModelKind::Junction),
+        placement_member("corridor_emitter", ModelKind::Junction),
     ];
     let mut schedule = DomainSchedule::new(
         domain,
@@ -803,7 +987,7 @@ fn failover_relocates_a_require_group_to_one_target() {
                 Some(node_named("node-2")),
                 vec![node_named("node-2"), node_named("node-3")],
             ),
-            scheduled_node("corridor_sink", ModelKind::Junction).placed_on(
+            scheduled_node("corridor_emitter", ModelKind::Junction).placed_on(
                 Some(node_named("node-2")),
                 vec![node_named("node-2"), node_named("node-1")],
             ),

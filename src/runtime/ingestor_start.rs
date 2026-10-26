@@ -5,9 +5,13 @@
 //!   and binding the dependencies every ingestor start reads.
 //! - **Depends on.** Installed ingestor plans, installed domain capabilities and the source start
 //!   path.
-//! - **Must not know.** NSPL parsing, registry validation, placement selection, or which connector
+//! - **Must not know.** Plexus parsing, registry validation, placement selection, or which connector
 //!   a source runs on.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -75,9 +79,69 @@ pub(super) struct IngestorRuntime {
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) branched: Vec<Arc<IngestorRouteRuntime>>,
     pub(super) tasks: Vec<JoinHandle<()>>,
+    /// The originator a domain-offset Kafka ingestor commits through, which schedule application
+    /// replaces while this instance runs; absent for every other ingestor.
+    pub(super) domain_offsets: Option<StdArc<KafkaOffsetOriginatorSlot>>,
+}
+
+/// A locally owned input that the committed revision replaces or removes. Both sides are typed
+/// execution plans; no running driver or mutable registry guard survives into retirement.
+pub(super) struct RetiringIngestorInput {
+    pub(super) previous: Arc<IngestorStartPlan>,
+    pub(super) replacement: Option<Arc<IngestorStartPlan>>,
 }
 
 impl Runtime {
+    /// Snapshots obsolete local inputs before the installed execution is withdrawn. A stopped
+    /// domain retains its plans, so retirement also works when no source task is running.
+    pub(super) fn retiring_ingestor_inputs(
+        &self,
+        domain: &DomainName,
+        desired: Option<&ExecutionRevision>,
+        #[cfg_attr(
+            nervix_lint,
+            nervix::identity(
+                node,
+                reason = "identifies the node applying this execution revision"
+            )
+        )]
+        local_node_id: Option<&ClusterNodeName>,
+    ) -> BTreeMap<IngestorName, RetiringIngestorInput> {
+        let Some(execution) = self.inner.executions.get(domain) else {
+            return BTreeMap::new();
+        };
+        let mut retiring = BTreeMap::new();
+        for previous in execution.revision.entrypoints.ingestors() {
+            let identity = NodeRef::new(
+                ModelKind::Ingestor,
+                ModelName::from(&previous.ingestor.name),
+            );
+            let node = execution.revision.nodes.get(&identity).assured(
+                "every installed execution retains the nodes that own its entrypoint plans",
+            );
+            if !Self::scheduled_node_executes_locally(node, local_node_id) {
+                continue;
+            }
+            let replacement = match desired {
+                Some(desired) => desired
+                    .entrypoints
+                    .ingestor(&previous.ingestor.name)
+                    .cloned(),
+                None => None,
+            };
+            if previous.requires_entity_retirement(replacement.as_deref()) {
+                retiring.insert(
+                    previous.ingestor.name.clone(),
+                    RetiringIngestorInput {
+                        previous: previous.clone(),
+                        replacement,
+                    },
+                );
+            }
+        }
+        retiring
+    }
+
     pub(in crate::runtime) fn syslog_ingestor_bind_addr(&self, configured: &str) -> String {
         let dispatcher = self.inner.remote_dispatcher.load();
         if let Some(dispatcher) = dispatcher.as_deref() {
@@ -189,19 +253,21 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), RuntimeError> {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         let Some((_, runtime)) = self.inner.ingestors.remove(&key) else {
-            return Err(RuntimeError::IngestorNotRunning {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.as_str().to_string(),
-            });
+            return Err(Report::new(RuntimeError::IngestorNotRunning {
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+            }));
         };
 
+        // The stopped instance's originator ends with it, so no reassignment reaches it again.
         let IngestorRuntime {
             shutdown,
             branched,
             tasks,
+            domain_offsets: _,
         } = runtime;
         if shutdown.send(true).is_err() {
             warn!(
@@ -453,6 +519,10 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::BTreeMap;
 
@@ -460,10 +530,10 @@ mod tests {
         ClientConfigEntry, ClientName, ClusterNodeName, ClusterSchedule, CodecName,
         CodecWireFormat, CreateClientMqtt, CreateCodec, CreateIngestor, CreateJsonWireSchema,
         CreateRelay, CreateSchema, DomainConfig, DomainPace, DomainSchedule, DomainState,
-        DomainStatus, GeneralErrorPolicy, IngestSource, IngestorName, JsonType, ModelKind,
-        MqttIngestMode, MqttQos, MqttSession, OutputBranch, ParseAsType, ProcessorOutputs,
-        RelayBranching, RelayName, RetryPolicy, SchemaField, SchemaName, WireSchemaField,
-        WireSchemaName,
+        DomainStatus, GeneralErrorPolicy, IngestorEntity, IngestorName, JsonType, ModelKind,
+        MqttIngestMode, MqttIngestor, MqttQos, MqttSession, MqttTopicIngestor, OutputBranch,
+        ParseAsType, ProcessorOutputs, RelayBranching, RelayName, RetryPolicy, SchemaField,
+        SchemaName, WireSchemaField, WireSchemaName,
     };
     use nonzero_ext::nonzero;
 
@@ -474,15 +544,12 @@ mod tests {
         let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
             .await
             .expect("the host's resolver configuration should load");
-        Runtime::with_persistence_and_temp_dir(
-            nervix_execution::Executor::default(),
-            Some(dns),
-            None,
-            DEFAULT_STATE_SNAPSHOT_INTERVAL,
-            ConfiguredFaultInjection::default(),
-            PathBuf::from(DEFAULT_TEMP_DIR),
-        )
-        .expect("a runtime without persistence builds")
+        let environment = RuntimeEnvironment {
+            dns: Some(dns),
+            ..RuntimeEnvironment::transient(nervix_execution::Executor::default())
+        };
+        Runtime::with_environment(environment, RuntimeSettings::default())
+            .expect("a runtime without persistence builds")
     }
 
     #[nervix_primitives::test]
@@ -577,16 +644,21 @@ mod tests {
                             .with_branch(OutputBranch::Unbranched),
                             input: nervix_models::IngestorInput::Transport(
                                 nervix_models::TransportIngestorInput {
-                                    source: IngestSource::Mqtt {
-                                        client,
-                                        topic: "notifications".to_string(),
-                                        instances: nonzero!(2u64),
-                                        mode: MqttIngestMode::NoAckSequential {
-                                            session: MqttSession::Clean,
-                                            qos: MqttQos::AtMostOnce,
+                                    source: IngestorEntity::Mqtt(MqttIngestor::Topic(
+                                        MqttTopicIngestor {
+                                            client,
+                                            topic: nervix_models::MqttTopicFilter::parse(
+                                                "notifications",
+                                            )
+                                            .expect("valid topic filter"),
+                                            instances: nonzero!(2u64),
+                                            mode: MqttIngestMode::NoAck {
+                                                session: MqttSession::Clean,
+                                                qos: MqttQos::AtMostOnce,
+                                            },
+                                            quiesce: nervix_models::IngestQuiesceMode::Drop,
                                         },
-                                        quiesce: nervix_models::IngestQuiesceMode::Drop,
-                                    },
+                                    )),
                                     codec: codec.clone(),
                                 },
                             ),
@@ -650,98 +722,95 @@ mod tests {
         let relay = named::<RelayName>("notifications");
         let client = named::<ClientName>("mqtt_main");
         let ingestor = named::<IngestorName>("mqtt_notifications");
-        let result = runtime
-            .apply_cluster_schedule(
-                &ClusterNodeName::parse("node-1").expect("valid name"),
-                &ClusterSchedule::from_iter([DomainSchedule::new(
-                    domain.clone(),
-                    vec![
-                        scheduled_model(nervix_models::Model::Schema(CreateSchema {
-                            name: schema.clone(),
-                            fields: vec![SchemaField {
-                                name: named("user_id"),
-                                ty: ParseAsType::I64,
-                                optional: false,
-                                sensitive: false,
-                            }],
-                        })),
-                        scheduled_model(nervix_models::Model::WireJsonSchema(
-                            CreateJsonWireSchema {
-                                name: wire_schema.clone(),
-                                strictness: Default::default(),
-                                fields: vec![WireSchemaField {
-                                    name: named("user_id"),
-                                    ty: JsonType::Integer,
-                                    optional: false,
-                                }],
-                            },
-                        )),
-                        scheduled_model(nervix_models::Model::Codec(CreateCodec {
-                            name: codec.clone(),
-                            wire_format: CodecWireFormat::Json {
-                                wire_schema: wire_schema.clone(),
-                            },
-                            schema: schema.clone(),
-                            encoding_rules: Vec::new(),
-                        })),
-                        scheduled_model(nervix_models::Model::Relay(CreateRelay {
-                            name: relay.clone(),
-                            schema: schema.clone(),
-                            buffer: nonzero!(2usize),
-                            branching: RelayBranching::unbranched(),
-                            materialized_state: None,
-                        })),
-                        scheduled_model(nervix_models::Model::ClientMqtt(CreateClientMqtt {
-                            name: client.clone(),
-                            mount: None,
-                            config: vec![ClientConfigEntry {
-                                key: "addr".to_string(),
-                                value: "mqtt://127.0.0.1:1883".to_string(),
-                            }],
-                        })),
-                        scheduled_model(nervix_models::Model::Ingestor(CreateIngestor {
-                            name: ingestor.clone(),
-                            output_routes: with_inherit_all(ProcessorOutputs::single(
-                                relay.clone(),
-                            ))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            })
-                            .with_branch(OutputBranch::Unbranched),
-                            input: nervix_models::IngestorInput::Transport(
-                                nervix_models::TransportIngestorInput {
-                                    source: IngestSource::Mqtt {
-                                        client,
-                                        topic: "notifications".to_string(),
-                                        instances: nonzero!(1u64),
-                                        mode: MqttIngestMode::AckSequential {
-                                            timeout: "oops".to_string(),
-                                            retry_policy: RetryPolicy {
-                                                backoff: "100ms".to_string(),
-                                                max_backoff: "200ms".to_string(),
-                                            },
-                                        },
-                                        quiesce: nervix_models::IngestQuiesceMode::Drop,
+        let node = ClusterNodeName::parse("node-1").expect("valid name");
+        let schedule = ClusterSchedule::from_iter([DomainSchedule::new(
+            domain.clone(),
+            vec![
+                scheduled_model(nervix_models::Model::Schema(CreateSchema {
+                    name: schema.clone(),
+                    fields: vec![SchemaField {
+                        name: named("user_id"),
+                        ty: ParseAsType::I64,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
+                scheduled_model(nervix_models::Model::WireJsonSchema(CreateJsonWireSchema {
+                    name: wire_schema.clone(),
+                    strictness: Default::default(),
+                    fields: vec![WireSchemaField {
+                        name: named("user_id"),
+                        ty: JsonType::Integer,
+                        optional: false,
+                    }],
+                })),
+                scheduled_model(nervix_models::Model::Codec(CreateCodec {
+                    name: codec.clone(),
+                    wire_format: CodecWireFormat::Json {
+                        wire_schema: wire_schema.clone(),
+                    },
+                    schema: schema.clone(),
+                    encoding_rules: Vec::new(),
+                })),
+                scheduled_model(nervix_models::Model::Relay(CreateRelay {
+                    name: relay.clone(),
+                    schema: schema.clone(),
+                    buffer: nonzero!(2usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                })),
+                scheduled_model(nervix_models::Model::ClientMqtt(CreateClientMqtt {
+                    name: client.clone(),
+                    mount: None,
+                    config: vec![ClientConfigEntry {
+                        key: "addr".to_string(),
+                        value: "mqtt://127.0.0.1:1883".to_string(),
+                    }],
+                })),
+                scheduled_model(nervix_models::Model::Ingestor(CreateIngestor {
+                    name: ingestor.clone(),
+                    output_routes: with_inherit_all(ProcessorOutputs::single(relay.clone()))
+                        .with_flush_policy(FlushPolicy::Each {
+                            interval: "100ms".to_string(),
+                            max_batch_size: "1MiB".to_string(),
+                        })
+                        .with_branch(OutputBranch::Unbranched),
+                    input: nervix_models::IngestorInput::Transport(
+                        nervix_models::TransportIngestorInput {
+                            source: IngestorEntity::Mqtt(MqttIngestor::Topic(MqttTopicIngestor {
+                                client,
+                                topic: nervix_models::MqttTopicFilter::parse("notifications")
+                                    .expect("valid topic filter"),
+                                instances: nonzero!(1u64),
+                                mode: MqttIngestMode::AckSequential {
+                                    timeout: "oops".to_string(),
+                                    retry_policy: RetryPolicy {
+                                        backoff: "100ms".to_string(),
+                                        max_backoff: "200ms".to_string(),
                                     },
-                                    codec: codec.clone(),
                                 },
-                            ),
-                            timestamp_source: None,
-                            general_error_policy: GeneralErrorPolicy::Log,
-                            filter_where: None,
-                        })),
-                    ],
-                    Vec::new(),
-                )]),
-            )
-            .await;
+                                quiesce: nervix_models::IngestQuiesceMode::Drop,
+                            })),
+                            codec: codec.clone(),
+                        },
+                    ),
+                    timestamp_source: None,
+                    general_error_policy: GeneralErrorPolicy::Log,
+                    filter_where: None,
+                })),
+            ],
+            Vec::new(),
+        )]);
 
-        let error = result.expect_err("invalid ACK timeout must fail schedule application");
-        let start_error = error.to_string();
-        assert!(
-            start_error.contains("invalid ack timeout 'oops'"),
-            "unexpected start error: {start_error}"
+        let error = runtime
+            .apply_cluster_schedule(&node, &schedule)
+            .await
+            .expect_err("invalid ACK timeout must fail schedule application");
+        let start_error = "failed to initialize ingestor 'mqtt_notifications' in domain \
+                           'default': invalid ack timeout 'oops': expected number at 0";
+        assert_eq!(
+            format!("{error:#}"),
+            format!("failed to build domain execution for 'default': {start_error}")
         );
         assert!(
             !runtime.inner.executions.contains_key(&domain),
@@ -765,7 +834,53 @@ mod tests {
         assert!(!describe.ready);
         assert_eq!(
             describe.transient_error.as_deref(),
-            Some(start_error.as_str())
+            Some(start_error),
+            "the ingestor describes its own start report, without the build that failed on it"
+        );
+
+        // The next attempt fails before it reaches the ingestor: a paced domain has no clock
+        // mapping installed here.
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            paced_domain_state(domain.as_str()),
+        )]));
+        let rebuilt = runtime
+            .apply_cluster_schedule(&node, &schedule)
+            .await
+            .expect_err("a paced domain without a clock mapping must fail schedule application");
+        let clock_error = format!("{rebuilt:#}");
+        assert!(
+            clock_error.starts_with(
+                "failed to build domain execution for 'default': failed to bind the domain clock"
+            ),
+            "unexpected rebuild error: {clock_error}"
+        );
+        let describe = runtime
+            .describe_local_ingestor(&domain, &ingestor)
+            .expect("describe should represent the stopped ingestor");
+        assert_eq!(
+            describe.transient_error.as_deref(),
+            Some(clock_error.as_str()),
+            "an attempt that records no start failure for the ingestor leaves it describing the \
+             domain's failed build, never the failure an earlier attempt recorded"
+        );
+    }
+
+    #[nervix_primitives::test]
+    async fn stopping_an_ingestor_that_is_not_running_names_it() {
+        let runtime = Runtime::default();
+
+        let error = runtime
+            .stop_ingestor(
+                &domain("default"),
+                &named::<IngestorName>("mqtt_notifications"),
+            )
+            .await
+            .expect_err("no ingestor runs before one starts");
+
+        assert_eq!(
+            format!("{error:#}"),
+            "ingestor 'mqtt_notifications' in domain 'default' is not running"
         );
     }
 }

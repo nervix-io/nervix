@@ -1,30 +1,30 @@
 Feature: Positive count settings
-  Every NSPL count whose meaning requires at least one — relay capacity, ingest instances,
+  Every Plexus count whose meaning requires at least one — relay capacity, ingest instances,
   confirmation windows, database batch limits, branch retention, guest fuel and memory, tensor
   dimensions, placement rank — is rejected where the statement is read, before any Model exists.
 
   Background:
     Given a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
 
   Scenario: Relay CAPACITY must be a positive count
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( tenant STRING );
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 3;
       """
-    And these NSPL commands fail with "invalid relay capacity '0'; expected a positive integer"
+    And these Plexus commands fail with "invalid relay capacity '0'; expected a positive integer"
       """
       CREATE RELAY empty_capacity SCHEMA notification UNBRANCHED CAPACITY 0;
       """
-    And these NSPL commands fail with "invalid relay capacity '0'; expected a positive integer"
+    And these Plexus commands fail with "invalid relay capacity '0'; expected a positive integer"
       """
       ALTER RELAY notifications SET CAPACITY 0;
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       SHOW CREATE RELAY notifications;
       """
@@ -34,35 +34,35 @@ Feature: Positive count settings
       """
 
   Scenario: Branch MAX INSTANCES must be a positive count
-    When these NSPL commands fail with "MAX INSTANCES must be greater than 0"
+    When these Plexus commands fail with "MAX INSTANCES must be greater than 0"
       """
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m MAX INSTANCES 0 EVICT LRU;
       """
 
   Scenario: Ingest INSTANCES and confirmation windows must be positive counts
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( tenant STRING );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( tenant string );
       CREATE CODEC notification_codec
         FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
+      CREATE KAFKA CLIENT kafka_main CONFIG { 'bootstrap.servers' = '127.0.0.1:9092' };
       """
-    And these NSPL commands fail with "instances must be greater than 0"
+    And these Plexus commands fail with "instances must be greater than 0"
       """
-      CREATE INGESTOR no_instances
-        FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP counts INSTANCES 0
-          MODE NO_ACK PARALLEL
+      CREATE KAFKA TOPIC INGESTOR no_instances
+        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts' INSTANCES 0
+          MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    And these NSPL commands fail with "parallel max in-flight must be greater than zero"
+    And these Plexus commands fail with "parallel max in-flight must be greater than zero"
       """
-      CREATE INGESTOR empty_ack_window
-        FROM KAFKA kafka_main TOPIC notifications OFFSET BY CONSUMER GROUP counts
+      CREATE KAFKA TOPIC INGESTOR empty_ack_window
+        FROM kafka_main TOPIC 'notifications' OFFSET BY CONSUMER GROUP 'counts'
           MODE ACK PARALLEL MAX 0 BATCH TIMEOUT 1s ACK TIMEOUT 1s
           RETRY POLICY BACKOFF 10ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -71,33 +71,31 @@ Feature: Positive count settings
       """
 
   Scenario: Emitter BATCH MAX MESSAGES must be a positive count
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( tenant STRING );
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT postgres_main TYPE POSTGRES POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE POSTGRES CLIENT postgres_main POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'postgresql://nervix:nervix@127.0.0.1:5432/nervix?sslmode=disable'
       };
       """
-    And these NSPL commands fail with "BATCH MAX MESSAGES must be between 1 and 65536, found 0"
+    And these Plexus commands fail with "BATCH MAX MESSAGES must be between 1 and 65536, found 0"
       """
-      CREATE EMITTER postgres_out FROM notifications
-        TO POSTGRES postgres_main INSERT TO TABLE notifications
-        VALUES { "tenant" = input.tenant }
-        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
-        BATCH MAX MESSAGES 0 MAX SIZE 1MiB
+      CREATE POSTGRES TABLE EMITTER postgres_out FROM notifications
+        TO postgres_main TABLE 'notifications'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "tenant" = input.tenant } BATCH MAX MESSAGES 0 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
   Scenario: WASM processor MAX FUEL and MAX MEMORY must be positive counts
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( tenant STRING );
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY processed SCHEMA notification UNBRANCHED;
       CREATE RESOURCE wasm_guest;
       """
-    And these NSPL commands fail with "MAX FUEL must be greater than zero"
+    And these Plexus commands fail with "MAX FUEL must be greater than zero"
       """
       CREATE WASM PROCESSOR no_fuel FROM notifications
         USING RESOURCE wasm_guest VERSION 1
@@ -108,7 +106,7 @@ Feature: Positive count settings
         TO processed SET tenant = tenant
         ON MESSAGE ERROR LOG ON GLOBAL ERROR LOG;
       """
-    And these NSPL commands fail with "MAX MEMORY must be greater than zero"
+    And these Plexus commands fail with "MAX MEMORY must be greater than zero"
       """
       CREATE WASM PROCESSOR no_memory FROM notifications
         USING RESOURCE wasm_guest VERSION 1
@@ -121,11 +119,11 @@ Feature: Positive count settings
       """
 
   Scenario: Array lengths and inferencer tensor dimensions must be positive counts
-    When these NSPL commands fail with "array length must be a positive unsigned integer"
+    When these Plexus commands fail with "array length must be a positive unsigned integer"
       """
       CREATE SCHEMA empty_embedding ( vector ARRAY<F32, 0> );
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA embedding ( vector ARRAY<F32, 2> );
       CREATE SCHEMA scored ( score ARRAY<F32, 1> );
@@ -133,7 +131,7 @@ Feature: Positive count settings
       CREATE RELAY scores SCHEMA scored UNBRANCHED;
       CREATE RESOURCE fraud_model;
       """
-    And these NSPL commands fail with "tensor dimension must be a positive integer, DYNAMIC, or BATCH"
+    And these Plexus commands fail with "tensor dimension must be a positive integer, DYNAMIC, or BATCH"
       """
       CREATE INFERENCER empty_dimension FROM embeddings
         USING RESOURCE fraud_model VERSION 1
@@ -148,7 +146,7 @@ Feature: Positive count settings
       """
 
   Scenario: Placement RANK must be a positive count
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( tenant STRING );
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
@@ -156,7 +154,7 @@ Feature: Positive count settings
       CREATE JUNCTION forwarder FROM notifications UNBRANCHED
         TO forwarded INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "RANK 0"
+    And these Plexus commands fail with "RANK 0"
       """
       CREATE PLACEMENT ranked
         FROM forwarder

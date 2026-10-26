@@ -8,6 +8,11 @@
 //! - **Depends on.** Vocabulary Models and names, and the create dialog's selected references.
 //! - **Must not know.** Registry state, session transport, or how references are looked up.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::num::NonZeroUsize;
 
 use error_stack::Report;
@@ -190,6 +195,10 @@ pub(super) enum RelayDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroUsize;
 
@@ -198,7 +207,7 @@ mod tests {
         BranchName, CreateStatement, MaterializedRelayState, Model, ModelKind, ModelName, NodeRef,
         RelayBranching, RequestedResourceVersion, SchemaName, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
     use strum::IntoEnumIterator as _;
 
     use super::{BranchingDraft, RelayDraft, RelayDraftError};
@@ -223,7 +232,7 @@ mod tests {
         let model: Model<RequestedResourceVersion> = model.into();
         let statement = Statement::Create(CreateStatement::new(Box::new(model), if_not_exists));
         let source = statement
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .assured("every completed relay has a canonical command");
         let parsed = parse_client_statement(&source)
             .assured("the canonical command must parse back to the same Model");

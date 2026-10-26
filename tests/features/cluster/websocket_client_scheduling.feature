@@ -4,7 +4,7 @@ Feature: WebSocket client ingestor scheduling
     Given the HTTP mock server is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
@@ -13,13 +13,12 @@ Feature: WebSocket client ingestor scheduling
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+      CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
-      CREATE INGESTOR ws_notifications
-        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_main MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -38,12 +37,12 @@ Feature: WebSocket client ingestor scheduling
       """
       "user_id":101
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "ingestor" "ws_notifications" is saved as placeholder "original_ws_owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RELAY copied_notifications SCHEMA notification UNBRANCHED;
       CREATE JUNCTION notification_copy
@@ -68,7 +67,7 @@ Feature: WebSocket client ingestor scheduling
     Given the HTTP mock server is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CORDON NODE node-1;
       CREATE UNPACED DOMAIN {{domain}};
@@ -78,13 +77,12 @@ Feature: WebSocket client ingestor scheduling
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+      CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
-      CREATE INGESTOR ws_notifications
-        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_main MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -97,7 +95,7 @@ Feature: WebSocket client ingestor scheduling
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "ingestor" "ws_notifications" is saved as placeholder "original_ws_owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       UNCORDON NODE node-1;
       CREATE RELAY uncordon_reconciliation_probe SCHEMA notification UNBRANCHED;
@@ -116,7 +114,7 @@ Feature: WebSocket client ingestor scheduling
     Given the HTTP mock server is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
@@ -125,13 +123,12 @@ Feature: WebSocket client ingestor scheduling
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+      CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
-      CREATE INGESTOR ws_notifications
-        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_main MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -144,7 +141,7 @@ Feature: WebSocket client ingestor scheduling
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "ingestor" "ws_notifications" is saved as placeholder "original_ws_owner"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CORDON NODE {{original_ws_owner}};
       ALTER DOMAIN SET PLACEMENT SUGGEST SEPARATION;
@@ -167,7 +164,7 @@ Feature: WebSocket client ingestor scheduling
     Given the HTTP mock server is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA notification ( user_id I64 );
@@ -176,13 +173,12 @@ Feature: WebSocket client ingestor scheduling
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+      CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
-      CREATE INGESTOR ws_notifications
-        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
+      CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_main MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -203,7 +199,7 @@ Feature: WebSocket client ingestor scheduling
       """
       "user_id":401
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DRAIN NODE {{original_ws_owner}};
       """

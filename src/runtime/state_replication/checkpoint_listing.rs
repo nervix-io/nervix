@@ -2,7 +2,12 @@
 //! Owns: the owner's answer to a replica's catalog read, and its conversion to and from the
 //! interconnect envelope that carries it.
 //! May depend on: catalog listings, typed branch keys and the interconnect envelopes.
-//! Must not know: how the catalog is kept, how a replica acts on a listing, or NSPL.
+//! Must not know: how the catalog is kept, how a replica acts on a listing, or Plexus.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use nervix_interconnect::{
     BranchCheckpointListing, BranchCheckpointPage, BranchCheckpointRevision,
@@ -106,3 +111,10 @@ impl CheckpointPage {
         })
     }
 }
+
+#[cfg(all(
+    test,
+    not(any(feature = "shuttle", feature = "loom", feature = "deloxide"))
+))]
+#[path = "checkpoint_listing_properties.rs"]
+mod properties;

@@ -1,3 +1,10 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "test fixture construction remains outside product execution"
+    )
+)]
 //! Fixtures the runtime's unit tests share.
 //!
 //! A fixture lives here only when tests in more than one runtime module build the same
@@ -112,14 +119,15 @@ impl nervix_connector::IngestMessageHeaders for TestIngestHeaders<'_> {
 
 /// Builds one group's ingest metadata through the group builders, as the runtime does.
 pub(super) fn ingest_metadata_for_test(
-    kind: super::IngestMetadataKind,
+    scope: super::IngestorMetadataScope,
     rows: &[nervix_connector::IngestMetadataRow<'_>],
 ) -> super::IngestFilterMapMetadata {
-    let mut builders = super::IngestMetadataBuilders::new(kind, rows.len());
+    let mut builders = super::IngestMetadataBuilders::new(scope, rows.len())
+        .expect("the fixture's metadata row capacity fits");
     for row in rows {
         builders
             .append(row)
-            .expect("test metadata row must match the group's source kind");
+            .expect("test metadata row must match the group's metadata scope");
     }
     builders.finish().expect("test metadata must build")
 }
@@ -131,8 +139,7 @@ pub(super) async fn execute_filter_map_for_test(
     metadata: Option<&super::IngestFilterMapMetadata>,
     now: Timestamp,
 ) -> Result<Option<RuntimeRow>, String> {
-    super::filter_map::execute_filter_map_on_record(
-        &named::<ModelName>("test_filter_map"),
+    let outcome = super::filter_map::execute_filter_map_on_record(
         program,
         record,
         branch_key,
@@ -141,15 +148,22 @@ pub(super) async fn execute_filter_map_for_test(
         now,
     )
     .await
-    .map_err(|error| error.to_string())
+    .map_err(|error| format!("{error:#}"))?;
+    match outcome {
+        super::SingleRecordFilterMapOutcome::Filtered => Ok(None),
+        super::SingleRecordFilterMapOutcome::Output(record) => Ok(Some(record)),
+        super::SingleRecordFilterMapOutcome::MessageError { error, .. } => {
+            Err(format!("FILTER-MAP message error: {}", error.message))
+        }
+    }
 }
 
 pub(super) fn expression(raw: &str) -> nervix_models::Expression {
-    nervix_nspl::parse_expression(raw).expect("valid semantic expression")
+    nervix_plexus::parse_expression(raw).expect("valid semantic expression")
 }
 
 pub(super) fn construction(raw: &str) -> nervix_models::RouteConstruction {
-    nervix_nspl::parse_route_construction(raw).expect("valid route construction")
+    nervix_plexus::parse_route_construction(raw).expect("valid route construction")
 }
 
 pub(super) fn window_outputs(relay: &str, set: &str) -> ProcessorOutputs {
@@ -328,6 +342,7 @@ pub(super) fn test_relay_boundary_services() -> Arc<super::RelayBoundaryServices
         Vec::new(),
         None,
         nervix_primitives::sync::Arc::new(super::BranchPresence::new()),
+        nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
     ))
 }
 
@@ -357,7 +372,8 @@ pub(super) async fn attach_loopback_cluster(
         bootstrap_host: None,
         recovery_endpoints: Default::default(),
         interconnect: interconnect.clone(),
-        node_unavailability_timeout: Duration::from_secs(10),
+        membership: crate::cluster::MembershipSettings::default(),
+        prerequisites: interconnect.local_prerequisites(),
         fault_injection: Default::default(),
     })
     .await
@@ -427,6 +443,23 @@ pub(super) fn install_unpaced_test_domain(runtime: &super::Runtime, domain: &Dom
     runtime.inner.domain_routings.insert(
         domain.clone(),
         StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
+    );
+}
+
+/// Publish the routing of `domain` with the boundary services of `relays`, as a schedule that runs
+/// those relays on this node does.
+pub(super) fn publish_test_relay_routing(
+    runtime: &super::Runtime,
+    domain: &DomainName,
+    relays: impl IntoIterator<Item = (RelayName, Arc<super::RelayBoundaryServices>)>,
+) {
+    let relay_services = relays.into_iter().collect();
+    runtime.inner.domain_routings.insert(
+        domain.clone(),
+        StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot {
+            relay_services,
+            ..DomainRoutingSnapshot::default()
+        })),
     );
 }
 
@@ -524,6 +557,150 @@ pub(super) fn test_named_branching(
     )
 }
 
+/// One compiled single-route window processor state, driven the way its branch task drives it.
+pub(super) struct TestWindow {
+    pub(super) plan: WindowAccumulatorPlan,
+    pub(super) compiled: CompiledWindowAggregateProgram,
+    pub(super) input_schema: Arc<CompiledSchema>,
+    pub(super) output_schema: Arc<CompiledSchema>,
+    pub(super) state: WindowProcessorState,
+}
+
+impl TestWindow {
+    pub(super) fn new(
+        set: &str,
+        input: &[OptionalTestField],
+        output: &[OptionalTestField],
+    ) -> Self {
+        let input_schema = test_optional_schema(input);
+        let output_schema = test_optional_schema(output);
+        let input_relay = named::<RelayName>("events");
+        let output_relay = named::<RelayName>("summary");
+        let relay_schemas = HashMap::from_iter([
+            (input_relay.clone(), input_schema.clone()),
+            (output_relay.clone(), output_schema.clone()),
+        ]);
+        let compiled = CompiledWindowAggregateProgram::compile(
+            &window_aggregate(set),
+            &[input_relay],
+            &output_relay,
+            &relay_schemas,
+            None,
+        )
+        .expect("the test window route should compile");
+        let sketch_layout = compiled
+            .route
+            .demands
+            .iter()
+            .any(|demand| demand.sketch.is_some())
+            .then(|| {
+                WindowPaneLayout::for_width_and_step(Duration::from_secs(2), Duration::from_secs(1))
+                    .verified("the test window has valid duration panes")
+            });
+        let max_state_bytes = sketch_layout.and_then(|_| NonZeroU64::new(1_048_576));
+        let plan = WindowAccumulatorPlan::new([&compiled.route], sketch_layout, max_state_bytes);
+        let state = WindowProcessorState::new(&plan, 1);
+        Self {
+            plan,
+            compiled,
+            input_schema,
+            output_schema,
+            state,
+        }
+    }
+
+    /// Evaluate one batch of `columns`, in input schema order, whose rows carry `timestamps`
+    /// as watermarks, admit every admissible row, and answer why the others were refused.
+    pub(super) async fn admit(
+        &mut self,
+        columns: Vec<ArrayRef>,
+        timestamps: &[i64],
+    ) -> Vec<String> {
+        let acks = vec![AckSet::empty(); timestamps.len()];
+        self.admit_acknowledged(columns, timestamps, acks).await
+    }
+
+    /// Like [`Self::admit`], where each row's message carries the acknowledgement set at its index.
+    pub(super) async fn admit_acknowledged(
+        &mut self,
+        columns: Vec<ArrayRef>,
+        timestamps: &[i64],
+        acks: Vec<AckSet>,
+    ) -> Vec<String> {
+        let schema = self.input_schema.arrow_schema();
+        let batch = RecordBatch::try_new(StdArc::clone(&schema), columns)
+            .expect("the test columns should match the input schema");
+        let carrier = Arc::new(
+            RuntimeRecordBatch::from_record_batch(schema, batch)
+                .expect("the test batch should be a valid relay batch"),
+        );
+        let mut evaluated = evaluate_window_arguments(
+            &Executor::default(),
+            &self.plan,
+            std::slice::from_ref(&self.compiled),
+            &carrier,
+            Timestamp::from_unix_nanos(1),
+        )
+        .await
+        .expect("the test batch's arguments should evaluate");
+        let mut refused = Vec::new();
+        let mut run = Vec::new();
+        for ((row, timestamp), acks) in timestamps.iter().enumerate().zip(acks) {
+            if let Some(refusal) = evaluated.take_refusal(row) {
+                refused.push(refusal.current_context().to_string());
+                continue;
+            }
+            let metadata = RuntimeRecordMetadata::from_ingested_at_watermarks(
+                Timestamp::from_unix_nanos(*timestamp),
+                Timestamp::from_unix_nanos(*timestamp),
+            );
+            let record = RuntimeRow::new(carrier.clone(), row, metadata)
+                .expect("every test row is inside its batch");
+            let message = RelayMessage {
+                key: None,
+                record,
+                acks,
+            };
+            run.push(WindowAdmission { message, row });
+        }
+        if let Err(error) = self
+            .state
+            .check_admission(&self.plan, Some(&evaluated.columns), &run)
+        {
+            refused.push(error.current_context().to_string());
+        } else {
+            self.state.admit(&evaluated.columns, run);
+        }
+        refused
+    }
+
+    pub(super) fn step(&mut self, count: usize, removed_at: i64) {
+        let removed = self
+            .state
+            .retract_oldest(count, Timestamp::from_unix_nanos(removed_at));
+        assert_eq!(removed.len(), count, "a test steps only over retained rows");
+    }
+
+    pub(super) async fn emit(
+        &self,
+    ) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
+        super::window_processor::evaluate_window_aggregate(
+            &Executor::default(),
+            &self.compiled,
+            &self.state,
+            &self.output_schema,
+            Timestamp::from_unix_nanos(42),
+        )
+        .await
+    }
+
+    pub(super) async fn emitted(&self) -> RuntimeRecordBatch {
+        self.emit()
+            .await
+            .expect("the window aggregate should evaluate")
+    }
+}
+
 /// One field of a test schema whose optionality varies per field.
 pub(super) struct OptionalTestField {
     pub(super) name: &'static str,
@@ -588,7 +765,7 @@ pub(super) fn validate_wasm_test_outputs(
     output_schema: &Arc<super::CompiledSchema>,
     ack_map: &super::WasmAckMap,
     outputs: Vec<WasmEnvelope>,
-) -> Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
+) -> error_stack::Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
     validate_wasm_test_output_groups(
         input_schema,
         vec![("output", Arc::clone(output_schema))],
@@ -602,7 +779,7 @@ pub(super) fn validate_wasm_test_output_groups(
     schemas: Vec<(&str, Arc<super::CompiledSchema>)>,
     ack_map: &super::WasmAckMap,
     outputs: Vec<WasmEnvelope>,
-) -> Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
+) -> error_stack::Result<Vec<WasmMaterializedOutput>, WasmOutputError> {
     let output_schemas = schemas
         .into_iter()
         .map(|(relay, schema)| (named::<RelayName>(relay), schema))
@@ -707,14 +884,13 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
 /// Lowers `construction` as an ingestor's plan does and binds it as the ingestor's start does, for
 /// tests whose subject is the bound route program.
 pub(super) fn bind_ingestor_route_for_test(
-    domain: &DomainName,
     identifier: &ModelName,
-    metadata_kind: IngestMetadataKind,
+    metadata_scope: IngestorMetadataScope,
     allow_header_reads: bool,
     construction: &RouteConstruction,
     schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+) -> RuntimeVmCompileResult<CompiledProgramWithMaterializedInterest> {
     let lowered = LoweredConstruction::transforming(
         construction,
         schemas.input.as_ref(),
@@ -722,8 +898,8 @@ pub(super) fn bind_ingestor_route_for_test(
     )
     .assured("the fixture route lowers against its schemas");
     bind_ingestor_filter_map_program(
-        RuntimeCompileTarget { domain, identifier },
-        metadata_kind,
+        identifier,
+        metadata_scope,
         allow_header_reads,
         &lowered,
         schemas,
@@ -1048,7 +1224,7 @@ pub(super) fn junction_branch_template(
     let input_relay = named::<RelayName>(input_relay);
     super::BranchInstanceTemplate {
         revision: super::ProcessorPlanRevision::new(),
-        source_kind: ModelKind::Junction,
+        entity_kind: ModelKind::Junction,
         source: RelayName::from(&processor.clone()),
         root_relay: input_relay.clone(),
         branch: None,
@@ -1161,12 +1337,12 @@ pub(super) fn input_value(batch: &RelayRecordBatch) -> i64 {
     value
 }
 
-pub(super) fn sink_context() -> EmitterSinkContext {
+pub(super) fn emitter_context() -> EmitterConnectorContext {
     let domain = DomainName::parse("emitter_tests").expect("valid domain");
     let runtime = Runtime::default();
     let emitter = EmitterName::parse("output").assured("fixture emitter name is valid");
     let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone());
-    EmitterSinkContext {
+    EmitterConnectorContext {
         routing: StdArc::new(ArcSwap::from_pointee(DomainRoutingSnapshot::default())),
         metrics_dirty: BranchMetricsMark::default(),
         status: runtime.emitter_status(&key),
@@ -1192,6 +1368,8 @@ pub(crate) fn single_worker_executor() -> Executor {
             bulk_cpu: one,
             consensus_storage: one,
             filesystem_storage: one,
+            connector_storage: nervix_execution::ConnectorStorageWorkers::resolve(Some(one))
+                .expect("one worker fits the primitive permit bound"),
             pending_jobs: one,
         },
         ..nervix_execution::ExecutionConfig::default()

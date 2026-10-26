@@ -7,11 +7,72 @@
 //! - **Depends on.** The vocabulary the variants quote.
 //! - **Must not know.** How a caller reports or recovers from a refusal.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::fmt;
 
 use error_stack::{Context, Report};
-use nervix_models::{BranchSelection, DomainName, FieldName, ModelKind, ModelName, RelayName};
+use nervix_models::{
+    BranchSelection, ClientName, ConnectorKind, DomainName, EmitterEntityKind, EndpointName,
+    EndpointType, FieldName, IngestorEntityKind, ModelKind, ModelName, RelayName,
+    WebsocketsClientConfigError, WebsocketsUpgradeHeadersError,
+};
 use thiserror::Error;
+
+/// A duration clause whose declared value must fit a scheduled connector wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(crate) enum ConnectorDurationSetting {
+    #[strum(serialize = "ACK TIMEOUT")]
+    AckTimeout,
+    #[strum(serialize = "BATCH TIMEOUT")]
+    BatchTimeout,
+    #[strum(serialize = "RETRY POLICY BACKOFF")]
+    RetryBackoff,
+    #[strum(serialize = "RETRY POLICY MAX")]
+    RetryMaximum,
+}
+
+/// A declaration that cannot produce a valid connector execution policy.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum ConnectorDeclarationIssue {
+    #[error("invalid {setting} duration '{value}'")]
+    InvalidDuration {
+        setting: ConnectorDurationSetting,
+        value: String,
+    },
+    #[error("{setting} must be greater than zero")]
+    ZeroDuration { setting: ConnectorDurationSetting },
+    #[error("{setting} is longer than the longest schedulable duration")]
+    UnschedulableDuration { setting: ConnectorDurationSetting },
+    #[error("RETRY POLICY MAX is shorter than its BACKOFF")]
+    InvertedRetry,
+    #[error("{entity} emitter requires {expected}")]
+    Body {
+        entity: EmitterEntityKind,
+        expected: nervix_models::EmitterBodyForm,
+    },
+    #[error("duplicate VALUES key '{key}'")]
+    DuplicateValue { key: String },
+    #[error("VALUES requires at least one mapping")]
+    EmptyValues,
+    #[error("{entity} declares no direct value type contract")]
+    MissingMappedValueContract { entity: EmitterEntityKind },
+    #[error("{section} does not support key '{key}'")]
+    UnsupportedMappedKey {
+        section: nervix_models::MappedValueSection,
+        key: String,
+    },
+    #[error("{section} key '{key}' requires {expected}, found {actual}")]
+    MappedType {
+        section: nervix_models::MappedValueSection,
+        key: String,
+        expected: nervix_models::MappedValueType,
+        actual: arrow_schema::DataType,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub(crate) enum OtelMappingSignal {
@@ -90,6 +151,11 @@ impl fmt::Display for OtelMappingIssue {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(crate) enum RegistryError {
+    #[error("client '{client}' configuration is invalid in domain '{domain}'")]
+    ClientConfig {
+        domain: DomainName,
+        client: ClientName,
+    },
     #[error("failed to open registry storage")]
     OpenStorage,
     #[cfg(test)]
@@ -111,6 +177,54 @@ pub(crate) enum RegistryError {
     DeserializeValue,
     #[error("stored model has an invalid archive header; recreate the stored data")]
     InvalidModelArchive,
+    #[error(
+        "{kind} ingestor '{ingestor}' in domain '{domain}' requires a {required} client, but \
+         client '{client}' is a {found} client"
+    )]
+    IngestorClientConnectorMismatch {
+        domain: DomainName,
+        ingestor: ModelName,
+        kind: IngestorEntityKind,
+        client: ClientName,
+        required: ConnectorKind,
+        found: ConnectorKind,
+    },
+    #[error(
+        "{kind} ingestor '{ingestor}' in domain '{domain}' requires a TYPE {required} endpoint, \
+         but endpoint '{endpoint}' is TYPE {found}"
+    )]
+    IngestorEndpointTypeMismatch {
+        domain: DomainName,
+        ingestor: ModelName,
+        kind: IngestorEntityKind,
+        endpoint: EndpointName,
+        required: EndpointType,
+        found: EndpointType,
+    },
+    /// The Prometheus client context above the vocabulary's key/API-root report.
+    #[error(
+        "{} client '{client}' in domain '{domain}' cannot use its CONFIG",
+        ConnectorKind::Prometheus
+    )]
+    InvalidPrometheusClientConfig {
+        domain: DomainName,
+        client: ClientName,
+    },
+    #[error(
+        "{} client '{client}' in domain '{domain}' cannot use its CONFIG: {issue}",
+        ConnectorKind::Websockets
+    )]
+    InvalidWebsocketsClientConfig {
+        domain: DomainName,
+        client: ClientName,
+        issue: WebsocketsClientConfigError,
+    },
+    #[error("ingestor '{ingestor}' in domain '{domain}' cannot use its HEADERS: {issue}")]
+    InvalidWebsocketsUpgradeHeaders {
+        domain: DomainName,
+        ingestor: ModelName,
+        issue: WebsocketsUpgradeHeadersError,
+    },
     #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
     BranchFieldContainsBytes {
         domain: DomainName,
@@ -289,14 +403,30 @@ pub(crate) enum RegistryError {
         expected_branch: BranchSelection,
     },
     #[error(
-        "emitter '{emitter}' in domain '{domain}' VALUES target '{target}' for {sink} would emit \
-         sensitive data; use leak_sensitive(...) explicitly"
+        "emitter '{emitter}' in domain '{domain}' VALUES target '{target}' for {connector} would \
+         emit sensitive data; use leak_sensitive(...) explicitly"
     )]
     SensitiveEmitterValue {
         domain: DomainName,
         emitter: ModelName,
-        sink: &'static str,
+        connector: &'static str,
         target: String,
+    },
+    /// An emitter whose emitter keeps one value per header name writes one literal name twice, so
+    /// on every record the later write replaces the earlier one and the earlier one is never
+    /// published. The header is named as the emitter's header model records it.
+    #[error(
+        "emitter '{emitter}' in domain '{domain}' writes header '{header}' at INVOKE #{earlier} \
+         and again at #{later}, but {connector} emitters keep one value per header name, so the \
+         later write would replace the earlier one on every record"
+    )]
+    ReplacedHeaderWrite {
+        domain: DomainName,
+        emitter: ModelName,
+        connector: EmitterEntityKind,
+        header: String,
+        earlier: usize,
+        later: usize,
     },
     #[error(
         "model '{identifier}' in domain '{domain}' is invalid: LOOKUP_HASH_MAP argument \
@@ -314,21 +444,28 @@ pub(crate) enum RegistryError {
         issue: OtelMappingIssue,
     },
     #[error(
+        "{} '{}' in domain '{domain}' is invalid: {issue}",
+        .node.kind.as_str(), .node.identifier
+    )]
+    InvalidConnectorDeclaration {
+        domain: DomainName,
+        #[cfg_attr(
+            nervix_lint,
+            nervix::identity(
+                node,
+                reason = "names the entity whose connector declaration is refused"
+            )
+        )]
+        node: nervix_models::NodeRef,
+        issue: ConnectorDeclarationIssue,
+    },
+    #[error(
         "cannot delete model '{identifier}' in domain '{domain}' because it is used by {blockers}"
     )]
     DeleteInUse {
         domain: String,
         identifier: String,
         blockers: String,
-    },
-    #[error(
-        "cannot alter model '{identifier}' in domain '{domain}' into a non-placement-eligible \
-         shape because it is pinned by placements {placements}"
-    )]
-    PlacementMemberPinned {
-        domain: String,
-        identifier: String,
-        placements: String,
     },
 }
 

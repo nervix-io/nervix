@@ -53,6 +53,14 @@ The finished module is
 
 ## A Minimal Guest
 
+The SDK's representation properties exercise all current scalar and nested Arrow types, null
+validity and float bits, retained input buffers, shared output columns and ordered emissions.
+Snapshot properties preserve raw application bytes, accept a domain rename with the same branch
+contract, and reject another branch configuration before calling application restore. They run
+through the production SDK APIs in both ordinary Bolero tests and registered sanitizer targets;
+the [WASM representation register](https://github.com/nervix-io/nervix/blob/main/tests/wasm-representation-coverage.md)
+states the projections and verification boundaries.
+
 This guest passes every input field through unchanged and appends one
 generated `bucket` column. It assumes the destination schema lists the input
 fields first and a required `bucket STRING` field last:

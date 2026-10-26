@@ -3,26 +3,37 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** Publishing a domain schedule, cordon and drain, relocation, failover onto live
-//!   members, and the Kafka partition schedule the leader watches.
+//!   members, process-local startup voter observations, and the Kafka partition schedule the leader
+//!   watches.
 //! - **Depends on.** The registry to compute a schedule, consensus to publish it, and the ownership
 //!   handoff to move state the schedule moves.
 //! - **Must not know.** How a scheduled node executes once it is placed.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
 
 use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
-use nervix_client_core::Client as NervixClient;
 use nervix_connector_kafka::TopicPartitionInspector;
 use nervix_consensus::{
-    CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs,
+    CommandExecution, ConsensusError, DomainMutationLease, DomainPlanningInputs, GossipState,
     TransactionScheduleEligibility,
 };
+use nervix_interconnect::{
+    RequestError, StoppingNodeDrainAction, StoppingNodeDrainRequest, StoppingNodeDrainResponse,
+};
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeName, DomainName, IngestSource, IngestorName, KafkaOffsetMode,
-    KafkaPartitionSchedule, Model, ModelKind, ModelName, NodeRef, PlacementGroupSchedule,
-    PlacementPolicy, QuiesceLevel, ScheduledNode,
+    ClusterNodeIdentity, ClusterNodeName, DomainName, IngestorEntity, IngestorName, KafkaIngestor,
+    KafkaOffsetMode, KafkaPartitionSchedule, KafkaTopicIngestor, Model, ModelKind, ModelName,
+    NodeRef, PlacementGroupSchedule, PlacementPolicy, QuiesceLevel, ScheduledNode,
 };
 use nervix_primitives::{
     sync::CancellationToken,
@@ -31,30 +42,69 @@ use nervix_primitives::{
 use tracing::{info, warn};
 
 use super::{
+    AppError,
     background_task::BackgroundTask,
     command_result::CommandResult,
     describe_output::{format_placement_runtime_nodes, placement_group_members_equal},
     model_mutation::{command_error, command_ok, quiesce_level_message},
     ownership_handoff::{
-        AssignmentRelocation, DrainMove, format_planned_ownership_move,
+        AssignmentRelocation, DrainMove, PlannedOwnershipHandoff, format_planned_ownership_move,
         mark_complete_ownership_transitions, planned_ownership_moves,
     },
-    peer_grpc::grpc_client_connect_options,
     schedule_planning::{DomainSchedulePlanningSnapshot, PreparedDomainSchedule},
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
 };
-use crate::{registry::ActiveGraph, runtime::LocalGraphDrainOutcome};
+use crate::{
+    registry::{ActiveGraph, assign_server_listener_nodes},
+    runtime::LocalGraphDrainOutcome,
+};
 
-/// How long a leader's automatic scheduling waits, after its reconciliation starts, for gossip to
-/// hear from or give up on every voter before it treats a voter it has not heard from as failed.
+mod settings;
+pub use settings::{ReplicaCount, SchedulingSettings};
+
+/// How long automatic scheduling waits, after this process's reconciliation starts, to observe
+/// every voter live before treating an unobserved voter as failed.
 ///
 /// After a whole cluster restarts, the first node to lead can reach a quorum before gossip has
-/// heard from the other nodes, which are still starting. Failing their work over then would move it
+/// observed the other nodes live, which are still starting. Failing their work over then would move it
 /// away from the node that holds its state and start that state afresh. Gossip exchanges state every
 /// half second, so the grace covers many rounds, and a voter that has not appeared by its end is
 /// treated as failed exactly as before.
 pub(in crate::application) const VOTER_OBSERVATION_GRACE: Duration = Duration::from_secs(10);
+
+/// Live voter observations owned by one process's reconciliation task, including while it follows.
+/// A first relayed heartbeat can be classified dead before gossip has enough samples for liveness;
+/// that verdict supplies no live observation and cannot end the startup wait.
+#[derive(Default)]
+pub(in crate::application) struct StartupVoterObservations {
+    observed_live: BTreeSet<ClusterNodeName>,
+}
+
+impl StartupVoterObservations {
+    pub(in crate::application) fn observe(&mut self, gossip: &GossipState, elapsed: Duration) {
+        if elapsed < VOTER_OBSERVATION_GRACE {
+            self.observed_live.extend(gossip.live_node_ids());
+        } else {
+            self.observed_live.clear();
+        }
+    }
+
+    pub(in crate::application) fn unobserved_voters(
+        &self,
+        voters: &[ClusterNodeName],
+        elapsed: Duration,
+    ) -> BTreeSet<ClusterNodeName> {
+        if elapsed >= VOTER_OBSERVATION_GRACE {
+            return BTreeSet::new();
+        }
+        voters
+            .iter()
+            .filter(|voter| !self.observed_live.contains(*voter))
+            .cloned()
+            .collect()
+    }
+}
 
 pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration =
     Duration::from_secs(1);
@@ -62,7 +112,11 @@ pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration
 pub(in crate::application) const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: Duration =
     Duration::from_secs(30);
 
-const SHUTDOWN_CORDON_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+/// The least time a stopping node waits for the release of the cordon its own drain set. It is what
+/// the release has when the move of the node's work used the whole drain timeout, so a drain that
+/// timed out still clears the cordon its request may have set, and all it has when the voters that
+/// stay are too few to commit it.
+const SHUTDOWN_CORDON_RELEASE_GRACE: Duration = Duration::from_secs(1);
 const SHUTDOWN_LEADER_OBSERVATION_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +155,31 @@ struct ShutdownDrainBudget {
     deadline: ShutdownDeadline,
 }
 
+/// The leader's view of the time a stopping node gave it for moving scheduled work. Each unit
+/// keeps a share of that time for the units after it and for the stopping node's local drain.
+struct ShutdownLeaderDrainBudget {
+    started: Instant,
+    timeout: Duration,
+}
+
+impl ShutdownLeaderDrainBudget {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout,
+        }
+    }
+
+    fn unit_handoff_budget(&self) -> Duration {
+        let remaining = self
+            .timeout
+            .checked_sub(self.started.elapsed())
+            .unwrap_or(Duration::ZERO);
+        let reserve = self.timeout / 6;
+        remaining.checked_sub(reserve).unwrap_or(Duration::ZERO)
+    }
+}
+
 impl ShutdownDrainBudget {
     fn start(timeout: Duration, deadline: ShutdownDeadline) -> Self {
         Self {
@@ -113,11 +192,28 @@ impl ShutdownDrainBudget {
     /// What remains of the drain timeout, which is nothing once it or the shutdown deadline has
     /// passed.
     fn remaining(&self) -> Duration {
-        let drain_remaining = self
-            .timeout
+        self.drain_remaining().min(self.deadline.remaining())
+    }
+
+    /// How long the release of the cordon the node's own drain set may wait, and never past the
+    /// shutdown deadline. While voters that stay can commit it, that is what remains of the drain
+    /// timeout, or the release grace when less than that remains. When they cannot, it is the
+    /// release grace alone, since only voters that are stopping too could commit the release.
+    fn cordon_release_bound(&self, quorum: ShutdownReleaseQuorum) -> Duration {
+        let wait = match quorum {
+            ShutdownReleaseQuorum::Staying => {
+                self.drain_remaining().max(SHUTDOWN_CORDON_RELEASE_GRACE)
+            }
+            ShutdownReleaseQuorum::Leaving => SHUTDOWN_CORDON_RELEASE_GRACE,
+        };
+        wait.min(self.deadline.remaining())
+    }
+
+    /// What remains of the drain timeout alone, which is nothing once it has passed.
+    fn drain_remaining(&self) -> Duration {
+        self.timeout
             .checked_sub(self.started.elapsed())
-            .unwrap_or(Duration::ZERO);
-        drain_remaining.min(self.deadline.remaining())
+            .unwrap_or(Duration::ZERO)
     }
 }
 
@@ -125,61 +221,172 @@ impl ShutdownDrainBudget {
 enum ShutdownOwnershipMove {
     /// No live schedulable node can take the work, so nothing was cordoned or moved.
     NoReplacement,
-    /// The drain timeout or the shutdown deadline passed, or the leader could not be reached,
-    /// before the drain was requested, so nothing was cordoned or moved.
+    /// The drain timeout or the shutdown deadline passed before a leader was observed, so the drain
+    /// was never requested and nothing was cordoned or moved.
     NotRequested,
     /// The leader was asked to cordon the node and move its scheduled work, and that drain ended
     /// with this outcome.
     Requested(ShutdownPhaseOutcome),
 }
 
-/// Where the drain of this node's scheduled work is requested.
+impl ShutdownOwnershipMove {
+    /// What the move of the node's scheduled work came to.
+    fn outcome(&self) -> ShutdownPhaseOutcome {
+        match self {
+            Self::NoReplacement => ShutdownPhaseOutcome::Completed,
+            Self::NotRequested => ShutdownPhaseOutcome::Abandoned,
+            Self::Requested(outcome) => *outcome,
+        }
+    }
+
+    /// Which cordon the node is left with after this move, given whether an operator had cordoned
+    /// the node before it began stopping.
+    fn drain_cordon(&self, operator_cordon_exists: bool) -> ShutdownDrainCordon {
+        match self {
+            Self::NoReplacement | Self::NotRequested => ShutdownDrainCordon::NeverSet,
+            Self::Requested(_) if operator_cordon_exists => ShutdownDrainCordon::Operator,
+            Self::Requested(_) => ShutdownDrainCordon::SetByDrain,
+        }
+    }
+}
+
+/// The cordon a stopping node holds once it has moved, or tried to move, its scheduled work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownDrainCordon {
+    /// The drain was never requested, so it cordoned nothing.
+    NeverSet,
+    /// An operator cordoned the node before it began stopping. That cordon outlives the stop.
+    Operator,
+    /// The requested drain may have cordoned the node, and the stop releases that cordon.
+    SetByDrain,
+}
+
+/// Whether the release of a stopping node's drain cordon can commit without voters that are
+/// stopping too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShutdownReleaseQuorum {
+    /// The stopping node and the voters that are live and not terminating form a quorum, so the
+    /// release can commit with voters that stay.
+    Staying,
+    /// Too few voters stay to form that quorum, as when the whole cluster stops together, so the
+    /// release commits only while voters that are stopping too still run.
+    Leaving,
+}
+
+impl ShutdownReleaseQuorum {
+    /// Whether `local_node_id` and the voters among `staying_node_ids`, the live nodes whose
+    /// incarnations are not terminating, form a quorum of `voters`.
+    fn of(
+        local_node_id: &ClusterNodeName,
+        voters: &BTreeSet<ClusterNodeName>,
+        staying_node_ids: &BTreeSet<ClusterNodeName>,
+    ) -> Self {
+        let mut committing_voters = voters
+            .intersection(staying_node_ids)
+            .collect::<BTreeSet<_>>();
+        if voters.contains(local_node_id) {
+            committing_voters.insert(local_node_id);
+        }
+        let quorum = SessionServiceImpl::raft_quorum_size(voters.len());
+        if committing_voters.len() >= quorum {
+            Self::Staying
+        } else {
+            Self::Leaving
+        }
+    }
+}
+
+/// Whether the drain of this node's scheduled work can be requested, and from which leader.
 enum ShutdownDrainRoute {
     /// No live schedulable node can take the work.
     NoReplacement,
-    /// The leader that must receive the drain cannot be reached.
-    UnreachableLeader,
-    /// This node leads, so it drains itself.
-    LocalLeader,
-    /// Another node leads and receives the drain request.
-    RemoteLeader(RemoteShutdownDrainLeader),
+    /// This leader receives the drain request. It is this node itself when this node leads.
+    Leader(ClusterNodeName),
 }
 
-/// Another node that leads, with a client connected to it.
-struct RemoteShutdownDrainLeader {
-    leader_id: ClusterNodeName,
-    client: NervixClient,
+/// How the leader answered what a stopping node asked about its own scheduled work.
+enum ShutdownDrainAnswer {
+    /// The leader completed the action and described it.
+    Completed {
+        leader: ClusterNodeName,
+        report: String,
+    },
+    /// The leader could not complete the action and described why.
+    Failed {
+        leader: ClusterNodeName,
+        report: String,
+    },
+    /// No answer arrived because the request failed in transport. The leader may still have acted
+    /// on it.
+    Unanswered {
+        leader: ClusterNodeName,
+        error: Report<RequestError>,
+    },
 }
 
-impl RemoteShutdownDrainLeader {
-    /// Asks the leader to drain `local_node_id`, which cordons that node first.
-    async fn drain(&self, local_node_id: &ClusterNodeName) -> ShutdownPhaseOutcome {
-        let drain = self.client.execute(format!("DRAIN NODE {local_node_id};"));
-        match drain.await {
-            Ok(outcome) if outcome.succeeded() => {
+impl ShutdownDrainAnswer {
+    /// Logs how the leader answered the drain of `local_node_id`, and returns what the move of the
+    /// node's scheduled work came to.
+    fn into_drain_outcome(self, local_node_id: &ClusterNodeName) -> ShutdownPhaseOutcome {
+        match self {
+            Self::Completed { leader, report } => {
                 info!(
                     node_id = %local_node_id,
-                    leader = %self.leader_id,
-                    message = outcome.message,
-                    "drained local node through leader before graceful shutdown"
+                    leader = %leader,
+                    message = report,
+                    "drained local node before graceful shutdown"
                 );
                 ShutdownPhaseOutcome::Completed
             }
-            Ok(outcome) => {
+            Self::Failed { leader, report } => {
                 warn!(
                     node_id = %local_node_id,
-                    leader = %self.leader_id,
-                    message = outcome.message,
-                    "failed to drain local node through leader before graceful shutdown"
+                    leader = %leader,
+                    message = report,
+                    "failed to drain local node before graceful shutdown"
                 );
                 ShutdownPhaseOutcome::Abandoned
             }
-            Err(error) => {
+            Self::Unanswered { leader, error } => {
                 warn!(
                     node_id = %local_node_id,
-                    leader = %self.leader_id,
+                    leader = %leader,
                     error = %error,
-                    "failed to drain local node through leader before graceful shutdown"
+                    "the leader did not answer the graceful shutdown drain of the local node"
+                );
+                ShutdownPhaseOutcome::Abandoned
+            }
+        }
+    }
+
+    /// Logs how the leader answered the release of the cordon the drain of `local_node_id` set, and
+    /// returns what that release came to.
+    fn into_cordon_release_outcome(self, local_node_id: &ClusterNodeName) -> ShutdownPhaseOutcome {
+        match self {
+            Self::Completed { leader, report } => {
+                info!(
+                    node_id = %local_node_id,
+                    leader = %leader,
+                    message = report,
+                    "cleared shutdown drain cordon before graceful shutdown"
+                );
+                ShutdownPhaseOutcome::Completed
+            }
+            Self::Failed { leader, report } => {
+                warn!(
+                    node_id = %local_node_id,
+                    leader = %leader,
+                    message = report,
+                    "failed to clear shutdown drain cordon before graceful shutdown"
+                );
+                ShutdownPhaseOutcome::Abandoned
+            }
+            Self::Unanswered { leader, error } => {
+                warn!(
+                    node_id = %local_node_id,
+                    leader = %leader,
+                    error = %error,
+                    "the leader did not answer the release of the shutdown drain cordon"
                 );
                 ShutdownPhaseOutcome::Abandoned
             }
@@ -414,7 +621,7 @@ impl SessionServiceImpl {
         if let Err(error) = self.apply_current_cluster_state().await {
             return command_error(format!(
                 "dropped node '{node_id}', but the resulting schedules failed to become usable: \
-                 {error}"
+                 {error:#}"
             ));
         }
         if let Err(error) = self.wait_for_authoritative_visibility().await {
@@ -499,6 +706,16 @@ impl SessionServiceImpl {
         node_id: ClusterNodeName,
         execution: Option<&CommandExecution>,
     ) -> CommandResult {
+        self.drain_node_with_budget(node_id, execution, None).await
+    }
+
+    async fn drain_node_with_budget(
+        &self,
+        node_id: ClusterNodeName,
+        execution: Option<&CommandExecution>,
+        shutdown_budget: Option<Duration>,
+    ) -> CommandResult {
+        let shutdown_budget = shutdown_budget.map(ShutdownLeaderDrainBudget::new);
         let membership = self.inner.consensus.membership_nodes().await;
         if !membership.contains_key(&node_id) {
             return command_error(format!("node '{node_id}' is not a raft member"));
@@ -530,7 +747,7 @@ impl SessionServiceImpl {
         let mut failed = false;
         let mut failed_units = BTreeSet::<(DomainName, String)>::new();
         let mut failed_domains = BTreeSet::<DomainName>::new();
-        loop {
+        'drain: loop {
             let mut handled_this_iteration = false;
 
             for (domain, graph) in self.inner.registry.active_graphs() {
@@ -675,12 +892,15 @@ impl SessionServiceImpl {
                         handled_this_iteration = true;
                         break;
                     }
-                    if let Err(error) = self.apply_current_cluster_state().await {
+                    if let Err(error) = self
+                        .activate_drained_revision(shutdown_budget.as_ref(), None)
+                        .await
+                    {
                         failed = true;
                         failed_domains.insert(domain.clone());
                         outcomes.push(format!(
                             "- domain={} owner={node_id} failed: could not activate initial \
-                             schedule: {error}",
+                             schedule: {error:#}",
                             domain.as_str()
                         ));
                     }
@@ -728,10 +948,40 @@ impl SessionServiceImpl {
                     handled_this_iteration = true;
                     break;
                 }
-                let mut handoff = match self
-                    .begin_planned_ownership_handoff(&domain, Some(current_domain), Some(&next))
-                    .await
-                {
+                let unit_budget = shutdown_budget
+                    .as_ref()
+                    .map(ShutdownLeaderDrainBudget::unit_handoff_budget);
+                if unit_budget == Some(Duration::ZERO) {
+                    failed = true;
+                    outcomes.push(format!(
+                        "- {} owner={node_id} failed: the stopping node's drain budget left no \
+                         time for another ownership handoff",
+                        drain_move.label
+                    ));
+                    break 'drain;
+                }
+                let preparation = async {
+                    match unit_budget {
+                        Some(budget) => {
+                            self.begin_shutdown_ownership_handoff(
+                                &domain,
+                                Some(current_domain),
+                                Some(&next),
+                                budget,
+                            )
+                            .await
+                        }
+                        None => {
+                            self.begin_planned_ownership_handoff(
+                                &domain,
+                                Some(current_domain),
+                                Some(&next),
+                            )
+                            .await
+                        }
+                    }
+                };
+                let mut handoff = match preparation.await {
                     Ok(handoff) => handoff,
                     Err(error) => {
                         failed = true;
@@ -793,21 +1043,24 @@ impl SessionServiceImpl {
                 moved = moved
                     .checked_add(planned_moves.len())
                     .assured("the moves counted here are schedule entries held in memory");
-                let local_activation_error = self.apply_current_cluster_state().await.err();
+                let revision_activation_error = self
+                    .activate_drained_revision(shutdown_budget.as_ref(), handoff.as_ref())
+                    .await
+                    .err();
                 let mut handoff_activation_error = None;
                 if let Some(handoff) = handoff {
                     debug_assert_eq!(handoff.moves, planned_moves);
-                    if let Some(error) = &local_activation_error {
+                    if let Some(error) = &revision_activation_error {
                         self.defer_planned_ownership_handoff_release(&domain, handoff, error, None);
                     } else if let Err(error) = self
                         .finish_planned_ownership_handoff(&domain, handoff, None)
                         .await
                     {
-                        handoff_activation_error = Some(error.to_string());
+                        handoff_activation_error = Some(format!("{error:#}"));
                     }
                 }
-                let activation_error = match local_activation_error {
-                    Some(error) => Some(error.to_string()),
+                let activation_error = match revision_activation_error {
+                    Some(error) => Some(format!("{error:#}")),
                     None => handoff_activation_error,
                 };
                 for ownership_move in &planned_moves {
@@ -854,13 +1107,42 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Waits for the runtime revision a drain committed to take effect where the drain needs it.
+    ///
+    /// An operator's drain is a command, so it waits until every live node has prepared the
+    /// revision and is ready at it. A stopping node's drain answers within that node's budget
+    /// instead. A unit that hands owned state over waits for its hold's participants to prepare
+    /// the revision, and a commit that moves no owner waits for nothing. Every other node
+    /// completes the revision through its own installation, so a node that prepares slowly cannot
+    /// spend the stopping node's budget.
+    async fn activate_drained_revision(
+        &self,
+        shutdown_budget: Option<&ShutdownLeaderDrainBudget>,
+        handoff: Option<&PlannedOwnershipHandoff>,
+    ) -> error_stack::Result<(), crate::runtime::RuntimeError> {
+        match (shutdown_budget, handoff) {
+            (None, _) => self.apply_current_cluster_state().await,
+            (Some(_), Some(handoff)) => self.wait_for_ownership_handoff_participants(handoff).await,
+            (Some(_), None) => Ok(()),
+        }
+    }
+
     pub(in crate::application) async fn drain_local_node_before_shutdown(
         &self,
         drain_timeout: Duration,
         deadline: ShutdownDeadline,
     ) -> ShutdownPhaseOutcome {
         let budget = ShutdownDrainBudget::start(drain_timeout, deadline);
+        // Stop source admission before the leader begins moving downstream nodes. A Kafka poll
+        // admitted while an emitter moves can otherwise leave its source ACK root waiting on that
+        // move until the entire drain budget expires.
+        self.inner.runtime.close_local_intake();
         let local_node_id = self.inner.consensus.local_node_id().clone();
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_graceful_drain_if_armed(&local_node_id)
+            .await;
         let operator_cordon_exists = self
             .inner
             .consensus
@@ -870,47 +1152,71 @@ impl SessionServiceImpl {
         let ownership_move = self
             .move_local_ownership_for_shutdown(&local_node_id, &budget)
             .await;
-        let ownership_outcome = match ownership_move {
-            ShutdownOwnershipMove::NoReplacement => ShutdownPhaseOutcome::Completed,
-            ShutdownOwnershipMove::NotRequested => ShutdownPhaseOutcome::Abandoned,
-            ShutdownOwnershipMove::Requested(move_outcome) if operator_cordon_exists => {
+        let drain_cordon = ownership_move.drain_cordon(operator_cordon_exists);
+
+        // Moving ownership hands scheduled work to other nodes. Everything this node has already
+        // admitted, including all of its work when no replacement exists, completes here before
+        // terminal teardown, within what remains of the same drain timeout. The release of the
+        // drain's cordon runs beside it, so a consensus write that takes long does not shorten the
+        // time admitted work has to complete.
+        let cordon_settlement =
+            self.settle_shutdown_drain_cordon(&local_node_id, drain_cordon, &budget);
+        let local_drain = self.drain_local_graphs_for_shutdown(&budget);
+        let (cordon_outcome, local_outcome) =
+            futures_util::future::join(cordon_settlement, local_drain).await;
+        ownership_move
+            .outcome()
+            .combine(cordon_outcome)
+            .combine(local_outcome)
+    }
+
+    /// Leaves an operator's cordon in place, and releases the cordon this stopping node's own
+    /// drain may have set within the release bound of `budget`.
+    async fn settle_shutdown_drain_cordon(
+        &self,
+        local_node_id: &ClusterNodeName,
+        drain_cordon: ShutdownDrainCordon,
+        budget: &ShutdownDrainBudget,
+    ) -> ShutdownPhaseOutcome {
+        match drain_cordon {
+            ShutdownDrainCordon::NeverSet => ShutdownPhaseOutcome::Completed,
+            ShutdownDrainCordon::Operator => {
                 info!(
                     node_id = %local_node_id,
                     "preserving operator cordon across graceful shutdown"
                 );
-                move_outcome
+                ShutdownPhaseOutcome::Completed
             }
-            ShutdownOwnershipMove::Requested(move_outcome) => {
-                let cleanup_timeout = SHUTDOWN_CORDON_CLEANUP_TIMEOUT.min(deadline.remaining());
-                let cleanup = nervix_primitives::time::timeout(
-                    cleanup_timeout,
-                    self.clear_shutdown_drain_cordon(&local_node_id),
-                )
-                .await;
-                let cleanup_outcome = match cleanup {
+            ShutdownDrainCordon::SetByDrain => {
+                let quorum = self.shutdown_release_quorum(local_node_id).await;
+                let release_bound = budget.cordon_release_bound(quorum);
+                let release = self.clear_shutdown_drain_cordon(local_node_id);
+                match nervix_primitives::time::timeout(release_bound, release).await {
                     Ok(outcome) => outcome,
                     Err(_) => {
                         warn!(
                             node_id = %local_node_id,
-                            timeout = ?cleanup_timeout,
+                            timeout = ?release_bound,
                             "timed out clearing shutdown drain cordon"
                         );
                         ShutdownPhaseOutcome::Abandoned
                     }
-                };
-                move_outcome.combine(cleanup_outcome)
+                }
             }
-        };
+        }
+    }
 
-        // Moving ownership hands scheduled work to other nodes. Everything this node has already
-        // admitted, including all of its work when no replacement exists, completes here before
-        // terminal teardown, within what remains of the same drain timeout.
+    /// Completes the work this stopping node has already admitted, within what remains of the
+    /// drain timeout.
+    async fn drain_local_graphs_for_shutdown(
+        &self,
+        budget: &ShutdownDrainBudget,
+    ) -> ShutdownPhaseOutcome {
         let local_drain = self.inner.runtime.drain_local_graphs(budget.remaining());
-        let local_outcome = match local_drain.await {
+        match local_drain.await {
             LocalGraphDrainOutcome::Quiescent => ShutdownPhaseOutcome::Completed,
             LocalGraphDrainOutcome::Abandoned => ShutdownPhaseOutcome::Abandoned,
-        };
-        ownership_outcome.combine(local_outcome)
+        }
     }
 
     async fn move_local_ownership_for_shutdown(
@@ -930,31 +1236,31 @@ impl SessionServiceImpl {
                 return ShutdownOwnershipMove::NotRequested;
             }
         };
+        let leader = match route {
+            ShutdownDrainRoute::NoReplacement => return ShutdownOwnershipMove::NoReplacement,
+            ShutdownDrainRoute::Leader(leader) => leader,
+        };
         // A requested drain may cordon the node before it moves anything, so a drain that times out
         // still counts as requested.
-        let drained = match route {
-            ShutdownDrainRoute::NoReplacement => return ShutdownOwnershipMove::NoReplacement,
-            ShutdownDrainRoute::UnreachableLeader => return ShutdownOwnershipMove::NotRequested,
-            ShutdownDrainRoute::LocalLeader => {
-                let drain = self.drain_local_node_as_leader(local_node_id);
-                nervix_primitives::time::timeout(budget.remaining(), drain).await
-            }
-            ShutdownDrainRoute::RemoteLeader(leader) => {
-                let drain = leader.drain(local_node_id);
-                nervix_primitives::time::timeout(budget.remaining(), drain).await
-            }
-        };
-        match drained {
-            Ok(drain_outcome) => ShutdownOwnershipMove::Requested(drain_outcome),
+        let drain = self.ask_shutdown_drain_leader(
+            local_node_id,
+            leader,
+            StoppingNodeDrainAction::Drain {
+                budget: budget.remaining(),
+            },
+        );
+        let answer = match nervix_primitives::time::timeout(budget.remaining(), drain).await {
+            Ok(answer) => answer,
             Err(_) => {
                 warn!(
                     node_id = %local_node_id,
                     timeout = ?budget.timeout,
                     "timed out moving scheduled work off the local node before graceful shutdown"
                 );
-                ShutdownOwnershipMove::Requested(ShutdownPhaseOutcome::Abandoned)
+                return ShutdownOwnershipMove::Requested(ShutdownPhaseOutcome::Abandoned);
             }
-        }
+        };
+        ShutdownOwnershipMove::Requested(answer.into_drain_outcome(local_node_id))
     }
 
     /// Finds where this node's drain is requested. Finding it asks the leader for nothing, so the
@@ -974,65 +1280,72 @@ impl SessionServiceImpl {
             );
             return ShutdownDrainRoute::NoReplacement;
         }
-        let leader_id = self.wait_for_shutdown_drain_leader().await;
-        if &leader_id == local_node_id {
-            return ShutdownDrainRoute::LocalLeader;
-        }
-        let Some(leader_grpc_uri) = self.leader_grpc_uri(&leader_id).await else {
-            warn!(
-                node_id = %local_node_id,
-                leader = %leader_id,
-                "failed to drain local node before graceful shutdown: leader grpc uri is \
-                 unknown"
-            );
-            return ShutdownDrainRoute::UnreachableLeader;
-        };
-        let client = NervixClient::connect_with_options(
-            &leader_grpc_uri,
-            None,
-            grpc_client_connect_options(
-                &leader_grpc_uri,
-                self.inner.configured_basic_auth.as_ref(),
-                self.inner.runtime.dns(),
-            ),
-        )
-        .await;
-        match client {
-            Ok(client) => {
-                ShutdownDrainRoute::RemoteLeader(RemoteShutdownDrainLeader { leader_id, client })
-            }
-            Err(error) => {
-                warn!(
-                    node_id = %local_node_id,
-                    leader = %leader_id,
-                    leader_grpc_uri,
-                    error = %error,
-                    "failed to connect to leader for graceful shutdown drain"
-                );
-                ShutdownDrainRoute::UnreachableLeader
-            }
-        }
+        let leader = self.wait_for_shutdown_drain_leader().await;
+        ShutdownDrainRoute::Leader(leader)
     }
 
-    async fn drain_local_node_as_leader(
+    /// Whether this stopping node and the voters that are live and not terminating can commit the
+    /// release of its drain cordon.
+    async fn shutdown_release_quorum(
         &self,
         local_node_id: &ClusterNodeName,
-    ) -> ShutdownPhaseOutcome {
-        let result = self.drain_node(local_node_id.clone(), None).await;
-        if result.succeeded() {
-            info!(
-                node_id = %local_node_id,
-                message = result.message,
-                "drained local node before graceful shutdown"
-            );
-            ShutdownPhaseOutcome::Completed
-        } else {
-            warn!(
-                node_id = %local_node_id,
-                message = result.message,
-                "failed to drain local node before graceful shutdown"
-            );
-            ShutdownPhaseOutcome::Abandoned
+    ) -> ShutdownReleaseQuorum {
+        let availability = self.inner.cluster.availability_state().await;
+        let staying_node_ids = availability.placement_candidate_node_ids();
+        let voters = self.inner.consensus.membership_voter_ids().await;
+        ShutdownReleaseQuorum::of(local_node_id, &voters, &staying_node_ids)
+    }
+
+    /// Asks `leader` to act on this stopping node's own scheduled work, and asks the leader this
+    /// node observes next whenever the node asked does not lead, or lost its leadership while
+    /// draining or releasing the cordon. While this node leads, it acts for itself.
+    ///
+    /// A leader that loses leadership during a drain preserves committed moves and lets the next
+    /// leader plan the remaining ones within the same budget.
+    /// Another leader hears the request over the interconnect, which authenticates this node by its
+    /// certificate, so asking needs no user credential.
+    async fn ask_shutdown_drain_leader(
+        &self,
+        local_node_id: &ClusterNodeName,
+        first_leader: ClusterNodeName,
+        action: StoppingNodeDrainAction,
+    ) -> ShutdownDrainAnswer {
+        let mut leader = first_leader;
+        let requested_at = Instant::now();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let current_action = match action {
+                StoppingNodeDrainAction::Drain { budget } => StoppingNodeDrainAction::Drain {
+                    budget: budget
+                        .checked_sub(requested_at.elapsed())
+                        .unwrap_or(Duration::ZERO),
+                },
+                StoppingNodeDrainAction::ReleaseCordon => StoppingNodeDrainAction::ReleaseCordon,
+            };
+            let response = if &leader == local_node_id {
+                self.act_for_stopping_node(local_node_id.clone(), current_action)
+                    .await
+            } else {
+                let request = StoppingNodeDrainRequest {
+                    action: current_action,
+                };
+                match self.inner.interconnect.request(&leader, request).await {
+                    Ok(response) => response,
+                    Err(error) => return ShutdownDrainAnswer::Unanswered { leader, error },
+                }
+            };
+            match response {
+                StoppingNodeDrainResponse::Completed { report } => {
+                    return ShutdownDrainAnswer::Completed { leader, report };
+                }
+                StoppingNodeDrainResponse::Failed { report } => {
+                    return ShutdownDrainAnswer::Failed { leader, report };
+                }
+                StoppingNodeDrainResponse::NotLeader => {
+                    sleep(SHUTDOWN_LEADER_OBSERVATION_INTERVAL).await;
+                    leader = self.wait_for_shutdown_drain_leader().await;
+                }
+            }
         }
     }
 
@@ -1051,105 +1364,132 @@ impl SessionServiceImpl {
         &self,
         local_node_id: &ClusterNodeName,
     ) -> ShutdownPhaseOutcome {
-        let leader_id = self.wait_for_shutdown_drain_leader().await;
-        if &leader_id == local_node_id {
-            match self
-                .inner
-                .consensus
-                .set_node_cordoned(local_node_id.clone(), false)
-                .await
-            {
-                Ok(()) => {
-                    info!(
-                        node_id = %local_node_id,
-                        "cleared shutdown drain cordon before graceful shutdown"
-                    );
-                    ShutdownPhaseOutcome::Completed
+        let leader = self.wait_for_shutdown_drain_leader().await;
+        let release = StoppingNodeDrainAction::ReleaseCordon;
+        let answer = self
+            .ask_shutdown_drain_leader(local_node_id, leader, release)
+            .await;
+        answer.into_cordon_release_outcome(local_node_id)
+    }
+
+    /// Answers the requests stopping nodes send about their own scheduled work.
+    ///
+    /// A request names no node: this node acts for the node whose authenticated connection carried
+    /// it. The action runs in a service task of its own, so a drain that has begun finishes, and
+    /// releases what it holds, even when the stopping node stops waiting for it.
+    pub(super) fn register_stopping_node_drain_handler(&self) -> error_stack::Result<(), AppError> {
+        let service = self.clone();
+        self.inner
+            .interconnect
+            .register_handler::<StoppingNodeDrainRequest, _, _>(move |context, request| {
+                let service = service.clone();
+                let node_id = context.peer_node_id().clone();
+                async move {
+                    service
+                        .answer_stopping_node_drain(node_id, request.action)
+                        .await
                 }
-                Err(error) => {
-                    warn!(
-                        node_id = %local_node_id,
-                        error = %error,
-                        "failed to clear shutdown drain cordon before graceful shutdown"
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)
+    }
+
+    async fn answer_stopping_node_drain(
+        &self,
+        node_id: ClusterNodeName,
+        action: StoppingNodeDrainAction,
+    ) -> StoppingNodeDrainResponse {
+        let service = self.clone();
+        let task = self
+            .inner
+            .service_tasks
+            .spawn(async move { service.act_for_stopping_node(node_id, action).await });
+        match task.await {
+            Ok(Some(response)) => response,
+            Ok(None) => StoppingNodeDrainResponse::Failed {
+                report: "the leader reached its shutdown deadline before it finished".to_string(),
+            },
+            Err(error) => StoppingNodeDrainResponse::Failed {
+                report: format!("the leader's drain task failed: {error}"),
+            },
+        }
+    }
+
+    /// Acts, as the leader, on what stopping node `node_id` asked about its own scheduled work. A
+    /// node that does not lead changes nothing.
+    async fn act_for_stopping_node(
+        &self,
+        node_id: ClusterNodeName,
+        action: StoppingNodeDrainAction,
+    ) -> StoppingNodeDrainResponse {
+        let leader = self.inner.consensus.current_leader().await;
+        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
+            return StoppingNodeDrainResponse::NotLeader;
+        }
+        match action {
+            StoppingNodeDrainAction::Drain { budget } => {
+                let drained = self
+                    .drain_node_with_budget(node_id.clone(), None, Some(budget))
+                    .await;
+                if drained.succeeded() {
+                    StoppingNodeDrainResponse::Completed {
+                        report: drained.message,
+                    }
+                } else if drained.is_not_leader()
+                    || self.inner.consensus.current_leader().await.as_ref()
+                        != Some(self.inner.consensus.local_node_id())
+                {
+                    info!(
+                        node_id = %node_id,
+                        report = %drained.message,
+                        "stopping-node drain lost leadership; remaining work needs the next leader"
                     );
-                    ShutdownPhaseOutcome::Abandoned
+                    StoppingNodeDrainResponse::NotLeader
+                } else {
+                    StoppingNodeDrainResponse::Failed {
+                        report: drained.message,
+                    }
                 }
             }
-        } else {
-            let Some(leader_grpc_uri) = self.leader_grpc_uri(&leader_id).await else {
-                warn!(
-                    node_id = %local_node_id,
-                    leader = %leader_id,
-                    "failed to clear shutdown drain cordon: leader grpc uri is unknown"
-                );
-                return ShutdownPhaseOutcome::Abandoned;
-            };
-            let client = NervixClient::connect_with_options(
-                &leader_grpc_uri,
-                None,
-                grpc_client_connect_options(
-                    &leader_grpc_uri,
-                    self.inner.configured_basic_auth.as_ref(),
-                    self.inner.runtime.dns(),
-                ),
-            )
-            .await;
-            let client = match client {
-                Ok(client) => client,
-                Err(error) => {
-                    warn!(
-                        node_id = %local_node_id,
-                        leader = %leader_id,
-                        error = %error,
-                        "failed to connect to leader to clear shutdown drain cordon"
-                    );
-                    return ShutdownPhaseOutcome::Abandoned;
+            StoppingNodeDrainAction::ReleaseCordon => {
+                #[cfg(feature = "testing")]
+                if let Some(delay) = self
+                    .inner
+                    .runtime
+                    .take_shutdown_cordon_release_delay(&node_id)
+                {
+                    sleep(delay).await;
                 }
-            };
-            match client
-                .execute(format!("UNCORDON NODE {local_node_id};"))
-                .await
-            {
-                Ok(outcome) if outcome.succeeded() => {
-                    info!(
-                        node_id = %local_node_id,
-                        leader = %leader_id,
-                        message = outcome.message,
-                        "cleared shutdown drain cordon through leader"
-                    );
-                    ShutdownPhaseOutcome::Completed
-                }
-                Ok(outcome) => {
-                    warn!(
-                        node_id = %local_node_id,
-                        leader = %leader_id,
-                        message = outcome.message,
-                        "failed to clear shutdown drain cordon through leader"
-                    );
-                    ShutdownPhaseOutcome::Abandoned
-                }
-                Err(error) => {
-                    warn!(
-                        node_id = %local_node_id,
-                        leader = %leader_id,
-                        error = %error,
-                        "failed to clear shutdown drain cordon through leader"
-                    );
-                    ShutdownPhaseOutcome::Abandoned
-                }
+                let released = self
+                    .inner
+                    .consensus
+                    .set_node_cordoned(node_id.clone(), false)
+                    .await;
+                Self::cordon_release_response(&node_id, released)
             }
         }
     }
 
-    /// Where the leader's session service is, or `None` while it has not advertised one.
-    async fn leader_grpc_uri(&self, leader_id: &ClusterNodeName) -> Option<String> {
-        let gossip = self.inner.cluster.gossip_state().await;
-        let leader = gossip
-            .live_nodes
-            .into_iter()
-            .find(|node| node.node_id == *leader_id)?;
-        let client_url = leader.client_url?;
-        Some(client_url.to_string())
+    /// The answer to stopping node `node_id`'s request to release its drain cordon, from what this
+    /// leader's write of the release came to.
+    ///
+    /// A leader that lost its leadership while it wrote the release answers as a node that does
+    /// not lead, so the stopping node asks the leader it observes next. Clearing a cordon is
+    /// idempotent, so asking again is safe even when the first write still commits.
+    fn cordon_release_response(
+        node_id: &ClusterNodeName,
+        released: Result<(), Report<ConsensusError>>,
+    ) -> StoppingNodeDrainResponse {
+        let Err(error) = released else {
+            return StoppingNodeDrainResponse::Completed {
+                report: format!("uncordoned node '{node_id}'"),
+            };
+        };
+        if let ConsensusError::LeadershipLost { .. } = error.current_context() {
+            return StoppingNodeDrainResponse::NotLeader;
+        }
+        StoppingNodeDrainResponse::Failed {
+            report: ConsensusError::report_message(&error),
+        }
     }
 
     #[cfg(test)]
@@ -1705,6 +2045,7 @@ impl SessionServiceImpl {
         existing: Option<&nervix_models::DomainSchedule>,
         live_node_ids: &[ClusterNodeName],
     ) {
+        assign_server_listener_nodes(schedule, live_node_ids);
         let Some(existing) = existing else {
             return;
         };
@@ -1859,13 +2200,13 @@ impl SessionServiceImpl {
                 let Model::Ingestor(ingestor) = node.config.as_ref() else {
                     continue;
                 };
-                let Some(IngestSource::Kafka {
+                let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                     client,
                     topic,
                     offset_mode: KafkaOffsetMode::Domain,
                     instances,
                     ..
-                }) = ingestor.input.transport_source()
+                }))) = ingestor.input.transport_entity()
                 else {
                     continue;
                 };
@@ -1922,12 +2263,12 @@ impl SessionServiceImpl {
         let Model::Ingestor(ingestor_model) = ingestor_node.config.as_ref() else {
             return Ok(());
         };
-        let Some(IngestSource::Kafka {
+        let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
             topic: scheduled_topic,
             offset_mode: KafkaOffsetMode::Domain,
             instances: scheduled_instances,
             ..
-        }) = ingestor_model.input.transport_source()
+        }))) = ingestor_model.input.transport_entity()
         else {
             return Ok(());
         };
@@ -1988,7 +2329,7 @@ impl SessionServiceImpl {
 
         let mut stale_keys = Vec::new();
         for (key, watcher) in tasks.iter() {
-            if desired.get(key) != Some(&watcher.spec) {
+            if desired.get(key) != Some(&watcher.spec) || watcher.task.handle.is_finished() {
                 stale_keys.push(key.clone());
             }
         }
@@ -2032,15 +2373,15 @@ impl SessionServiceImpl {
                         spec_for_task.domain.as_str(),
                         spec_for_task.ingestor.as_str()
                     ),
+                    service.inner.runtime.executor().clone(),
                 ) {
                     Ok(inspector) => inspector,
                     Err(error) => {
                         service.broadcast_error(format!(
                             "failed to create Kafka partition watcher for ingestor '{}' in domain \
-                             '{}': {}",
+                             '{}': {error:#}",
                             spec_for_task.ingestor.as_str(),
                             spec_for_task.domain.as_str(),
-                            error
                         ));
                         return;
                     }
@@ -2051,6 +2392,10 @@ impl SessionServiceImpl {
                     let mut partitions =
                         match inspector.partitions(spec_for_task.topic.as_str()).await {
                             Ok(partitions) => partitions,
+                            // The ingestor's own source reports a topic the broker does not have,
+                            // so the watcher records it as a topic without partitions and
+                            // publishes the real schedule once the topic is provisioned.
+                            Err(error) if error.current_context().is_missing_topic() => Vec::new(),
                             Err(error) => {
                                 service.broadcast_error(format!(
                                     "failed to inspect Kafka partitions for ingestor '{}' in \
@@ -2113,3 +2458,7 @@ mod tests;
 #[cfg(test)]
 #[path = "scheduling_publication_tests.rs"]
 mod publication_tests;
+
+#[cfg(test)]
+#[path = "scheduling_shutdown_drain_tests.rs"]
+mod shutdown_drain_tests;

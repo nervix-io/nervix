@@ -1,3 +1,5 @@
+mod paced_interconnect;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
@@ -18,7 +20,7 @@ use aws_sdk_sqs::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::Report;
 use fjall::Database;
-use futures_util::SinkExt;
+use futures_util::{SinkExt, future::join_all};
 use lapin::{
     BasicProperties, Connection, ConnectionProperties,
     options::{BasicAckOptions, BasicConsumeOptions, BasicPublishOptions, QueueDeclareOptions},
@@ -38,21 +40,24 @@ use nervix_connector_kafka::testing_rdkafka::{
     producer::{FutureProducer, FutureRecord},
     topic_partition_list::{Offset, TopicPartitionList},
 };
-use nervix_consensus::RaftRetentionPolicy;
+use nervix_consensus::{RaftRetentionSettings, RaftTimings};
 use nervix_dns::{DnsConfiguration, DnsResolver};
 use nervix_execution::Executor;
 use nervix_interconnect::{
     ControlEnvelope, Envelope, PeerResolver, PeerTarget, RuntimeErrorEvent, TlsConfigBundle,
     Transport, TransportClock, TransportIdentity, TransportOptions,
 };
-use nervix_models::{ClusterNodeName, NodeEndpoint};
+use nervix_models::{ClusterNodeName, NodeEndpoint, TrustRootFingerprint};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statement_sources};
 use nervix_primitives::{
+    runtime::Handle,
     sync::{
         StdArc,
         blocking::{LazyLock, OnceLock},
     },
     time::Instant,
 };
+use paced_interconnect::PacedInterconnect;
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
 pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
@@ -62,17 +67,21 @@ use nervix_primitives::{
     net::{TcpListener as TokioTcpListener, TcpStream},
     stream::StreamExt,
     sync::{Arc, CancellationToken, blocking::Mutex, mpsc, oneshot, watch},
-    task::JoinHandle,
+    task::{AbortOnDropHandle, JoinHandle},
     time::{sleep, timeout},
 };
 use nervix_server::{
     FaultInjection, SchedulerMode,
     application::{
-        Application, CommandExecutionPolicy, InternalTransportMode, ShutdownCoordinator,
-        init_tracing_to_file,
+        Application, CommandExecutionPolicy, InternalTransportMode, NodeIdentity, NodeSettings,
+        SchedulingSettings, SettingOverride, ShutdownCoordinator, ShutdownOutcome,
+        ShutdownSettings, TransactionBounds, TransactionLimits, init_tracing_to_file,
     },
-    memory_pressure::MemoryPressureConfig,
-    runtime::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, branch_task_stop_timeout},
+    cluster::{MembershipSettings, MembershipValues},
+    memory_pressure::{MemoryPressureConfig, MemoryPressureSettings},
+    runtime::{
+        DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, RuntimeSettings, branch_task_stop_timeout,
+    },
 };
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
@@ -92,7 +101,6 @@ use rustls::{
 };
 use rustls_pki_types::pem::PemObject;
 use tempfile::{TempDir, tempdir};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_rustls::TlsConnector;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, client_async, connect_async,
@@ -101,37 +109,44 @@ use tokio_tungstenite::{
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
-pub(crate) use super::raw_session::{TestSession, open_raw_session};
 use super::{
+    broker_observer::BROKER_TIMEOUT,
     cluster_teardown::{CLUSTER_TEARDOWN_BUDGET, ClusterTeardown, TeardownNode},
+    command_recovery::LeaderRoutes,
     dependencies::{
         DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
         PULSAR_ADMIN_ADDR, PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT,
         SQS_TLS_ENDPOINT,
     },
     kafka_group_member::ExternalKafkaGroupMember,
+    nats_observer::NatsObserver,
     node_liveness::{
-        NodeStartupError, NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask,
-        ReadinessProbeOutcome,
+        NodeStartupError, NodeTaskState, NodeTaskTerminalOutcome, NodeTaskWaitOutcome,
+        OwnedNodeTask, ReadinessProbeOutcome,
     },
     node_startup::{
         ATTEMPT_READINESS_BUDGET, AttemptCleanup, NODE_STARTUP_BUDGET, NodeStartup, StartableNode,
-        cluster_startup_budget,
+        StartupPorts, StartupRetryPolicy, cluster_startup_budget,
     },
+    node_stop::{NodeStopClock, NodeStopEnding, NodeStopProgress, NodeStopRecord},
     peer_addressing::{
         ClusterDns, FixtureAnswer, InterconnectAddress, PeerAddressing, PublishedNode,
         qualified_name,
     },
-    phase_deadline::PhaseDeadline,
+    phase_deadline::{BeforeDeadline, PhaseDeadline},
     port_pool::{next_ports, release_test_ports},
     raw_session::{TestUpload, send_upload},
-    redis_client::TestRedisClient,
+    redis_client::{TestRedisClient, publish_burst},
     scenario_phase::ScenarioIdentity,
     status_request::{
         STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint,
         StatusRequestError, StatusTransport,
     },
-    suite_watchdog::{LiveClusterHandle, LiveClusterRegistration, NodeStop},
+    suite_watchdog::{LiveClusterRegistration, NodeStop, SUITE_BUDGET},
+};
+pub(crate) use super::{
+    broker_observer::{BrokerMessage, BrokerObserver},
+    raw_session::{TestSession, open_raw_session},
 };
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -145,7 +160,9 @@ pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
              in Duration"
         ),
     };
-const BROKER_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long provisioning a Pulsar subscription repeats a request the broker refuses as a
+/// conflict while an ingestor's check holds a non-durable cursor of the same name.
+const PULSAR_PROVISION_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_RUNTIME_BRANCH_STOP_TIMEOUT: Duration =
     branch_task_stop_timeout(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
 const DEFAULT_GRACEFUL_SHUTDOWN_PHASE_FLOOR: Duration =
@@ -185,137 +202,17 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const SQS_REGION: &str = "us-east-1";
 const TEST_LOG_DIR: &str = "tests/logs";
 const TEST_LOG_FILE: &str = "tests/logs/scenarios.log";
-const TEST_RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
-const TEST_RAFT_ELECTION_TIMEOUT_MIN: Duration = Duration::from_secs(1);
-const TEST_RAFT_ELECTION_TIMEOUT_MAX: Duration = Duration::from_secs(2);
+/// A sixth of a second, so the election timeouts consensus derives from it stay just inside the one
+/// and two seconds scenarios size their leader waits for.
+const TEST_RAFT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(166);
+/// The cluster every test node claims unless a scenario names another for a node that joins.
+const TEST_CLUSTER_ID: &str = "cucumber";
 const TEST_REPLICA_COUNT: usize = 0;
 const TEST_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const TEST_AUTH_USERNAME: &str = "default";
 pub(crate) const TEST_AUTH_PASSWORD: &str = "nervix-test-password";
 static DEV_TLS_READY: OnceLock<io::Result<()>> = OnceLock::new();
 static TEST_LOG_TRUNCATED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
-
-#[derive(Debug)]
-pub(crate) struct StallableTcpProxy {
-    local_addr: std::net::SocketAddr,
-    paused: watch::Sender<bool>,
-    cancellation: CancellationToken,
-    task: JoinHandle<()>,
-}
-
-impl StallableTcpProxy {
-    pub(crate) async fn start(target_host: String, target_port: u16) -> io::Result<Self> {
-        let listener = TokioTcpListener::bind((HOST, 0)).await?;
-        let local_addr = listener.local_addr()?;
-        let (paused, paused_rx) = watch::channel(false);
-        let cancellation = CancellationToken::new();
-        let task_cancellation = cancellation.clone();
-        let task = nervix_primitives::task::spawn(async move {
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                let accepted = nervix_primitives::select! {
-                    _ = task_cancellation.cancelled() => return,
-                    accepted = listener.accept() => accepted,
-                };
-                let Ok((downstream, _)) = accepted else {
-                    return;
-                };
-                let target_host = target_host.clone();
-                let paused = paused_rx.clone();
-                let connection_cancellation = task_cancellation.child_token();
-                nervix_primitives::task::spawn(async move {
-                    let Ok(upstream) =
-                        TcpStream::connect((target_host.as_str(), target_port)).await
-                    else {
-                        return;
-                    };
-                    let (downstream_read, downstream_write) = downstream.into_split();
-                    let (upstream_read, upstream_write) = upstream.into_split();
-                    let upstream_copy = copy_through_stall_gate(
-                        downstream_read,
-                        upstream_write,
-                        paused.clone(),
-                        connection_cancellation.clone(),
-                    );
-                    let downstream_copy = copy_through_stall_gate(
-                        upstream_read,
-                        downstream_write,
-                        paused,
-                        connection_cancellation,
-                    );
-                    let _ = tokio::join!(upstream_copy, downstream_copy);
-                });
-            }
-        });
-        Ok(Self {
-            local_addr,
-            paused,
-            cancellation,
-            task,
-        })
-    }
-
-    pub(crate) fn local_port(&self) -> u16 {
-        self.local_addr.port()
-    }
-
-    pub(crate) fn set_paused(&self, paused: bool) {
-        self.paused.send_replace(paused);
-    }
-}
-
-impl Drop for StallableTcpProxy {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
-        self.task.abort();
-    }
-}
-
-async fn copy_through_stall_gate<Reader, Writer>(
-    mut reader: Reader,
-    mut writer: Writer,
-    mut paused: watch::Receiver<bool>,
-    cancellation: CancellationToken,
-) -> io::Result<()>
-where
-    Reader: AsyncRead + Unpin,
-    Writer: AsyncWrite + Unpin,
-{
-    let mut buffer = vec![0_u8; 16 * 1024];
-    loop {
-        nervix_primitives::task::consume_budget().await;
-        wait_for_proxy_resume(&mut paused, &cancellation).await?;
-        let read = nervix_primitives::select! {
-            biased;
-            _ = cancellation.cancelled() => return Ok(()),
-            changed = paused.changed() => {
-                changed.map_err(io::Error::other)?;
-                continue;
-            }
-            read = reader.read(&mut buffer) => read?,
-        };
-        if read == 0 {
-            writer.shutdown().await?;
-            return Ok(());
-        }
-        wait_for_proxy_resume(&mut paused, &cancellation).await?;
-        writer.write_all(&buffer[..read]).await?;
-    }
-}
-
-async fn wait_for_proxy_resume(
-    paused: &mut watch::Receiver<bool>,
-    cancellation: &CancellationToken,
-) -> io::Result<()> {
-    while *paused.borrow_and_update() {
-        nervix_primitives::task::consume_budget().await;
-        nervix_primitives::select! {
-            _ = cancellation.cancelled() => return Err(io::Error::other("TCP proxy stopped")),
-            changed = paused.changed() => changed.map_err(io::Error::other)?,
-        }
-    }
-    Ok(())
-}
 
 pub(crate) fn test_basic_auth_token_for_password(password: &str) -> String {
     BASE64_STANDARD.encode(format!("{TEST_AUTH_USERNAME}:{password}"))
@@ -425,7 +322,7 @@ fn observability_metric_reaches(
 /// window rather than an instant inside it. Scrape failures are skipped rather than ending the
 /// sampling, because a node that is busy answering the work under test is the case being measured.
 pub(crate) async fn sample_peak_observability_metric(
-    url: String,
+    mut url: watch::Receiver<String>,
     metric_name: String,
     label_fragments: Vec<String>,
     cancellation: nervix_primitives::sync::CancellationToken,
@@ -434,7 +331,8 @@ pub(crate) async fn sample_peak_observability_metric(
     let mut peak = 0.0_f64;
     loop {
         nervix_primitives::task::consume_budget().await;
-        if let Ok(response) = client.get(&url).send().await
+        let current_url = url.borrow_and_update().clone();
+        if let Ok(response) = client.get(&current_url).send().await
             && let Ok(body) = response.text().await
         {
             for line in body.lines() {
@@ -454,6 +352,11 @@ pub(crate) async fn sample_peak_observability_metric(
         }
         nervix_primitives::select! {
             () = cancellation.cancelled() => return peak,
+            changed = url.changed() => {
+                if changed.is_err() {
+                    return peak;
+                }
+            }
             () = sleep(POLL_INTERVAL) => {}
         }
     }
@@ -612,6 +515,52 @@ pub(crate) fn client_connect_options(server: &str) -> io::Result<ConnectOptions>
     }
 }
 
+/// The slowest healthy `UPLOAD RESOURCE` of a 48 MiB archive measured beside other large uploads.
+/// With 48 of them on one shared, disk-backed host, those that completed did so just inside the
+/// client's 120-second window and 35 others did not; on an idle host 72 of them took at most 52
+/// seconds.
+const SLOWEST_HEALTHY_UPLOAD: Duration = Duration::from_secs(120);
+/// A policy input: an upload's pace follows the storage and CPU the rest of the suite leaves it,
+/// and both transfers of its archive slow down together.
+const UPLOAD_WAIT_HEADROOM_FACTOR: u32 = 5;
+/// How long a native client the harness runs an `UPLOAD RESOURCE` through waits for the upload,
+/// every attempt and redirect included. The leader answers an upload only once every live node has
+/// fetched, verified and installed its archive, so the wait is two transfers of the archive at the
+/// pace the suite's load allows, which the client's default request and retry windows do not
+/// always cover.
+pub(crate) const UPLOAD_COMMAND_WAIT: Duration =
+    match SLOWEST_HEALTHY_UPLOAD.checked_mul(UPLOAD_WAIT_HEADROOM_FACTOR) {
+        Some(wait) => wait,
+        None => panic!("the upload command wait must fit a duration"),
+    };
+const _: () = assert!(
+    UPLOAD_COMMAND_WAIT.as_nanos() < SUITE_BUDGET.as_nanos(),
+    "an upload the harness waits for must end inside the suite budget"
+);
+
+/// The options of a native client the harness runs `commands` through. A client that runs an
+/// `UPLOAD RESOURCE` waits [`UPLOAD_COMMAND_WAIT`] for its requests and their retries; every other
+/// client keeps the client's own defaults.
+pub(crate) fn command_connect_options(server: &str, commands: &str) -> io::Result<ConnectOptions> {
+    let mut options = client_connect_options(server)?;
+    if uploads_resource(commands) {
+        options.request_timeout = UPLOAD_COMMAND_WAIT;
+        options.retry_timeout = UPLOAD_COMMAND_WAIT;
+    }
+    Ok(options)
+}
+
+/// Whether `commands` holds an `UPLOAD RESOURCE`. Commands that do not parse upload nothing, and
+/// the client reports them as it would any other.
+fn uploads_resource(commands: &str) -> bool {
+    let Ok(statements) = parse_client_statement_sources(commands) else {
+        return false;
+    };
+    statements
+        .iter()
+        .any(|parsed| matches!(parsed.statement, ClientStatement::UploadResource(_)))
+}
+
 pub(crate) struct InterconnectTestCa {
     certificate: rcgen::Certificate,
     key: KeyPair,
@@ -635,6 +584,11 @@ impl std::fmt::Debug for InterconnectTestCa {
 
 impl InterconnectTestCa {
     pub(crate) fn new(root: &TempDir) -> io::Result<Self> {
+        Self::new_in(root.path())
+    }
+
+    /// A fresh authority whose certificate is written into `directory`.
+    fn new_in(directory: &std::path::Path) -> io::Result<Self> {
         let mut params = CertificateParams::default();
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![
@@ -644,7 +598,7 @@ impl InterconnectTestCa {
         ];
         let key = KeyPair::generate().map_err(io::Error::other)?;
         let certificate = params.self_signed(&key).map_err(io::Error::other)?;
-        let path = root.path().join("interconnect-ca.pem");
+        let path = directory.join("interconnect-ca.pem");
         std::fs::write(&path, certificate.pem())?;
         Ok(Self {
             certificate,
@@ -655,11 +609,12 @@ impl InterconnectTestCa {
 
     fn issue_node(
         &self,
+        cluster_id: &str,
         node_id: &str,
         directory: &std::path::Path,
     ) -> io::Result<(PathBuf, PathBuf)> {
         self.issue_node_with_identity(
-            "cucumber",
+            cluster_id,
             node_id,
             TestCertificateValidity::Current,
             directory,
@@ -707,6 +662,28 @@ impl InterconnectTestCa {
     }
 }
 
+/// Which nodes of a test cluster start with the default user's initial password.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DefaultUserPasswordSeed {
+    /// Every node starts with it.
+    #[default]
+    EveryNode,
+    /// Only the node that bootstraps the cluster starts with it, as in the documented Docker
+    /// Compose deployment. The other nodes learn the default user from the replicated user records.
+    BootstrapNodeOnly,
+}
+
+impl DefaultUserPasswordSeed {
+    /// The initial password a node starts with, given whether it bootstraps the cluster.
+    fn initial_password(self, bootstraps: bool) -> Option<String> {
+        match self {
+            Self::EveryNode => Some(TEST_AUTH_PASSWORD.to_string()),
+            Self::BootstrapNodeOnly if bootstraps => Some(TEST_AUTH_PASSWORD.to_string()),
+            Self::BootstrapNodeOnly => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum InterconnectCredentialFault {
     UntrustedClient,
@@ -716,9 +693,59 @@ pub(crate) enum InterconnectCredentialFault {
     ExpiredCertificate,
 }
 
+/// What a whole-cluster restart arms after every node has stopped and before any starts again.
+#[derive(Debug, Clone, Copy)]
+enum RestartArrangement<'a> {
+    /// Every node starts again as it stopped.
+    Unchanged,
+    /// The bootstrap node holds the first heartbeat this voter relays and fails its health probes,
+    /// so the scenario observes scheduling while the voter looks unavailable.
+    RelayedVoter(&'a str),
+    /// The first runtime installation this node begins waits until the scenario releases it.
+    HeldRuntimeInstallation(&'a str),
+    /// This node runs and gossips as soon as it starts, but the restart counts it ready only once
+    /// the restarted cluster's leader has ended its startup voter observation, as a loaded host can
+    /// keep a live node from reporting ready.
+    ReadyAfterStartupObservation(&'a str),
+}
+
+impl<'a> RestartArrangement<'a> {
+    /// The voter whose relayed heartbeat the restart holds, which the cluster cannot wait to catch
+    /// up until the scenario releases it.
+    fn relayed_voter(self) -> Option<&'a str> {
+        match self {
+            Self::RelayedVoter(voter) => Some(voter),
+            Self::Unchanged
+            | Self::HeldRuntimeInstallation(_)
+            | Self::ReadyAfterStartupObservation(_) => None,
+        }
+    }
+
+    /// The node the restart counts ready only once the leader's startup voter observation ended.
+    fn ready_after_startup_observation(self) -> Option<&'a str> {
+        match self {
+            Self::ReadyAfterStartupObservation(node) => Some(node),
+            Self::Unchanged | Self::RelayedVoter(_) | Self::HeldRuntimeInstallation(_) => None,
+        }
+    }
+}
+
+/// What every node of one cluster uses for as long as it runs. The cluster and each of its nodes
+/// share it, so a node that is still stopping when its cluster is dropped keeps its storage and
+/// stays published until its own task has ended.
+#[derive(Debug)]
+struct ClusterRoots {
+    /// The temporary storage every node's databases and certificates live in.
+    storage: TempDir,
+    /// Publishes this cluster to the suite watchdog for as long as the scenario holds it or one of
+    /// its nodes still runs, so a suite timeout can name its nodes and ask every one of them to
+    /// stop.
+    live: LiveClusterRegistration,
+}
+
 #[derive(Debug)]
 pub(crate) struct Cluster {
-    _root_dir: TempDir,
+    roots: Arc<ClusterRoots>,
     interconnect_ca: InterconnectTestCa,
     peer_addressing: PeerAddressing,
     /// The DNS a named cluster resolves peers through; a literally addressed cluster has none.
@@ -726,12 +753,31 @@ pub(crate) struct Cluster {
     nodes: BTreeMap<String, NodeHandle>,
     fault_injection: FaultInjection,
     dependencies: DependencyEndpoints,
-    /// Publishes this cluster to the suite watchdog for as long as the scenario holds it, so a
-    /// suite timeout can name its nodes and ask every one of them to stop.
-    live: LiveClusterRegistration,
     /// What every node's name begins with: the n-th node is `<prefix>-<n>`, and the first one
     /// bootstraps the cluster.
     node_name_prefix: String,
+    /// What a scenario named for nodes that are not members yet, applied when each is registered.
+    pending_members: BTreeMap<String, PendingMember>,
+}
+
+/// What a node that is not a member yet brings when it first starts, as a scenario named it.
+#[derive(Debug, Default)]
+struct PendingMember {
+    /// The cluster it claims in its configuration and its certificate, when not the test cluster.
+    cluster_id: Option<String>,
+    /// Whether it trusts a second certificate authority beside the cluster's own.
+    additional_trust_anchor: bool,
+    /// The settings it starts with over the cluster's own.
+    setting_overrides: Vec<SettingOverride>,
+}
+
+/// How a node's attempt to join a running cluster ended.
+#[derive(Debug)]
+pub(crate) enum JoinAttempt {
+    /// The node became a voter of the membership it reports.
+    Admitted,
+    /// The node stopped before it was admitted; the text is how its start or its task ended.
+    Stopped(String),
 }
 
 #[derive(Debug, Clone)]
@@ -740,6 +786,9 @@ pub(crate) struct TestClusterConfig {
     #[cfg(feature = "testing")]
     pub scheduler_mode: Option<SchedulerMode>,
     pub state_snapshot_interval: Duration,
+    /// The restore staging quota a scenario gives every node; without one each node derives it
+    /// from its database volume.
+    pub restore_staging_max_bytes: Option<u64>,
     pub transaction_idle_timeout: Duration,
     pub transaction_tombstone_retention: Duration,
     pub command_retry_validity: Duration,
@@ -752,15 +801,18 @@ pub(crate) struct TestClusterConfig {
     pub drain_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub memory_pressure: Option<MemoryPressureConfig>,
-    pub raft_election_timeout_min: Duration,
-    pub raft_election_timeout_max: Duration,
-    pub raft_retention: RaftRetentionPolicy,
+    pub raft_heartbeat_interval: Duration,
+    pub raft_retention: RaftRetentionSettings,
     pub temp_dir: Option<PathBuf>,
+    /// Settings a scenario names for one node, applied over the cluster's own when that node
+    /// next starts.
+    pub node_setting_overrides: BTreeMap<String, Vec<SettingOverride>>,
     pub dependencies: DependencyEndpoints,
     pub peer_addressing: PeerAddressing,
     /// What every node's name begins with: the n-th node is `<prefix>-<n>`. A scenario that runs a
     /// second cluster names its nodes apart from the first one's.
     pub node_name_prefix: String,
+    pub default_user_password: DefaultUserPasswordSeed,
 }
 
 impl Default for TestClusterConfig {
@@ -770,6 +822,7 @@ impl Default for TestClusterConfig {
             #[cfg(feature = "testing")]
             scheduler_mode: None,
             state_snapshot_interval: TEST_STATE_SNAPSHOT_INTERVAL,
+            restore_staging_max_bytes: None,
             transaction_idle_timeout: Duration::from_secs(15 * 60),
             transaction_tombstone_retention: Duration::from_secs(15 * 60),
             command_retry_validity: Duration::from_secs(15 * 60),
@@ -782,14 +835,78 @@ impl Default for TestClusterConfig {
             drain_timeout: DEFAULT_TEST_DRAIN_TIMEOUT,
             shutdown_timeout: DEFAULT_TEST_SHUTDOWN_TIMEOUT,
             memory_pressure: None,
-            raft_election_timeout_min: TEST_RAFT_ELECTION_TIMEOUT_MIN,
-            raft_election_timeout_max: TEST_RAFT_ELECTION_TIMEOUT_MAX,
-            raft_retention: RaftRetentionPolicy::default(),
+            raft_heartbeat_interval: TEST_RAFT_HEARTBEAT_INTERVAL,
+            raft_retention: RaftRetentionSettings::default(),
             temp_dir: None,
+            node_setting_overrides: BTreeMap::new(),
             dependencies: DependencyEndpoints::default(),
             peer_addressing: PeerAddressing::default(),
             node_name_prefix: "node".to_string(),
+            default_user_password: DefaultUserPasswordSeed::default(),
         }
+    }
+}
+
+impl TestClusterConfig {
+    /// The settings `node_id` starts with: the cluster's own, with the settings a scenario named
+    /// for that node applied over them exactly as the server's command line reads them.
+    fn node_settings(&self, node_id: &str) -> io::Result<NodeSettings> {
+        let settings = NodeSettings {
+            raft: RaftTimings::resolve(Some(self.raft_heartbeat_interval))
+                .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            raft_retention: self.raft_retention,
+            membership: MembershipSettings::resolve(MembershipValues {
+                node_unavailability_timeout: Some(TEST_NODE_UNAVAILABILITY_TIMEOUT),
+                ..MembershipValues::default()
+            })
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            scheduling: SchedulingSettings::resolve(Some(self.replica_count))
+                .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            runtime: RuntimeSettings::resolve(
+                Some(self.state_snapshot_interval),
+                self.restore_staging_max_bytes.map(ubyte::ByteUnit::Byte),
+            )
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            transactions: TransactionLimits::resolve(TransactionBounds {
+                idle_timeout: Some(self.transaction_idle_timeout),
+                tombstone_retention: Some(self.transaction_tombstone_retention),
+                max_statements: Some(self.transaction_max_statements),
+                max_source_bytes: Some(self.transaction_max_source_bytes),
+                max_open: Some(self.transaction_max_open),
+            })
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            commands: CommandExecutionPolicy::resolve(
+                Some(self.command_retry_validity),
+                Some(self.command_execution_capacity),
+            )
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            memory_pressure: self.memory_pressure_settings()?,
+            shutdown: ShutdownSettings::resolve(
+                Some(self.shutdown_timeout),
+                Some(self.drain_timeout),
+            )
+            .map_err(|report| io::Error::other(format!("{report:#}")))?,
+            ..NodeSettings::default()
+        };
+        let Some(overrides) = self.node_setting_overrides.get(node_id) else {
+            return Ok(settings);
+        };
+        settings
+            .with_overrides(overrides)
+            .map_err(|report| io::Error::other(format!("{report:#}")))
+    }
+
+    fn memory_pressure_settings(&self) -> io::Result<MemoryPressureSettings> {
+        let Some(config) = self.memory_pressure else {
+            return Ok(MemoryPressureSettings::default());
+        };
+        MemoryPressureSettings::resolve(
+            Some(config.high_watermark),
+            Some(config.low_watermark),
+            Some(config.check_interval),
+            Some(config.resume_jitter),
+        )
+        .map_err(|report| io::Error::other(format!("{report:#}")))
     }
 }
 
@@ -814,9 +931,12 @@ impl Cluster {
         };
         truncate_test_log_once()?;
         init_tracing_to_file(std::path::Path::new(TEST_LOG_FILE))?;
-        let root_dir = tempdir()?;
-        let interconnect_ca = InterconnectTestCa::new(&root_dir)?;
-        let live = LiveClusterRegistration::start(scenario);
+        let storage = tempdir()?;
+        let interconnect_ca = InterconnectTestCa::new(&storage)?;
+        let roots = Arc::new(ClusterRoots {
+            storage,
+            live: LiveClusterRegistration::start(scenario),
+        });
         /// One node of the cluster being built, before its spec exists.
         struct PlannedNode {
             node_id: String,
@@ -843,7 +963,7 @@ impl Cluster {
                 listen_ip: node.address.listen_ip,
             });
         }
-        let dns = ClusterDns::start(peer_addressing, root_dir.path(), &published).await?;
+        let dns = ClusterDns::start(peer_addressing, roots.storage.path(), &published).await?;
         let mut nodes = BTreeMap::new();
 
         for PlannedNode {
@@ -852,36 +972,40 @@ impl Cluster {
             address,
         } in planned
         {
-            let mut spec = NodeSpec::new(&root_dir, &interconnect_ca, &node_id, index == 1)?;
+            let mut spec = NodeSpec::new(&roots.storage, &interconnect_ca, &node_id, index == 1)?;
             spec.set_interconnect_address(address);
             spec.dns = dns.as_ref().map(ClusterDns::configuration);
             fault_injection
                 .set_syslog_ingestor_bind_ip(node_name(&node_id), spec.syslog_ingestor_host);
             nodes.insert(
                 node_id.clone(),
-                NodeHandle::new(spec, fault_injection.clone(), config.clone(), live.handle()),
+                NodeHandle::new(spec, fault_injection.clone(), config.clone(), roots.clone()),
             );
         }
 
         let mut cluster = Self {
-            _root_dir: root_dir,
+            roots,
             interconnect_ca,
             peer_addressing,
             dns,
             fault_injection,
             nodes,
             dependencies: config.dependencies,
-            live,
             node_name_prefix: config.node_name_prefix,
+            pending_members: BTreeMap::new(),
         };
 
         if let Err(error) = cluster.start_nodes_and_wait(node_count).await {
-            let cleanup_error = cluster.shutdown().await.err();
-            return Err(if let Some(cleanup_error) = cleanup_error {
-                io::Error::other(format!("{error}; cleanup failed: {cleanup_error}"))
-            } else {
-                error
-            });
+            // A construction that failed has no assertion left to serve, so the nodes it started
+            // stop together under the one cleanup budget rather than one after another under the
+            // product shutdown deadlines a scenario-driven stop observes.
+            let teardown = cluster.shutdown_for_teardown().await;
+            let Some(unclean) = teardown.unclean() else {
+                return Err(error);
+            };
+            return Err(io::Error::other(format!(
+                "{error}; cleanup {teardown}: {unclean}"
+            )));
         }
 
         Ok(cluster)
@@ -947,20 +1071,76 @@ impl Cluster {
     /// Start a node without waiting for it to catch up with the leader.
     ///
     /// A scenario whose subject is a node that cannot apply what the leader committed waits for
-    /// its own condition instead, and the retry [`Cluster::start_node`] performs would restart a
-    /// node that had already consumed the failure the scenario armed. Its budget is therefore one
-    /// attempt's readiness rather than the whole per-node startup budget, which exists for the
-    /// retries this path must not perform.
+    /// its own condition. Only a lost early listener bind permits another launch, before runtime
+    /// initialization could consume the failure it armed. Every launch, failed-task cleanup and
+    /// pause shares one readiness attempt's budget; a readiness timeout is terminal here.
     pub(crate) async fn start_node_without_catching_up(&mut self, node_id: &str) -> io::Result<()> {
         let handle = self
             .nodes
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        handle.launch()?;
+        let node = node_name(&handle.spec.node_id);
+        NodeStartup::start(
+            &node,
+            handle,
+            PhaseDeadline::after(ATTEMPT_READINESS_BUDGET),
+            StartupRetryPolicy::BindBeforeRuntime,
+        )
+        .await
+        .map_err(io::Error::other)
+    }
+
+    /// Names a setting `node_id` starts with from its next launch on, over the cluster's own. A
+    /// node that is not a member yet starts with it when it is registered.
+    pub(crate) fn override_node_setting(&mut self, node_id: &str, setting: SettingOverride) {
+        let Some(handle) = self.nodes.get_mut(node_id) else {
+            self.pending_member(node_id).setting_overrides.push(setting);
+            return;
+        };
         handle
-            .readiness(1, PhaseDeadline::after(ATTEMPT_READINESS_BUDGET))
-            .await
-            .map_err(io::Error::other)
+            .config
+            .node_setting_overrides
+            .entry(node_id.to_string())
+            .or_default()
+            .push(setting);
+    }
+
+    /// Makes `node_id`, which is not a member yet, claim `cluster_id` in its configuration and in
+    /// the certificate it presents.
+    pub(crate) fn claim_cluster_for_new_node(&mut self, node_id: &str, cluster_id: &str) {
+        self.pending_member(node_id).cluster_id = Some(cluster_id.to_string());
+    }
+
+    /// Makes `node_id`, which is not a member yet, trust a second certificate authority beside
+    /// the cluster's own, so every certificate it meets still verifies while its trust root
+    /// differs from every member's.
+    pub(crate) fn trust_additional_authority_for_new_node(&mut self, node_id: &str) {
+        self.pending_member(node_id).additional_trust_anchor = true;
+    }
+
+    fn pending_member(&mut self, node_id: &str) -> &mut PendingMember {
+        assert!(
+            !self.nodes.contains_key(node_id),
+            "node '{node_id}' is already a member of the cluster"
+        );
+        self.pending_members.entry(node_id.to_string()).or_default()
+    }
+
+    /// The trust root `node_id` presents, read from its trust bundle the way its transport reads
+    /// it.
+    pub(crate) fn trust_root_of(&self, node_id: &str) -> io::Result<TrustRootFingerprint> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| io::Error::other(format!("unknown node '{node_id}'")))?;
+        let bundle = TlsConfigBundle::from_pem_files(
+            &handle.spec.interconnect_tls_ca,
+            &handle.spec.interconnect_tls_cert,
+            &handle.spec.interconnect_tls_key,
+            TransportClock::system(),
+        )
+        .map_err(|error| io::Error::other(format!("{error:#}")))?;
+        Ok(bundle.trust_root())
     }
 
     pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
@@ -977,6 +1157,11 @@ impl Cluster {
     ) -> io::Result<()> {
         self.start_node_without_waiting_for_raft_catch_up_within(node_id, construction)
             .await?;
+        self.wait_for_node_raft_catch_up(node_id).await
+    }
+
+    /// Compare public applied positions after a startup fault has been released.
+    pub(crate) async fn wait_for_node_raft_catch_up(&self, node_id: &str) -> io::Result<()> {
         let leader_lookup = PhaseDeadline::after(STATUS_WAIT_BUDGET);
         let mut leader_applied = None;
         for probe_node_id in self
@@ -1037,12 +1222,67 @@ impl Cluster {
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         let node = node_name(&handle.spec.node_id);
         let budget = construction.nested(NODE_STARTUP_BUDGET);
-        NodeStartup::start(&node, handle, budget)
+        NodeStartup::start(&node, handle, budget, StartupRetryPolicy::Transient)
             .await
             .map_err(io::Error::other)
     }
 
     pub(crate) async fn add_node(&mut self, node_id: &str) -> io::Result<()> {
+        self.register_new_node(node_id)?;
+        self.start_node(node_id).await?;
+
+        let node_ids = self.node_ids();
+        self.wait_for_any_leader(node_id).await?;
+        let voter_refs = node_ids.iter().map(String::as_str).collect::<Vec<_>>();
+        self.wait_for_voters(node_id, &voter_refs).await?;
+        self.wait_for_consistent_leader_on_all_nodes().await?;
+        self.wait_for_full_interconnect(&node_ids).await
+    }
+
+    /// Starts `node_id`, registering it as a new node that joins through a running member when
+    /// the cluster has none by that name, and waits until the node is a voter of the membership
+    /// it reports or its task has ended. A node that ended reports how, which is how a refused
+    /// join reads.
+    pub(crate) async fn attempt_join(&mut self, node_id: &str) -> io::Result<JoinAttempt> {
+        if !self.nodes.contains_key(node_id) {
+            self.register_new_node(node_id)?;
+        }
+        if let Err(error) = self
+            .start_node_without_waiting_for_raft_catch_up(node_id)
+            .await
+        {
+            return Ok(JoinAttempt::Stopped(format!("{error:#}")));
+        }
+        // A refused node stops through its whole shutdown, and an admitted one waits for the
+        // leader to see its record, so the decision gets a node's whole startup budget.
+        let deadline = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let handle = self
+                .nodes
+                .get_mut(node_id)
+                .verified("the node was registered before it was started");
+            if let NodeTaskState::Terminal(outcome) = handle.task.inspect().await {
+                return Ok(JoinAttempt::Stopped(outcome.to_string()));
+            }
+            if let Ok(status) = handle.cluster_status(deadline).await
+                && status.is_voter(node_id)
+            {
+                return Ok(JoinAttempt::Admitted);
+            }
+            if deadline.has_passed() {
+                return Err(io::Error::other(format!(
+                    "node '{node_id}' neither became a voter nor stopped within {:?}",
+                    deadline.elapsed()
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Adds `node_id` to the nodes the harness owns, joining through a running member, with what
+    /// a scenario named for it before it existed.
+    fn register_new_node(&mut self, node_id: &str) -> io::Result<()> {
         if self.nodes.contains_key(node_id) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -1055,14 +1295,28 @@ impl Cluster {
             .find(|node| node.task.is_running())
             .map(|node| node.spec.interconnect_endpoint())
             .ok_or_else(|| io::Error::other("a running bootstrap node is required"))?;
-        let config = self
+        let mut config = self
             .nodes
             .values()
             .next()
             .expect("an existing cluster has at least one node")
             .config
             .clone();
-        let mut spec = NodeSpec::new(&self._root_dir, &self.interconnect_ca, node_id, false)?;
+        let pending = self.pending_members.remove(node_id).unwrap_or_default();
+        if !pending.setting_overrides.is_empty() {
+            config
+                .node_setting_overrides
+                .entry(node_id.to_string())
+                .or_default()
+                .extend(pending.setting_overrides);
+        }
+        let mut spec = NodeSpec::new(&self.roots.storage, &self.interconnect_ca, node_id, false)?;
+        if let Some(cluster_id) = &pending.cluster_id {
+            spec.claim_cluster(&self.interconnect_ca, cluster_id)?;
+        }
+        if pending.additional_trust_anchor {
+            spec.trust_additional_authority(&self.interconnect_ca)?;
+        }
         let index = NodeSpec::index(node_id)?;
         let address = self.peer_addressing.address(node_id, index);
         if let Some(dns) = &self.dns {
@@ -1079,17 +1333,10 @@ impl Cluster {
                 spec,
                 self.fault_injection.clone(),
                 config,
-                self.live.handle(),
+                self.roots.clone(),
             ),
         );
-        self.start_node(node_id).await?;
-
-        let node_ids = self.node_ids();
-        self.wait_for_any_leader(node_id).await?;
-        let voter_refs = node_ids.iter().map(String::as_str).collect::<Vec<_>>();
-        self.wait_for_voters(node_id, &voter_refs).await?;
-        self.wait_for_consistent_leader_on_all_nodes().await?;
-        self.wait_for_full_interconnect(&node_ids).await
+        Ok(())
     }
 
     pub(crate) fn syslog_ingestor_addr(
@@ -1130,6 +1377,38 @@ impl Cluster {
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         handle.stop().await
+    }
+
+    /// Hold a stopped node's metrics listener until its next failed startup has been cleaned up.
+    pub(crate) async fn occupy_observability_port_for_start(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
+        let handle = self.nodes.get_mut(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        if !matches!(
+            handle.task.state(),
+            NodeTaskState::NotStarted | NodeTaskState::Terminal(_)
+        ) || handle.startup_listener_collision.is_some()
+        {
+            return Err(io::Error::other(
+                "a startup port collision needs one stopped node",
+            ));
+        }
+        handle.startup_listener_collision =
+            Some(TokioTcpListener::bind((HOST, handle.spec.observability_port)).await?);
+        Ok(())
+    }
+
+    /// How the last stop of `node_id` that a scenario requested and waited for ended, or `None`
+    /// when no such stop has finished its phases.
+    pub(crate) fn last_shutdown_outcome(&self, node_id: &str) -> Option<ShutdownOutcome> {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        handle.last_shutdown
     }
 
     /// Move a stopped node's interconnect to another loopback address behind the same advertised
@@ -1247,10 +1526,11 @@ impl Cluster {
     }
 
     pub(crate) async fn rotate_interconnect_certificates(&mut self) -> io::Result<()> {
-        let interconnect_ca = InterconnectTestCa::new(&self._root_dir)?;
+        let interconnect_ca = InterconnectTestCa::new(&self.roots.storage)?;
         for (node_id, node) in &mut self.nodes {
             nervix_primitives::task::consume_budget().await;
-            let (certificate, key) = interconnect_ca.issue_node(node_id, &node.spec.base_dir)?;
+            let (certificate, key) =
+                interconnect_ca.issue_node(&node.spec.cluster_id, node_id, &node.spec.base_dir)?;
             node.spec.interconnect_tls_ca = interconnect_ca.path.clone();
             node.spec.interconnect_tls_cert = certificate;
             node.spec.interconnect_tls_key = key;
@@ -1282,7 +1562,7 @@ impl Cluster {
             )
         })?;
         let target_addr = target.spec.interconnect_listen_addr();
-        let probe_directory = tempfile::tempdir_in(self._root_dir.path())?;
+        let probe_directory = tempfile::tempdir_in(self.roots.storage.path())?;
         let untrusted_authority = if let InterconnectCredentialFault::UntrustedClient = fault {
             Some(InterconnectTestCa::new(&probe_directory)?)
         } else {
@@ -1295,7 +1575,7 @@ impl Cluster {
             if let InterconnectCredentialFault::WrongClusterIdentity = fault {
                 "another-cluster"
             } else {
-                "cucumber"
+                TEST_CLUSTER_ID
             };
         let validity = if let InterconnectCredentialFault::ExpiredCertificate = fault {
             TestCertificateValidity::Expired
@@ -1333,6 +1613,7 @@ impl Cluster {
                 cluster_id: certificate_cluster_id.to_string(),
                 node_id: probe_node_id,
                 advertised_host: "localhost".to_string(),
+                join_terms: target.config.node_settings(target_node_id)?.join_terms(),
             },
             tls,
             options,
@@ -1410,7 +1691,7 @@ impl Cluster {
             }
         }
         for node in self.nodes.values_mut() {
-            node.spec.release_ports();
+            node.release_ports_once_down();
         }
         if let Some(error) = first_error {
             Err(error)
@@ -1430,6 +1711,74 @@ impl Cluster {
     }
 
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
+        self.restart_arranged(RestartArrangement::Unchanged).await
+    }
+
+    pub(crate) async fn restart_with_relayed_voter(&mut self, voter: &str) -> io::Result<()> {
+        self.restart_arranged(RestartArrangement::RelayedVoter(voter))
+            .await
+    }
+
+    /// Restarts every node with the first runtime installation `node` begins held until the
+    /// scenario releases it, so the restarted cluster answers requests that reach `node` before it
+    /// has installed any committed domain again.
+    pub(crate) async fn restart_holding_runtime_installation(
+        &mut self,
+        node: &str,
+    ) -> io::Result<()> {
+        self.restart_arranged(RestartArrangement::HeldRuntimeInstallation(node))
+            .await
+    }
+
+    /// Restarts every node with `node` counted ready only once the restarted cluster's leader has
+    /// ended its startup voter observation, as when a loaded host keeps a node that already runs
+    /// and gossips from reporting ready.
+    pub(crate) async fn restart_with_node_ready_after_startup_observation(
+        &mut self,
+        node: &str,
+    ) -> io::Result<()> {
+        self.restart_arranged(RestartArrangement::ReadyAfterStartupObservation(node))
+            .await
+    }
+
+    /// Starts every node of a restarted cluster at once, as a restart of the whole cluster does,
+    /// and returns once each of them is ready, each inside its own startup budget nested in the
+    /// restart's. Starting each node only once the one before it is ready would hold the last voter
+    /// back by every earlier node's startup, which on a loaded host can outlast the grace a newly
+    /// started leader gives voters it has not yet observed before it fails their work over. The
+    /// node `ready_after_startup_observation` names counts as ready only once a leader of the
+    /// restarted cluster has ended that observation, so a restart that waited for it before
+    /// starting the next node would start that node only after the grace.
+    async fn start_restarted_nodes_together(
+        &mut self,
+        construction: PhaseDeadline,
+        ready_after_startup_observation: Option<&str>,
+    ) -> io::Result<()> {
+        let mut startups = Vec::with_capacity(self.nodes.len());
+        for handle in self.nodes.values_mut() {
+            let ready_after_observation_end =
+                ready_after_startup_observation == Some(handle.spec.node_id.as_str());
+            startups.push(async move {
+                let node = node_name(&handle.spec.node_id);
+                let budget = construction.nested(NODE_STARTUP_BUDGET);
+                NodeStartup::start(&node, handle, budget, StartupRetryPolicy::Transient)
+                    .await
+                    .map_err(io::Error::other)?;
+                if ready_after_observation_end {
+                    handle
+                        .wait_for_startup_voter_observation_end(construction)
+                        .await?;
+                }
+                Ok::<(), io::Error>(())
+            });
+        }
+        for startup in join_all(startups).await {
+            startup?;
+        }
+        Ok(())
+    }
+
+    async fn restart_arranged(&mut self, arrangement: RestartArrangement<'_>) -> io::Result<()> {
         let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
         let mut first_error = None;
 
@@ -1461,9 +1810,43 @@ impl Cluster {
             .assured("a test cluster is built from a handful of nodes, not billions");
         let construction = PhaseDeadline::after(cluster_startup_budget(nodes_to_start));
         let bootstrap = self.node_id(1);
-        self.start_node_within(&bootstrap, construction).await?;
-        for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
-            self.start_node_within(node_id, construction).await?;
+        // Every node has stopped, so a fault armed here reaches only the nodes that start next.
+        match arrangement {
+            RestartArrangement::Unchanged => {}
+            RestartArrangement::RelayedVoter(voter) => {
+                self.fault_injection
+                    .hold_restarted_voter_heartbeat(node_name(&bootstrap), node_name(voter));
+                self.fault_injection
+                    .fail_health_responses_between(node_name(&bootstrap), node_name(voter));
+            }
+            RestartArrangement::HeldRuntimeInstallation(node) => {
+                self.fault_injection
+                    .pause_runtime_installation_on(node_name(node));
+            }
+            RestartArrangement::ReadyAfterStartupObservation(_) => {
+                self.fault_injection.await_startup_voter_observation_end();
+            }
+        }
+        if arrangement.relayed_voter().is_some() {
+            // The relayed voter's scenario observes scheduling while the bootstrap node leads, so
+            // that node starts first. The held heartbeat can keep replication from catching the
+            // voter up, so the others start without waiting for catch-up: the scenario reaches and
+            // releases the observation barrier before it waits for that.
+            self.start_node_within(&bootstrap, construction).await?;
+            for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
+                self.start_node_without_waiting_for_raft_catch_up_within(node_id, construction)
+                    .await?;
+            }
+            self.wait_for_any_leader(&bootstrap).await?;
+            return self.wait_for_leader(&bootstrap, Some(&bootstrap)).await;
+        }
+        self.start_restarted_nodes_together(
+            construction,
+            arrangement.ready_after_startup_observation(),
+        )
+        .await?;
+        for node_id in &node_ids {
+            self.wait_for_node_raft_catch_up(node_id).await?;
         }
 
         self.wait_for_any_leader(&bootstrap).await?;
@@ -1563,6 +1946,48 @@ impl Cluster {
         }
     }
 
+    /// Whether the Kafka broker knows `topic`. The metadata request names the topic from a
+    /// consumer, which never lets the broker create it.
+    pub(crate) fn kafka_topic_exists(&self, topic: &str) -> io::Result<bool> {
+        let partitions = kafka_topic_partition_count(&self.dependencies, topic)?;
+        Ok(partitions.is_some())
+    }
+
+    /// Waits until the broker lists every group of `groups`, when `listed` is true, or none of
+    /// them, when it is false.
+    pub(crate) async fn wait_for_kafka_consumer_groups_listed(
+        &self,
+        groups: &BTreeSet<String>,
+        listed: bool,
+        within: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + within;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let broker_groups = kafka_listed_consumer_groups(&self.dependencies)?;
+            let present = groups
+                .intersection(&broker_groups)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let settled = if listed {
+                present == *groups
+            } else {
+                present.is_empty()
+            };
+            if settled {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                let expected = if listed { "all" } else { "none" };
+                return Err(io::Error::other(format!(
+                    "expected Kafka to list {expected} of consumer groups {groups:?} within \
+                     {within:?}; it lists {present:?} of them"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub(crate) async fn assert_kafka_consumer_group_next_offset(
         &self,
         group: &str,
@@ -1572,53 +1997,16 @@ impl Cluster {
         should_reach: bool,
         duration: Duration,
     ) -> io::Result<()> {
-        let deadline = Instant::now() + duration;
-        loop {
-            nervix_primitives::task::consume_budget().await;
-            let dependencies = self.dependencies.clone();
-            let query_group = group.to_string();
-            let query_topic = topic.to_string();
-            let observation = nervix_primitives::task::spawn_blocking(move || {
-                kafka_consumer_group_next_offset(
-                    &dependencies,
-                    &query_group,
-                    &query_topic,
-                    partition,
-                )
-            })
-            .await
-            .map_err(io::Error::other)?;
-            let actual = match observation {
-                Ok(actual) => actual,
-                Err(error) if Instant::now() >= deadline => return Err(error),
-                Err(_) => {
-                    sleep(POLL_INTERVAL).await;
-                    continue;
-                }
-            };
-            let reached = actual.is_some_and(|offset| offset >= threshold);
-            if should_reach && reached {
-                return Ok(());
-            }
-            if !should_reach && reached {
-                return Err(io::Error::other(format!(
-                    "Kafka consumer group '{group}' unexpectedly committed next offset {actual:?} \
-                     for topic '{topic}' partition {partition}; expected it to remain below \
-                     {threshold}"
-                )));
-            }
-            if Instant::now() >= deadline {
-                if should_reach {
-                    return Err(io::Error::other(format!(
-                        "timed out waiting for Kafka consumer group '{group}' to commit next \
-                         offset at least {threshold} for topic '{topic}' partition {partition}; \
-                         observed {actual:?}"
-                    )));
-                }
-                return Ok(());
-            }
-            sleep(POLL_INTERVAL).await;
-        }
+        assert_kafka_consumer_group_next_offset_through(
+            kafka_client_config(&self.dependencies)?,
+            group,
+            topic,
+            partition,
+            threshold,
+            should_reach,
+            duration,
+        )
+        .await
     }
 
     pub(crate) async fn wait_for_rabbitmq_queue_consumers(
@@ -1646,6 +2034,19 @@ impl Cluster {
         }
     }
 
+    /// The messages `queue` holds ready for delivery now.
+    pub(crate) async fn rabbitmq_queue_messages(&self, queue: &str) -> io::Result<usize> {
+        let state = rabbitmq_queue_state(&self.dependencies, queue).await?;
+        Ok(state.messages)
+    }
+
+    pub(crate) fn rabbitmq_queue_probe(
+        &self,
+        queue: &str,
+    ) -> io::Result<super::rabbitmq_queue::RabbitMqQueueProbe> {
+        super::rabbitmq_queue::RabbitMqQueueProbe::new(&self.dependencies, queue)
+    }
+
     pub(crate) async fn wait_for_redis_channel_subscribers(
         &self,
         channel: &str,
@@ -1664,6 +2065,19 @@ impl Cluster {
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         open_raw_session(&handle.spec.grpc_uri(handle.config.grpc_mode), domain).await
+    }
+
+    /// The gRPC endpoint of every node, by node id, which a command whose leader moved is sent to
+    /// again until the node that leads now answers it.
+    pub(crate) fn leader_routes(&self) -> LeaderRoutes {
+        let mut endpoints = BTreeMap::new();
+        for (node_id, handle) in &self.nodes {
+            endpoints.insert(
+                node_id.clone(),
+                handle.spec.grpc_uri(handle.config.grpc_mode),
+            );
+        }
+        LeaderRoutes::new(endpoints)
     }
 
     pub(crate) fn grpc_uri(&self, node_id: &str) -> io::Result<String> {
@@ -1731,6 +2145,17 @@ impl Cluster {
             "http://{}/metrics",
             handle.spec.observability_addr()
         ))
+    }
+
+    /// Follow the actual metrics listener through a bounded startup retry.
+    pub(crate) fn observability_metrics_stream(
+        &self,
+        node_id: &str,
+    ) -> io::Result<watch::Receiver<String>> {
+        let handle = self.nodes.get(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        Ok(handle.metrics_endpoint.subscribe())
     }
 
     /// Read one series once, for a value a scenario compares others against rather than waits for.
@@ -1848,6 +2273,94 @@ impl Cluster {
         limit_pulsar_topic_message_size(&self.dependencies, topic, max_message_size).await
     }
 
+    /// The number of messages the broker holds for `subscription` of `topic` that no consumer has
+    /// acknowledged, as its admin API reports the subscription's backlog.
+    pub(crate) async fn pulsar_subscription_backlog(
+        &self,
+        topic: &str,
+        subscription: &str,
+    ) -> io::Result<u64> {
+        pulsar_subscription_backlog(&self.dependencies, topic, subscription).await
+    }
+
+    /// What the broker's admin API reports of `subscription` of `topic` now, absent when the topic
+    /// holds no subscription of that name.
+    pub(crate) async fn pulsar_subscription(
+        &self,
+        topic: &str,
+        subscription: &str,
+    ) -> io::Result<Option<PulsarSubscriptionObservation>> {
+        pulsar_subscription(&self.dependencies, topic, subscription).await
+    }
+
+    /// Provisions `subscription` of `topic` as an operator does, through the broker's admin API:
+    /// the topic is created when it is absent, and the subscription starts at the topic's latest
+    /// message, so it holds what is published from then on.
+    pub(crate) async fn provision_pulsar_subscription(
+        &self,
+        topic: &str,
+        subscription: &str,
+    ) -> io::Result<()> {
+        provision_pulsar_subscription(&self.dependencies, topic, subscription).await
+    }
+
+    /// Waits until the admin API's report of `subscription` of `topic` satisfies `holds`.
+    pub(crate) async fn wait_for_pulsar_subscription(
+        &self,
+        topic: &str,
+        subscription: &str,
+        within: Duration,
+        holds: impl Fn(Option<&PulsarSubscriptionObservation>) -> bool,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + within;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let observed = pulsar_subscription(&self.dependencies, topic, subscription).await;
+            if let Ok(observation) = &observed
+                && holds(observation.as_ref())
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "timed out waiting for Pulsar subscription '{subscription}' of topic \
+                     '{topic}'; last observation: {observed:?}"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Waits until the backlog of `subscription` of `topic` holds `expected` messages, as the
+    /// acknowledgements a consumer sends reach the broker.
+    pub(crate) async fn wait_for_pulsar_subscription_backlog(
+        &self,
+        topic: &str,
+        subscription: &str,
+        expected: u64,
+        within: Duration,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + within;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let observed =
+                pulsar_subscription_backlog(&self.dependencies, topic, subscription).await;
+            if let Ok(backlog) = &observed
+                && *backlog == expected
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::other(format!(
+                    "timed out waiting for Pulsar subscription '{subscription}' of topic \
+                     '{topic}' to hold {expected} unacknowledged messages; last observation: \
+                     {observed:?}"
+                )));
+            }
+            sleep(POLL_INTERVAL).await;
+        }
+    }
+
     pub(crate) async fn publish_kafka(&self, topic: &str, payload: &str) -> io::Result<()> {
         publish_kafka(&self.dependencies, topic, payload).await
     }
@@ -1874,7 +2387,7 @@ impl Cluster {
     pub(crate) async fn publish_kafka_payloads(
         &self,
         topic: &str,
-        payloads: &[String],
+        payloads: &[Vec<u8>],
     ) -> io::Result<()> {
         publish_kafka_payloads(&self.dependencies, topic, payloads).await
     }
@@ -1921,6 +2434,22 @@ impl Cluster {
         ensure_sqs_queue_tls(&self.dependencies, queue).await
     }
 
+    /// Creates `queue` with `visibility_timeout`: how long a message a receive took stays invisible
+    /// to every other receive unless it is deleted first.
+    pub(crate) async fn ensure_sqs_queue_with_visibility_timeout(
+        &self,
+        queue: &str,
+        visibility_timeout: Duration,
+    ) -> io::Result<()> {
+        let client = sqs_client(&self.dependencies).await?;
+        let request = client.create_queue().queue_name(queue).attributes(
+            QueueAttributeName::VisibilityTimeout,
+            visibility_timeout.as_secs().to_string(),
+        );
+        request.send().await.map_err(io::Error::other)?;
+        Ok(())
+    }
+
     pub(crate) async fn publish_sqs(&self, queue: &str, payload: &str) -> io::Result<()> {
         publish_sqs(&self.dependencies, queue, payload).await
     }
@@ -1948,6 +2477,21 @@ impl Cluster {
         expected: &str,
     ) -> io::Result<()> {
         wait_for_nats_stream_payload(&self.dependencies, stream, subject, expected).await
+    }
+
+    /// How many messages JetStream `stream` holds.
+    pub(crate) async fn nats_stream_message_count(&self, stream: &str) -> io::Result<u64> {
+        nats_stream_message_count(&self.dependencies, stream).await
+    }
+
+    /// The integer `field` of the JSON payload of every message JetStream `stream` holds, in the
+    /// order the stream stored them.
+    pub(crate) async fn nats_stream_field_values(
+        &self,
+        stream: &str,
+        field: &str,
+    ) -> io::Result<Vec<i64>> {
+        nats_stream_field_values(&self.dependencies, stream, field).await
     }
 
     pub(crate) async fn publish_nats_payloads(
@@ -2053,6 +2597,27 @@ impl Cluster {
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
         publish_http(&handle.spec, host, path, payload).await
+    }
+
+    /// A publisher to the acknowledged HTTP endpoint at `host` and `path` on `node_id`, which
+    /// waits at most `wait` for each payload's graph acknowledgement.
+    pub(crate) fn acknowledged_http_publisher(
+        &self,
+        node_id: &str,
+        host: &str,
+        path: &str,
+        wait: Duration,
+    ) -> AcknowledgedHttpPublisher {
+        let handle = self
+            .nodes
+            .get(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        AcknowledgedHttpPublisher {
+            client: reqwest::Client::new(),
+            uri: handle.spec.http_uri(path),
+            host: host.to_owned(),
+            wait,
+        }
     }
 
     pub(crate) fn spawn_http_publish(
@@ -2247,6 +2812,22 @@ impl Cluster {
             .arm_health_response_pause(node_name(probing_node_id), node_name(responding_node_id));
     }
 
+    pub(crate) fn pause_application_revision_responses_from(&self, node_id: &str) {
+        self.fault_injection
+            .pause_application_revision_responses_from(node_name(node_id));
+    }
+
+    pub(crate) async fn wait_for_application_revision_response_pause(&self, node_id: &str) {
+        self.fault_injection
+            .wait_for_application_revision_response_pause(&node_name(node_id))
+            .await;
+    }
+
+    pub(crate) fn release_application_revision_responses_from(&self, node_id: &str) {
+        self.fault_injection
+            .release_application_revision_responses_from(&node_name(node_id));
+    }
+
     pub(crate) fn fail_health_responses_from(&self, responding_node_id: &str) {
         self.fault_injection
             .fail_health_responses_from(node_name(responding_node_id));
@@ -2320,25 +2901,59 @@ impl Cluster {
         self.fault_injection.clear_emitter_fault(emitter);
     }
 
-    pub(crate) fn fail_sink_client_unavailable_on_all_nodes(&self, emitter: &str) {
-        self.fault_injection.fail_sink_client_unavailable(emitter);
+    pub(crate) fn fail_emitter_client_unavailable_on_all_nodes(&self, emitter: &str) {
+        self.fault_injection
+            .fail_emitter_client_unavailable(emitter);
     }
 
-    pub(crate) fn clear_sink_client_fault_on_all_nodes(&self, emitter: &str) {
-        self.fault_injection.clear_sink_client_fault(emitter);
+    pub(crate) fn clear_emitter_client_fault_on_all_nodes(&self, emitter: &str) {
+        self.fault_injection.clear_emitter_client_fault(emitter);
     }
 
-    pub(crate) fn stall_emitter_sink_after_resolving_on_all_nodes(
+    pub(crate) fn stall_emitter_connector_after_resolving_on_all_nodes(
         &self,
         emitter: &str,
         resolved: usize,
     ) {
         self.fault_injection
-            .stall_emitter_sink_after_resolving(emitter, resolved);
+            .stall_emitter_connector_after_resolving(emitter, resolved);
     }
 
     pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {
         self.fault_injection.fail_next_schedule_publication(domain);
+    }
+
+    pub(crate) fn lose_wasm_reset_publication_authority(&self, domain: &str, count: usize) {
+        self.fault_injection.lose_wasm_reset_publication_authority(
+            nervix_models::DomainName::parse(domain).expect("a scenario domain is valid"),
+            std::num::NonZeroUsize::new(count).expect("a refusal count is positive"),
+        );
+    }
+
+    pub(crate) fn fail_wasm_reset_publications(&self, domain: &str) {
+        self.fault_injection.fail_wasm_reset_publications(
+            nervix_models::DomainName::parse(domain).expect("a scenario domain is valid"),
+        );
+    }
+
+    pub(crate) fn clear_wasm_reset_publication_failure(&self, domain: &str) {
+        self.fault_injection.clear_wasm_reset_publication_failure(
+            &nervix_models::DomainName::parse(domain).expect("a scenario domain is valid"),
+        );
+    }
+
+    pub(crate) fn wasm_reset_publication_failure_delivered(&self, domain: &str) -> Option<bool> {
+        self.fault_injection
+            .wasm_reset_publication_failure_delivered(
+                &nervix_models::DomainName::parse(domain).expect("a scenario domain is valid"),
+            )
+    }
+
+    pub(crate) fn wasm_reset_publication_authority_losses(&self, domain: &str) -> Option<usize> {
+        self.fault_injection
+            .wasm_reset_publication_authority_losses(
+                &nervix_models::DomainName::parse(domain).expect("a scenario domain is valid"),
+            )
     }
 
     pub(crate) fn fail_ingestor_on_all_nodes(&self, ingestor: &str) {
@@ -2369,7 +2984,17 @@ impl Cluster {
         node_id: &str,
         fragment: &str,
     ) -> io::Result<()> {
-        self.wait_until(node_id, |status| status.raw.contains(fragment))
+        self.wait_for_status_contains_with_budget(node_id, fragment, STATUS_WAIT_BUDGET)
+            .await
+    }
+
+    pub(crate) async fn wait_for_status_contains_with_budget(
+        &self,
+        node_id: &str,
+        fragment: &str,
+        budget: Duration,
+    ) -> io::Result<()> {
+        self.wait_until_with_budget(node_id, budget, |status| status.raw.contains(fragment))
             .await
     }
 
@@ -2489,6 +3114,53 @@ impl Cluster {
             message.push_str(&format!("\nlast error: {err}"));
         }
         Err(io::Error::other(message))
+    }
+
+    /// A live connector may retain its retirement envelope. Check room for a control operation
+    /// rather than requiring an otherwise idle Commands class to contain no live allocations.
+    pub(crate) async fn wait_for_commands_memory_headroom(
+        &self,
+        node_id: &str,
+        bytes: u64,
+        wait: Duration,
+    ) -> io::Result<()> {
+        let labels = ["class=\"commands\"".to_string()];
+        let mut last_capacity = None;
+        let mut last_reserved = None;
+        let observed = timeout(wait, async {
+            let capacity = self
+                .read_observability_metric(
+                    node_id,
+                    "nervix_execution_memory_capacity_bytes",
+                    &labels,
+                )
+                .await?;
+            last_capacity = Some(capacity);
+            let requested: f64 = bytes.approx_into();
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                let reserved = self
+                    .read_observability_metric(
+                        node_id,
+                        "nervix_execution_memory_reserved_bytes",
+                        &labels,
+                    )
+                    .await?;
+                last_reserved = Some(reserved);
+                if reserved + requested <= capacity {
+                    return Ok(());
+                }
+                sleep(POLL_INTERVAL).await;
+            }
+        })
+        .await;
+        match observed {
+            Ok(result) => result,
+            Err(_) => Err(io::Error::other(format!(
+                "node '{node_id}' did not leave {bytes} Commands bytes available within {wait:?}; \
+                 last capacity={last_capacity:?}, reserved={last_reserved:?}"
+            ))),
+        }
     }
 
     pub(crate) async fn wait_for_observability_metric_value(
@@ -2871,7 +3543,71 @@ impl Cluster {
         self.fault_injection
             .request_leadership_transfer(node_name(from_node_id), node_name(to_node_id));
     }
+
+    /// Moves leadership from `from_node_id` to `to_node_id` underneath the next command that
+    /// `from_node_id` durably admits. The command stays paused after its durable admission until
+    /// `to_node_id` reports itself the leader, so the node that admitted it cannot know its
+    /// outcome. The returned task ends once the command is released.
+    pub(crate) fn move_leadership_after_next_durable_admission(
+        &self,
+        from_node_id: &str,
+        to_node_id: &str,
+    ) -> AbortOnDropHandle<io::Result<()>> {
+        let from = node_name(from_node_id);
+        let to = node_name(to_node_id);
+        let successor_id = to_node_id.to_string();
+        let successor = self
+            .nodes
+            .get(to_node_id)
+            .unwrap_or_else(|| panic!("unknown node '{to_node_id}'"))
+            .status_endpoint();
+        let fault_injection = self.fault_injection.clone();
+        fault_injection.pause_command_after_durable_admission_on(from.clone());
+        AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
+            fault_injection
+                .wait_for_command_durable_admission_pause(&from)
+                .await;
+            fault_injection.request_leadership_transfer(from.clone(), to);
+            let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
+            let elected = deadline
+                .poll_until(
+                    POLL_INTERVAL,
+                    |phase| {
+                        let successor = &successor;
+                        async move {
+                            let status = successor.cluster_status(phase).await?;
+                            Ok::<_, Report<StatusRequestError>>(ClusterStatus::parse(status))
+                        }
+                    },
+                    |status| status.current_leader.as_deref() == Some(successor_id.as_str()),
+                )
+                .await;
+            fault_injection.release_command_durable_admission_pause(&from);
+            match elected {
+                Ok(_) => Ok(()),
+                Err(expired) => Err(io::Error::other(format!(
+                    "node '{successor_id}' did not report itself leader within {:?}; last status: \
+                     {:?}",
+                    deadline.elapsed(),
+                    expired.last_output.map(|status| status.raw)
+                ))),
+            }
+        }))
+    }
     async fn wait_until<F>(&self, node_id: &str, predicate: F) -> io::Result<()>
+    where
+        F: Fn(&ClusterStatus) -> bool,
+    {
+        self.wait_until_with_budget(node_id, STATUS_WAIT_BUDGET, predicate)
+            .await
+    }
+
+    async fn wait_until_with_budget<F>(
+        &self,
+        node_id: &str,
+        budget: Duration,
+        predicate: F,
+    ) -> io::Result<()>
     where
         F: Fn(&ClusterStatus) -> bool,
     {
@@ -2879,7 +3615,7 @@ impl Cluster {
             .nodes
             .get(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        let deadline = PhaseDeadline::after(STATUS_WAIT_BUDGET);
+        let deadline = PhaseDeadline::after(budget);
         let waited = deadline
             .poll_until(
                 POLL_INTERVAL,
@@ -2911,11 +3647,24 @@ impl Cluster {
 #[derive(Debug)]
 struct NodeHandle {
     spec: NodeSpec,
+    metrics_endpoint: watch::Sender<String>,
+    startup_listener_collision: Option<TokioTcpListener>,
     fault_injection: FaultInjection,
     config: TestClusterConfig,
     task: OwnedNodeTask,
     shutdown: Option<ShutdownCoordinator>,
-    live: LiveClusterHandle,
+    /// How the last stop a scenario requested and waited for ended, kept after its coordinator
+    /// is released so the scenario can read the outcome of each shutdown phase.
+    last_shutdown: Option<ShutdownOutcome>,
+    /// When the current launch was first asked to stop and when its task ended, for the record of
+    /// a stop a scenario waits for. `None` until the node has been launched.
+    stop_clock: Option<NodeStopClock>,
+    /// The cluster's storage and watchdog registration, which a node left stopping keeps until its
+    /// task has ended.
+    roots: Arc<ClusterRoots>,
+    /// The settings of the current launch, which bound how long its stop may take. `None` until
+    /// the node has been launched.
+    launched_settings: Option<NodeSettings>,
 }
 
 impl NodeHandle {
@@ -2923,29 +3672,45 @@ impl NodeHandle {
         spec: NodeSpec,
         fault_injection: FaultInjection,
         config: TestClusterConfig,
-        live: LiveClusterHandle,
+        roots: Arc<ClusterRoots>,
     ) -> Self {
+        let (metrics_endpoint, _) =
+            watch::channel(format!("http://{}/metrics", spec.observability_addr()));
         Self {
             spec,
+            metrics_endpoint,
+            startup_listener_collision: None,
             fault_injection,
             config,
             task: OwnedNodeTask::not_started(),
             shutdown: None,
-            live,
+            last_shutdown: None,
+            stop_clock: None,
+            roots,
+            launched_settings: None,
         }
     }
 
     fn start(&mut self) -> io::Result<()> {
-        if self.task.is_running() {
-            return Ok(());
+        match self.task.state() {
+            NodeTaskState::Running => return Ok(()),
+            // The node this handle launched before is still stopping under its keeper, with the
+            // database and the listeners a fresh launch would need.
+            NodeTaskState::LeftStopping => {
+                return Err(io::Error::other(format!(
+                    "node '{}' was left stopping and cannot be started until it has ended",
+                    self.spec.node_id
+                )));
+            }
+            NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => {}
         }
         if self.config.grpc_mode == InternalTransportMode::Https {
             ensure_dev_tls_assets()?;
         }
 
-        let shutdown = ShutdownCoordinator::new(self.config.shutdown_timeout);
+        let settings = self.config.node_settings(&self.spec.node_id)?;
         let db_path = self.spec.db_path()?;
-        let application_builder = Application::builder()
+        let identity = NodeIdentity::builder()
             .addr(parse_addr(&self.spec.grpc_addr())?)
             .grpc_mode(self.config.grpc_mode)
             .grpc_https_listen_addr(Some(parse_addr(&self.spec.grpc_https_addr())?))
@@ -2954,7 +3719,7 @@ impl NodeHandle {
             .observability_listen_addr(parse_addr(&self.spec.observability_addr())?)
             .web_console_listen_addr(parse_addr(&self.spec.web_console_addr())?)
             .web_console_advertise_addr(Some(parse_addr(&self.spec.web_console_addr())?.into()))
-            .cluster_id("cucumber".to_string())
+            .cluster_id(self.spec.cluster_id.clone())
             .node_id(node_name(&self.spec.node_id))
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
             .grpc_https_advertise_addr(Some(parse_addr(&self.spec.grpc_https_addr())?.into()))
@@ -2970,25 +3735,11 @@ impl NodeHandle {
             .interconnect_tls_key(self.spec.interconnect_tls_key.clone())
             .allow_bootstrap(self.spec.allow_bootstrap)
             .default_user(TEST_AUTH_USERNAME.to_string())
-            .init_default_user_password(Some(TEST_AUTH_PASSWORD.to_string()))
-            .node_unavailability_timeout(TEST_NODE_UNAVAILABILITY_TIMEOUT)
-            .raft_heartbeat_interval(TEST_RAFT_HEARTBEAT_INTERVAL)
-            .raft_election_timeout_min(self.config.raft_election_timeout_min)
-            .raft_election_timeout_max(self.config.raft_election_timeout_max)
-            .replica_count(self.config.replica_count);
-        let application = application_builder
-            .state_snapshot_interval(self.config.state_snapshot_interval)
-            .transaction_idle_timeout(self.config.transaction_idle_timeout)
-            .transaction_tombstone_retention(self.config.transaction_tombstone_retention)
-            .command_execution(CommandExecutionPolicy::new(
-                self.config.command_retry_validity,
-                self.config.command_execution_capacity,
-            ))
-            .transaction_max_statements(self.config.transaction_max_statements)
-            .transaction_max_source_bytes(self.config.transaction_max_source_bytes)
-            .transaction_max_open(self.config.transaction_max_open)
-            .memory_pressure(self.config.memory_pressure)
-            .raft_retention(self.config.raft_retention)
+            .init_default_user_password(
+                self.config
+                    .default_user_password
+                    .initial_password(self.spec.allow_bootstrap),
+            )
             .cluster_bootstrap_host(self.spec.bootstrap_host.clone())
             .dns(
                 self.spec
@@ -3003,20 +3754,30 @@ impl NodeHandle {
                     .clone()
                     .unwrap_or_else(|| PathBuf::from(DEFAULT_TEMP_DIR)),
             )
-            .fault_injection(self.fault_injection.clone())
-            .shutdown(shutdown.clone())
-            .graceful_shutdown_drain(self.config.graceful_shutdown_drain)
-            .drain_timeout(self.config.drain_timeout)
             .build();
+        let application = Application::builder()
+            .identity(identity)
+            .settings(settings)
+            .fault_injection(self.fault_injection.clone())
+            .graceful_shutdown_drain(self.config.graceful_shutdown_drain)
+            .build();
+        let shutdown = application.shutdown.clone();
+        self.launched_settings = Some(settings);
         // Published before the task is spawned and handed to that task, so the watchdog sees the
         // node for exactly as long as it runs: the registration leaves the registry when the task
-        // ends, whether it returned, failed, panicked or was aborted.
+        // ends, whether it returned, failed or panicked.
         let live = self
+            .roots
             .live
+            .handle()
             .node_started(&self.spec.node_id, StdArc::new(shutdown.clone()));
+        let (stop_clock, ended) = NodeStopClock::start();
         self.shutdown = Some(shutdown);
+        self.stop_clock = Some(stop_clock);
         self.task = OwnedNodeTask::spawn(async move {
             let _live = live;
+            // Dropped when this task ends, however it ends, which records when that was.
+            let _ended = ended;
             application.run().await
         });
         Ok(())
@@ -3028,8 +3789,12 @@ impl NodeHandle {
     }
 
     fn shutdown_watchdog_timeout(&self) -> io::Result<Duration> {
+        let shutdown_settings = match &self.launched_settings {
+            Some(settings) => settings.shutdown,
+            None => self.config.node_settings(&self.spec.node_id)?.shutdown,
+        };
         let application_drain_timeout = if self.config.graceful_shutdown_drain {
-            self.config.drain_timeout
+            shutdown_settings.drain_timeout()
         } else {
             Duration::ZERO
         };
@@ -3047,41 +3812,92 @@ impl NodeHandle {
             })?;
         Ok(NODE_SHUTDOWN_LIVENESS_WATCHDOG
             .max(configured_phase_floor)
-            .max(self.config.shutdown_timeout))
+            .max(shutdown_settings.shutdown_timeout()))
     }
 
     /// Waits for a node a scenario stopped itself, within the product shutdown deadlines that
     /// scenario configured. Scenario cleanup uses the harness cleanup budget instead.
+    ///
+    /// A node still stopping when the watchdog passes fails the step and keeps its task: it holds
+    /// its databases and its consensus registration until it has ended, so nothing of it is given
+    /// back here.
     async fn wait_stopped(&mut self) -> io::Result<()> {
         let shutdown_timeout = self.shutdown_watchdog_timeout()?;
-        let task_result = match self.task.wait(PhaseDeadline::after(shutdown_timeout)).await {
+        let waited = self.task.wait(PhaseDeadline::after(shutdown_timeout)).await;
+        // A stop is printed by the wait that observed the node's ending, and only by that one.
+        let observed_by_this_wait = matches!(waited, NodeTaskWaitOutcome::Joined(_));
+        let outcome = match waited {
             NodeTaskWaitOutcome::NotStarted => return Ok(()),
             NodeTaskWaitOutcome::AlreadyObserved(outcome)
-            | NodeTaskWaitOutcome::Joined(outcome) => {
-                if let NodeTaskTerminalOutcome::Panic(_) = outcome.as_ref() {
-                    Err(io::Error::other(NodeShutdownError::Task {
-                        node: node_name(&self.spec.node_id),
-                        outcome,
-                    }))
-                } else {
-                    Ok(())
-                }
-            }
-            NodeTaskWaitOutcome::AbortedAtDeadline(outcome) => {
-                Err(io::Error::other(NodeShutdownError::Deadline {
-                    node: node_name(&self.spec.node_id),
-                    timeout: shutdown_timeout,
-                    outcome,
-                }))
+            | NodeTaskWaitOutcome::Joined(outcome) => outcome,
+            NodeTaskWaitOutcome::StillRunning | NodeTaskWaitOutcome::LeftStopping => {
+                let ending = match &self.shutdown {
+                    Some(shutdown) => {
+                        NodeStopEnding::StillStopping(NodeStopProgress::observe(shutdown))
+                    }
+                    // A node left stopping before this wait went to its keeper with its
+                    // coordinator.
+                    None => NodeStopEnding::LeftToKeeper,
+                };
+                let record = self.stop_record(shutdown_timeout, ending);
+                eprintln!("{record}");
+                return Err(io::Error::other(NodeShutdownError::Deadline(record)));
             }
         };
-        self.shutdown = None;
+        let shutdown_outcome = match self.shutdown.take() {
+            Some(shutdown) => {
+                self.last_shutdown = shutdown.outcome();
+                self.last_shutdown
+            }
+            None => None,
+        };
+        if observed_by_this_wait {
+            let record = self.stop_record(
+                shutdown_timeout,
+                NodeStopEnding::Ended {
+                    task: outcome.clone(),
+                    shutdown: shutdown_outcome,
+                },
+            );
+            eprintln!("{record}");
+        }
+        let task_result = if let NodeTaskTerminalOutcome::Panic(_) = outcome.as_ref() {
+            Err(io::Error::other(NodeShutdownError::Task {
+                node: node_name(&self.spec.node_id),
+                outcome,
+            }))
+        } else {
+            Ok(())
+        };
         self.fault_injection
             .unregister_consensus(&node_name(&self.spec.node_id));
         if task_result.is_ok() {
             self.ensure_database_unlocked().await?;
         }
         task_result
+    }
+
+    /// The record of a stop this handle waited for under `watchdog`.
+    fn stop_record(&self, watchdog: Duration, ending: NodeStopEnding) -> NodeStopRecord {
+        let stopping_for = match &self.stop_clock {
+            Some(clock) => clock.stopping_for(),
+            None => None,
+        };
+        NodeStopRecord {
+            node: self.spec.node_id.clone(),
+            stopping_for,
+            watchdog,
+            ending,
+        }
+    }
+
+    /// Returns this node's ports to the pool unless its task still runs, here or under a keeper,
+    /// which gives them back itself once the node has ended.
+    fn release_ports_once_down(&mut self) {
+        match self.task.state() {
+            NodeTaskState::NotStarted | NodeTaskState::Terminal(_) => self.spec.release_ports(),
+            NodeTaskState::Running | NodeTaskState::LeftStopping => {}
+        }
     }
 
     async fn ensure_database_unlocked(&self) -> io::Result<()> {
@@ -3130,9 +3946,26 @@ impl NodeHandle {
         Ok(ClusterStatus::parse(status))
     }
 
-    fn abort(&mut self) {
-        self.shutdown = None;
-        self.task.abort();
+    /// Waits, inside the restart's budget, until a leader of the restarted cluster has ended its
+    /// startup voter observation, for a node the restart counts as ready only after that.
+    async fn wait_for_startup_voter_observation_end(
+        &self,
+        construction: PhaseDeadline,
+    ) -> io::Result<()> {
+        let ended = construction
+            .bound(
+                self.fault_injection
+                    .wait_for_startup_voter_observation_end(),
+            )
+            .await;
+        match ended {
+            BeforeDeadline::Finished(()) => Ok(()),
+            BeforeDeadline::Passed => Err(io::Error::other(format!(
+                "no leader of the restarted cluster ended its startup voter observation within \
+                 the restart's budget, so node '{}' never counted as ready",
+                self.spec.node_id
+            ))),
+        }
     }
 }
 
@@ -3155,22 +3988,30 @@ impl StartableNode for NodeHandle {
             .await
     }
 
-    /// A node that never became ready has no drain to finish, so its cleanup is the short slice
-    /// its startup budget can spare rather than the product's shutdown watchdog. The stop is
-    /// requested first, and the task is aborted and joined when the slice ends. A database lock
-    /// that outlives the abort surfaces as the next attempt's application error, which ends the
-    /// startup with both attempts in its history.
+    /// Failed-startup cleanup shares the node's remaining absolute startup budget. The stop is
+    /// requested first, and the product's shutdown watchdog does not restart the harness budget.
+    /// A node still stopping when that budget ends keeps its task, its coordinator and its
+    /// consensus registration; a replacement cannot take the database or listeners it still holds.
     async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
         self.request_stop();
-        let outcome = self.task.wait(cleanup).await;
-        self.shutdown = None;
-        self.fault_injection
-            .unregister_consensus(&node_name(&self.spec.node_id));
-        AttemptCleanup::from(outcome)
+        let outcome = AttemptCleanup::from(self.task.wait(cleanup).await);
+        self.startup_listener_collision = None;
+        match outcome {
+            AttemptCleanup::StillStopping => {}
+            AttemptCleanup::NothingLaunched | AttemptCleanup::Stopped(_) => {
+                self.shutdown = None;
+                self.fault_injection
+                    .unregister_consensus(&node_name(&self.spec.node_id));
+            }
+        }
+        outcome
     }
 
-    fn move_to_fresh_ports(&mut self) -> io::Result<()> {
-        self.spec.reallocate_ports()
+    fn move_to_fresh_ports(&mut self, ports: StartupPorts) -> io::Result<()> {
+        self.spec.reallocate_ports(ports)?;
+        self.metrics_endpoint
+            .send_replace(format!("http://{}/metrics", self.spec.observability_addr()));
+        Ok(())
     }
 }
 
@@ -3182,11 +4023,18 @@ impl TeardownNode for NodeHandle {
     fn request_stop(&mut self) {
         if let Some(shutdown) = &self.shutdown {
             shutdown.request_stop();
+            if let Some(stop_clock) = &mut self.stop_clock {
+                stop_clock.stop_requested();
+            }
         }
     }
 
     fn owned_task(&mut self) -> &mut OwnedNodeTask {
         &mut self.task
+    }
+
+    fn stop_progress(&self) -> Option<NodeStopProgress> {
+        self.shutdown.as_ref().map(NodeStopProgress::observe)
     }
 
     fn release(&mut self) {
@@ -3195,11 +4043,44 @@ impl TeardownNode for NodeHandle {
             .unregister_consensus(&node_name(&self.spec.node_id));
         self.spec.release_ports();
     }
+
+    fn leave_stopping(&mut self) {
+        let node = self.spec.node_id.clone();
+        let ports = self.spec.ports();
+        let fault_injection = self.fault_injection.clone();
+        let roots = self.roots.clone();
+        let left = Instant::now();
+        let kept = self.task.keep_until_ended(move |outcome| {
+            fault_injection.unregister_consensus(&node_name(&node));
+            release_test_ports(&ports);
+            eprintln!(
+                "node '{node}' ended {:?} after it was left stopping: {outcome}",
+                left.elapsed()
+            );
+            // The storage and the watchdog registration go last: the node used both until now.
+            drop(roots);
+        });
+        if kept {
+            self.shutdown = None;
+        }
+    }
 }
 
 impl Drop for NodeHandle {
+    /// A node dropped while it runs is asked to stop and left to end itself with what it holds.
+    /// Aborting its task would end only the future the node was started as and orphan the tasks
+    /// the node spawned, with its databases and its listeners.
     fn drop(&mut self) {
-        self.abort();
+        if !self.task.is_running() {
+            return;
+        }
+        // Without a runtime nothing can run the node's task or a keeper for it, so there is
+        // nothing left to hand over.
+        if Handle::try_current().is_err() {
+            return;
+        }
+        TeardownNode::request_stop(self);
+        self.leave_stopping();
     }
 }
 
@@ -3220,20 +4101,17 @@ enum NodeShutdownError {
         node: ClusterNodeName,
         outcome: Arc<NodeTaskTerminalOutcome>,
     },
-    #[error(
-        "timed out after {timeout:?} waiting for node '{node}' shutdown; terminal task outcome: \
-         {outcome}"
-    )]
-    Deadline {
-        node: ClusterNodeName,
-        timeout: Duration,
-        outcome: Arc<NodeTaskTerminalOutcome>,
-    },
+    /// The watchdog of a stop a scenario waited for passed with the node still stopping. The
+    /// record names how long it had been stopping and where its own shutdown stood.
+    #[error("{0}")]
+    Deadline(NodeStopRecord),
 }
 
 #[derive(Debug)]
 struct NodeSpec {
     node_id: String,
+    /// The cluster the node claims in its configuration and its certificate.
+    cluster_id: String,
     base_dir: PathBuf,
     interconnect_tls_ca: PathBuf,
     interconnect_tls_cert: PathBuf,
@@ -3252,6 +4130,8 @@ struct NodeSpec {
     interconnect_ip: IpAddr,
     /// The host the node advertises for its interconnect endpoint.
     interconnect_host: String,
+    /// A scenario-owned byte pacer at this node's advertised endpoint.
+    paced_interconnect: Option<PacedInterconnect>,
     /// The resolver configuration the node loads, or `None` for the host's own.
     dns: Option<DnsConfiguration>,
 }
@@ -3291,12 +4171,13 @@ impl NodeSpec {
         let base_dir = root.path().join(node_id);
         std::fs::create_dir_all(&base_dir)?;
         let (interconnect_tls_cert, interconnect_tls_key) =
-            interconnect_ca.issue_node(node_id, &base_dir)?;
+            interconnect_ca.issue_node(TEST_CLUSTER_ID, node_id, &base_dir)?;
         let ports = NodePorts::allocate()?;
         let syslog_ingestor_host = Self::syslog_ingestor_host(node_id)?;
 
         Ok(Self {
             node_id: node_id.to_string(),
+            cluster_id: TEST_CLUSTER_ID.to_string(),
             base_dir,
             interconnect_tls_ca: interconnect_ca.path.clone(),
             interconnect_tls_cert,
@@ -3313,8 +4194,41 @@ impl NodeSpec {
             interconnect_port: ports.interconnect,
             interconnect_ip: HOST,
             interconnect_host: HOST.to_string(),
+            paced_interconnect: None,
             dns: None,
         })
+    }
+
+    /// Makes this node claim `cluster_id`, with a certificate the cluster's authority issues for
+    /// that cluster.
+    fn claim_cluster(
+        &mut self,
+        interconnect_ca: &InterconnectTestCa,
+        cluster_id: &str,
+    ) -> io::Result<()> {
+        let (certificate, key) =
+            interconnect_ca.issue_node(cluster_id, &self.node_id, &self.base_dir)?;
+        self.cluster_id = cluster_id.to_string();
+        self.interconnect_tls_cert = certificate;
+        self.interconnect_tls_key = key;
+        Ok(())
+    }
+
+    /// Makes this node trust a second, freshly created certificate authority beside the cluster's
+    /// own, through a bundle holding both.
+    fn trust_additional_authority(
+        &mut self,
+        interconnect_ca: &InterconnectTestCa,
+    ) -> io::Result<()> {
+        let directory = self.base_dir.join("additional-authority");
+        std::fs::create_dir_all(&directory)?;
+        let additional = InterconnectTestCa::new_in(&directory)?;
+        let mut bundle = std::fs::read_to_string(&interconnect_ca.path)?;
+        bundle.push_str(&std::fs::read_to_string(&additional.path)?);
+        let bundle_path = self.base_dir.join("interconnect-ca-bundle.pem");
+        std::fs::write(&bundle_path, bundle)?;
+        self.interconnect_tls_ca = bundle_path;
+        Ok(())
     }
 
     /// The `<n>` of a test node id `node-<n>`.
@@ -3350,16 +4264,34 @@ impl NodeSpec {
         self.interconnect_host = address.advertised_host;
     }
 
-    fn reallocate_ports(&mut self) -> io::Result<()> {
-        self.release_ports();
-        let ports = NodePorts::allocate()?;
-        self.grpc_port = ports.grpc;
-        self.grpc_https_port = ports.grpc_https;
-        self.http_port = ports.http;
-        self.https_port = ports.https;
-        self.observability_port = ports.observability;
-        self.web_console_port = ports.web_console;
-        self.interconnect_port = ports.interconnect;
+    fn reallocate_ports(&mut self, selection: StartupPorts) -> io::Result<()> {
+        let prior_interconnect = self.interconnect_port;
+        let listeners = match selection {
+            StartupPorts::All => vec![
+                &mut self.grpc_port,
+                &mut self.grpc_https_port,
+                &mut self.http_port,
+                &mut self.https_port,
+                &mut self.observability_port,
+                &mut self.web_console_port,
+                &mut self.interconnect_port,
+            ],
+            StartupPorts::Grpc => vec![&mut self.grpc_port, &mut self.grpc_https_port],
+            StartupPorts::Http => vec![&mut self.http_port],
+            StartupPorts::Https => vec![&mut self.https_port],
+            StartupPorts::Observability => vec![&mut self.observability_port],
+            StartupPorts::WebConsole => vec![&mut self.web_console_port],
+            StartupPorts::Interconnect => vec![&mut self.interconnect_port],
+        };
+        let replacements = next_ports(listeners.len())?;
+        for (listener, replacement) in listeners.into_iter().zip(replacements) {
+            // A peer can still dial a published address after this node has stopped. Retain its
+            // reservation, as an explicit interconnect address move does, until the run ends.
+            if *listener != prior_interconnect {
+                release_test_ports(&[*listener]);
+            }
+            *listener = replacement;
+        }
         Ok(())
     }
 
@@ -3385,11 +4317,16 @@ impl NodeSpec {
     }
 
     /// Return this node's ports to the pool. Every caller reaches here with the node down: two
-    /// teardown paths, and the startup retry for a node that never bound them. That is what makes
+    /// teardown paths. That is what makes
     /// the release safe, not the stop itself, so a caller that releases while a peer may still dial
     /// the address belongs elsewhere.
     fn release_ports(&mut self) {
-        release_test_ports(&[
+        release_test_ports(&self.ports());
+    }
+
+    /// The seven ports this node listens on.
+    fn ports(&self) -> [u16; 7] {
+        [
             self.grpc_port,
             self.grpc_https_port,
             self.http_port,
@@ -3397,7 +4334,7 @@ impl NodeSpec {
             self.observability_port,
             self.web_console_port,
             self.interconnect_port,
-        ]);
+        ]
     }
 
     fn grpc_addr(&self) -> String {
@@ -3471,7 +4408,11 @@ impl NodeSpec {
 
     /// The `host:port` endpoint the node advertises and a joining node bootstraps from.
     fn interconnect_endpoint(&self) -> String {
-        NodeEndpoint::new(self.interconnect_host.clone(), self.interconnect_port).to_string()
+        let port = self
+            .paced_interconnect
+            .as_ref()
+            .map_or(self.interconnect_port, PacedInterconnect::port);
+        NodeEndpoint::new(self.interconnect_host.clone(), port).to_string()
     }
 
     fn db_path(&self) -> io::Result<PathBuf> {
@@ -3677,6 +4618,86 @@ async fn publish_http_bytes_with_headers(
     publish_http_uri_with_headers(spec.http_uri(path), host, payload, content_type, headers).await
 }
 
+/// The retry delay of an acknowledged endpoint's refusal that names none.
+const ACKNOWLEDGED_HTTP_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+/// Posts payloads to one acknowledged HTTP endpoint through one client, so the posts a step keeps
+/// in flight together share its connections.
+pub(crate) struct AcknowledgedHttpPublisher {
+    client: reqwest::Client,
+    uri: String,
+    host: String,
+    /// How long one payload may take to be acknowledged, its retries included.
+    wait: Duration,
+}
+
+impl AcknowledgedHttpPublisher {
+    /// Posts `payload` until the endpoint answers 200 with a completed outcome.
+    ///
+    /// The sender owns the retry of a 503: a full ACK window, a downstream refusal, an expired ACK
+    /// timeout and a quiesced intake are all answered that way, with the delay to wait. A retried
+    /// payload may be delivered twice, because a timed-out attempt is not rolled back. The wait
+    /// bounds only an endpoint that keeps refusing the payload; every attempt is answered within
+    /// the endpoint's ACK timeout.
+    pub(crate) async fn publish(&self, payload: &str) -> io::Result<()> {
+        let deadline = Instant::now() + self.wait;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let response = self
+                .client
+                .post(&self.uri)
+                .header("Host", &self.host)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(payload.to_owned())
+                .send()
+                .await
+                .map_err(io::Error::other)?;
+            let status = response.status();
+            let retry_delay = match response.headers().get(reqwest::header::RETRY_AFTER) {
+                Some(value) => {
+                    let seconds = value
+                        .to_str()
+                        .map_err(io::Error::other)?
+                        .parse::<u64>()
+                        .map_err(io::Error::other)?;
+                    Duration::from_secs(seconds)
+                }
+                None => ACKNOWLEDGED_HTTP_RETRY_DELAY,
+            };
+            let body = response.bytes().await.map_err(io::Error::other)?;
+            let outcome: serde_json::Value = serde_json::from_slice(&body).map_err(|error| {
+                io::Error::other(format!(
+                    "the endpoint answered {status} outside its outcome vocabulary: {error}"
+                ))
+            })?;
+            if status == reqwest::StatusCode::OK {
+                if outcome != serde_json::json!({ "outcome": "completed", "cause": "none" }) {
+                    return Err(io::Error::other(format!(
+                        "the endpoint answered 200 without completing the payload: {outcome}"
+                    )));
+                }
+                return Ok(());
+            }
+            if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                return Err(io::Error::other(format!(
+                    "the endpoint refused the payload for good: {status} {outcome}"
+                )));
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "the payload was not acknowledged within {:?}; the last answer was \
+                         {status} {outcome}",
+                        self.wait
+                    ),
+                ));
+            }
+            sleep(retry_delay).await;
+        }
+    }
+}
+
 pub(crate) async fn publish_http_uri_with_headers(
     uri: String,
     host: &str,
@@ -3696,10 +4717,15 @@ pub(crate) async fn publish_http_uri_with_headers(
     let response = request.send().await.map_err(io::Error::other)?;
 
     if response.status() != reqwest::StatusCode::ACCEPTED {
-        return Err(io::Error::other(format!(
-            "unexpected http status {}",
-            response.status()
-        )));
+        let kind = if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
+            io::ErrorKind::WouldBlock
+        } else {
+            io::ErrorKind::Other
+        };
+        return Err(io::Error::new(
+            kind,
+            format!("unexpected http status {}", response.status()),
+        ));
     }
 
     Ok(())
@@ -3815,89 +4841,6 @@ struct ClusterStatus {
     interconnect: BTreeMap<String, String>,
 }
 
-#[derive(Debug)]
-pub(crate) struct BrokerMessage {
-    /// The payload as text, with any byte that is not valid UTF-8 replaced.
-    pub(crate) payload: String,
-    /// The payload exactly as the broker delivered it.
-    pub(crate) bytes: Vec<u8>,
-    /// The headers the broker delivered with the payload: Kafka and NATS headers in their written
-    /// order, and Pulsar properties, RabbitMQ headers and SQS message attributes sorted by name,
-    /// because those brokers keep no order of their own.
-    pub(crate) headers: Vec<(String, String)>,
-    /// The key the broker delivered with the payload: a Kafka record key or a Pulsar partition key.
-    pub(crate) key: Option<String>,
-    /// The ordering group the broker delivered the payload in: an SQS FIFO message group.
-    pub(crate) group: Option<String>,
-}
-
-impl BrokerMessage {
-    fn from_bytes(bytes: &[u8], headers: Vec<(String, String)>) -> Self {
-        Self {
-            payload: String::from_utf8_lossy(bytes).to_string(),
-            bytes: bytes.to_vec(),
-            headers,
-            key: None,
-            group: None,
-        }
-    }
-
-    fn with_key(mut self, key: Option<String>) -> Self {
-        self.key = key;
-        self
-    }
-
-    fn with_group(mut self, group: Option<String>) -> Self {
-        self.group = group;
-        self
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct BrokerObserver {
-    payload_rx: mpsc::Receiver<BrokerMessage>,
-    task: Option<JoinHandle<()>>,
-}
-
-impl BrokerObserver {
-    pub(crate) async fn next_message(&mut self) -> io::Result<BrokerMessage> {
-        timeout(BROKER_TIMEOUT, self.payload_rx.recv())
-            .await
-            .map_err(|_| io::Error::other("timed out waiting for broker payload"))?
-            .ok_or_else(|| io::Error::other("broker observer closed before delivering payload"))
-    }
-
-    pub(crate) async fn try_next_payload(
-        &mut self,
-        duration: Duration,
-    ) -> io::Result<Option<String>> {
-        self.try_next_message(duration)
-            .await
-            .map(|message| message.map(|message| message.payload))
-    }
-
-    pub(crate) async fn try_next_message(
-        &mut self,
-        duration: Duration,
-    ) -> io::Result<Option<BrokerMessage>> {
-        match timeout(duration, self.payload_rx.recv()).await {
-            Ok(Some(message)) => Ok(Some(message)),
-            Ok(None) => Err(io::Error::other(
-                "broker observer closed before delivering payload",
-            )),
-            Err(_) => Ok(None),
-        }
-    }
-}
-
-impl Drop for BrokerObserver {
-    fn drop(&mut self) {
-        if let Some(task) = self.task.take() {
-            task.abort();
-        }
-    }
-}
-
 impl ClusterStatus {
     fn parse(raw: String) -> Self {
         let mut current_leader = None;
@@ -3967,6 +4910,24 @@ impl ClusterStatus {
     }
 }
 
+impl ClusterStatus {
+    /// Whether the membership this status reports holds `node_id` as a voter.
+    fn is_voter(&self, node_id: &str) -> bool {
+        match self.membership.get(node_id) {
+            Some(role) => role == "voter",
+            None => false,
+        }
+    }
+}
+
+/// Reads a retained status observation through the same parser as the cluster's status waits.
+pub(crate) fn interconnect_status_from_text(raw: &str, peer: &str) -> Option<String> {
+    ClusterStatus::parse(raw.to_string())
+        .interconnect
+        .get(peer)
+        .cloned()
+}
+
 fn parse_membership_line(line: &str) -> Option<(String, String)> {
     let item = line.strip_prefix("- ")?;
     let (node_id, rest) = item.split_once(" [")?;
@@ -4015,14 +4976,14 @@ pub(crate) async fn run_command_via_client(
     let client = Client::connect_with_options(
         server,
         client_domain(domain),
-        client_connect_options(server)?,
+        command_connect_options(server, query)?,
     )
     .await
-    .map_err(io::Error::other)?;
+    .map_err(|report| io::Error::other(format!("{report:#}")))?;
     let outcome = client
         .execute(query.to_string())
         .await
-        .map_err(io::Error::other)?;
+        .map_err(|report| io::Error::other(format!("{report:#}")))?;
     if outcome.succeeded() {
         Ok(flatten_outcome_messages(&outcome))
     } else {
@@ -4048,52 +5009,47 @@ async fn publish_mqtt_with_qos(
     qos: QoS,
     retain: bool,
 ) -> io::Result<()> {
-    let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
     let (host, port) = dependency_host_port(dependencies, MQTT_ADDR, 1883)?;
+    publish_mqtt_to_address(host, port, topic, payload, qos, retain).await
+}
+
+pub(crate) async fn publish_mqtt_to_address(
+    host: String,
+    port: u16,
+    topic: &str,
+    payload: &str,
+    qos: QoS,
+    retain: bool,
+) -> io::Result<()> {
+    let client_id = format!("nervix-cucumber-{}", Uuid::now_v7().as_simple());
     let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(16).build();
-    let driver = nervix_primitives::task::spawn(async move {
+    let driver = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
         loop {
             nervix_primitives::task::consume_budget().await;
             if eventloop.poll().await.is_err() {
                 break;
             }
         }
-    });
+    }));
 
-    let mut last_error = None;
-    for attempt in 0..5 {
-        nervix_primitives::task::consume_budget().await;
-        // Runtime ingestors can still be attaching to the broker immediately after START.
-        // Retaining the per-test input payload makes MQTT publishes deterministic without
-        // changing application-level topic reuse, because scenario topics are unique.
-        match client
-            .publish(topic, payload, PublishOptions::new(qos).retain(retain))
+    let published = timeout(BROKER_TIMEOUT, async {
+        // Runtime ingestors can still be attaching immediately after START. Retain the input on
+        // its unique scenario topic, and keep driving until it is sent (QoS 0) or answered (QoS 1).
+        let notice = client
+            .publish_tracked(topic, payload, PublishOptions::new(qos).retain(retain))
             .await
-        {
-            Ok(()) => {
-                sleep(POLL_INTERVAL).await;
-                driver.abort();
-                let _ = driver.await;
-                return Ok(());
-            }
-            Err(error) => {
-                last_error = Some(io::Error::other(format!(
-                    "failed to publish mqtt message to topic '{topic}': {error}"
-                )));
-                if attempt < 4 {
-                    sleep(POLL_INTERVAL).await;
-                }
-            }
-        }
-    }
+            .map_err(io::Error::other)?;
+        notice
+            .wait_completion_async()
+            .await
+            .map_err(io::Error::other)
+    })
+    .await;
 
-    sleep(POLL_INTERVAL).await;
     driver.abort();
     let _ = driver.await;
-    Err(last_error.unwrap_or_else(|| {
-        io::Error::other(format!("failed to publish mqtt message to topic '{topic}'"))
-    }))
+    published.map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
 }
 
 async fn publish_mqtt_burst(
@@ -4112,36 +5068,62 @@ async fn publish_mqtt_burst_with_qos(
     count: usize,
     qos: QoS,
 ) -> io::Result<()> {
-    let client_id = format!("nervix-cucumber-burst-{}", Uuid::now_v7().as_simple());
     let (host, port) = dependency_host_port(dependencies, MQTT_ADDR, 1883)?;
+    publish_mqtt_burst_to_address(host, port, topic, payload, count, qos).await
+}
+
+pub(crate) async fn publish_mqtt_burst_to_address(
+    host: String,
+    port: u16,
+    topic: &str,
+    payload: &str,
+    count: usize,
+    qos: QoS,
+) -> io::Result<()> {
+    let client_id = format!("nervix-cucumber-burst-{}", Uuid::now_v7().as_simple());
     let options = MqttOptions::new(client_id, (host, port));
     let (client, mut eventloop) = AsyncClient::builder(options)
         .capacity(count.max(16))
         .build();
-    let driver = nervix_primitives::task::spawn(async move {
+    let driver = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
         loop {
             nervix_primitives::task::consume_budget().await;
             if eventloop.poll().await.is_err() {
                 break;
             }
         }
-    });
+    }));
 
-    for _ in 0..count {
-        nervix_primitives::task::consume_budget().await;
-        client
-            .publish(topic, payload, PublishOptions::new(qos))
+    // The broker-operation timeout bounds each publication's queueing and completion rather than
+    // the whole burst, so a burst fails only once the broker answers none of its publications for
+    // that long. A broker the parallel suite loads answers a burst of 2,000 QoS 1 publications in
+    // more than one timeout while it answers each of them well within it.
+    let published = async {
+        let mut notices = Vec::with_capacity(count);
+        for _ in 0..count {
+            nervix_primitives::task::consume_budget().await;
+            let queued = timeout(
+                BROKER_TIMEOUT,
+                client.publish_tracked(topic, payload, PublishOptions::new(qos)),
+            )
             .await
-            .map_err(|error| {
-                io::Error::other(format!(
-                    "failed to publish mqtt burst message to topic '{topic}': {error}"
-                ))
-            })?;
+            .map_err(|elapsed| io::Error::new(io::ErrorKind::TimedOut, elapsed))?;
+            notices.push(queued.map_err(io::Error::other)?);
+        }
+        // Queue the complete burst before waiting so completion tracking preserves its demand.
+        for notice in notices {
+            nervix_primitives::task::consume_budget().await;
+            let completed = timeout(BROKER_TIMEOUT, notice.wait_completion_async())
+                .await
+                .map_err(|elapsed| io::Error::new(io::ErrorKind::TimedOut, elapsed))?;
+            completed.map_err(io::Error::other)?;
+        }
+        Ok::<_, io::Error>(())
     }
-    sleep(POLL_INTERVAL).await;
+    .await;
     driver.abort();
     let _ = driver.await;
-    Ok(())
+    published
 }
 
 async fn ensure_rabbitmq_queue(dependencies: &DependencyEndpoints, queue: &str) -> io::Result<()> {
@@ -4202,10 +5184,26 @@ async fn declare_rabbitmq_queue(channel: &lapin::Channel, queue: &str) -> io::Re
     Ok(())
 }
 
+/// What a passive declaration of a RabbitMQ queue reports about it.
+struct RabbitMqQueueState {
+    /// The messages ready for delivery. A delivery a consumer still holds unacknowledged is not one
+    /// of them until the consumer leaves.
+    messages: usize,
+    consumers: usize,
+}
+
 async fn rabbitmq_queue_consumer_count(
     dependencies: &DependencyEndpoints,
     queue: &str,
 ) -> io::Result<usize> {
+    let state = rabbitmq_queue_state(dependencies, queue).await?;
+    Ok(state.consumers)
+}
+
+async fn rabbitmq_queue_state(
+    dependencies: &DependencyEndpoints,
+    queue: &str,
+) -> io::Result<RabbitMqQueueState> {
     let connection = Connection::connect(
         dependencies.get(RABBITMQ_ADDR)?,
         ConnectionProperties::default(),
@@ -4227,7 +5225,10 @@ async fn rabbitmq_queue_consumer_count(
         )
         .await
         .map_err(io::Error::other)?;
-    Ok(declared.consumer_count().arch_into())
+    Ok(RabbitMqQueueState {
+        messages: declared.message_count().arch_into(),
+        consumers: declared.consumer_count().arch_into(),
+    })
 }
 
 async fn publish_redis(
@@ -4250,10 +5251,26 @@ async fn publish_redis_burst(
 ) -> io::Result<()> {
     let client = TestRedisClient::open(dependencies.get(REDIS_ADDR)?)?;
     let mut connection = client.connect().await?;
-    for _ in 0..count {
+    let deadline = Instant::now() + BROKER_TIMEOUT;
+    loop {
         nervix_primitives::task::consume_budget().await;
-        publish_redis_to_subscriber(&mut connection, channel, payload).await?;
+        let counts: Vec<(String, usize)> = redis::cmd("PUBSUB")
+            .arg("NUMSUB")
+            .arg(channel)
+            .query_async(&mut connection)
+            .await
+            .map_err(io::Error::other)?;
+        if counts.iter().any(|(_, subscribers)| *subscribers > 0) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "timed out waiting for a Redis burst subscriber on channel '{channel}'"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
     }
+    publish_burst(&mut connection, channel, payload, count).await?;
     sleep(POLL_INTERVAL).await;
     Ok(())
 }
@@ -4452,6 +5469,146 @@ async fn limit_pulsar_topic_message_size(
     }
 }
 
+/// The backlog the Pulsar admin API reports for `subscription` of `topic`: the messages the broker
+/// holds for it that no consumer acknowledged, delivered or not.
+async fn pulsar_subscription_backlog(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    subscription: &str,
+) -> io::Result<u64> {
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let url = format!("{admin}/admin/v2/persistent/public/default/{topic}/stats");
+    let stats: serde_json::Value = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(io::Error::other)?
+        .error_for_status()
+        .map_err(io::Error::other)?
+        .json()
+        .await
+        .map_err(io::Error::other)?;
+    let Some(backlog) = stats["subscriptions"][subscription]["msgBacklog"].as_u64() else {
+        return Err(io::Error::other(format!(
+            "the stats of Pulsar topic '{topic}' report no backlog for subscription \
+             '{subscription}': {stats}"
+        )));
+    };
+    Ok(backlog)
+}
+
+/// One subscription of a topic as the Pulsar admin API reports it: whether its cursor is
+/// durable, which a probe's non-durable cursor is not, and the names its consumers registered
+/// under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PulsarSubscriptionObservation {
+    pub(crate) durable: bool,
+    pub(crate) consumer_names: Vec<String>,
+}
+
+/// The subscription `subscription` of `topic` as the admin API's topic stats report it, absent
+/// when the topic holds no subscription of that name. A topic the broker does not have holds no
+/// subscription either: the broker deletes an inactive topic without subscriptions.
+async fn pulsar_subscription(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    subscription: &str,
+) -> io::Result<Option<PulsarSubscriptionObservation>> {
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let url = format!("{admin}/admin/v2/persistent/public/default/{topic}/stats");
+    let response = reqwest::Client::new()
+        .get(&url)
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let stats: serde_json::Value = response
+        .error_for_status()
+        .map_err(io::Error::other)?
+        .json()
+        .await
+        .map_err(io::Error::other)?;
+    let reported = &stats["subscriptions"][subscription];
+    if reported.is_null() {
+        return Ok(None);
+    }
+    let Some(durable) = reported["isDurable"].as_bool() else {
+        return Err(io::Error::other(format!(
+            "the stats of Pulsar topic '{topic}' report no durability for subscription \
+             '{subscription}': {stats}"
+        )));
+    };
+    let mut consumer_names = Vec::new();
+    for consumer in reported["consumers"].as_array().into_iter().flatten() {
+        let Some(name) = consumer["consumerName"].as_str() else {
+            return Err(io::Error::other(format!(
+                "the stats of Pulsar topic '{topic}' report a consumer of subscription \
+                 '{subscription}' without a name: {stats}"
+            )));
+        };
+        consumer_names.push(name.to_string());
+    }
+    consumer_names.sort();
+    Ok(Some(PulsarSubscriptionObservation {
+        durable,
+        consumer_names,
+    }))
+}
+
+/// Creates `topic` when the broker does not have it, then `subscription` of it at the topic's
+/// latest message, through the admin API.
+async fn provision_pulsar_subscription(
+    dependencies: &DependencyEndpoints,
+    topic: &str,
+    subscription: &str,
+) -> io::Result<()> {
+    let admin = dependencies.get(PULSAR_ADMIN_ADDR)?;
+    let client = reqwest::Client::new();
+    let topic_url = format!("{admin}/admin/v2/persistent/public/default/{topic}");
+    let created = client
+        .put(&topic_url)
+        .send()
+        .await
+        .map_err(io::Error::other)?;
+    // A topic that already exists, such as one a probe of the subscription created, answers
+    // conflict and is used as it is.
+    if created.status() != reqwest::StatusCode::CONFLICT {
+        created.error_for_status().map_err(io::Error::other)?;
+    }
+    // An ingestor that checks for the missing subscription holds a non-durable cursor of its name
+    // for the moment of each check, and the broker refuses to create the subscription as a
+    // conflict meanwhile. An operator repeats the request, and so does this, until the broker
+    // holds the subscription durably.
+    let subscription_url = format!("{topic_url}/subscription/{subscription}");
+    let deadline = Instant::now() + PULSAR_PROVISION_TIMEOUT;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let created = client
+            .put(&subscription_url)
+            .send()
+            .await
+            .map_err(io::Error::other)?;
+        if created.status() != reqwest::StatusCode::CONFLICT {
+            created.error_for_status().map_err(io::Error::other)?;
+            return Ok(());
+        }
+        let observed = pulsar_subscription(dependencies, topic, subscription).await?;
+        if let Some(PulsarSubscriptionObservation { durable: true, .. }) = observed {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::other(format!(
+                "the broker refused to create Pulsar subscription '{subscription}' of topic \
+                 '{topic}' as a conflict for {PULSAR_PROVISION_TIMEOUT:?} without holding it \
+                 durably; last observation: {observed:?}"
+            )));
+        }
+        sleep(POLL_INTERVAL).await;
+    }
+}
+
 /// The body the admin API answers `url` with, or what kept it from answering.
 async fn read_pulsar_admin_value(client: &reqwest::Client, url: &str) -> String {
     let response = match client.get(url).send().await {
@@ -4485,7 +5642,7 @@ async fn publish_kafka_with_headers(
 async fn publish_kafka_payloads(
     dependencies: &DependencyEndpoints,
     topic: &str,
-    payloads: &[String],
+    payloads: &[Vec<u8>],
 ) -> io::Result<()> {
     let mut client_config = kafka_client_config(dependencies)?;
     let producer: FutureProducer = client_config
@@ -4498,7 +5655,7 @@ async fn publish_kafka_payloads(
     for payload in payloads {
         nervix_primitives::task::consume_budget().await;
         deliveries.push(producer.send(
-            FutureRecord::<(), str>::to(topic).payload(payload.as_str()),
+            FutureRecord::<(), [u8]>::to(topic).payload(payload.as_slice()),
             Duration::from_secs(5),
         ));
     }
@@ -4535,7 +5692,25 @@ async fn publish_kafka_record(
     payload: &str,
     headers: &[(&str, &str)],
 ) -> io::Result<()> {
-    let mut client_config = kafka_client_config(dependencies)?;
+    publish_kafka_record_through(
+        kafka_client_config(dependencies)?,
+        topic,
+        partition,
+        payload,
+        headers,
+    )
+    .await
+}
+
+/// Publishes one record to `topic` through a producer that `client_config` connects to its broker,
+/// such as the mock broker a scenario owns.
+pub(crate) async fn publish_kafka_record_through(
+    mut client_config: ClientConfig,
+    topic: &str,
+    partition: Option<i32>,
+    payload: &str,
+    headers: &[(&str, &str)],
+) -> io::Result<()> {
     let producer: FutureProducer = client_config
         .set("message.timeout.ms", "5000")
         .set("delivery.timeout.ms", "5000")
@@ -4784,13 +5959,35 @@ fn kafka_consumer_group_member_count(
     Ok(info.members().len())
 }
 
-fn kafka_consumer_group_next_offset(
+/// The consumer groups the Kafka broker lists. A group with neither members nor committed offsets
+/// does not exist on the broker, so the listing leaves it out.
+fn kafka_listed_consumer_groups(
     dependencies: &DependencyEndpoints,
+) -> io::Result<BTreeSet<String>> {
+    let mut client_config = kafka_client_config(dependencies)?;
+    let consumer: BaseConsumer = client_config
+        .set(
+            "group.id",
+            format!("nervix-cucumber-admin-{}", Uuid::now_v7().as_simple()),
+        )
+        .create()
+        .map_err(io::Error::other)?;
+    let group_list = consumer
+        .fetch_group_list(None, Duration::from_secs(10))
+        .map_err(io::Error::other)?;
+    let mut listed = BTreeSet::new();
+    for group in group_list.groups() {
+        listed.insert(group.name().to_string());
+    }
+    Ok(listed)
+}
+
+fn kafka_consumer_group_next_offset(
+    mut client_config: ClientConfig,
     group: &str,
     topic: &str,
     partition: i32,
 ) -> io::Result<Option<i64>> {
-    let mut client_config = kafka_client_config(dependencies)?;
     let consumer: BaseConsumer = client_config
         .set("group.id", group)
         .set("enable.auto.commit", "false")
@@ -4811,6 +6008,61 @@ fn kafka_consumer_group_next_offset(
         | Offset::Stored
         | Offset::Invalid
         | Offset::OffsetTail(_) => Ok(None),
+    }
+}
+
+/// Asserts, through a consumer that `client_config` connects to its broker, that consumer group
+/// `group` commits a next offset of at least `threshold` for `topic` partition `partition` within
+/// `duration`, or, when `should_reach` is false, that it stays below it for all of `duration`.
+pub(crate) async fn assert_kafka_consumer_group_next_offset_through(
+    client_config: ClientConfig,
+    group: &str,
+    topic: &str,
+    partition: i32,
+    threshold: i64,
+    should_reach: bool,
+    duration: Duration,
+) -> io::Result<()> {
+    let deadline = Instant::now() + duration;
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let query_config = client_config.clone();
+        let query_group = group.to_string();
+        let query_topic = topic.to_string();
+        let observation = nervix_primitives::task::spawn_blocking(move || {
+            kafka_consumer_group_next_offset(query_config, &query_group, &query_topic, partition)
+        })
+        .await
+        .map_err(io::Error::other)?;
+        let actual = match observation {
+            Ok(actual) => actual,
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => {
+                sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+        let reached = actual.is_some_and(|offset| offset >= threshold);
+        if should_reach && reached {
+            return Ok(());
+        }
+        if !should_reach && reached {
+            return Err(io::Error::other(format!(
+                "Kafka consumer group '{group}' unexpectedly committed next offset {actual:?} for \
+                 topic '{topic}' partition {partition}; expected it to remain below {threshold}"
+            )));
+        }
+        if Instant::now() >= deadline {
+            if should_reach {
+                return Err(io::Error::other(format!(
+                    "timed out waiting for Kafka consumer group '{group}' to commit next offset \
+                     at least {threshold} for topic '{topic}' partition {partition}; observed \
+                     {actual:?}"
+                )));
+            }
+            return Ok(());
+        }
+        sleep(POLL_INTERVAL).await;
     }
 }
 
@@ -4963,7 +6215,7 @@ async fn publish_zeromq(addr: &str, payload: &str) -> io::Result<()> {
     Ok(())
 }
 
-async fn observe_mqtt(
+pub(crate) async fn observe_mqtt(
     dependencies: &DependencyEndpoints,
     topic: &str,
 ) -> io::Result<BrokerObserver> {
@@ -5021,10 +6273,7 @@ async fn observe_mqtt(
         .map_err(|_| io::Error::other("timed out waiting for mqtt observer subscription"))?
         .map_err(io::Error::other)?;
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_rabbitmq(
@@ -5069,10 +6318,7 @@ async fn observe_rabbitmq(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 /// The string headers of one RabbitMQ delivery in name order, which is the order the AMQP field
@@ -5116,14 +6362,20 @@ async fn observe_redis(
     });
 
     sleep(POLL_INTERVAL).await;
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_kafka(
     dependencies: &DependencyEndpoints,
+    topic: &str,
+) -> io::Result<BrokerObserver> {
+    observe_kafka_through(kafka_client_config(dependencies)?, topic).await
+}
+
+/// Observes `topic` through a consumer that `client_config` connects to its broker, such as the mock
+/// broker a scenario owns.
+pub(crate) async fn observe_kafka_through(
+    mut client_config: ClientConfig,
     topic: &str,
 ) -> io::Result<BrokerObserver> {
     let consumer_group = format!(
@@ -5134,7 +6386,6 @@ async fn observe_kafka(
             .expect("system clock must be after unix epoch")
             .as_nanos()
     );
-    let mut client_config = kafka_client_config(dependencies)?;
     let consumer: StreamConsumer = client_config
         .set("group.id", &consumer_group)
         .set("enable.partition.eof", "false")
@@ -5183,10 +6434,7 @@ async fn observe_kafka(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_pulsar(
@@ -5269,10 +6517,7 @@ async fn observe_pulsar_with_addr(
                 }
             });
 
-            Ok(BrokerObserver {
-                payload_rx,
-                task: Some(task),
-            })
+            Ok(BrokerObserver::forwarded(payload_rx, task))
         }
         .await;
 
@@ -5351,55 +6596,15 @@ async fn observe_sqs(
         }
     });
 
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn observe_nats(
     dependencies: &DependencyEndpoints,
     subject: &str,
 ) -> io::Result<BrokerObserver> {
-    let client = nats_client(dependencies).await?;
-    let mut subscriber = client
-        .subscribe(subject.to_string())
-        .await
-        .map_err(io::Error::other)?;
-    let (payload_tx, payload_rx) = mpsc::channel(1);
-
-    let task = nervix_primitives::task::spawn(async move {
-        while let Some(message) = subscriber.next().await {
-            nervix_primitives::task::consume_budget().await;
-            let bytes = message.payload.as_ref();
-            let headers = message
-                .headers
-                .as_ref()
-                .map(|headers| {
-                    headers
-                        .iter()
-                        .flat_map(|(name, values)| {
-                            values
-                                .iter()
-                                .map(|value| (name.to_string(), value.as_str().to_string()))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if payload_tx
-                .send(BrokerMessage::from_bytes(bytes, headers))
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    let observer = NatsObserver::connect(dependencies.get(NATS_ADDR)?, subject).await?;
+    Ok(BrokerObserver::nats(observer))
 }
 
 async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
@@ -5434,10 +6639,7 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
     });
 
     sleep(POLL_INTERVAL).await;
-    Ok(BrokerObserver {
-        payload_rx,
-        task: Some(task),
-    })
+    Ok(BrokerObserver::forwarded(payload_rx, task))
 }
 
 async fn nats_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {
@@ -5496,6 +6698,75 @@ async fn wait_for_nats_stream_payload(
         }
         sleep(POLL_INTERVAL).await;
     }
+}
+
+async fn nats_stream_message_count(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+) -> io::Result<u64> {
+    let client = nats_client(dependencies).await?;
+    let mut stream_handle = async_nats::jetstream::new(client)
+        .get_stream(stream)
+        .await
+        .map_err(io::Error::other)?;
+    let info = stream_handle.info().await.map_err(io::Error::other)?;
+    Ok(info.state.messages)
+}
+
+/// Reads every message JetStream `stream` holds when the read begins, through an ordered consumer
+/// of its own, and returns the integer `field` of each message's JSON payload in the order the
+/// stream stored them.
+async fn nats_stream_field_values(
+    dependencies: &DependencyEndpoints,
+    stream: &str,
+    field: &str,
+) -> io::Result<Vec<i64>> {
+    let client = nats_client(dependencies).await?;
+    let mut stream_handle = async_nats::jetstream::new(client)
+        .get_stream(stream)
+        .await
+        .map_err(io::Error::other)?;
+    let held = stream_handle
+        .info()
+        .await
+        .map_err(io::Error::other)?
+        .state
+        .messages;
+    let mut values = Vec::new();
+    if held == 0 {
+        return Ok(values);
+    }
+    let consumer = stream_handle
+        .create_consumer(async_nats::jetstream::consumer::pull::OrderedConfig::default())
+        .await
+        .map_err(io::Error::other)?;
+    let mut messages = consumer.messages().await.map_err(io::Error::other)?;
+    for read in 0..held {
+        nervix_primitives::task::consume_budget().await;
+        let Ok(next) = timeout(BROKER_TIMEOUT, messages.next()).await else {
+            return Err(io::Error::other(format!(
+                "timed out reading message {read} of the {held} NATS JetStream stream '{stream}' \
+                 held"
+            )));
+        };
+        let Some(message) = next else {
+            return Err(io::Error::other(format!(
+                "the ordered consumer of NATS JetStream stream '{stream}' ended after {read} of \
+                 its {held} messages"
+            )));
+        };
+        let message = message.map_err(io::Error::other)?;
+        let payload: serde_json::Value =
+            serde_json::from_slice(&message.payload).map_err(io::Error::other)?;
+        let Some(value) = payload.get(field).and_then(serde_json::Value::as_i64) else {
+            return Err(io::Error::other(format!(
+                "a message of NATS JetStream stream '{stream}' carries no integer '{field}': \
+                 {payload}"
+            )));
+        };
+        values.push(value);
+    }
+    Ok(values)
 }
 
 async fn nats_tls_client(dependencies: &DependencyEndpoints) -> io::Result<NatsClient> {

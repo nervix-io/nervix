@@ -7,10 +7,16 @@
 //! - **Depends on.** The runtime's answers and the interconnect's typed requests.
 //! - **Must not know.** How the runtime keeps, catalogues or encodes the state it answers from.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::ResultExt as _;
 use nervix_interconnect::{
-    BranchCheckpointListingRequest, BranchCheckpointListingResponse, RemoteOperationFailure,
-    RemoteOperationSubject, StateSnapshotEnvelope, StateSyncRequest, StateSyncResponse,
+    BranchCheckpointListingRequest, BranchCheckpointListingResponse, DescribeKafkaOffsets,
+    FetchStateCheckpoint, RemoteOperationFailure, RemoteOperationSubject, StateSyncRequest,
+    StateSyncResponse, SyncKafkaOffsets,
 };
 
 use super::{AppError, session_service::SessionServiceImpl};
@@ -21,6 +27,32 @@ impl SessionServiceImpl {
     pub(super) fn register_state_replication_interconnect_handlers(
         &self,
     ) -> error_stack::Result<(), AppError> {
+        let describe_kafka_offsets_service = self.clone();
+        self.inner
+            .interconnect
+            .register_handler::<DescribeKafkaOffsets, _, _>(move |_context, request| {
+                let service = describe_kafka_offsets_service.clone();
+                async move { service.inner.runtime.describe_kafka_offsets(request) }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let kafka_offsets_service = self.clone();
+        self.inner
+            .interconnect
+            .register_stream_handler::<SyncKafkaOffsets, _, _>(move |_context, request| {
+                let service = kafka_offsets_service.clone();
+                async move { service.inner.runtime.stream_kafka_offsets(request).await }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
+        let checkpoint_service = self.clone();
+        self.inner
+            .interconnect
+            .register_stream_handler::<FetchStateCheckpoint, _, _>(move |_context, request| {
+                let service = checkpoint_service.clone();
+                async move { service.inner.runtime.stream_state_checkpoint(request).await }
+            })
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+
         let state_sync_service = self.clone();
         self.inner
             .interconnect
@@ -39,28 +71,33 @@ impl SessionServiceImpl {
                             };
                         }
                     };
-                    if !service
+                    let Some(admitted) = service
                         .inner
                         .runtime
-                        .runtime_state_placement_is_assigned_locally(&placement)
-                    {
+                        .resolve_state_replication_request(&placement)
+                    else {
                         return StateSyncResponse {
                             result: Err(RemoteOperationFailure::rejected(subject)),
                         };
-                    }
+                    };
                     let snapshot = service
                         .inner
                         .runtime
-                        .handle_state_sync_request(&placement, request.after_lsm)
-                        .await
-                        .map_err(|error| error.current_context().as_remote_failure(subject));
+                        .answer_state_sync_request(admitted, request.after_lsm)
+                        .await;
+                    let described = match snapshot {
+                        Ok(Some(snapshot)) => service
+                            .inner
+                            .runtime
+                            .describe_state_checkpoint(&placement, snapshot)
+                            .await
+                            .map(Some),
+                        Ok(None) => Ok(None),
+                        Err(error) => Err(error),
+                    };
                     StateSyncResponse {
-                        result: snapshot.map(|snapshot| {
-                            snapshot.map(|snapshot| StateSnapshotEnvelope {
-                                lsm: snapshot.lsm,
-                                payload: snapshot.payload,
-                            })
-                        }),
+                        result: described
+                            .map_err(|error| error.current_context().as_remote_failure(subject)),
                     }
                 }
             })
@@ -84,19 +121,19 @@ impl SessionServiceImpl {
                             };
                         }
                     };
-                    if !service
+                    let Some(admitted) = service
                         .inner
                         .runtime
-                        .runtime_state_placement_is_assigned_locally(&placement)
-                    {
+                        .resolve_state_replication_request(&placement)
+                    else {
                         return BranchCheckpointListingResponse {
                             result: Err(RemoteOperationFailure::rejected(subject)),
                         };
-                    }
+                    };
                     let listing = service
                         .inner
                         .runtime
-                        .handle_branch_checkpoint_listing(&placement, request.after);
+                        .answer_branch_checkpoint_listing(admitted, request.after);
                     BranchCheckpointListingResponse {
                         result: Ok(listing),
                     }

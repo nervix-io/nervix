@@ -8,12 +8,16 @@ import io
 import os
 import pathlib
 import runpy
+import signal
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
-from scripts import typed_ratchet
+from scripts import analysis_admission, typed_ratchet
+from scripts.analysis_admission import GIB, Compiled, Policy
 from scripts.typed_ratchet import AnalysisError, Configuration, ROOT, Runner, TOOLING, atomic_json, digest, summarize
 
 
@@ -34,6 +38,7 @@ class CompletionTests(unittest.TestCase):
         self.runner.compiler = "qualified compiler"
         self.runner.identity = "current worktree fingerprint"
         self.runner.environment = {"NERVIX_LINT_MODE": "gate"}
+        self.runner.admission = Policy(self.root / "queue", 4 * GIB, 60.0, {Compiled("example", "lib"): 16 * GIB})
         self.configuration = Configuration("ordinary", "Cargo.toml", ("example",))
         self.key = "example-id::example::lib"
         self.expected = {self.key: {"package": "example", "source": str(self.source), "kind": "lib"}}
@@ -97,7 +102,7 @@ class RunnerIdentityTests(unittest.TestCase):
         self.root = pathlib.Path(self.temporary.name)
         self.target = self.root / "target"
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self.root, check=True)
-        for name, text in {"src/lib.rs": "pub fn owner() {}", "Cargo.toml": "[workspace]", "Cargo.lock": "lock", str(TOOLING / "report/src/rules.rs"): "rule code", str(TOOLING / "configurations.toml"): "configuration", "scripts/typed_lint_wrapper.py": "wrapper", "target/typed-ratchet/driver/debug/nervix-lint-driver": "driver", "target/typed-ratchet/driver/debug/nervix-lint-report": "validator"}.items():
+        for name, text in {"src/lib.rs": "pub fn owner() {}", "Cargo.toml": "[workspace]", "Cargo.lock": "lock", str(TOOLING / "report/src/rules.rs"): "rule code", str(TOOLING / "configurations.toml"): "[admission]\nreservation = []\nthreshold_gib = 4\nwait_limit_minutes = 30\n# declared", "scripts/typed_lint_wrapper.py": "wrapper", "target/typed-ratchet/driver/debug/nervix-lint-driver": "driver", "target/typed-ratchet/driver/debug/nervix-lint-report": "validator"}.items():
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
@@ -146,22 +151,73 @@ class RunnerIdentityTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_diagnostic_configurations_include_the_lanes_testing_capability(self) -> None:
+        diagnostic_features = {"deloxide", "deloxide-order", "deloxide-stress"}
+        diagnostic_configurations = 0
+        for configuration in typed_ratchet.load_configurations(ROOT):
+            if diagnostic_features.intersection(configuration.features):
+                diagnostic_configurations += 1
+                with self.subTest(configuration=configuration.name):
+                    self.assertIn("testing", configuration.features)
+        self.assertEqual(diagnostic_configurations, 6)
+
     def test_arguments_keep_modes_targets_and_selected_packages_explicit(self) -> None:
         self.assertEqual(Configuration("selected", "Cargo.toml", ("one", "two"), ("lib", "bin"), ("native", "shuttle"), "native-target").cargo_arguments(), ["--manifest-path", "Cargo.toml", "--package", "one", "--package", "two", "--lib", "--bins", "--features", "native shuttle", "--target", "native-target"])
         self.assertIn("--workspace", Configuration("ordinary", "Cargo.toml", ()).cargo_arguments())
 
     def test_declared_modes_and_malformed_configuration(self) -> None:
         configurations = typed_ratchet.load_configurations(ROOT)
-        self.assertEqual({item.name for item in configurations}, {"ordinary", "testing", "shuttle", "loom", "turmoil"})
+        self.assertEqual({item.name for item in configurations}, {"ordinary", "browser", "testing", "shuttle", "loom", "turmoil", "deloxide", "deloxide-order", "deloxide-stress", "deloxide-binaries", "deloxide-order-binaries", "deloxide-stress-binaries"})
+        browser = next(item for item in configurations if item.name == "browser")
+        self.assertEqual(browser.target, "wasm32-unknown-unknown")
+        self.assertEqual(browser.kinds, ("lib", "bin"))
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             path = root / TOOLING / "configurations.toml"
             path.parent.mkdir(parents=True)
             valid = '[[configuration]]\nname="ordinary"\nmanifest="Cargo.toml"\npackages=[]\n'
-            for text, error in ((valid + valid, "duplicate"), (valid + 'features=["loom", "shuttle"]\n', "incompatible"), (valid + 'kinds=["test"]\n', "unsupported"), (valid + 'unknown=true\n', "unknown"), ('[[configuration]]\nname="absent"\n', "missing"), ('configuration=[]\n', "no declared")):
+            for text, error in ((valid + valid, "duplicate"), (valid + 'features=["loom", "shuttle"]\n', "incompatible"), (valid + 'features=["deloxide", "turmoil"]\n', "incompatible"), (valid + 'kinds=["test"]\n', "unsupported"), (valid + 'unknown=true\n', "unknown"), ('[[configuration]]\nname="absent"\n', "missing"), ('configuration=[]\n', "no declared")):
                 path.write_text(text)
                 with self.assertRaisesRegex(AnalysisError, error):
                     typed_ratchet.load_configurations(root)
+
+    def test_the_declared_admission_reserves_the_server_library_in_the_hosts_queue(self) -> None:
+        policy = typed_ratchet.load_admission(ROOT)
+        self.assertEqual(policy.directory, analysis_admission.host_directory())
+        self.assertGreater(policy.reservation(Compiled("nervix_server", "lib")), policy.threshold_bytes)
+        self.assertGreater(policy.wait_limit_seconds, 0)
+
+    def test_a_malformed_admission_declaration_names_its_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path = root / TOOLING / "configurations.toml"
+            path.parent.mkdir(parents=True)
+            head = "[admission]\nthreshold_gib = 4\nwait_limit_minutes = 30\n"
+            reservation = '[[admission.reservation]]\ncrate = "nervix_server"\ngib = 16\nkind = "lib"\n'
+            path.write_text(head + reservation)
+            self.assertEqual(typed_ratchet.load_admission(root).reservations, {Compiled("nervix_server", "lib"): 16 * GIB})
+            path.write_text(head + "reservation = []\n")
+            self.assertEqual(typed_ratchet.load_admission(root).reservations, {})
+            for text, error in (
+                ("", "needs exactly threshold_gib, wait_limit_minutes and reservation"),
+                (head, "needs exactly threshold_gib"),
+                (head + "reservation = []\nunknown = 1\n", "needs exactly threshold_gib"),
+                ("[admission]\nthreshold_gib = 0\nwait_limit_minutes = 30\nreservation = []\n", "positive whole numbers"),
+                ("[admission]\nthreshold_gib = true\nwait_limit_minutes = 30\nreservation = []\n", "positive whole numbers"),
+                ("[admission]\nthreshold_gib = 4\nwait_limit_minutes = 0.5\nreservation = []\n", "positive whole numbers"),
+                (head + 'reservation = "nervix_server"\n', "reservations are a list"),
+                (head + "reservation = [1]\n", "needs exactly a crate, a kind and its gib"),
+                (head + '[[admission.reservation]]\ncrate = "nervix_server"\nkind = "lib"\n', "needs exactly a crate, a kind and its gib"),
+                (head + '[[admission.reservation]]\ncrate = ""\ngib = 16\nkind = "lib"\n', "names a crate and a lib or bin kind"),
+                (head + '[[admission.reservation]]\ncrate = "nervix_server"\ngib = 16\nkind = "test"\n', "names a crate and a lib or bin kind"),
+                (head + reservation + reservation, "duplicate admission reservation for nervix_server \\(lib\\)"),
+                (head + '[[admission.reservation]]\ncrate = "nervix_server"\ngib = 4\nkind = "lib"\n', "is a whole number of GiB above the 4 GiB threshold"),
+                (head + '[[admission.reservation]]\ncrate = "nervix_server"\ngib = 16.5\nkind = "lib"\n', "is a whole number of GiB above"),
+            ):
+                with self.subTest(text=text):
+                    path.write_text(text)
+                    with self.assertRaisesRegex(AnalysisError, "^tools/nervix-lint/configurations.toml: .*" + error):
+                        typed_ratchet.load_admission(root)
 
 
 class RunnerExecutionTests(CompletionTests):
@@ -256,15 +312,64 @@ class RunnerExecutionTests(CompletionTests):
         self.assertEqual(captured[0][1]["RUSTC_WRAPPER"], "kache")
         self.assertEqual(captured[0][1]["RUSTC_WORKSPACE_WRAPPER"], str(self.runner.wrapper))
         self.assertEqual(captured[0][1]["KACHE_KEY_SALT"], "current namespace")
+        self.assertEqual(Policy.decode(captured[0][1]["NERVIX_LINT_ADMISSION"]), self.runner.admission)
         with mock.patch("scripts.typed_ratchet.subprocess.Popen", return_value=mock.Mock(wait=mock.Mock(return_value=1))):
             with self.assertRaisesRegex(AnalysisError, "did not finish"):
                 Runner.cargo(self.runner, self.configuration, self.root / "build", self.reports, "namespace")
+
+    def failed_cargo(self, messages: list[dict], terminations: list[dict]) -> str:
+        def popen(args, **kwargs):
+            for message in messages:
+                kwargs["stdout"].write(json.dumps(message) + "\n")
+            for termination in terminations:
+                atomic_json(self.reports / "compilations" / f"{termination['crate_name']}{termination['extra_filename']}.json", termination)
+            return mock.Mock(wait=mock.Mock(return_value=101))
+        with mock.patch("scripts.typed_ratchet.subprocess.Popen", side_effect=popen):
+            with self.assertRaisesRegex(AnalysisError, "compiler run failed or did not finish") as failure:
+                Runner.cargo(self.runner, self.configuration, self.root / "build", self.reports, "namespace")
+        return str(failure.exception)
+
+    def test_a_failed_compilation_names_how_each_analysis_compiler_ended(self) -> None:
+        finished = {"reason": "build-finished", "success": False}
+        target = {"name": "example", "kind": ["lib"], "src_path": str(self.source)}
+        error = {"reason": "compiler-message", "package_id": "example-id", "target": target, "message": {"level": "error", "message": "mismatched types", "rendered": "error: mismatched types", "code": None}}
+        termination = {"crate_name": "example", "extra_filename": "-abcd", "crate_types": ["lib"], "source": "src/lib.rs", "peak_resident_bytes": 14 * 2**30, "started_unix_ns": 1, "seconds": 412.0, "oom_kills": 1, "admission": None}
+        killed = self.failed_cargo([finished], [{**termination, "ending": {"kind": "signal", "signal": 9, "name": "SIGKILL"}}])
+        self.assertRegex(killed, r"example \(lib\): the analysis compiler was terminated by signal 9 \(SIGKILL\) after 412s at a peak resident size of 14\.0 GiB; the kernel's out-of-memory killer recorded 1 kill in its cgroup while it ran; it wrote no compiler report")
+        stopped = self.failed_cargo([finished], [{**termination, "crate_types": [], "oom_kills": 0, "ending": {"kind": "signal", "signal": 15, "name": None}}])
+        self.assertIn("example (unknown): the analysis compiler was terminated by signal 15 (unnamed) after 412s at a peak resident size of 14.0 GiB; it wrote no compiler report", stopped)
+        failed = self.failed_cargo([error, finished], [{**termination, "ending": {"kind": "exit", "status": 1}}])
+        self.assertIn("example (lib): the analysis compiler failed with 1 compiler error (exit status 1)", failed)
+        driver = self.failed_cargo([finished], [{**termination, "oom_kills": None, "ending": {"kind": "exit", "status": 1}}])
+        self.assertIn("example (lib): the analysis compiler exited with status 1 without a compiler error, so the analysis driver itself failed", driver)
+        self.assertNotIn("out-of-memory", driver)
+        outside = self.failed_cargo([finished], [])
+        self.assertIn("no analysis compilation ended unsuccessfully, so Cargo, a build script or the compiler wrapper failed outside them", outside)
+        succeeded = self.failed_cargo([finished], [{**termination, "ending": {"kind": "exit", "status": 0}}])
+        self.assertIn("no analysis compilation ended unsuccessfully", succeeded)
+
+    def test_a_previous_runs_compilation_is_not_reported_again(self) -> None:
+        stale = {"crate_name": "example", "extra_filename": "-abcd", "crate_types": ["lib"], "source": "src/lib.rs", "peak_resident_bytes": 1, "started_unix_ns": 1, "seconds": 1.0, "oom_kills": 0, "admission": None, "ending": {"kind": "signal", "signal": 9, "name": "SIGKILL"}}
+        atomic_json(self.reports / "compilations/example-abcd.json", stale)
+        outside = self.failed_cargo([{"reason": "build-finished", "success": False}], [])
+        self.assertNotIn("SIGKILL", outside)
+        self.assertFalse((self.reports / "compilations/example-abcd.json").exists())
 
     def test_clean_only_this_analysis_build(self) -> None:
         with mock.patch("scripts.typed_ratchet.command") as command:
             Runner.clean_authored_artifacts(self.runner, self.configuration, self.expected, self.root / "isolated")
         self.assertIn(str(self.root / "isolated"), command.call_args.args[0])
         self.assertIn("example", command.call_args.args[0])
+        self.assertEqual(command.call_args.kwargs["env"]["RUSTC_WRAPPER"], "kache")
+
+    def test_cross_target_reanalysis_cleans_the_analyzed_target(self) -> None:
+        configuration = Configuration("browser", "Cargo.toml", ("example",), target="wasm32-unknown-unknown")
+        with mock.patch("scripts.typed_ratchet.command") as command:
+            Runner.clean_authored_artifacts(self.runner, configuration, self.expected, self.root / "isolated")
+        arguments = command.call_args.args[0]
+        self.assertIn("--target", arguments)
+        self.assertEqual(arguments[arguments.index("--target") + 1], configuration.target)
+        self.assertEqual(arguments[arguments.index("--target-dir") + 1], str(self.root / "isolated"))
         self.assertEqual(command.call_args.kwargs["env"]["RUSTC_WRAPPER"], "kache")
 
     def test_required_gate_rejects_warnings_and_inventory_records_them(self) -> None:
@@ -276,6 +381,125 @@ class RunnerExecutionTests(CompletionTests):
         self.runner.check_diagnostics(messages)
         self.runner.environment["NERVIX_LINT_MODE"] = "gate"
         self.runner.check_diagnostics([{"reason": "compiler-message", "message": {"code": None}}])
+
+
+class CompilationMeasurementTests(CompletionTests):
+    def setUp(self) -> None:
+        super().setUp()
+        for message in self.messages:
+            message["fresh"] = False
+        self.admission = {"reservation_bytes": 16 * GIB, "outcome": "fit", "waited_seconds": 93.0, "left_bytes": 40 * GIB, "holders": 1, "error": None}
+        self.record = {"crate_name": "example", "extra_filename": "-abcd", "crate_types": ["lib"], "source": str(self.source), "ending": {"kind": "exit", "status": 0}, "peak_resident_bytes": 13 * GIB, "started_unix_ns": 5, "seconds": 119.0, "oom_kills": 0, "admission": self.admission}
+        self.record_path = self.reports / "compilations/example-abcd.json"
+        atomic_json(self.record_path, self.record)
+
+    def measure(self) -> dict:
+        return self.runner.measure_compilations(self.configuration, self.expected, self.messages, self.reports)
+
+    def test_a_declared_compilation_within_its_reservation_is_measured(self) -> None:
+        self.assertEqual(self.measure(), {self.key: {"crate_name": "example", "kind": "lib", "peak_resident_bytes": 13 * GIB, "started_unix_ns": 5, "seconds": 119.0, "admission": self.admission}})
+        atomic_json(self.record_path, {**self.record, "peak_resident_bytes": 16 * GIB})
+        self.assertEqual(self.measure()[self.key]["peak_resident_bytes"], 16 * GIB)
+
+    def test_a_compilation_above_its_reservation_names_the_declaration(self) -> None:
+        atomic_json(self.record_path, {**self.record, "peak_resident_bytes": 17 * GIB})
+        with self.assertRaisesRegex(AnalysisError, r"^ordinary: example \(lib\) peaked at 17\.0 GiB, above its 16 GiB admission reservation; raise the reservation in tools/nervix-lint/configurations\.toml$"):
+            self.measure()
+
+    def test_an_undeclared_compilation_above_the_threshold_names_the_declaration(self) -> None:
+        self.runner.admission = Policy(self.root / "queue", 4 * GIB, 60.0, {})
+        atomic_json(self.record_path, {**self.record, "peak_resident_bytes": 4 * GIB, "admission": None})
+        self.assertEqual(self.measure()[self.key]["peak_resident_bytes"], 4 * GIB)
+        atomic_json(self.record_path, {**self.record, "peak_resident_bytes": 4 * GIB + 1, "admission": None})
+        with self.assertRaisesRegex(AnalysisError, r"^ordinary: example \(lib\) peaked at 4\.0 GiB, above the 4 GiB admission threshold, without an admission reservation; declare one in tools/nervix-lint/configurations\.toml$"):
+            self.measure()
+
+    def test_fresh_targets_and_dependencies_outside_the_workspace_have_no_measurement(self) -> None:
+        self.record_path.unlink()
+        fresh = [{**message, "fresh": True} for message in self.messages]
+        self.assertEqual(self.runner.measure_compilations(self.configuration, self.expected, fresh, self.reports), {})
+        dependency = [{**message, "package_id": "registry-id"} for message in self.messages]
+        self.assertEqual(self.runner.measure_compilations(self.configuration, self.expected, dependency, self.reports), {})
+
+    def test_a_workspace_compilation_outside_the_expected_targets_is_held_to_the_declaration(self) -> None:
+        # A binary configuration expects only binaries, but compiles the libraries they depend on.
+        library = [{**message, "package_id": "library-id"} for message in self.messages]
+        measured = self.runner.measure_compilations(self.configuration, self.expected, library, self.reports)
+        self.assertEqual(list(measured), ["library-id::example::lib"])
+        self.assertEqual(measured["library-id::example::lib"]["peak_resident_bytes"], 13 * GIB)
+        atomic_json(self.record_path, {**self.record, "peak_resident_bytes": 17 * GIB})
+        with self.assertRaisesRegex(AnalysisError, "above its 16 GiB admission reservation"):
+            self.runner.measure_compilations(self.configuration, self.expected, library, self.reports)
+
+    def test_a_missing_ambiguous_or_failed_record_fails(self) -> None:
+        self.messages[0]["filenames"].append(str(self.root / "libexample-efgh.rlib"))
+        atomic_json(self.reports / "compilations/example-efgh.json", self.record)
+        with self.assertRaisesRegex(AnalysisError, "ordinary: example-id::example::lib: ambiguous compilation records"):
+            self.measure()
+        (self.reports / "compilations/example-efgh.json").unlink()
+        atomic_json(self.record_path, {**self.record, "ending": {"kind": "signal", "signal": 9, "name": "SIGKILL"}})
+        with self.assertRaisesRegex(AnalysisError, "compilation record names a failure"):
+            self.measure()
+        self.record_path.unlink()
+        with self.assertRaisesRegex(AnalysisError, "ordinary: example-id::example::lib: missing compilation record"):
+            self.measure()
+
+    def test_analysis_evidence_keeps_the_measurements_and_prints_the_waits(self) -> None:
+        self.runner.target = self.root / "target"
+        self.runner.work = self.root / "evidence"
+        self.runner.inputs = {"src/lib.rs": digest(self.source)}
+        self.runner.environment = {**os.environ, "NERVIX_LINT_MODE": "gate"}
+        self.runner.expected_targets = mock.Mock(return_value=self.expected)
+
+        def cargo(configuration, build, reports, salt):
+            reports.mkdir(parents=True, exist_ok=True)
+            atomic_json(reports / "example-abcd.json", self.report)
+            atomic_json(reports / "compilations/example-abcd.json", self.record)
+            (reports.parent / "cargo.jsonl").write_text("\n".join(json.dumps(message) for message in self.messages) + "\n")
+            return self.messages
+
+        self.runner.cargo = cargo
+        output = io.StringIO()
+        with mock.patch("scripts.typed_ratchet.source_inputs", return_value=self.runner.inputs), contextlib.redirect_stdout(output):
+            evidence = self.runner.analyze(self.configuration)
+        self.assertEqual(evidence["compilations"][self.key]["peak_resident_bytes"], 13 * GIB)
+        self.assertEqual(json.loads((self.runner.work / "ordinary/completion.json").read_text())["compilations"], evidence["compilations"])
+        self.assertIn("typed ratchet: ordinary: the largest analysis compilation, example (lib), peaked at 13.0 GiB in 119 s", output.getvalue())
+        self.assertIn("typed ratchet: ordinary: example (lib) waited 93 s for host memory admission (fit) of its 16 GiB reservation and peaked at 13.0 GiB", output.getvalue())
+
+    def test_a_failed_measurement_discards_the_analysis_so_the_next_run_measures_again(self) -> None:
+        self.runner.target = self.root / "target"
+        self.runner.work = self.root / "evidence"
+        self.runner.inputs = {"src/lib.rs": digest(self.source)}
+        self.runner.expected_targets = mock.Mock(return_value=self.expected)
+        self.runner.clean_authored_artifacts = mock.Mock()
+        oversized = {**self.record, "peak_resident_bytes": 17 * GIB}
+
+        def cargo(configuration, build, reports, salt):
+            reports.mkdir(parents=True, exist_ok=True)
+            atomic_json(reports / "example-abcd.json", self.report)
+            atomic_json(reports / "compilations/example-abcd.json", oversized)
+            (reports.parent / "cargo.jsonl").write_text("\n".join(json.dumps(message) for message in self.messages) + "\n")
+            return self.messages
+
+        self.runner.cargo = cargo
+        with mock.patch("scripts.typed_ratchet.source_inputs", return_value=self.runner.inputs):
+            with self.assertRaisesRegex(AnalysisError, "above its 16 GiB admission reservation"):
+                self.runner.analyze(self.configuration)
+        self.runner.clean_authored_artifacts.assert_called_once_with(self.configuration, self.expected, self.runner.target / "typed-ratchet/build/ordinary")
+        self.assertFalse((self.runner.work / "ordinary/completion.json").exists())
+
+    def test_measurement_lines_name_the_largest_compilation_and_admissions_that_waited_or_did_not_fit(self) -> None:
+        self.assertEqual(typed_ratchet.measurement_lines(self.configuration, {}), [])
+        small = {"crate_name": "small", "kind": "lib", "peak_resident_bytes": GIB, "started_unix_ns": 1, "seconds": 2.0, "admission": None}
+        prompt = {**small, "crate_name": "prompt", "peak_resident_bytes": 2 * GIB, "started_unix_ns": 2, "admission": {**self.admission, "waited_seconds": 0.4}}
+        alone = {**small, "crate_name": "alone", "peak_resident_bytes": 3 * GIB, "started_unix_ns": 4, "admission": {**self.admission, "outcome": "alone", "waited_seconds": 0.0}}
+        waited = {**small, "crate_name": "waited", "peak_resident_bytes": 5 * GIB, "seconds": 120.0, "started_unix_ns": 3, "admission": self.admission}
+        self.assertEqual(typed_ratchet.measurement_lines(self.configuration, {"a": small, "b": prompt, "c": alone, "d": waited}), [
+            "typed ratchet: ordinary: the largest analysis compilation, waited (lib), peaked at 5.0 GiB in 120 s",
+            "typed ratchet: ordinary: waited (lib) waited 93 s for host memory admission (fit) of its 16 GiB reservation and peaked at 5.0 GiB",
+            "typed ratchet: ordinary: alone (lib) waited 0 s for host memory admission (alone) of its 16 GiB reservation and peaked at 3.0 GiB",
+        ])
 
 
 class MainTests(unittest.TestCase):
@@ -371,14 +595,263 @@ class MainTests(unittest.TestCase):
 
 
 class WorkspaceWrapperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = pathlib.Path(self.temporary.name)
+        self.reports = self.root / "reports"
+        self.reports.mkdir()
+        self.arguments = ["/rustc", "--crate-name", "example", "src/lib.rs", "--crate-type", "lib", "-C", "extra-filename=-abcd"]
+
+    def driver(self, body: str) -> pathlib.Path:
+        path = self.root / "driver"
+        path.write_text(f"#!{sys.executable}\nimport os, signal, sys\n{body}\n")
+        path.chmod(0o755)
+        return path
+
+    def environment(self, driver: pathlib.Path, policy: Policy | None = None) -> dict[str, str]:
+        if policy is None:
+            policy = Policy(self.root / "queue", 0, 60.0, {})
+        return {"NERVIX_LINT_DRIVER": str(driver), "NERVIX_LINT_REPORTS": str(self.reports), "NERVIX_LINT_ADMISSION": policy.encode(), "NERVIX_LINT_CONFIGURATION": "testing", "NERVIX_LINT_ROOT": str(self.root)}
+
+    def wrap(self, driver: pathlib.Path, inherited: tuple[int, ...] = (), policy: Policy | None = None) -> subprocess.CompletedProcess[str]:
+        environment = {**os.environ, **self.environment(driver, policy)}
+        environment.pop("NERVIX_NATIVE_COVERAGE_ATTEMPT", None)
+        return subprocess.run([sys.executable, str(ROOT / "scripts/typed_lint_wrapper.py"), *self.arguments], env=environment, capture_output=True, text=True, pass_fds=inherited)
+
+    def record(self) -> dict:
+        return json.loads((self.reports / "compilations/example-abcd.json").read_text())
+
     def test_wrapper_forwards_compiler_and_arguments_with_optional_coverage_recording(self) -> None:
         for coverage in ("", "/attempt"):
-            with mock.patch.dict(os.environ, {"NERVIX_LINT_DRIVER": "/driver", "NERVIX_NATIVE_COVERAGE_ATTEMPT": coverage}), mock.patch("sys.argv", ["wrapper", "/rustc", "--crate-name", "example"]), mock.patch("os.execv", side_effect=RuntimeError("executed")) as execute:
-                with self.assertRaisesRegex(RuntimeError, "executed"):
+            with mock.patch.dict(os.environ, {"NERVIX_LINT_DRIVER": "/driver", "NERVIX_LINT_REPORTS": str(self.reports), "NERVIX_NATIVE_COVERAGE_ATTEMPT": coverage}), mock.patch("sys.argv", ["wrapper", "/rustc", "--crate-name", "example"]), mock.patch("subprocess.Popen", side_effect=RuntimeError("started")) as start:
+                with self.assertRaisesRegex(RuntimeError, "started"):
                     runpy.run_module("scripts.typed_lint_wrapper", run_name="__main__")
-            arguments = execute.call_args.args[1]
+            arguments = start.call_args.args[0]
             self.assertEqual(arguments[-4:], ["/driver", "/rustc", "--crate-name", "example"])
             self.assertEqual("exec" in arguments, bool(coverage))
+
+    def test_the_driver_inherits_the_descriptors_the_wrapper_inherited(self) -> None:
+        reading, writing = os.pipe()
+        self.addCleanup(os.close, reading)
+        self.addCleanup(os.close, writing)
+        # Cargo's jobserver reaches the compiler as inherited descriptors named in CARGO_MAKEFLAGS.
+        completed = self.wrap(self.driver(f"os.write({writing}, b'token')"), inherited=(writing,))
+        self.assertEqual((completed.returncode, completed.stderr), (0, ""))
+        self.assertEqual(os.read(reading, 5), b"token")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "the parent-death signal is Linux's")
+    def test_the_driver_ends_when_a_compiler_wrapper_stops_its_wrapper(self) -> None:
+        started = self.root / "started"
+        driver = self.driver(f"import pathlib, time\npathlib.Path({str(started)!r}).write_text(str(os.getpid()))\ntime.sleep(600)")
+        environment = {**os.environ, **self.environment(driver)}
+        environment.pop("NERVIX_NATIVE_COVERAGE_ATTEMPT", None)
+        wrapper = subprocess.Popen([sys.executable, str(ROOT / "scripts/typed_lint_wrapper.py"), *self.arguments], env=environment)
+        self.addCleanup(wrapper.wait)
+        deadline = time.monotonic() + 60
+        while not started.exists():
+            self.assertIsNone(wrapper.poll(), "the wrapper ended before its driver started")
+            self.assertLess(time.monotonic(), deadline, "the driver never started")
+            time.sleep(0.01)
+        pid = int(started.read_text())
+
+        def running() -> bool:
+            # An ended driver can briefly remain a zombie until whoever adopted it reaps it.
+            try:
+                state = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+            except (OSError, IndexError):
+                return False
+            return state != "Z"
+
+        self.addCleanup(lambda: running() and os.kill(pid, signal.SIGKILL))
+        wrapper.kill()
+        wrapper.wait()
+        deadline = time.monotonic() + 60
+        while running():
+            self.assertLess(time.monotonic(), deadline, "the driver outlived its stopped wrapper")
+            time.sleep(0.01)
+        self.assertEqual(list(self.reports.iterdir()), [])
+
+    def test_a_driver_ended_by_a_signal_leaves_its_termination_and_the_same_signal(self) -> None:
+        completed = self.wrap(self.driver("os.kill(os.getpid(), signal.SIGKILL)"))
+        self.assertEqual(completed.returncode, -signal.SIGKILL)
+        record = self.record()
+        self.assertEqual(record["ending"], {"kind": "signal", "signal": signal.SIGKILL, "name": "SIGKILL"})
+        self.assertEqual((record["crate_name"], record["extra_filename"], record["crate_types"], record["source"]), ("example", "-abcd", ["lib"], "src/lib.rs"))
+        self.assertGreater(record["peak_resident_bytes"], 0)
+        self.assertIn("example", completed.stderr)
+        self.assertIn("signal 9 (SIGKILL)", completed.stderr)
+
+    def run_main(self, driver: pathlib.Path) -> tuple[int, str]:
+        from scripts import typed_lint_wrapper
+
+        handlers = {number: signal.getsignal(number) for number in typed_lint_wrapper.FORWARDED}
+        for number, handler in handlers.items():
+            self.addCleanup(signal.signal, number, handler)
+        output = io.StringIO()
+        environment = {**self.environment(driver), "NERVIX_NATIVE_COVERAGE_ATTEMPT": ""}
+        with mock.patch.dict(os.environ, environment), contextlib.redirect_stderr(output):
+            status = typed_lint_wrapper.main(self.arguments)
+        return status, output.getvalue()
+
+    def test_main_records_each_drivers_ending_and_returns_its_status(self) -> None:
+        self.assertEqual(self.run_main(self.driver("pass")), (0, ""))
+        succeeded = self.record()
+        self.assertEqual((succeeded["ending"], succeeded["admission"]), ({"kind": "exit", "status": 0}, None))
+        self.assertGreater(succeeded["peak_resident_bytes"], 0)
+        self.assertGreater(succeeded["started_unix_ns"], 0)
+        status, output = self.run_main(self.driver("sys.exit(3)"))
+        self.assertEqual((status, output), (3, ""))
+        record = self.record()
+        self.assertEqual(record["ending"], {"kind": "exit", "status": 3})
+        self.assertEqual(record["crate_name"], "example")
+        self.assertGreater(record["peak_resident_bytes"], 0)
+        self.assertGreaterEqual(record["seconds"], 0)
+        with mock.patch("scripts.typed_lint_wrapper.cgroup_oom_kills", return_value=None):
+            self.assertEqual(self.run_main(self.driver("sys.exit(3)"))[0], 3)
+        self.assertIsNone(self.record()["oom_kills"])
+
+    def test_an_unwritable_record_keeps_the_drivers_ending(self) -> None:
+        self.reports.rmdir()
+        status, output = self.run_main(self.driver("sys.exit(3)"))
+        self.assertEqual(status, 3)
+        self.assertIn("nervix analysis: cannot write the compilation record of example:", output)
+
+    def test_main_names_a_terminating_signal_and_ends_with_it(self) -> None:
+        with mock.patch("scripts.typed_lint_wrapper.os.kill") as kill:
+            status, output = self.run_main(self.driver("os.kill(os.getpid(), signal.SIGKILL)"))
+        kill.assert_called_once_with(os.getpid(), signal.SIGKILL)
+        self.assertEqual(status, 128 + signal.SIGKILL)
+        self.assertIn("the compilation of example was terminated by signal 9 (SIGKILL); compilation record: " + str(self.reports / "compilations/example-abcd.json"), output)
+        self.assertEqual(self.record()["ending"]["name"], "SIGKILL")
+
+    def test_endings_name_signals_and_keep_unnamed_ones_by_number(self) -> None:
+        from scripts import typed_lint_wrapper
+
+        self.assertEqual(typed_lint_wrapper.ending(-signal.SIGTERM), {"kind": "signal", "signal": signal.SIGTERM, "name": "SIGTERM"})
+        unnamed = next(number for number in range(1, 128) if number not in {item.value for item in signal.Signals})
+        self.assertEqual(typed_lint_wrapper.ending(-unnamed), {"kind": "signal", "signal": unnamed, "name": None})
+        with mock.patch("scripts.typed_lint_wrapper.os.kill") as kill:
+            previous = signal.getsignal(signal.SIGTERM)
+            self.addCleanup(signal.signal, signal.SIGTERM, previous)
+            self.assertEqual(typed_lint_wrapper.end_like(signal.SIGTERM), 128 + signal.SIGTERM)
+            self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_DFL)
+        kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+
+    def test_out_of_memory_kills_come_from_the_unified_cgroup_hierarchy(self) -> None:
+        from scripts import typed_lint_wrapper
+
+        membership = self.root / "cgroup"
+        hierarchy = self.root / "hierarchy"
+        events = hierarchy / "user.slice/build.scope/memory.events"
+        events.parent.mkdir(parents=True)
+        self.assertIsNone(typed_lint_wrapper.cgroup_oom_kills(membership, hierarchy))
+        membership.write_text("12:memory:/user.slice/build.scope\n0::/user.slice/build.scope\n")
+        self.assertIsNone(typed_lint_wrapper.cgroup_oom_kills(membership, hierarchy))
+        events.write_text("low 0\nhigh 0\nmax 4\noom 1\noom_kill 2\noom_group_kill 0\n")
+        self.assertEqual(typed_lint_wrapper.cgroup_oom_kills(membership, hierarchy), 2)
+        events.write_text("oom_kill unknown\n")
+        self.assertIsNone(typed_lint_wrapper.cgroup_oom_kills(membership, hierarchy))
+        membership.write_text("12:memory:/user.slice/build.scope\n")
+        self.assertIsNone(typed_lint_wrapper.cgroup_oom_kills(membership, hierarchy))
+
+    def test_platform_specific_lifetime_and_resident_size(self) -> None:
+        from scripts import typed_lint_wrapper
+
+        self.assertTrue(callable(typed_lint_wrapper.ending_with(os.getpid())))
+        usage = mock.Mock(ru_maxrss=4096)
+        with mock.patch("scripts.typed_lint_wrapper.sys.platform", "darwin"), mock.patch("scripts.typed_lint_wrapper.resource.getrusage", return_value=usage):
+            self.assertIsNone(typed_lint_wrapper.ending_with(os.getpid()))
+            self.assertEqual(typed_lint_wrapper.peak_resident_bytes(), 4096)
+        with mock.patch("scripts.typed_lint_wrapper.sys.platform", "linux"), mock.patch("scripts.typed_lint_wrapper.resource.getrusage", return_value=usage):
+            self.assertEqual(typed_lint_wrapper.peak_resident_bytes(), 4096 * 1024)
+
+    def test_the_compilation_comes_from_either_spelling_of_its_options(self) -> None:
+        from scripts import typed_lint_wrapper
+
+        separate = typed_lint_wrapper.compilation(self.arguments)
+        joined = typed_lint_wrapper.compilation(["/rustc", "--crate-name=example", "src/lib.rs", "--crate-type=lib,rlib", "-Cextra-filename=-abcd", "--crate-type", "proc-macro"])
+        self.assertEqual(separate, {"crate_name": "example", "crate_types": ["lib"], "extra_filename": "-abcd", "source": "src/lib.rs"})
+        self.assertEqual(joined, {"crate_name": "example", "crate_types": ["lib", "rlib", "proc-macro"], "extra_filename": "-abcd", "source": "src/lib.rs"})
+        self.assertEqual(typed_lint_wrapper.compilation(["/rustc", "--crate-name"])["crate_name"], None)
+
+    def test_a_record_needs_a_report_directory_and_a_crate(self) -> None:
+        from scripts import typed_lint_wrapper
+
+        record = {**typed_lint_wrapper.compilation(["/rustc", "-vV"]), "ending": {"kind": "exit", "status": 1}}
+        self.assertEqual((record["crate_name"], record["crate_types"], record["extra_filename"], record["source"]), (None, [], "", None))
+        with mock.patch.dict(os.environ, {"NERVIX_LINT_REPORTS": str(self.reports)}):
+            self.assertIsNone(typed_lint_wrapper.publish(record))
+        with mock.patch.dict(os.environ, {"NERVIX_LINT_REPORTS": ""}):
+            self.assertIsNone(typed_lint_wrapper.publish({**record, **typed_lint_wrapper.compilation(self.arguments)}))
+        self.assertEqual(list(self.reports.iterdir()), [])
+
+    def test_a_driver_leaves_its_exit_status_whether_it_failed_or_succeeded(self) -> None:
+        completed = self.wrap(self.driver("print('Error: cannot publish the required compiler report', file=sys.stderr)\nsys.exit(1)"))
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(self.record()["ending"], {"kind": "exit", "status": 1})
+        self.assertIn("cannot publish the required compiler report", completed.stderr)
+        completed = self.wrap(self.driver("print('{\"artifact\": \"example\"}', file=sys.stderr)"))
+        self.assertEqual((completed.returncode, completed.stderr), (0, '{"artifact": "example"}\n'))
+        self.assertEqual(self.record()["ending"], {"kind": "exit", "status": 0})
+        self.assertEqual([path.name for path in (self.reports / "compilations").iterdir()], ["example-abcd.json"])
+
+    def test_a_declared_compilation_holds_its_admitted_place_while_its_driver_runs(self) -> None:
+        observed = self.root / "observed.json"
+        queue = self.root / "queue"
+        body = (
+            "import json, pathlib, time\n"
+            "deadline = time.monotonic() + 60\n"
+            "while True:\n"
+            f"    leases = [json.loads(path.read_text()) for path in pathlib.Path({str(queue / 'leases')!r}).glob('*.json')]\n"
+            "    if [lease['driver_pid'] for lease in leases] == [os.getpid()] or time.monotonic() > deadline:\n"
+            "        break\n"
+            "    time.sleep(0.01)\n"
+            f"pathlib.Path({str(observed)!r}).write_text(json.dumps(leases))\n"
+        )
+        policy = Policy(queue, 0, 60.0, {Compiled("example", "lib"): 2**20})
+        completed = self.wrap(self.driver(body), policy=policy)
+        self.assertEqual((completed.returncode, completed.stderr), (0, ""))
+        leases = json.loads(observed.read_text())
+        self.assertEqual(len(leases), 1)
+        self.assertIsNotNone(leases[0]["admitted_ns"])
+        self.assertEqual((leases[0]["crate_name"], leases[0]["kind"], leases[0]["configuration"], leases[0]["root"], leases[0]["reservation_bytes"]), ("example", "lib", "testing", str(self.root), 2**20))
+        self.assertEqual(list((queue / "leases").iterdir()), [])
+        admission = self.record()["admission"]
+        self.assertEqual((admission["outcome"], admission["reservation_bytes"], admission["holders"], admission["error"]), ("fit", 2**20, 0, None))
+
+    def test_main_holds_a_declared_compilations_place_until_its_driver_ends(self) -> None:
+        queue = self.root / "queue"
+        policy = Policy(queue, 0, 60.0, {Compiled("example", "lib"): 2**20})
+        leases = queue / "leases"
+        driver = self.driver(f"import json, pathlib\nleases = [json.loads(path.read_text()) for path in pathlib.Path({str(leases)!r}).glob('*.json')]\nsys.exit(0 if len(leases) == 1 and leases[0]['admitted_ns'] else 4)")
+        output = io.StringIO()
+        environment = {**self.environment(driver, policy), "NERVIX_NATIVE_COVERAGE_ATTEMPT": ""}
+        with mock.patch.dict(os.environ, environment), contextlib.redirect_stderr(output):
+            from scripts import typed_lint_wrapper
+
+            handlers = {number: signal.getsignal(number) for number in typed_lint_wrapper.FORWARDED}
+            for number, handler in handlers.items():
+                self.addCleanup(signal.signal, number, handler)
+            status = typed_lint_wrapper.main(self.arguments)
+        self.assertEqual((status, output.getvalue()), (0, ""))
+        self.assertEqual(list(leases.iterdir()), [])
+        self.assertEqual(self.record()["admission"]["outcome"], "fit")
+
+    def test_an_undeclared_compilation_takes_no_place(self) -> None:
+        policy = Policy(self.root / "queue", 0, 60.0, {Compiled("example", "bin"): 2**20, Compiled("another", "lib"): 2**20})
+        completed = self.wrap(self.driver("pass"), policy=policy)
+        self.assertEqual(completed.returncode, 0)
+        self.assertIsNone(self.record()["admission"])
+        self.assertFalse((self.root / "queue").exists())
+
+    def test_a_driver_that_cannot_start_releases_its_place(self) -> None:
+        queue = self.root / "queue"
+        policy = Policy(queue, 0, 60.0, {Compiled("example", "lib"): 2**20})
+        completed = self.wrap(self.root / "missing-driver", policy=policy)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("FileNotFoundError", completed.stderr)
+        self.assertEqual(list((queue / "leases").iterdir()), [])
 
 
 class CacheQualificationTests(unittest.TestCase):

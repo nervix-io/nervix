@@ -9,6 +9,14 @@
 //! - **Must not know.** Sources, ingest groups, acknowledgements or branches. The caller decides
 //!   what a rejected payload means for its source.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::fmt;
 
 use bytes::Bytes;
@@ -203,7 +211,7 @@ impl CompiledCodec {
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => {
+            | CompiledWireSchema::Syslog(_) => {
                 Err(self.contract_violation(CodecContractError::OnIngestionMissing))
             }
         }

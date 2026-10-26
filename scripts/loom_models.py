@@ -7,22 +7,30 @@
 `crates/model-harness/loom-inventory.toml` registers every model by the invariant it checks.
 
 `run` lists the library tests named `loom_*` of every inventory package, built with its `loom`
-feature, and checks them against the inventory: a run over the whole inventory fails when a
-registered test is missing or ignored, or when a discovered model is not registered. It then runs
-each selected model in its own process and accepts it only when the model's harness printed the
+feature and build profile, and checks them against the inventory: a run over the whole inventory
+fails when a registered test is missing or ignored, or when a discovered model is not registered.
+It then runs each selected model in its own process and accepts it only when the model's harness printed the
 record of an exhaustive exploration for the model's own invariant; a passing test without that
 record is an incomplete run. It reports how many models it discovered, selected, executed and saw
 complete, and a filter that selects nothing fails.
 
-A failed model leaves `<target>/loom-failures/<package>/<test>/` behind: Loom's checkpoint of the
+A failed model leaves `<target>/loom-failures/<package>/<invariant>/` behind: Loom's checkpoint of the
 failed execution, the run's output, and `metadata.json` with the invariant, revision, toolchain,
 Loom version and exploration bounds. `replay` resumes Loom from that checkpoint with location
 tracking and tracing enabled, so the failed execution runs first. The artifacts hold model output
 only; a model has no payloads or secrets to leak.
 
-`qualify` applies each registered weakening to a copy of the working tree, requires the named
+`qualify` applies each registered weakening to one copy of the working tree, requires the named
 model to fail with the registered message, and requires the checkpoint of that failure to replay
-it. The copy shares the target directory, so only the mutated packages are rebuilt.
+it. The copy builds into a target directory of its own, so a weakened build never stands in for the
+working tree's, and every file it copies or restores takes a fresh modification time, so Cargo
+rebuilds exactly what a weakening changed and never mistakes a weakened build for a restored one.
+Qualifications that apply the same weakening share one weakened build. The copy links the generated
+inputs the ignore rules leave out but a package embeds, such as the built web console, and is removed
+when the qualification ends; its target directory stays, so a later run reuses its dependencies.
+The copy compiles incrementally, and `--shard NUMBER/COUNT` qualifies one part of the distinct
+weakenings, so separate jobs can split the rebuilds.
+Discovery, execution, replay and qualification use the same build profile.
 """
 
 from __future__ import annotations
@@ -35,15 +43,22 @@ import shutil
 import subprocess
 import sys
 import tomllib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
+
+from scripts.model_evidence import Evidence
 
 INVENTORY = Path("crates/model-harness/loom-inventory.toml")
 FAILURES = "loom-failures"
 QUALIFICATIONS = "loom-qualification"
+QUALIFICATION_BUILD = "loom-qualification-build"
+# Generated build inputs the working tree's ignore rules leave out of a copy but a package compiles
+# in: the server's library embeds the built web console.
+GENERATED_INPUTS = (Path("crates/web-console/dist"),)
 MODEL_PREFIX = "loom_"
 LOOM_FEATURE = "loom"
+LOOM_PROFILE = "loom"
 
 _INVARIANT_ID = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+$")
 # The test harness prints `test <name> ... ` before a test's own output, so a record can share its
@@ -263,6 +278,8 @@ def completion(output: str, invariant_id: str) -> Completion | None:
 
     for match in _COMPLETED.finditer(output):
         if match.group("id") == invariant_id:
+            if int(match.group("executions")) == 0:
+                return None
             return Completion(
                 executions=int(match.group("executions")), bounds=match.group("bounds")
             )
@@ -331,7 +348,7 @@ class Commands:
 
 
 def cargo_test(package: str, *arguments: str, manifest: Path | None = None) -> list[str]:
-    command = ["cargo", "test"]
+    command = ["cargo", "test", "--profile", LOOM_PROFILE]
     if manifest is not None:
         command += ["--manifest-path", str(manifest)]
     return [*command, "--package", package, "--features", LOOM_FEATURE, "--lib", *arguments]
@@ -406,16 +423,35 @@ def checkpoint_environment(checkpoint: Path) -> dict[str, str]:
     }
 
 
-def run_models(commands: Commands, inventory: Inventory, target: Path, filter_text: str) -> int:
+def run_models(
+    commands: Commands, inventory: Inventory, target: Path, filter_text: str, report: Path | None = None
+) -> int:
+    evidence = Evidence(report, "loom", filter_text, INVENTORY)
     discoveries = [discover(commands, package) for package in inventory.packages()]
+    evidence.discover([
+        {
+            "package": discovery.package,
+            "test": test,
+            "invariant": registered.id if (registered := inventory.registered(discovery.package, test)) else None,
+            "ignored": test in discovery.ignored,
+        }
+        for discovery in discoveries for test in discovery.models
+    ])
     discovered = sum(len(discovery.models) for discovery in discoveries)
     selected = select(inventory, discoveries, filter_text)
+    evidence.select([
+        {"package": model.package, "test": model.test, "invariant": model.invariant.id}
+        for model in selected
+    ])
 
     executed = 0
     completed = 0
     failures: list[str] = []
     for model in selected:
-        directory = target / FAILURES / model.package / model.test
+        check_evidence = evidence.begin({
+            "package": model.package, "test": model.test, "invariant": model.invariant.id
+        })
+        directory = target / FAILURES / model.package / model.invariant.id
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
         checkpoint = directory / "checkpoint.json"
@@ -424,8 +460,18 @@ def run_models(commands: Commands, inventory: Inventory, target: Path, filter_te
         outcome = commands.run(command, environment=checkpoint_environment(checkpoint))
         executed += 1
         record = completion(outcome.output, model.invariant.id)
+        check_evidence["runs"] = [{
+            "name": "exploration",
+            "exit_status": outcome.status,
+            "completed": outcome.status == 0 and record is not None,
+            "executions": record.executions if record is not None else None,
+            "bounds": record.bounds if record is not None else exploration_bounds(outcome.output, model.invariant.id),
+        }]
+        evidence.write()
         if outcome.status == 0 and record is not None:
             completed += 1
+            check_evidence["completed"] = True
+            evidence.write()
             shutil.rmtree(directory)
             continue
         if outcome.status == 0:
@@ -447,7 +493,9 @@ def run_models(commands: Commands, inventory: Inventory, target: Path, filter_te
     for failure in failures:
         print(f"loom: {failure}", file=sys.stderr)
     if failures:
+        evidence.finish(1)
         return 1
+    evidence.finish(0)
     return 0
 
 
@@ -479,6 +527,13 @@ def replay(commands: Commands, inventory: Inventory, directory: Path) -> int:
 
 
 def copy_working_tree(commands: Commands, destination: Path) -> None:
+    """Copy the working tree to `destination`, every file with a fresh modification time, and link
+    its generated inputs.
+
+    A preserved time could be older than a weakened build a previous qualification left in the
+    copy's target directory, and Cargo would take that build for the copied sources.
+    """
+
     listing = commands.run(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], echo=False
     )
@@ -491,7 +546,67 @@ def copy_working_tree(commands: Commands, destination: Path) -> None:
             continue
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
+        shutil.copyfile(source, target)
+        shutil.copymode(source, target)
+    for generated in GENERATED_INPUTS:
+        source = commands.root / generated
+        if not source.exists():
+            raise RunnerError(f"{generated} is missing; build it before qualifying the models")
+        link = destination / generated
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(source.resolve(), target_is_directory=source.is_dir())
+
+
+@dataclass(frozen=True)
+class Weakening:
+    """One change to one file, which every qualification that registers it shares."""
+
+    path: str
+    original: str
+    weakened: str
+
+
+def weakenings(
+    qualifications: Sequence[Qualification],
+) -> list[tuple[Weakening, list[Qualification]]]:
+    """The distinct weakenings in inventory order, each with the qualifications that apply it."""
+
+    grouped: dict[Weakening, list[Qualification]] = {}
+    for qualification in qualifications:
+        weakening = Weakening(
+            path=qualification.path,
+            original=qualification.original,
+            weakened=qualification.weakened,
+        )
+        grouped.setdefault(weakening, []).append(qualification)
+    return list(grouped.items())
+
+
+@dataclass(frozen=True)
+class Shard:
+    """One part of the qualification, so separate jobs can share its weakened builds.
+
+    Shard `number` of `count`, numbered from 1, takes the distinct weakenings at the inventory
+    positions that leave `number - 1` when divided by `count`.
+    """
+
+    number: int
+    count: int
+
+    @classmethod
+    def parse(cls, text: str) -> Shard:
+        number, separator, count = text.partition("/")
+        if not separator or not number.isdigit() or not count.isdigit():
+            raise RunnerError(f"a qualification shard is NUMBER/COUNT, such as 1/2, not `{text}`")
+        shard = cls(number=int(number), count=int(count))
+        if shard.count < 1 or not 1 <= shard.number <= shard.count:
+            raise RunnerError(
+                f"qualification shard {text} names no part: NUMBER runs from 1 to COUNT"
+            )
+        return shard
+
+    def selects(self, position: int) -> bool:
+        return position % self.count == self.number - 1
 
 
 def qualification_failure(outcome: Outcome, qualification: Qualification) -> str | None:
@@ -506,60 +621,130 @@ def qualification_failure(outcome: Outcome, qualification: Qualification) -> str
     return None
 
 
-def qualify(commands: Commands, inventory: Inventory, target: Path) -> int:
+def qualify(
+    commands: Commands, inventory: Inventory, target: Path, shard: Shard = Shard(1, 1)
+) -> int:
     if not inventory.qualifications:
         raise RunnerError(f"{INVENTORY} registers no qualification")
+    distinct = weakenings(inventory.qualifications)
+    selected: list[tuple[Weakening, list[Qualification]]] = []
+    for position, group in enumerate(distinct):
+        if shard.selects(position):
+            selected.append(group)
+    if not selected:
+        raise RunnerError(
+            f"qualification shard {shard.number}/{shard.count} selects none of the "
+            f"{len(distinct)} weakenings"
+        )
+    print(
+        f"loom: qualification shard {shard.number} of {shard.count} applies {len(selected)} of "
+        f"{len(distinct)} weakenings",
+        flush=True,
+    )
+    build = target / QUALIFICATION_BUILD
+    tree = build / "tree"
+    copy_working_tree(commands, tree)
+    manifest = tree / "Cargo.toml"
+    # A weakened build serves this run alone, so the copy compiles incrementally: each weakening
+    # recompiles what it changed rather than the whole crate it changed.
+    environment = {"CARGO_TARGET_DIR": str(build / "target"), "CARGO_INCREMENTAL": "1"}
     problems: list[str] = []
-    for qualification in inventory.qualifications:
-        invariant = inventory.invariant(qualification.invariant)
-        model = Model(package=invariant.package, test=invariant.test, invariant=invariant)
-        directory = target / QUALIFICATIONS / qualification.id
-        tree = directory / "tree"
-        copy_working_tree(commands, tree)
-        mutated = tree / qualification.path
-        mutated.write_text(
-            weaken(mutated.read_text(encoding="utf-8"), qualification), encoding="utf-8"
-        )
-        manifest = tree / "Cargo.toml"
-        environment = {"CARGO_TARGET_DIR": str(target)}
-        checkpoint = directory / "checkpoint.json"
-        checkpoint.unlink(missing_ok=True)
-        print(f"loom: qualifying {invariant.id} against {qualification.id}", flush=True)
-        weakened = commands.run(
-            model_command(model, manifest),
-            environment={**environment, **checkpoint_environment(checkpoint)},
-            cwd=tree,
-        )
-        (directory / "output.log").write_text(weakened.output, encoding="utf-8")
-        problem = qualification_failure(weakened, qualification)
-        if problem is None and not checkpoint.is_file():
-            problem = "the failed model left no checkpoint to replay"
-        if problem is None:
-            replayed_checkpoint = directory / "replay-checkpoint.json"
-            shutil.copyfile(checkpoint, replayed_checkpoint)
-            replayed = commands.run(
-                model_command(model, manifest),
-                environment={**environment, **checkpoint_environment(replayed_checkpoint)},
-                cwd=tree,
-            )
-            (directory / "replay.log").write_text(replayed.output, encoding="utf-8")
-            replay_problem = qualification_failure(replayed, qualification)
-            if replay_problem is not None:
-                problem = f"its checkpoint does not replay the failure: {replay_problem}"
-        if problem is not None:
-            problems.append(f"qualification {qualification.id}: {problem}; see {directory}")
-            continue
-        shutil.rmtree(directory)
-        print(
-            f"loom: {qualification.id} makes {invariant.id} fail with "
-            f"`{qualification.failure}`, and its checkpoint replays the failure",
-            flush=True,
-        )
+    try:
+        for weakening, qualifications in selected:
+            mutated = tree / weakening.path
+            source = mutated.read_text(encoding="utf-8")
+            mutated.write_text(weaken(source, qualifications[0]), encoding="utf-8")
+            try:
+                for qualification in qualifications:
+                    problem = qualify_one(
+                        commands, inventory, target, qualification, manifest, environment
+                    )
+                    if problem is not None:
+                        problems.append(problem)
+            finally:
+                # Written anew, so its time is newer than the weakened build and Cargo rebuilds it.
+                mutated.write_text(source, encoding="utf-8")
+    finally:
+        # A later run copies the tree afresh, so the copy is removed and only its build stays.
+        shutil.rmtree(tree, ignore_errors=True)
     for problem in problems:
         print(f"loom: {problem}", file=sys.stderr)
     if problems:
         return 1
     return 0
+
+
+def qualify_one(
+    commands: Commands,
+    inventory: Inventory,
+    target: Path,
+    qualification: Qualification,
+    manifest: Path,
+    environment: Mapping[str, str],
+) -> str | None:
+    """Run the model of `qualification` against the weakened copy and replay its failure. Returns
+    why the qualification fails, or `None` when the model failed as it must and replayed."""
+
+    invariant = inventory.invariant(qualification.invariant)
+    model = Model(package=invariant.package, test=invariant.test, invariant=invariant)
+    directory = target / QUALIFICATIONS / qualification.id
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True)
+    tree = manifest.parent
+    checkpoint = directory / "checkpoint.json"
+    print(f"loom: qualifying {invariant.id} against {qualification.id}", flush=True)
+    weakened = commands.run(
+        model_command(model, manifest),
+        environment={**environment, **checkpoint_environment(checkpoint)},
+        cwd=tree,
+    )
+    (directory / "output.log").write_text(weakened.output, encoding="utf-8")
+    problem = qualification_failure(weakened, qualification)
+    if problem is None and not checkpoint.is_file():
+        problem = "the failed model left no checkpoint to replay"
+    replayed: Outcome | None = None
+    if problem is None:
+        replayed_checkpoint = directory / "replay-checkpoint.json"
+        shutil.copyfile(checkpoint, replayed_checkpoint)
+        replayed = commands.run(
+            model_command(model, manifest),
+            environment={**environment, **checkpoint_environment(replayed_checkpoint)},
+            cwd=tree,
+        )
+        (directory / "replay.log").write_text(replayed.output, encoding="utf-8")
+        replay_problem = qualification_failure(replayed, qualification)
+        if replay_problem is not None:
+            problem = f"its checkpoint does not replay the failure: {replay_problem}"
+    if checkpoint.is_file():
+        command = model_command(model, manifest)
+        metadata = failure_metadata(commands, model, command, weakened, directory)
+        metadata["qualification"] = asdict(qualification)
+        metadata["qualification_status"] = "passed" if problem is None else "failed"
+        metadata["checkpoint_replay"] = (
+            {
+                "command": command,
+                "checkpoint": "replay-checkpoint.json",
+                "exit_status": replayed.status,
+                "output": "replay.log",
+            }
+            if replayed is not None
+            else None
+        )
+        metadata["replay"] = (
+            "Restore the recorded revision and apply the recorded qualification's weakening "
+            f"in an isolated worktree, then run just test-loom-replay {directory}"
+        )
+        (directory / "metadata.json").write_text(
+            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+        )
+    if problem is not None:
+        return f"qualification {qualification.id}: {problem}; see {directory}"
+    print(
+        f"loom: {qualification.id} makes {invariant.id} fail with "
+        f"`{qualification.failure}`, and its checkpoint replays the failure",
+        flush=True,
+    )
+    return None
 
 
 def repository_root() -> Path:
@@ -579,9 +764,11 @@ def main(
     subcommands = parser.add_subparsers(dest="command", required=True)
     run_parser = subcommands.add_parser("run")
     run_parser.add_argument("filter", nargs="?", default="")
+    run_parser.add_argument("--report", type=Path)
     replay_parser = subcommands.add_parser("replay")
     replay_parser.add_argument("failure", type=Path)
-    subcommands.add_parser("qualify")
+    qualify_parser = subcommands.add_parser("qualify")
+    qualify_parser.add_argument("--shard", default="1/1")
     arguments = parser.parse_args(argv)
 
     root = arguments.root or repository_root()
@@ -590,10 +777,10 @@ def main(
     try:
         inventory = parse_inventory((root / INVENTORY).read_text(encoding="utf-8"))
         if arguments.command == "run":
-            return run_models(commands, inventory, target, arguments.filter)
+            return run_models(commands, inventory, target, arguments.filter, arguments.report)
         if arguments.command == "replay":
             return replay(commands, inventory, arguments.failure.resolve())
-        return qualify(commands, inventory, target)
+        return qualify(commands, inventory, target, Shard.parse(arguments.shard))
     except RunnerError as error:
         print(f"loom: {error}", file=sys.stderr)
         return 1

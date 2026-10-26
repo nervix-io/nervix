@@ -1,16 +1,19 @@
 //! Layer: data plane.
 //! Owns: typed failure contexts for capturing, validating, and activating runtime state handoffs,
 //! and the rejection a peer receives for one.
-//! May depend on: runtime state persistence errors, the model vocabulary, the interconnect's
-//! handoff failure envelope, and `error-stack` reports.
-//! Must not know: schedules, consensus transactions, NSPL, or edge protocols.
+//! May depend on: the model vocabulary, the interconnect's handoff failure envelope, and
+//! `error-stack` reports, which keep a runtime state persistence failure beneath them.
+//! Must not know: schedules, consensus transactions, Plexus, or edge protocols.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use error_stack::Report;
 use nervix_interconnect::OwnershipHandoffFailure;
-use nervix_models::{ModelKind, ModelName};
+use nervix_models::{ClusterNodeName, DomainName, ModelKind, ModelName, NodeRef};
 use thiserror::Error;
-
-use super::RuntimePersistenceError;
 
 pub(crate) type OwnershipHandoffResult<T> = Result<T, Report<OwnershipHandoffError>>;
 
@@ -20,6 +23,10 @@ pub(crate) enum OwnershipHandoffError {
     Checkpoint(String),
     #[error("ownership handoff participant validation failed: {0}")]
     Participant(String),
+    /// The destination's own process incarnation advertised that it is terminating, so it is not a
+    /// new placement destination, whatever its coordinator's view still shows.
+    #[error("destination node '{node}' is terminating")]
+    DestinationTerminating { node: ClusterNodeName },
     #[error("ownership handoff schedule validation failed: {0}")]
     Schedule(String),
     #[error("ownership handoff state validation failed: {0}")]
@@ -28,6 +35,11 @@ pub(crate) enum OwnershipHandoffError {
     Transport(String),
     #[error("ownership handoff deadline elapsed: {0}")]
     Deadline(String),
+    #[error(
+        "forced recovery of {} '{}' in domain '{}' timed out waiting for its local schedule installation",
+        .node.kind.as_str(), .node.identifier.as_str(), .domain.as_str()
+    )]
+    ScheduleInstallationDeadline { domain: DomainName, node: NodeRef },
     #[error("ownership handoff WASM restore failed for wasm processor '{}'", .processor.as_str())]
     WasmRestore { processor: ModelName },
     #[error("ownership handoff checkpoint failed for wasm processor '{}'", .processor.as_str())]
@@ -41,8 +53,18 @@ pub(crate) enum OwnershipHandoffError {
         kind: ModelKind,
         identifier: ModelName,
     },
-    #[error(transparent)]
-    Persistence(#[from] RuntimePersistenceError),
+    #[error(
+        "{} '{}' has not restored the branches its lifecycle checkpoint names yet",
+        .kind.as_str(),
+        .identifier.as_str()
+    )]
+    BranchesUnrestored {
+        kind: ModelKind,
+        identifier: ModelName,
+    },
+    /// The node's runtime state storage failed; its `RuntimePersistenceError` report is beneath.
+    #[error("ownership handoff state storage failed")]
+    Persistence,
 }
 
 impl OwnershipHandoffError {
@@ -82,9 +104,5 @@ impl OwnershipHandoffError {
     /// instead of only its outermost one.
     pub(crate) fn remote_rejection(report: &Report<Self>) -> OwnershipHandoffFailure {
         OwnershipHandoffFailure::rejected(format!("{report:#}"))
-    }
-
-    pub(crate) fn persistence(error: RuntimePersistenceError) -> Report<Self> {
-        Report::new(Self::Persistence(error))
     }
 }

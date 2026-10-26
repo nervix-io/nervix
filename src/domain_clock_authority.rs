@@ -7,6 +7,11 @@
 //!   hashing primitive.
 //! - **Must not know.** Gossip, consensus, transport, Tokio or clock-production tasks.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use meticulous::{OptionExt as _, ResultExt as _};

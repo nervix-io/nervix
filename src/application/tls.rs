@@ -8,6 +8,11 @@
 //!   vhosts.
 //! - **Must not know.** What travels over a connection once it is established.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{
     collections::BTreeMap,
     io,
@@ -99,6 +104,7 @@ impl InterconnectTlsMaterial {
 
 pub(in crate::application) async fn reload_interconnect_tls(
     transport: Transport,
+    cluster: Arc<ClusterHandle>,
     paths: InterconnectTlsPaths,
     initial_fingerprint: blake3::Hash,
     shutdown: CancellationToken,
@@ -151,6 +157,7 @@ pub(in crate::application) async fn reload_interconnect_tls(
                 continue;
             }
         };
+        let previous_trust_root = transport.local_prerequisites().trust_root;
         if let Err(error) = transport.replace_tls(replacement).await {
             let failure = error.to_string();
             if reported_failure.as_ref() != Some(&failure) {
@@ -158,6 +165,16 @@ pub(in crate::application) async fn reload_interconnect_tls(
                 reported_failure = Some(failure);
             }
             continue;
+        }
+        // Peers judge this node by the record its gossip publishes and its handshakes carry, so a
+        // reload that changed the trust root republishes the record the handshakes now carry.
+        let prerequisites = transport.local_prerequisites();
+        if prerequisites.trust_root != previous_trust_root {
+            cluster.publish_local_prerequisites(&prerequisites).await;
+            info!(
+                trust_root = %prerequisites.trust_root,
+                "published the trust root of the reloaded interconnect credentials"
+            );
         }
 
         applied_fingerprint = fingerprint;
@@ -173,8 +190,6 @@ const VHOST_TLS_KEY_PATH: &str = "tls.key";
 
 const VHOST_TLS_CA_PATH: &str = "ca.crt";
 
-pub(in crate::application) const INTERNAL_TLS_CA_FILE: &str = "ca.pem";
-
 const INTERNAL_TLS_CERT_FILE: &str = "node.pem";
 
 const INTERNAL_TLS_KEY_FILE: &str = "node-key.pem";
@@ -182,7 +197,7 @@ const INTERNAL_TLS_KEY_FILE: &str = "node-key.pem";
 /// Why a file a model reads from a resource version cannot be opened.
 #[derive(Debug, Error)]
 pub(in crate::application) enum ResourceFileError {
-    #[error("{label} file does not exist: {source}")]
+    #[error("{label} file does not exist")]
     Missing {
         label: &'static str,
         source: io::Error,
@@ -233,9 +248,9 @@ pub(in crate::application) enum TlsMaterialError {
         file: TlsFileKind,
         kind: TlsPemFailure,
     },
-    #[error("TLS CA certificate is unusable: {source}")]
+    #[error("TLS CA certificate is unusable")]
     CaCertificate { source: rustls::Error },
-    #[error("the certificate chain and private key do not form a usable key: {source}")]
+    #[error("the certificate chain and private key do not form a usable key")]
     CertifiedKey { source: rustls::Error },
     #[error("the rustls crypto provider is not installed")]
     CryptoProvider,
@@ -272,10 +287,7 @@ pub(in crate::application) enum HttpsListenerError {
         resource: ResourceName,
         version: u64,
     },
-    #[error(
-        "failed to present TLS hostname '{hostname}' for VHOST '{vhost}' in domain '{domain}': \
-         {source}"
-    )]
+    #[error("failed to present TLS hostname '{hostname}' for VHOST '{vhost}' in domain '{domain}'")]
     Hostname {
         domain: DomainName,
         vhost: VhostName,
@@ -286,7 +298,7 @@ pub(in crate::application) enum HttpsListenerError {
     FaultInjected,
 }
 
-pub(in crate::application) fn internal_tls_path(file_name: &str) -> PathBuf {
+fn internal_tls_path(file_name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tls")
         .join("dev")
@@ -535,6 +547,13 @@ struct HttpsListenerCertificatesInner {
     /// Also held by the application, which starts and shuts it down.
     cluster: Arc<ClusterHandle>,
     /// Read by the HTTPS listener for every connection it accepts.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::state(
+            mutable,
+            reason = "serialized HTTPS revision installation replaces the handshake configuration"
+        )
+    )]
     server_config: RwLock<Option<StdArc<ServerConfig>>>,
     /// Serializes installations with the VHOSTs they replace.
     installation: AsyncMutex<ListenerInstallation>,
@@ -655,6 +674,7 @@ impl HttpsListenerCertificates {
 mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
+    use error_stack::Report;
     use nervix_interconnect::HttpsListenerInstallation;
     use nervix_models::{
         ClusterSchedule, CreateVhost, DomainName, DomainSchedule, Model, ResourceId, ScheduledNode,
@@ -920,6 +940,37 @@ mod tests {
         let ca_path = ca_path.to_str().expect("fixture path is UTF-8");
         assert!(!format!("{error:#}").contains(ca_path));
         assert!(!format!("{error:?}").contains(ca_path));
+        let TlsMaterialError::CaCertificate {
+            source: rustls_cause,
+        } = error.current_context()
+        else {
+            panic!("the CA refusal is the current context: {error:?}");
+        };
+        let rustls_cause = rustls_cause.to_string();
+        assert_eq!(
+            format!("{error:#}"),
+            format!("TLS CA certificate is unusable: {rustls_cause}")
+        );
+
+        std::fs::remove_file(content.join(VHOST_TLS_CA_PATH)).expect("the CA file is removed");
+        let error = load_vhost_tls_materials(resource_store, &bundle)
+            .await
+            .expect_err("a bundle without its CA file is unusable");
+        let Some(ResourceFileError::Missing {
+            source: missing_cause,
+            ..
+        }) = error.downcast_ref::<ResourceFileError>()
+        else {
+            panic!("the missing CA file is beneath the unavailable material: {error:?}");
+        };
+        let missing_cause = missing_cause.to_string();
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "a required TLS file is unavailable: tls CA certificate file does not exist: \
+                 {missing_cause}"
+            )
+        );
 
         std::fs::write(content.join(VHOST_TLS_CA_PATH), &usable_ca)
             .expect("the usable CA is restored");
@@ -951,6 +1002,18 @@ mod tests {
 
         drop(service);
         std::fs::remove_dir_all(&path).expect("the test database directory is removed");
+    }
+
+    #[test]
+    fn a_key_that_does_not_match_its_certificate_names_the_mismatch_once() {
+        let mismatch = rustls::Error::InconsistentKeys(rustls::InconsistentKeys::KeyMismatch);
+        let cause = mismatch.to_string();
+        let error = Report::new(TlsMaterialError::CertifiedKey { source: mismatch });
+
+        assert_eq!(
+            format!("{error:#}"),
+            format!("the certificate chain and private key do not form a usable key: {cause}")
+        );
     }
 
     #[test]
@@ -1013,6 +1076,21 @@ mod tests {
                 HttpsListenerError::Hostname { hostname, .. } if hostname == "orders.example.com"
             ),
             "{error:?}"
+        );
+        let HttpsListenerError::Hostname {
+            source: hostname_cause,
+            ..
+        } = error.current_context()
+        else {
+            panic!("the hostname refusal is the current context: {error:?}");
+        };
+        let hostname_cause = hostname_cause.to_string();
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "failed to present TLS hostname 'orders.example.com' for VHOST 'edge' in domain \
+                 'orders': {hostname_cause}"
+            )
         );
         let HttpsListenerInstallation::Failed { revision, reason } =
             certificates.installation(3).await

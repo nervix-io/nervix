@@ -8,7 +8,7 @@ Feature: Cluster peer name resolution
   Scenario Outline: Nodes form a cluster through <addressing>
     Given cluster peers are addressed by "<addressing>"
     And a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -70,7 +70,7 @@ Feature: Cluster peer name resolution
   Scenario: A stopped leader rejoins through its advertised name
     Given cluster peers are addressed by "DNS names"
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
@@ -84,3 +84,22 @@ Feature: Cluster peer name resolution
     And node "node-2" eventually reports interconnect to "node-1" as "connected"
     And node "node-3" eventually reports interconnect to "node-1" as "connected"
     And node "node-2" eventually reports raft voters "node-1,node-2,node-3"
+
+  Scenario: A recovered voter restores quorum while its bootstrap name does not resolve
+    Given cluster peers are addressed by "DNS names"
+    And a 3 node nervix cluster is started
+    When node "node-1" is stopped
+    And node "node-2" is stopped
+    And the DNS fixture answers the name of node "node-1" with "name not found"
+    And node "node-2" is started without waiting for it to catch up
+    Then node "node-2" eventually observes a stable leader
+    And node "node-3" eventually observes a stable leader
+    When these Plexus commands are executed on node "node-3"
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then node "node-2" eventually reports raft voters "node-1,node-2,node-3"
+    When the DNS fixture answers "node-1.nervix.test" with addresses "127.0.2.1"
+    And node "node-1" is started
+    Then node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-1" eventually reports raft voters "node-1,node-2,node-3"

@@ -9,6 +9,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "connection and peer registration install or retire concrete transport \
@@ -30,8 +37,9 @@ use error_stack::Report;
 use futures_util::stream::FuturesUnordered;
 use h2::{Ping, PingPong, Reason, RecvStream, client, server};
 use http::{Method, Request, StatusCode, Version};
+use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_dns::ConnectionBudget;
+use nervix_dns::{LookupShare, OperationBudget};
 use nervix_execution::{
     BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
@@ -41,11 +49,11 @@ use nervix_models::{
 use nervix_primitives::{
     collections::{DashMap, dash_map::Entry},
     net::{TcpListener, TcpStream},
-    publication::ArcSwap,
+    publication::{ArcSwap, ArcSwapOption},
     sync::{
-        Arc, CancellationToken, Notify, OwnedSemaphorePermit, Semaphore, StdArc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-        mpsc,
+        Arc, CancellationToken, Notify, OwnedSemaphorePermit, Semaphore, StdArc, StdWeak,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc, watch,
     },
     task::TaskTracker,
     time::{Instant, sleep, sleep_until, timeout},
@@ -53,11 +61,16 @@ use nervix_primitives::{
 use strum::EnumCount as _;
 use tracing::{debug, warn};
 
+use self::{
+    join::InboundBindingAnswer,
+    published_tls::{ActiveTls, PublishedTls},
+    stream_releases::StreamReleases,
+};
 use super::{
-    ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,
-    RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision, RelayAdmissionStatus,
-    RelayDelivery, RelayPayload, RequestSubquota, TlsConfigBundle, TransportError,
-    TransportIdentity, TransportOptions, wire,
+    ControlEnvelope, CoordinationIdentityAllocationError, Envelope, JoinProgress, JoinTerms,
+    PeerTarget, PoolClass, RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision,
+    RelayAdmissionStatus, RelayDelivery, RelayGrantRefusal, RelayPayload, RequestSubquota,
+    TlsConfigBundle, TransportError, TransportIdentity, TransportOptions, wire,
 };
 use crate::{
     identity::CertificateIdentity,
@@ -68,24 +81,35 @@ use crate::{
     peer_resolver::PeerResolver,
     request::RequestAdmission,
     wire::{
-        ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
-        RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, WIRE_CONTRACT_FINGERPRINT,
+        ConnectionAccepted, ConnectionAnswer, ConnectionHello, RelayAdmissionRequest,
+        RelayAdmissionResponse, RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse,
     },
 };
 
 mod body;
 mod dial;
 mod duplex;
+mod join;
+mod published_tls;
+mod receive_window;
 mod relay;
+mod relay_admission_choice;
+mod relay_owner;
+mod relay_watermarks;
+use relay_admission_choice::{AdmissionChoice, ChosenAdmission};
 mod stream;
+mod stream_releases;
 pub(crate) mod stream_slots;
+mod targets;
 
 use body::{read_body, read_body_into, send_body, send_response, send_static_error};
 use dial::{DialedStream, OutboundDial};
 pub(crate) use duplex::FrameReader;
 pub use duplex::{
-    ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
+    ChargedItem, DuplexCodec, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress,
+    DuplexSender, EncodedMessage,
 };
+use relay_owner::{RelayGrantPosition, RelayOwnersPublication, RelayPeerOwner};
 pub use stream::IncomingByteStream;
 pub(crate) use stream::OutboundByteStreamRequest;
 use stream_slots::{StreamSlotQuotas, configure_client_builder, configure_server_builder};
@@ -102,7 +126,10 @@ const RELAY_PATH_PREFIX: &str = "/v1/relay/";
 const RELAY_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const RELAY_PROGRESS_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 const RELAY_CANCELLATION_RETRY_WINDOW: Duration = Duration::from_secs(30);
-const RELAY_CHANNEL_RETENTION: Duration = Duration::from_secs(600);
+/// How long a receiver retains a relay channel's watermark after it was last recorded or consulted,
+/// unless its peer's watermark budget needs the position first. A sender rotates a channel it
+/// leaves idle well within this, so a channel it resumes still finds its watermark.
+pub const RELAY_CHANNEL_RETENTION: Duration = Duration::from_secs(600);
 const RELAY_CHANNEL_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const BODY_CHUNK_BYTES: usize = 16 * 1024;
@@ -133,10 +160,37 @@ struct InboundPeer {
     advertised_host: String,
     process_epoch: u64,
     class: PoolClass,
+    relay_owner: StdArc<RelayPeerOwner>,
 }
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::context(
+        bounded,
+        reason = "one concrete pool slot claims its own worker and publishes authenticated \
+                  connections",
+        key = "endpoint, pool class, slot and cancellation lifetime",
+        bound = "one worker claim per lifetime and one current connection publication"
+    )
+)]
 struct SlotControl {
+    key: ConnectionSlotKey,
     cancel: CancellationToken,
+    started: AtomicBool,
+    /// The slot worker publishes each authenticated connection here. A stream lease retains that
+    /// exact connection, including its cancellation and peer incarnation, after the load ends.
+    connection: ArcSwapOption<ClientConnection>,
+}
+
+impl SlotControl {
+    fn claim_worker(&self) -> bool {
+        if self.cancel.is_cancelled() || self.started.load(Ordering::Relaxed) {
+            return false;
+        }
+        self.started
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    }
 }
 
 #[cfg_attr(
@@ -169,10 +223,10 @@ impl Drop for CancelOnDrop {
     }
 }
 
-/// One registered outbound endpoint of a peer, with the key of every connection slot it can hold.
+/// One published outbound endpoint of a peer, retaining every connection slot it can hold.
 ///
-/// The keys are built once when the endpoint is registered, so leasing a stream finds its slots
-/// and connections by reference instead of assembling a key for every operation. The keys name the
+/// The slot handles are built once when the endpoint is registered. Leasing a stream reads their
+/// connection publications without acquiring a discovery map. Slot identities name the
 /// endpoint, not an address, so a new DNS answer for the same endpoint changes only where the next
 /// connection is dialled and never retires a connection that is already established.
 #[cfg_attr(
@@ -185,17 +239,22 @@ impl Drop for CancelOnDrop {
 struct OutboundTarget {
     endpoint: NodeEndpoint,
     dial: OutboundDial,
-    slot_keys: [Box<[ConnectionSlotKey]>; PoolClass::COUNT],
+    pool: Arc<OutboundPool>,
 }
+
+type OutboundTargets =
+    GenericHashMap<ClusterNodeName, Arc<OutboundTarget>, RandomState, DefaultSharedPtr>;
 
 impl OutboundTarget {
     fn new(node_id: &ClusterNodeName, endpoint: NodeEndpoint, dial: OutboundDial) -> Self {
-        let slot_keys =
-            PoolClass::ALL.map(|class| Self::class_slot_keys(node_id, &endpoint, class));
+        let slots = PoolClass::ALL.map(|class| Self::class_slots(node_id, &endpoint, class));
         Self {
             endpoint,
             dial,
-            slot_keys,
+            pool: Arc::new(OutboundPool {
+                slots,
+                releases: StreamReleases::new(),
+            }),
         }
     }
 
@@ -204,76 +263,44 @@ impl OutboundTarget {
         Self {
             endpoint: self.endpoint.clone(),
             dial,
-            slot_keys: self.slot_keys.clone(),
+            pool: Arc::clone(&self.pool),
         }
     }
 
-    fn class_slot_keys(
+    fn class_slots(
         node_id: &ClusterNodeName,
         endpoint: &NodeEndpoint,
         class: PoolClass,
-    ) -> Box<[ConnectionSlotKey]> {
+    ) -> Box<[Arc<SlotControl>]> {
         let mut keys = Vec::with_capacity(class.connections_per_peer());
         for slot in 0..class.connections_per_peer() {
-            keys.push(ConnectionSlotKey {
-                node_id: node_id.clone(),
-                endpoint: endpoint.clone(),
-                class,
-                slot,
-            });
+            keys.push(Arc::new(SlotControl {
+                key: ConnectionSlotKey {
+                    node_id: node_id.clone(),
+                    endpoint: endpoint.clone(),
+                    class,
+                    slot,
+                },
+                cancel: CancellationToken::new(),
+                started: AtomicBool::new(false),
+                connection: ArcSwapOption::empty(),
+            }));
         }
         keys.into_boxed_slice()
     }
 
-    /// The keys of this endpoint's connection slots in `class`, in slot order.
-    fn slot_keys(&self, class: PoolClass) -> &[ConnectionSlotKey] {
-        &self.slot_keys[class.index()]
+    /// The retained connection slots in `class`, in slot order.
+    fn slots(&self, class: PoolClass) -> &[Arc<SlotControl>] {
+        &self.pool.slots[class.index()]
     }
 }
 
-/// The credentials new connections authenticate with, published without a lock.
-///
-/// Every connection records the generation it authenticated under and drains once the published
-/// generation moves past it. A replacement publishes its bundle before it advances the generation,
-/// and a reader loads the generation before the bundle. A connection can therefore record a
-/// generation older than the credentials it used, which only drains it early, but never a newer
-/// one, which would let replaced credentials outlive their replacement.
-struct PublishedTls {
-    generation: AtomicU64,
-    bundle: ArcSwap<TlsConfigBundle>,
-}
-
-/// The credentials one connection authenticates with, and the generation it records for them.
-struct ActiveTls {
-    generation: u64,
-    bundle: StdArc<TlsConfigBundle>,
-}
-
-impl PublishedTls {
-    fn new(bundle: TlsConfigBundle) -> Self {
-        Self {
-            generation: AtomicU64::new(1),
-            bundle: ArcSwap::from_pointee(bundle),
-        }
-    }
-
-    fn generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
-    }
-
-    fn current(&self) -> ActiveTls {
-        let generation = self.generation();
-        let bundle = self.bundle.load_full();
-        ActiveTls { generation, bundle }
-    }
-
-    /// Publish `bundle` under `generation`, which the caller derived from the current generation.
-    /// The bundle is published first, and a race between replacements never moves the generation
-    /// backwards.
-    fn publish(&self, generation: u64, bundle: TlsConfigBundle) {
-        self.bundle.store(StdArc::new(bundle));
-        self.generation.fetch_max(generation, Ordering::AcqRel);
-    }
+/// What every dial of one registered endpoint shares: its connection slots, and the wakeups of the
+/// operations waiting for one of their streams. The same endpoint dialled another way keeps both,
+/// so a waiter of the earlier target still hears a later release.
+struct OutboundPool {
+    slots: [Box<[Arc<SlotControl>]>; PoolClass::COUNT],
+    releases: StreamReleases,
 }
 
 struct ClientConnection {
@@ -285,6 +312,8 @@ struct ClientConnection {
     sender: client::SendRequest<Bytes>,
     stream_slots: StreamSlotQuotas,
     peer_epoch: u64,
+    /// The authenticated connection retains the peer's protocol owner for all of its frames.
+    relay_owner: Option<StdArc<RelayPeerOwner>>,
     retiring: CancellationToken,
     cancel: CancellationToken,
     closed: CancellationToken,
@@ -306,16 +335,43 @@ fn increment(total: usize, addition: usize) -> usize {
     )
 )]
 pub(crate) struct StreamLease {
-    connection: Arc<ClientConnection>,
+    connection: StdArc<ClientConnection>,
     slot: Option<OwnedSemaphorePermit>,
+    /// The receive window a bulk stream grants its sender, reserved before its request leaves and
+    /// returned when the stream ends. A stream of any other pool grants the initial window, which
+    /// no reservation backs.
+    _receive_window: Option<Reservation>,
     state: TransportState,
+    released: StreamRelease,
 }
 
 impl Drop for StreamLease {
     fn drop(&mut self) {
         drop(self.slot.take());
-        self.state.inner.connection_changed.notify_one();
+        let StreamRelease {
+            pool,
+            class,
+            subquota,
+        } = &self.released;
+        pool.releases.of(*class, *subquota).notify_one();
     }
+}
+
+/// Where a stream lease reports its release: the pool it leased from, and its class and subquota.
+struct StreamRelease {
+    pool: Arc<OutboundPool>,
+    class: PoolClass,
+    subquota: RequestSubquota,
+}
+
+/// What one attempt to lease a stream found.
+enum StreamLeaseAttempt {
+    Leased(StreamLease),
+    /// Every stream the peer has in the class and subquota is leased; a release wakes a waiter
+    /// through the pool's releases.
+    Busy(Arc<OutboundPool>),
+    /// The peer has no target to lease from.
+    NoTarget,
 }
 
 struct RawRequest<'a> {
@@ -349,6 +405,13 @@ struct PeerConnections {
 struct InboundConnectionRegistration {
     state: TransportState,
     key: InboundPoolKey,
+}
+
+struct InboundBinding {
+    peer_addr: SocketAddr,
+    peer_identity: CertificateIdentity,
+    handshake_permit: OwnedSemaphorePermit,
+    binding_sequence: u64,
 }
 
 struct BoundInboundConnection {
@@ -390,7 +453,7 @@ struct OutboundRelayKey {
 ///
 /// The attempt holds its channel's key, so the channel bookkeeping an attempt touches never
 /// rebuilds that key.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(
     nervix_lint,
     nervix::context(
@@ -412,7 +475,7 @@ impl RelayAttemptKey {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct RelayChannelKey {
     peer_node_id: ClusterNodeName,
     sender_epoch: u64,
@@ -431,12 +494,7 @@ struct RelayChannelKey {
 struct RelayChannelWatermark {
     sequence: u64,
     status: RelayAdmissionStatus,
-    /// When this watermark was recorded for its channel.
-    recorded_at: Instant,
-    /// How long after `recorded_at` the watermark last reconciled a delivery of its channel, in
-    /// nanoseconds. An atomic lets a shared map guard refresh it, so checking a delivery against
-    /// its channel never takes the exclusive shard lock.
-    reconciled_after_nanos: AtomicU64,
+    last_reconciled: Instant,
 }
 
 impl RelayChannelWatermark {
@@ -444,80 +502,32 @@ impl RelayChannelWatermark {
         Self {
             sequence,
             status,
-            recorded_at: Instant::now(),
-            reconciled_after_nanos: AtomicU64::new(0),
+            last_reconciled: Instant::now(),
         }
     }
 
-    /// Record that the watermark reconciled a delivery now. Concurrent reconciliations keep the
-    /// latest.
-    fn mark_reconciled(&self) {
-        let reconciled_after = self.recorded_at.elapsed();
-        let reconciled_after_nanos = u64::try_from(reconciled_after.as_nanos()).assured(
-            "a transport process runs far less than the 584 years a u64 nanosecond offset spans",
-        );
-        self.reconciled_after_nanos
-            .fetch_max(reconciled_after_nanos, Ordering::AcqRel);
+    fn mark_reconciled(&mut self) {
+        self.last_reconciled = Instant::now();
     }
 
-    /// When the watermark last reconciled a delivery, or when it was recorded if it has not.
     fn last_reconciled_at(&self) -> Instant {
-        let reconciled_after =
-            Duration::from_nanos(self.reconciled_after_nanos.load(Ordering::Acquire));
-        self.recorded_at.checked_add(reconciled_after).assured(
-            "the offset was measured on the monotonic clock, so it names an instant the clock read",
-        )
+        self.last_reconciled
     }
-}
-
-#[derive(Clone)]
-#[cfg_attr(
-    nervix_lint,
-    nervix::context(
-        recurring,
-        reason = "this retained transport value services relay frames and their terminal outcomes"
-    )
-)]
-enum RelayAttemptEntry {
-    Active(StdArc<RelayAdmissionRecord>),
-    CancellationFence,
 }
 
 enum RelayGrantRegistration {
     Registered,
-    Existing(RelayAttemptEntry),
+    Existing(StdArc<RelayAdmissionRecord>),
     Retired(RelayGrantDisposition),
     InvalidSequence,
     ChannelBusy,
     AdmissionBusy,
 }
 
-impl RelayAttemptEntry {
-    fn progress_registration(&self) -> Option<RemoteAckRegistration> {
-        match self {
-            Self::Active(record) => record.progress_registration(),
-            Self::CancellationFence => None,
-        }
-    }
-
-    fn is_unadmitted(&self) -> bool {
-        match self {
-            Self::Active(record) => matches!(
-                record.status(),
-                RelayAdmissionStatus::Reserved | RelayAdmissionStatus::BodyReceived
-            ),
-            Self::CancellationFence => false,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
-enum RelayAdmissionState {
+enum RelayBodyPhase {
     Reserved { grant_id: u64 },
     BodyReceived,
-    Admitted,
-    Rejected(String),
-    Cancelled,
 }
 
 #[cfg_attr(
@@ -534,7 +544,10 @@ struct RelayAdmissionRecord {
     admission_key: RelayAdmissionKey,
     body_bytes: u64,
     metadata: wire::RelayMetadata,
-    state: nervix_primitives::sync::blocking::Mutex<RelayAdmissionState>,
+    /// Decoded metadata stays allocated until the last intake or protocol owner releases it.
+    _metadata_memory: Reservation,
+    choice: AdmissionChoice,
+    state: nervix_primitives::sync::blocking::Mutex<RelayAdmissionProtocol>,
     cancellation: CancellationToken,
     /// When the receiver accepted this attempt's reservation. Progress and admission latency are
     /// both measured from here, because that is when the sender's wait begins.
@@ -542,6 +555,18 @@ struct RelayAdmissionRecord {
     /// Also held by the transport, which outlives every attempt it reserved. The record resolves
     /// long after the call that created it returned, so it records its own outcome.
     observations: Arc<TransportObservations>,
+    /// Records borrow the transport owner weakly; the owner retains unresolved records.
+    owner: StdWeak<RelayPeerOwner>,
+}
+
+struct RelayAdmissionProtocol {
+    phase: RelayBodyPhase,
+    rejection: Option<String>,
+    capacity: Option<RelayAdmissionCapacity>,
+    last_progress: Instant,
+}
+
+struct RelayAdmissionCapacity {
     _item: OwnedSemaphorePermit,
     _terminal: OwnedSemaphorePermit,
 }
@@ -655,26 +680,43 @@ impl std::fmt::Debug for RelayAdmission {
 }
 
 impl RelayAdmission {
+    /// Resolves once this attempt can no longer be admitted: its sender cancelled it, its peer
+    /// ended or changed process, or the transport rejected it. An application that holds the
+    /// received batch back before it decides admission stops holding it then; [`Self::admit`]
+    /// reports the same verdict.
+    pub async fn cancelled(&self) {
+        self.record.cancellation.cancelled().await;
+    }
+
     pub fn admit(&self) -> RelayAdmissionDecision {
-        let mut state = self.record.state.lock();
-        match &*state {
-            RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived => {
-                *state = RelayAdmissionState::Admitted;
-                self.record.observe(RelayAdmissionOutcome::Admitted);
-                RelayAdmissionDecision::Admitted
-            }
-            RelayAdmissionState::Admitted => RelayAdmissionDecision::Admitted,
-            RelayAdmissionState::Rejected(_) | RelayAdmissionState::Cancelled => {
-                RelayAdmissionDecision::Cancelled
+        self.record.mark_admitted();
+        match self.record.choice.current() {
+            ChosenAdmission::Admitted => RelayAdmissionDecision::Admitted,
+            ChosenAdmission::Cancelled => RelayAdmissionDecision::Cancelled,
+            ChosenAdmission::Pending => {
+                unreachable!("admission selected or observed an irreversible verdict")
             }
         }
     }
 }
 
 impl RelayAdmissionRecord {
+    fn release_capacity(&self) {
+        self.state.lock().capacity.take();
+    }
+    fn report_progress(&self) {
+        self.state.lock().last_progress = Instant::now();
+    }
+    fn last_progress(&self) -> Instant {
+        self.state.lock().last_progress
+    }
+
+    fn is_unadmitted(&self) -> bool {
+        self.choice.current() == ChosenAdmission::Pending
+    }
+
     fn progress_registration(&self) -> Option<RemoteAckRegistration> {
-        let state = self.state.lock();
-        if let RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived = &*state {
+        if self.is_unadmitted() {
             self.metadata.admission.clone()
         } else {
             None
@@ -682,43 +724,59 @@ impl RelayAdmissionRecord {
     }
 
     fn reserved_grant_id(&self) -> Option<u64> {
-        match &*self.state.lock() {
-            RelayAdmissionState::Reserved { grant_id } => Some(*grant_id),
-            RelayAdmissionState::BodyReceived
-            | RelayAdmissionState::Admitted
-            | RelayAdmissionState::Rejected(_)
-            | RelayAdmissionState::Cancelled => None,
+        let state = self.state.lock();
+        if !self.is_unadmitted() {
+            return None;
+        }
+        match state.phase {
+            RelayBodyPhase::Reserved { grant_id } => Some(grant_id),
+            RelayBodyPhase::BodyReceived => None,
+        }
+    }
+
+    fn status_under_guard(&self, state: &RelayAdmissionProtocol) -> RelayAdmissionStatus {
+        match self.choice.current() {
+            ChosenAdmission::Pending => match state.phase {
+                RelayBodyPhase::Reserved { .. } => RelayAdmissionStatus::Reserved,
+                RelayBodyPhase::BodyReceived => RelayAdmissionStatus::BodyReceived,
+            },
+            ChosenAdmission::Admitted => RelayAdmissionStatus::Admitted,
+            ChosenAdmission::Cancelled => match &state.rejection {
+                Some(reason) => RelayAdmissionStatus::Rejected(reason.clone()),
+                None => RelayAdmissionStatus::Cancelled,
+            },
         }
     }
 
     fn status(&self) -> RelayAdmissionStatus {
-        match &*self.state.lock() {
-            RelayAdmissionState::Reserved { .. } => RelayAdmissionStatus::Reserved,
-            RelayAdmissionState::BodyReceived => RelayAdmissionStatus::BodyReceived,
-            RelayAdmissionState::Admitted => RelayAdmissionStatus::Admitted,
-            RelayAdmissionState::Rejected(reason) => RelayAdmissionStatus::Rejected(reason.clone()),
-            RelayAdmissionState::Cancelled => RelayAdmissionStatus::Cancelled,
-        }
+        self.status_under_guard(&self.state.lock())
     }
 
     fn grant_disposition(&self) -> RelayGrantDisposition {
-        match &*self.state.lock() {
-            RelayAdmissionState::Reserved { grant_id } => RelayGrantDisposition::SendBody {
-                grant_id: *grant_id,
-            },
-            RelayAdmissionState::BodyReceived => RelayGrantDisposition::BodyReceived,
-            RelayAdmissionState::Admitted => RelayGrantDisposition::Admitted,
-            RelayAdmissionState::Rejected(reason) => {
-                RelayGrantDisposition::Rejected(reason.clone())
+        let state = self.state.lock();
+        match self.status_under_guard(&state) {
+            RelayAdmissionStatus::Reserved => {
+                let RelayBodyPhase::Reserved { grant_id } = state.phase else {
+                    unreachable!("the guarded body phase is reserved");
+                };
+                RelayGrantDisposition::SendBody { grant_id }
             }
-            RelayAdmissionState::Cancelled => RelayGrantDisposition::Cancelled,
+            RelayAdmissionStatus::BodyReceived => RelayGrantDisposition::BodyReceived,
+            RelayAdmissionStatus::Admitted => RelayGrantDisposition::Admitted,
+            RelayAdmissionStatus::Rejected(reason) => RelayGrantDisposition::Rejected(reason),
+            RelayAdmissionStatus::Cancelled => RelayGrantDisposition::Cancelled,
+            RelayAdmissionStatus::Retired
+            | RelayAdmissionStatus::Unknown
+            | RelayAdmissionStatus::Indeterminate => {
+                unreachable!("a live record has a concrete admission phase or verdict")
+            }
         }
     }
 
     fn mark_body_received(&self) -> bool {
         let mut state = self.state.lock();
-        if let RelayAdmissionState::Reserved { .. } = &*state {
-            *state = RelayAdmissionState::BodyReceived;
+        if self.is_unadmitted() && matches!(state.phase, RelayBodyPhase::Reserved { .. }) {
+            state.phase = RelayBodyPhase::BodyReceived;
             true
         } else {
             false
@@ -726,40 +784,29 @@ impl RelayAdmissionRecord {
     }
 
     fn mark_admitted(&self) {
-        let mut state = self.state.lock();
-        if let RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived = &*state {
-            *state = RelayAdmissionState::Admitted;
+        if self.choice.admit() {
             self.observe(RelayAdmissionOutcome::Admitted);
         }
     }
 
     fn reject(&self, reason: String) {
         let mut state = self.state.lock();
-        if let RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived = &*state {
-            *state = RelayAdmissionState::Rejected(reason);
+        if self.choice.cancel() {
+            state.rejection = Some(reason);
             self.observe(RelayAdmissionOutcome::Rejected);
             self.cancellation.cancel();
         }
     }
 
     fn cancel(&self) -> RelayAdmissionStatus {
-        let mut state = self.state.lock();
-        match &*state {
-            RelayAdmissionState::Reserved { .. } | RelayAdmissionState::BodyReceived => {
-                *state = RelayAdmissionState::Cancelled;
-                self.observe(RelayAdmissionOutcome::Cancelled);
-                self.cancellation.cancel();
-                RelayAdmissionStatus::Cancelled
-            }
-            RelayAdmissionState::Admitted => RelayAdmissionStatus::Admitted,
-            RelayAdmissionState::Rejected(reason) => RelayAdmissionStatus::Rejected(reason.clone()),
-            RelayAdmissionState::Cancelled => RelayAdmissionStatus::Cancelled,
+        let state = self.state.lock();
+        if self.choice.cancel() {
+            self.observe(RelayAdmissionOutcome::Cancelled);
+            self.cancellation.cancel();
         }
+        self.status_under_guard(&state)
     }
 
-    /// Count how this attempt left the unresolved set, and how long it waited to get there. Every
-    /// caller holds the state lock and has already checked that the attempt was unresolved, so an
-    /// attempt is counted exactly once.
     fn observe(&self, outcome: RelayAdmissionOutcome) {
         self.observations
             .relay_resolved(outcome, self.reserved_at.elapsed());
@@ -777,15 +824,18 @@ pub(crate) struct TransportStateInner {
     cluster_id: String,
     node_id: ClusterNodeName,
     advertised_host: String,
+    join_terms: JoinTerms,
+    /// Written only by outbound connection attempts, and only while it still reads `Joining`.
+    join_progress: watch::Sender<JoinProgress>,
     process_epoch: u64,
     next_coordination_sequence: AtomicU64,
+    next_binding_sequence: AtomicU64,
     local_addr: SocketAddr,
     resolver: PeerResolver,
     tls: PublishedTls,
     tls_changed: Notify,
-    targets: DashMap<ClusterNodeName, Arc<OutboundTarget>, RandomState>,
-    slots: DashMap<ConnectionSlotKey, SlotControl, RandomState>,
-    connections: DashMap<ConnectionSlotKey, Arc<ClientConnection>, RandomState>,
+    targets: ArcSwap<OutboundTargets>,
+    connections: DashMap<ConnectionSlotKey, StdArc<ClientConnection>, RandomState>,
     peer_connections: DashMap<ClusterNodeName, PeerConnections, RandomState>,
     inbound_pool_connections: DashMap<InboundPoolKey, usize, RandomState>,
     peer_permits: StdArc<Semaphore>,
@@ -797,14 +847,9 @@ pub(crate) struct TransportStateInner {
     handshake_permits: StdArc<Semaphore>,
     incoming_tx: mpsc::Sender<ReceivedEnvelope>,
     requests: super::RequestState,
-    grants: DashMap<u64, RelayGrant, RandomState>,
-    relay_attempts: DashMap<RelayAttemptKey, RelayAttemptEntry, RandomState>,
-    /// The sequence of the batch each channel has granted and not yet retired.
-    active_relay_channels: DashMap<RelayChannelKey, u64, RandomState>,
-    relay_admissions: DashMap<RelayAdmissionKey, StdArc<RelayAdmissionRecord>, RandomState>,
-    relay_watermarks: DashMap<RelayChannelKey, RelayChannelWatermark, RandomState>,
-    outbound_relay_epochs: DashMap<OutboundRelayKey, u64, RandomState>,
-    outbound_relay_admissions: DashMap<RelayAdmissionKey, OutboundRelayKey, RandomState>,
+    /// Immutable routing only. Connections and attempts retain their peer owner before recurring
+    /// protocol work, and only peer installation and withdrawal replace this publication.
+    relay_owners: ArcSwap<RelayOwnersPublication>,
     relay_items: StdArc<Semaphore>,
     terminal_outcomes: StdArc<Semaphore>,
     admission_closed: CancellationToken,
@@ -834,8 +879,10 @@ impl TransportState {
             cluster_id,
             node_id,
             advertised_host,
+            join_terms,
         } = identity;
         options.validate()?;
+        Self::validate_bulk_receive_window(&options, &executor)?;
         tls.certificate
             .validate_local(&cluster_id, &node_id, &advertised_host)
             .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
@@ -863,14 +910,16 @@ impl TransportState {
                 cluster_id,
                 node_id,
                 advertised_host,
+                join_terms,
+                join_progress: watch::channel(JoinProgress::Joining).0,
                 process_epoch,
                 next_coordination_sequence: AtomicU64::new(1),
+                next_binding_sequence: AtomicU64::new(1),
                 local_addr,
                 resolver,
                 tls: PublishedTls::new(tls),
                 tls_changed: Notify::new(),
-                targets: DashMap::default(),
-                slots: DashMap::default(),
+                targets: ArcSwap::from_pointee(OutboundTargets::default()),
                 connections: DashMap::default(),
                 peer_connections: DashMap::default(),
                 inbound_pool_connections: DashMap::default(),
@@ -900,13 +949,7 @@ impl TransportState {
                     options.incoming_queue_capacity,
                     Arc::clone(&observations),
                 ),
-                grants: DashMap::default(),
-                relay_attempts: DashMap::default(),
-                active_relay_channels: DashMap::default(),
-                relay_admissions: DashMap::default(),
-                relay_watermarks: DashMap::default(),
-                outbound_relay_epochs: DashMap::default(),
-                outbound_relay_admissions: DashMap::default(),
+                relay_owners: ArcSwap::from_pointee(RelayOwnersPublication::default()),
                 relay_items: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
                 terminal_outcomes: StdArc::new(Semaphore::new(options.incoming_queue_capacity)),
                 admission_closed: CancellationToken::new(),
@@ -1012,11 +1055,17 @@ impl TransportState {
         }
 
         let mut oldest_unresolved_outcome = Duration::ZERO;
-        for entry in self.relay_attempts.iter() {
-            let RelayAttemptEntry::Active(record) = entry.value() else {
-                continue;
-            };
-            oldest_unresolved_outcome = oldest_unresolved_outcome.max(record.reserved_at.elapsed());
+        let mut relay_channels = 0;
+        let mut relay_attempts = 0;
+        let mut relay_grants = 0;
+        let mut relay_channel_watermarks = 0;
+        for owner in self.relay_owners.load().owners.values() {
+            let snapshot = owner.snapshot();
+            relay_channels = increment(relay_channels, snapshot.channels);
+            relay_attempts = increment(relay_attempts, snapshot.attempts);
+            relay_grants = increment(relay_grants, snapshot.grants);
+            relay_channel_watermarks = increment(relay_channel_watermarks, snapshot.watermarks);
+            oldest_unresolved_outcome = oldest_unresolved_outcome.max(snapshot.oldest);
         }
 
         TransportSnapshot {
@@ -1024,127 +1073,26 @@ impl TransportState {
             connections,
             leased_streams,
             pending_operations: self.requests.pending_operations(),
-            relay_channels: self.active_relay_channels.len(),
-            relay_attempts: self.relay_attempts.len(),
-            relay_grants: self.grants.len(),
+            relay_channels,
+            relay_attempts,
+            relay_grants,
+            relay_channel_watermarks,
             oldest_unresolved_outcome,
         }
     }
 
     pub(crate) fn is_connected_to(&self, node_id: &ClusterNodeName) -> bool {
-        let Some(target) = self
-            .targets
-            .get(node_id)
-            .map(|target| Arc::clone(target.value()))
-        else {
+        let Some(target) = self.targets.load().get(node_id).cloned() else {
             return false;
         };
         for class in PoolClass::PRECONNECTED {
-            for key in target.slot_keys(class) {
-                if !self.connections.contains_key(key) {
+            for slot in target.slots(class) {
+                if slot.cancel.is_cancelled() || slot.connection.load().is_none() {
                     return false;
                 }
             }
         }
         true
-    }
-
-    pub(crate) fn replace_outbound_targets(
-        &self,
-        endpoints: &BTreeMap<ClusterNodeName, NodeEndpoint>,
-    ) {
-        let accepted = endpoints
-            .iter()
-            .take(self.options.max_peers)
-            .map(|(node, endpoint)| (node.clone(), endpoint.clone()))
-            .collect::<BTreeMap<_, _>>();
-
-        // Retire in node order, not map order, so the cancellations a replacement causes happen in
-        // the same sequence in every process.
-        let removed = self
-            .targets
-            .iter()
-            .filter(|entry| accepted.get(entry.key()) != Some(&entry.value().endpoint))
-            .map(|entry| entry.key().clone())
-            .collect::<BTreeSet<_>>();
-        for node in removed {
-            self.targets.remove(&node);
-            self.cancel_slots_for_node(&node);
-        }
-
-        for (node, endpoint) in accepted {
-            let outbound = self.install_outbound_target(node, endpoint, OutboundDial::Advertised);
-            self.ensure_preconnected_slots(&outbound);
-        }
-    }
-
-    pub(crate) fn register_outbound_target(
-        &self,
-        node_id: ClusterNodeName,
-        endpoint: NodeEndpoint,
-    ) -> Result<(), Report<TransportError>> {
-        if !self.has_room_for(&node_id) {
-            return Err(Report::new(TransportError::PoolExhausted));
-        }
-        let outbound = self.install_outbound_target(node_id, endpoint, OutboundDial::Advertised);
-        self.ensure_preconnected_slots(&outbound);
-        Ok(())
-    }
-
-    /// Install the address a bootstrap exchange authenticated as `node_id`. An endpoint the node
-    /// already has keeps how it is dialled, so a later bootstrap never narrows an advertised
-    /// endpoint down to one of its addresses.
-    fn install_authenticated_target(
-        &self,
-        node_id: ClusterNodeName,
-        target: PeerTarget,
-    ) -> Arc<OutboundTarget> {
-        let endpoint = target.endpoint();
-        let current = self
-            .targets
-            .get(&node_id)
-            .map(|current| Arc::clone(current.value()));
-        if let Some(current) = current
-            && current.endpoint == endpoint
-        {
-            return current;
-        }
-        self.install_outbound_target(node_id, endpoint, OutboundDial::Authenticated(target.addr))
-    }
-
-    /// Whether `node_id` fits the topology limit: a node that already has a target always does.
-    fn has_room_for(&self, node_id: &ClusterNodeName) -> bool {
-        self.targets.contains_key(node_id) || self.targets.len() < self.options.max_peers
-    }
-
-    /// Make `endpoint` the endpoint `node_id` is reached at, dialled through `dial`, and return its
-    /// registration. A different endpoint replaces the registered one and cancels the slots that
-    /// belonged to it. The same endpoint keeps its slots and connections, and only a different
-    /// `dial` changes where the next connection goes.
-    fn install_outbound_target(
-        &self,
-        node_id: ClusterNodeName,
-        endpoint: NodeEndpoint,
-        dial: OutboundDial,
-    ) -> Arc<OutboundTarget> {
-        let current = self
-            .targets
-            .get(&node_id)
-            .map(|current| Arc::clone(current.value()));
-        if let Some(current) = current
-            && current.endpoint == endpoint
-        {
-            if current.dial == dial {
-                return current;
-            }
-            let redialled = Arc::new(current.with_dial(dial));
-            self.targets.insert(node_id, Arc::clone(&redialled));
-            return redialled;
-        }
-        self.cancel_slots_for_node(&node_id);
-        let outbound = Arc::new(OutboundTarget::new(&node_id, endpoint, dial));
-        self.targets.insert(node_id, Arc::clone(&outbound));
-        outbound
     }
 
     pub(crate) async fn bootstrap_target(
@@ -1185,32 +1133,34 @@ impl TransportState {
                 ))));
             }
             let node_id = identity.node_id;
-            if !self.has_room_for(&node_id) {
-                return Err(Report::new(TransportError::PoolExhausted));
-            }
-            let outbound = self.install_authenticated_target(node_id.clone(), target);
+            let outbound = self.install_authenticated_target(node_id.clone(), target)?;
             self.ensure_preconnected_slots(&outbound);
             Ok::<_, Report<TransportError>>(node_id)
         };
-        match timeout(self.options.connection_setup_timeout, setup).await {
+        let bootstrapped = match timeout(self.options.connection_setup_timeout, setup).await {
             Ok(result) => result,
             Err(_) => Err(Report::new(TransportError::ConnectionSetupTimeout {
                 peer: NodeEndpoint::from(peer_addr),
                 timeout: self.options.connection_setup_timeout,
             })),
+        };
+        if let Err(error) = &bootstrapped {
+            self.note_join_failure(error.current_context());
         }
+        bootstrapped
     }
 
     pub(crate) fn retire_departed_connections(&self, live_nodes: &BTreeSet<ClusterNodeName>) {
+        self.retire_departed_relay_owners(live_nodes);
         let departed = self
             .targets
+            .load()
             .iter()
-            .filter(|target| !live_nodes.contains(target.key()))
-            .map(|target| target.key().clone())
+            .filter(|target| !live_nodes.contains(target.0))
+            .map(|target| target.0.clone())
             .collect::<BTreeSet<_>>();
         for node in departed {
-            self.targets.remove(&node);
-            self.cancel_slots_for_node(&node);
+            self.remove_target(&node);
         }
     }
 
@@ -1223,8 +1173,8 @@ impl TransportState {
         )
     )]
     fn ensure_class_slots(&self, target: &OutboundTarget, class: PoolClass) {
-        for key in target.slot_keys(class) {
-            self.ensure_slot(key);
+        for slot in target.slots(class) {
+            self.ensure_slot(slot);
         }
     }
 
@@ -1234,82 +1184,54 @@ impl TransportState {
         }
     }
 
+    /// Claims the one worker belonging to this slot's lifetime. Established requests only read
+    /// the claimed bit; replacement constructs different slots and never resets this bit.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
+            bounded,
+            reason = "one retained pool slot admits its worker once per endpoint and TLS \
+                      generation",
+            key = "peer endpoint, pool class, slot and cancellation lifetime",
+            bound = "one atomic claim and at most one supervised worker per retained slot"
         )
     )]
-    fn ensure_slot(&self, key: &ConnectionSlotKey) {
-        if self.admission_closed.is_cancelled() {
+    fn ensure_slot(&self, slot: &Arc<SlotControl>) {
+        if self.admission_closed.is_cancelled() || !slot.claim_worker() {
             return;
         }
-        // Every lease passes through here, and in the steady state its slot is already running. A
-        // shared lookup confirms that, so only a missing slot takes the exclusive entry and builds
-        // an owned key.
-        if nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
-             slot instead of reaching the shared registry per request",
-            self.slots.contains_key(key)
-        ) {
-            return;
-        }
-        match nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
-             slot instead of reaching the shared registry per request",
-            self.slots.entry(key.clone())
-        ) {
-            Entry::Occupied(_) => {}
-            Entry::Vacant(entry) => {
-                let cancel = CancellationToken::new();
-                entry.insert(SlotControl {
-                    cancel: cancel.clone(),
-                });
-                let state = self.clone();
-                let key = key.clone();
-                self.tasks.spawn(async move {
-                    nervix_primitives::expect_lint!(
-                        nervix::lifecycle_call,
-                        "Typed Ratchet 03 (86bc9eqjv): a missing retained transport slot installs \
-                         its one supervised connection task",
-                        state.run_slot(key, cancel)
-                    )
-                    .await;
-                });
-            }
-        }
+        let state = self.clone();
+        let slot = slot.clone();
+        #[cfg_attr(
+            nervix_lint,
+            nervix::context(
+                lifecycle,
+                reason = "only the successful first-use claim constructs this retained slot's \
+                          reconnect worker"
+            )
+        )]
+        #[cfg_attr(
+            nervix_lint,
+            expect(
+                nervix::lifecycle_call,
+                reason = "constructing this reconnect task is a first-use installation: the \
+                          retained slot's atomic claim has one winner and is never reset"
+            )
+        )]
+        let worker = async move {
+            state.run_slot(slot).await;
+        };
+        self.tasks.spawn(worker);
     }
 
-    fn cancel_slots_for_node(&self, node_id: &ClusterNodeName) {
-        let slots = self
-            .slots
-            .iter()
-            .filter(|slot| &slot.key().node_id == node_id)
-            .map(|slot| (slot.key().clone(), slot.cancel.clone()))
-            .collect::<BTreeMap<_, _>>();
-        for (key, cancel) in slots {
-            self.retire_slot(&key, &cancel);
-        }
-    }
-
-    fn retire_slot(&self, key: &ConnectionSlotKey, cancel: &CancellationToken) {
-        cancel.cancel();
-        let connection = self
-            .connections
-            .remove_if(key, |_, connection| connection.retiring == *cancel);
+    fn retire_slot(&self, slot: &SlotControl) {
+        slot.cancel.cancel();
+        slot.connection.store(None);
+        let connection = self.connections.remove_if(&slot.key, |_, connection| {
+            connection.retiring == slot.cancel
+        });
         if connection.is_some() {
-            self.decrement_peer(&key.node_id);
-        }
-        if self
-            .slots
-            .get(key)
-            .is_some_and(|slot| slot.cancel == *cancel)
-        {
-            self.slots.remove(key);
+            self.decrement_peer(&slot.key.node_id);
         }
         self.connection_changed.notify_waiters();
     }
@@ -1322,7 +1244,9 @@ impl TransportState {
                       an explicit lifetime boundary"
         )
     )]
-    async fn run_slot(self, key: ConnectionSlotKey, slot_cancel: CancellationToken) {
+    async fn run_slot(self, slot: Arc<SlotControl>) {
+        let key = slot.key.clone();
+        let slot_cancel = slot.cancel.clone();
         let mut backoff = self.options.reconnect_backoff;
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -1344,9 +1268,10 @@ impl TransportState {
             match connected {
                 Ok(connection) => {
                     backoff = self.options.reconnect_backoff;
-                    match self.register_connection(connection.clone()) {
+                    match self.register_connection(&slot, connection.clone()) {
                         Ok(()) => {
                             self.observations.connection_established(key.class);
+                            self.note_joined(&key.node_id);
                             nervix_primitives::select! {
                                 _ = slot_cancel.cancelled() => {}
                                 _ = self.admission_closed.cancelled() => {}
@@ -1354,6 +1279,7 @@ impl TransportState {
                             }
                             self.observations
                                 .connection_failed(key.class, ConnectionFailureReason::Closed);
+                            slot.connection.store(None);
                             self.unregister_connection(&key, &connection);
                             self.drain_outbound_connection(&connection).await;
                             connection.cancel.cancel();
@@ -1376,6 +1302,7 @@ impl TransportState {
                         key.class,
                         ConnectionFailureReason::of(error.current_context()),
                     );
+                    self.note_join_failure(error.current_context());
                     debug!(
                         ?error,
                         node = %key.node_id,
@@ -1397,7 +1324,7 @@ impl TransportState {
                 .unwrap_or(self.options.max_reconnect_backoff)
                 .min(self.options.max_reconnect_backoff);
         }
-        self.unregister_slot(&key, &slot_cancel);
+        slot.connection.store(None);
     }
 
     /// End a blackholed HTTP/2 connection without waiting for the kernel's TCP retransmission
@@ -1467,39 +1394,34 @@ impl TransportState {
         })
     }
 
-    fn unregister_slot(&self, key: &ConnectionSlotKey, cancel: &CancellationToken) {
-        let remove = self
-            .slots
-            .get(key)
-            .is_some_and(|slot| slot.cancel == *cancel);
-        if remove {
-            self.slots.remove(key);
-        }
-    }
-
     fn register_connection(
         &self,
-        connection: Arc<ClientConnection>,
+        slot: &SlotControl,
+        connection: StdArc<ClientConnection>,
     ) -> Result<(), Report<TransportError>> {
         let key = connection.key.clone();
         let Entry::Vacant(entry) = self.connections.entry(key.clone()) else {
             return Err(Report::new(TransportError::PoolExhausted));
         };
         self.increment_peer(&key.node_id)?;
-        entry.insert(connection);
+        entry.insert(connection.clone());
+        slot.connection.store(Some(connection));
         self.connection_changed.notify_waiters();
         Ok(())
     }
 
-    fn unregister_connection(&self, key: &ConnectionSlotKey, connection: &Arc<ClientConnection>) {
-        let remove = self
+    fn unregister_connection(
+        &self,
+        key: &ConnectionSlotKey,
+        connection: &StdArc<ClientConnection>,
+    ) {
+        if self
             .connections
-            .get(key)
-            .is_some_and(|current| Arc::ptr_eq(current.value(), connection));
-        if !remove {
+            .remove_if(key, |_, current| StdArc::ptr_eq(current, connection))
+            .is_none()
+        {
             return;
         }
-        self.connections.remove(key);
         self.decrement_peer(&key.node_id);
         self.connection_changed.notify_waiters();
     }
@@ -1516,12 +1438,30 @@ impl TransportState {
         }
     }
 
+    fn allocate_binding_sequence(&self) -> u64 {
+        loop {
+            let current = self.next_binding_sequence.load(Ordering::Relaxed);
+            let next = current
+                .checked_add(1)
+                .assured("a process cannot start u64::MAX connection bindings");
+            if self
+                .next_binding_sequence
+                .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return current;
+            }
+        }
+    }
+
     async fn connect(
         &self,
         key: &ConnectionSlotKey,
         slot_cancel: &CancellationToken,
-    ) -> Result<Arc<ClientConnection>, Report<TransportError>> {
-        let budget = ConnectionBudget::start(self.options.connection_setup_timeout);
+    ) -> Result<StdArc<ClientConnection>, Report<TransportError>> {
+        let binding_sequence = self.allocate_binding_sequence();
+        let budget =
+            OperationBudget::start(self.options.connection_setup_timeout, LookupShare::Whole);
         let setup = async {
             let DialedStream {
                 stream: tcp,
@@ -1572,23 +1512,25 @@ impl TransportState {
                 driver_closed.cancel();
             });
             let driver_setup_guard = CancelOnDrop::new(cancel.clone());
-            let connection = Arc::new(ClientConnection {
+            let connection = StdArc::new(ClientConnection {
                 key: key.clone(),
                 peer_addr,
                 request_host: key.endpoint.url_host(),
                 sender,
                 stream_slots: StreamSlotQuotas::new(key.class),
                 peer_epoch: 0,
+                relay_owner: None,
                 retiring: slot_cancel.clone(),
                 cancel,
                 closed,
             });
+            let local_prerequisites = self.prerequisites_with(&tls);
             let hello = ConnectionHello {
-                fingerprint: WIRE_CONTRACT_FINGERPRINT,
                 class: key.class,
                 process_epoch: self.process_epoch,
                 node_id: self.node_id.clone(),
                 advertised_host: self.advertised_host.clone(),
+                prerequisites: local_prerequisites.clone(),
             };
             let body = wire::encode_rkyv(
                 &self.executor,
@@ -1598,6 +1540,7 @@ impl TransportState {
                 hello,
             )
             .await?;
+            let binding_window = self.reserve_binding_receive_window(key).await?;
             let accepted = connection
                 .request_raw(
                     self,
@@ -1611,7 +1554,8 @@ impl TransportState {
                     },
                 )
                 .await?;
-            let accepted = wire::decode_rkyv::<ConnectionAccepted>(
+            drop(binding_window);
+            let answer = wire::decode_rkyv::<ConnectionAnswer>(
                 &self.executor,
                 MemoryClass::Management,
                 CpuClass::Control,
@@ -1619,19 +1563,19 @@ impl TransportState {
             )
             .await?
             .into_value();
-            if accepted.fingerprint != WIRE_CONTRACT_FINGERPRINT || accepted.node_id != key.node_id
-            {
-                return Err(Report::new(TransportError::InvalidHandshake(
-                    "wire fingerprint or addressed node identity differs".to_string(),
-                )));
-            }
-            let connection = Arc::new(ClientConnection {
+            let accepted = Self::accepted_answer(&key.node_id, &local_prerequisites, answer)?;
+            let connection = StdArc::new(ClientConnection {
                 key: connection.key.clone(),
                 peer_addr: connection.peer_addr,
                 request_host: connection.request_host.clone(),
                 sender: connection.sender.clone(),
                 stream_slots: connection.stream_slots.clone(),
                 peer_epoch: accepted.process_epoch,
+                relay_owner: Some(self.bind_relay_owner(
+                    &key.node_id,
+                    accepted.process_epoch,
+                    binding_sequence,
+                )?),
                 retiring: connection.retiring.clone(),
                 cancel: connection.cancel.clone(),
                 closed: connection.closed.clone(),
@@ -1653,6 +1597,9 @@ impl TransportState {
         }
     }
 
+    /// Lease a stream of `class` to `node_id` before `deadline`. A bulk stream also reserves the
+    /// receive window its connection grants it before the caller sends anything on it, so the
+    /// sender can never put more on the wire toward this node than the node has room for.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -1668,20 +1615,58 @@ impl TransportState {
         subquota: RequestSubquota,
         deadline: Instant,
     ) -> Result<StreamLease, Report<TransportError>> {
+        let mut lease = self.lease_slot(node_id, class, subquota, deadline).await?;
+        if class.grants_bulk_receive_window() {
+            lease._receive_window =
+                Some(self.reserve_bulk_receive_window(node_id, deadline).await?);
+        }
+        Ok(lease)
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "the transport performs this operation for each admitted frame or stream \
+                      request"
+        )
+    )]
+    async fn lease_slot(
+        &self,
+        node_id: &ClusterNodeName,
+        class: PoolClass,
+        subquota: RequestSubquota,
+        deadline: Instant,
+    ) -> Result<StreamLease, Report<TransportError>> {
         loop {
             nervix_primitives::task::consume_budget().await;
             if self.admission_closed.is_cancelled() {
                 return Err(Report::new(TransportError::ShuttingDown));
             }
-            if let Some(lease) = self.try_lease(node_id, class, subquota) {
-                return Ok(lease);
+            let busy_pool = match self.try_lease(node_id, class, subquota) {
+                StreamLeaseAttempt::Leased(lease) => return Ok(lease),
+                StreamLeaseAttempt::Busy(pool) => Some(pool),
+                StreamLeaseAttempt::NoTarget => None,
+            };
+            // Only an operation that found no free stream registers to wait: for a stream of its
+            // own class and subquota to be released, and for any change of the peer's connections.
+            // It checks the pools again once registered, so a change between the two checks still
+            // wakes it.
+            let changed = self.connection_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let released = async {
+                match &busy_pool {
+                    Some(pool) => pool.releases.of(class, subquota).notified().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::pin!(released);
+            // Polled once so the release wait registers before the second check.
+            if let std::task::Poll::Ready(()) = futures_util::poll!(released.as_mut()) {
+                continue;
             }
-            // Only an operation that found no free stream registers to wait. It checks the pools
-            // again once registered, so a change between the two checks still wakes it.
-            let notified = self.connection_changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(lease) = self.try_lease(node_id, class, subquota) {
+            if let StreamLeaseAttempt::Leased(lease) = self.try_lease(node_id, class, subquota) {
                 return Ok(lease);
             }
 
@@ -1695,61 +1680,37 @@ impl TransportState {
                         timeout: self.options.request_timeout,
                     }));
                 }
-                _ = &mut notified => {}
+                _ = &mut changed => {}
+                () = &mut released => {}
             }
         }
     }
 
-    /// Lease a free stream on an established connection of `class` to `node_id`, starting any of
-    /// the peer's slots in that class that are not running. On an established pool every step reads
-    /// shared state, so the lease takes no exclusive lock.
+    /// Select from the peer's atomically published slot handles. The publication changes only
+    /// with topology or credentials; connection workers replace their own connection publication.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
             recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
+            reason = "stream requests select a retained peer pool and lease one bounded stream"
         )
     )]
-    #[allow(deprecated)] // until try_update is stabilized
     fn try_lease(
         &self,
         node_id: &ClusterNodeName,
         class: PoolClass,
         subquota: RequestSubquota,
-    ) -> Option<StreamLease> {
-        let target = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected connection \
-             slot instead of reaching the shared registry per request",
-            self.targets.get(node_id)
-        )
-        .map(|target| Arc::clone(target.value()))?;
-        nervix_primitives::expect_lint!(
-            nervix::lifecycle_call,
-            "Typed Ratchet 03 (86bc9eqjv): retain the selected transport class slots before \
-             recurring lease attempts",
-            self.ensure_class_slots(&target, class)
-        );
-
-        let slot_keys = target.slot_keys(class);
-        #[allow(deprecated)] // until try_update is stabilized
-        let start = self
-            .next_connection
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.checked_add(1).unwrap_or_default())
-            })
-            .assured("the round-robin cursor update always returns a value")
-            % slot_keys.len();
-        let (before_start, from_start) = slot_keys.split_at(start);
-        for key in from_start.iter().chain(before_start) {
-            let Some(connection) = nervix_primitives::expect_lint!(
-                nervix::sync_acquisition,
-                "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain the selected \
-                 connection slot instead of reaching the shared registry per request",
-                self.connections.get(key)
-            )
-            .map(|item| item.clone()) else {
+    ) -> StreamLeaseAttempt {
+        let targets = self.targets.load();
+        let Some(target) = targets.get(node_id) else {
+            return StreamLeaseAttempt::NoTarget;
+        };
+        let slots = target.slots(class);
+        let start = self.next_connection.fetch_add(1, Ordering::Relaxed) % slots.len();
+        let (before_start, from_start) = slots.split_at(start);
+        for slot in from_start.iter().chain(before_start) {
+            self.ensure_slot(slot);
+            let Some(connection) = slot.connection.load_full() else {
                 continue;
             };
             let Some(permit) = connection.stream_slots.try_lease(subquota) else {
@@ -1758,13 +1719,19 @@ impl TransportState {
             if connection.closed.is_cancelled() || connection.retiring.is_cancelled() {
                 continue;
             }
-            return Some(StreamLease {
+            return StreamLeaseAttempt::Leased(StreamLease {
                 connection,
                 slot: Some(permit),
+                _receive_window: None,
                 state: self.clone(),
+                released: StreamRelease {
+                    pool: Arc::clone(&target.pool),
+                    class,
+                    subquota,
+                },
             });
         }
-        None
+        StreamLeaseAttempt::Busy(Arc::clone(&target.pool))
     }
 
     #[cfg_attr(
@@ -1783,40 +1750,12 @@ impl TransportState {
         if let Envelope::RelayPayload(payload) = envelope {
             return self.send_relay(node_id, payload).await;
         }
-        // A terminal acknowledgement resolves the reserved admission it names. The resolved record
-        // is retired once the acknowledgement is delivered, without looking the admission up again.
-        let completed_admission = if let Envelope::Ack(ack) = &envelope {
-            if let RemoteAckOutcome::Alive = &ack.outcome {
-                None
-            } else {
-                let key = RelayAdmissionKey {
-                    peer_node_id: node_id.clone(),
-                    registration: ack.registration.clone(),
-                };
-                let record = nervix_primitives::expect_lint!(
-                    nervix::sync_acquisition,
-                    "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain pending request \
-                     ownership through the terminal response",
-                    self.relay_admissions.get(&key)
-                )
-                .map(|record| StdArc::clone(record.value()));
-                if let Some(record) = &record {
-                    if let RemoteAckOutcome::NoAck(reason) = &ack.outcome {
-                        record.reject(reason.clone());
-                    } else {
-                        record.mark_admitted();
-                    }
-                }
-                record
-            }
-        } else {
-            None
-        };
+        let mut completed_admission = None;
         let result = async {
             let class = envelope.pool_class();
             let subquota = match &envelope {
                 Envelope::Ack(ack) => {
-                    if ack.outcome == RemoteAckOutcome::Alive {
+                    if ack.outcome.is_progress() {
                         RequestSubquota::Progress
                     } else {
                         RequestSubquota::Terminal
@@ -1834,6 +1773,20 @@ impl TransportState {
             let lease = self.lease(node_id, class, subquota, deadline).await?;
             match envelope {
                 Envelope::Ack(ack) => {
+                    {
+                        let owner = lease
+                            .connection
+                            .relay_owner
+                            .as_ref()
+                            .assured("a leased connection completed its authenticated binding");
+                        completed_admission = owner.completed_admission(
+                            &RelayAdmissionKey {
+                                peer_node_id: node_id.clone(),
+                                registration: ack.registration.clone(),
+                            },
+                            &ack.outcome,
+                        );
+                    }
                     let bytes = wire::encode_rkyv(
                         &self.executor,
                         class.memory_class(),
@@ -2017,6 +1970,7 @@ impl TransportState {
                         continue;
                     }
                 };
+            let binding_sequence = self.allocate_binding_sequence();
             let state = self.clone();
             self.tasks.spawn(async move {
                 nervix_primitives::select! {
@@ -2027,9 +1981,19 @@ impl TransportState {
                         peer_addr,
                         handshake_permit,
                         connection_permit,
+                        binding_sequence,
                     ) => {
                         if let Err(error) = result {
-                            debug!(?error, %peer_addr, "interconnect connection rejected");
+                            match error.current_context() {
+                                TransportError::IncompatiblePeer { peer, mismatch } => warn!(
+                                    %peer,
+                                    %peer_addr,
+                                    prerequisite = %mismatch.prerequisite(),
+                                    refusal = %mismatch,
+                                    "refused an interconnect peer that cannot run beside this node"
+                                ),
+                                _ => debug!(?error, %peer_addr, "interconnect connection rejected"),
+                            }
                         }
                     }
                 }
@@ -2043,6 +2007,7 @@ impl TransportState {
         peer_addr: SocketAddr,
         handshake_permit: OwnedSemaphorePermit,
         _connection_permit: OwnedSemaphorePermit,
+        binding_sequence: u64,
     ) -> Result<(), Report<TransportError>> {
         tcp.set_nodelay(true).map_err(TransportError::from)?;
         let ActiveTls {
@@ -2088,11 +2053,14 @@ impl TransportState {
         let bound = self
             .complete_inbound_binding(
                 &mut connection,
-                peer_addr,
-                peer_identity,
                 request,
                 respond,
-                handshake_permit,
+                InboundBinding {
+                    peer_addr,
+                    peer_identity,
+                    handshake_permit,
+                    binding_sequence,
+                },
             )
             .await?;
 
@@ -2109,15 +2077,19 @@ impl TransportState {
     async fn complete_inbound_binding<T>(
         &self,
         connection: &mut server::Connection<T, Bytes>,
-        peer_addr: SocketAddr,
-        peer_identity: CertificateIdentity,
         request: Request<RecvStream>,
         respond: server::SendResponse<Bytes>,
-        handshake_permit: OwnedSemaphorePermit,
+        binding: InboundBinding,
     ) -> Result<BoundInboundConnection, Report<TransportError>>
     where
         T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
+        let InboundBinding {
+            peer_addr,
+            peer_identity,
+            handshake_permit,
+            binding_sequence,
+        } = binding;
         let binding = async {
             if request.method() != Method::POST || request.uri().path() != CONNECT_PATH {
                 return Err(Report::new(TransportError::InvalidHandshake(
@@ -2140,14 +2112,18 @@ impl TransportState {
             )
             .await?
             .into_value();
-            if hello.fingerprint != WIRE_CONTRACT_FINGERPRINT
-                || hello.node_id != peer_identity.node_id
+            if hello.node_id != peer_identity.node_id
                 || !peer_identity.matches_endpoint(&hello.advertised_host)
             {
                 return Err(Report::new(TransportError::InvalidHandshake(
-                    "wire fingerprint, certificate identity, or advertised endpoint differs"
-                        .to_string(),
+                    "certificate identity or advertised endpoint differs".to_string(),
                 )));
+            }
+            let local_prerequisites = self.local_prerequisites();
+            if let Err(mismatch) = local_prerequisites.verify_peer(&hello.prerequisites) {
+                return self
+                    .refuse_binding(respond, &peer_identity.node_id, mismatch)
+                    .await;
             }
             let non_management = if hello.class == PoolClass::Management {
                 None
@@ -2172,11 +2148,11 @@ impl TransportState {
             drop(handshake_permit);
             let registration =
                 self.register_inbound_pool(peer_identity.node_id.clone(), hello.class)?;
-            let accepted = ConnectionAccepted {
-                fingerprint: WIRE_CONTRACT_FINGERPRINT,
+            let accepted = ConnectionAnswer::Accepted(ConnectionAccepted {
                 process_epoch: self.process_epoch,
                 node_id: self.node_id.clone(),
-            };
+                prerequisites: local_prerequisites,
+            });
             let accepted = wire::encode_rkyv(
                 &self.executor,
                 MemoryClass::Management,
@@ -2185,6 +2161,8 @@ impl TransportState {
                 accepted,
             )
             .await?;
+            let relay_owner =
+                self.bind_relay_owner(&hello.node_id, hello.process_epoch, binding_sequence)?;
             send_response(
                 respond,
                 StatusCode::OK,
@@ -2192,31 +2170,42 @@ impl TransportState {
                 self.options.progress_timeout,
             )
             .await?;
-            Ok(BoundInboundConnection {
+            Ok(InboundBindingAnswer::Bound(BoundInboundConnection {
                 peer: InboundPeer {
                     addr: peer_addr,
                     node_id: peer_identity.node_id.clone(),
                     advertised_host: hello.advertised_host,
                     process_epoch: hello.process_epoch,
                     class: hello.class,
+                    relay_owner,
                 },
                 _registration: registration,
                 _non_management: non_management,
                 _non_preconnected: non_preconnected,
-            })
+            }))
         };
 
-        // Request and response flow-control windows advance only while the h2 connection is polled.
-        let connection_closed = poll_fn(|context| connection.poll_closed(context));
-        tokio::pin!(binding);
-        tokio::pin!(connection_closed);
-        nervix_primitives::select! {
-            result = &mut binding => result,
-            result = &mut connection_closed => {
-                result.map_err(TransportError::from)?;
-                Err(Report::new(TransportError::InvalidHandshake(
-                    "connection closed before its class binding completed".to_string(),
-                )))
+        let answer = {
+            // Request and response flow-control windows advance only while the h2 connection is
+            // polled.
+            let connection_closed = poll_fn(|context| connection.poll_closed(context));
+            tokio::pin!(binding);
+            tokio::pin!(connection_closed);
+            nervix_primitives::select! {
+                result = &mut binding => result,
+                result = &mut connection_closed => {
+                    result.map_err(TransportError::from)?;
+                    Err(Report::new(TransportError::InvalidHandshake(
+                        "connection closed before its class binding completed".to_string(),
+                    )))
+                }
+            }
+        };
+        match answer? {
+            InboundBindingAnswer::Bound(bound) => Ok(bound),
+            InboundBindingAnswer::Refused(refusal) => {
+                self.flush_refusal(connection).await;
+                Err(refusal)
             }
         }
     }
@@ -2247,6 +2236,7 @@ impl TransportState {
                 let deadline = drain_deadline
                     .verified("entering drain always records its force-close deadline");
                 nervix_primitives::select! {
+                    _ = peer.relay_owner.closed.cancelled() => break,
                     _ = self.force_close.cancelled() => break,
                     () = &mut health_probe => break,
                     _ = sleep_until(deadline) => break,
@@ -2279,6 +2269,7 @@ impl TransportState {
                         );
                         continue;
                     }
+                    _ = peer.relay_owner.closed.cancelled() => break,
                     _ = self.force_close.cancelled() => break,
                     () = &mut health_probe => break,
                     _ = sleep_until(certificate_expires_at) => {
@@ -2411,7 +2402,7 @@ impl TransportState {
             )
             .await?;
             let (ack, reservation) = decoded.into_parts();
-            let terminal_admission = if ack.outcome == RemoteAckOutcome::Alive {
+            let terminal_admission = if ack.outcome.is_progress() {
                 None
             } else {
                 Some(RelayAdmissionKey {
@@ -2419,7 +2410,7 @@ impl TransportState {
                     registration: ack.registration.clone(),
                 })
             };
-            if ack.outcome == RemoteAckOutcome::Alive {
+            if ack.outcome.is_progress() {
                 self.deliver_incoming(
                     peer.addr,
                     peer.node_id,
@@ -2436,7 +2427,7 @@ impl TransportState {
                 .await?;
             }
             if let Some(admission_key) = terminal_admission {
-                self.retire_outbound_relay_admission(&admission_key);
+                peer.relay_owner.retire_outbound_admission(&admission_key);
             }
             send_response(
                 respond,
@@ -2462,6 +2453,7 @@ impl TransportState {
                 .handle_relay_admission_control(
                     peer.node_id,
                     peer.process_epoch,
+                    peer.relay_owner,
                     path == RELAY_CANCEL_PATH,
                     request.into_body(),
                     respond,
@@ -2483,6 +2475,7 @@ impl TransportState {
                 .handle_relay_grant(
                     peer.node_id,
                     peer.process_epoch,
+                    peer.relay_owner,
                     request.into_body(),
                     respond,
                 )
@@ -2496,15 +2489,8 @@ impl TransportState {
             let grant_id = grant_id.parse::<u64>().map_err(|error| {
                 TransportError::RelayGrant(format!("invalid grant id: {error}"))
             })?;
-            self.handle_relay_body(
-                peer.addr,
-                peer.node_id,
-                peer.process_epoch,
-                grant_id,
-                request,
-                respond,
-            )
-            .await?;
+            self.handle_relay_body(peer, grant_id, request, respond)
+                .await?;
             return Ok(());
         }
 
@@ -2701,35 +2687,37 @@ impl TransportState {
         tls.clock
             .ensure_current(&tls.certificate)
             .map_err(|error| TransportError::with_cause(error, TransportError::InvalidHandshake))?;
-        let next_generation =
-            self.tls
-                .generation()
-                .checked_add(1)
-                .ok_or_else(|| TransportError::InvalidOptions {
-                    reason: "TLS configuration generation is exhausted".to_string(),
-                })?;
+        // Published before the slots are retired. An outbound connection set up from the replaced
+        // credentials checks the generation once it is established: one that checks after this
+        // publication is refused, and one that checked before it was registered on a slot that
+        // existed before it, which the retirement below ends.
+        self.tls.replace(tls);
         self.cancel_all_slots();
-        self.tls.publish(next_generation, tls);
         self.tls_changed.notify_waiters();
-        let targets = self
-            .targets
-            .iter()
-            .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
-            .collect::<BTreeMap<_, _>>();
-        for target in targets.into_values() {
-            self.ensure_preconnected_slots(&target);
+        self.targets.rcu(|current| {
+            let mut next = (**current).clone();
+            for (node, target) in current.iter() {
+                self.retire_target(target);
+                next.insert(
+                    node.clone(),
+                    Arc::new(OutboundTarget::new(
+                        node,
+                        target.endpoint.clone(),
+                        target.dial,
+                    )),
+                );
+            }
+            next
+        });
+        for target in self.targets.load().values() {
+            self.ensure_preconnected_slots(target);
         }
         Ok(())
     }
 
     fn cancel_all_slots(&self) {
-        let slots = self
-            .slots
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.cancel.clone()))
-            .collect::<BTreeMap<_, _>>();
-        for (key, cancel) in slots {
-            self.retire_slot(&key, &cancel);
+        for target in self.targets.load().values() {
+            self.retire_target(target);
         }
     }
 
@@ -2737,13 +2725,18 @@ impl TransportState {
         self.admission_closed.cancel();
         self.requests.shutdown();
         self.cancel_all_slots();
-        self.grants.clear();
-        self.relay_attempts.clear();
-        self.active_relay_channels.clear();
-        self.relay_admissions.clear();
-        self.relay_watermarks.clear();
-        self.outbound_relay_epochs.clear();
-        self.outbound_relay_admissions.clear();
+        loop {
+            let current = self.relay_owners.load_full();
+            let observed = self
+                .relay_owners
+                .compare_and_swap(&current, StdArc::new(RelayOwnersPublication::default()));
+            if StdArc::ptr_eq(&current, &observed) {
+                for owner in current.owners.values() {
+                    owner.end();
+                }
+                break;
+            }
+        }
         self.tasks.close();
         if timeout(self.options.shutdown_drain_timeout, self.tasks.wait())
             .await
@@ -2990,3 +2983,7 @@ impl StreamLease {
         self.connection.request_raw(state, request).await
     }
 }
+
+#[cfg(test)]
+#[path = "connection/retained_slots_tests.rs"]
+mod retained_slots_tests;

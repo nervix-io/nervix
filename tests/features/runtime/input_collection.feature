@@ -3,11 +3,11 @@ Feature: Runtime node input collection
   Scenario Outline: Junction collects relay batches until its input timer expires
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -29,8 +29,8 @@ Feature: Runtime node input collection
       ON edge
       PATH '/input-collection'
       TYPE HTTP;
-      CREATE INGESTOR input_collection_source
-      FROM ENDPOINT input_collection_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR input_collection_source
+      FROM input_collection_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO incoming
         INHERIT ALL
@@ -68,15 +68,14 @@ Feature: Runtime node input collection
       """
       {"tenant":"beta","sequence":2}
       """
-    Then within "5s" node "node-1" eventually reports describe ingestor "input_collection_source" as "batches_total sent relay=incoming physical_node=node-1 total=4"
-    And the relay subscription does not receive a payload within "300ms"
-    Then within "6s" the relay subscription receives payloads
+    Then within "30s" the relay subscription receives payloads no sooner than "3s" after the first http payload was posted
       """
       {"sequence":1,"tenant":"alpha"}
       {"sequence":2,"tenant":"alpha"}
       {"sequence":1,"tenant":"beta"}
       {"sequence":2,"tenant":"beta"}
       """
+    And within "5s" node "node-1" eventually reports describe ingestor "input_collection_source" as "batches_total sent relay=incoming physical_node=node-1 total=4"
     And node "{{junction_owner}}" observability metric "nervix_batches_total" with labels eventually equals 2
       """
       target_kind="JUNCTION"
@@ -93,11 +92,11 @@ Feature: Runtime node input collection
   Scenario Outline: Junction releases a collected batch at its input size boundary
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         sequence I64
@@ -115,8 +114,8 @@ Feature: Runtime node input collection
       ON edge
       PATH '/input-collection'
       TYPE HTTP;
-      CREATE INGESTOR input_collection_source
-      FROM ENDPOINT input_collection_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR input_collection_source
+      FROM input_collection_ingress MODE NO ACK
       ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
       TO incoming
         INHERIT ALL

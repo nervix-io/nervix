@@ -30,7 +30,7 @@ arch-into = { workspace = true }
 arrow-array = { workspace = true, optional = true }
 arrow-ipc = { workspace = true, optional = true }
 arrow-schema = { workspace = true, optional = true }
-async-tar = { workspace = true, features = ["runtime-tokio"] }
+astral-tokio-tar = { workspace = true }
 base64 = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
@@ -41,7 +41,7 @@ meticulous = { workspace = true }
 nervix-client-wire = { workspace = true, features = ["grpc"] }
 nervix-dns = { workspace = true }
 nervix-models = { workspace = true }
-nervix-nspl = { workspace = true, features = ["client"] }
+nervix-plexus = { workspace = true, features = ["client"] }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 rustls = { workspace = true }
@@ -62,8 +62,10 @@ url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 
 [dev-dependencies]
+bolero = { workspace = true }
 nervix-model-harness = { workspace = true }
 nervix-test-environment = { workspace = true }
+tar = { workspace = true }
 tokio = { workspace = true, features = [
   "macros",
   "net",

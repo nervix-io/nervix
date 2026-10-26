@@ -5,6 +5,14 @@
 //! - **Depends on.** Vocabulary identities used by commands and transactions.
 //! - **Must not know.** Sessions, runtime activation, scheduling policy, or mutation execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::fmt;
 
 use nervix_models::{CommandExecutionReference, DomainName};
@@ -95,6 +103,13 @@ impl DomainMutationLease {
 
     pub fn recovery_fence(&self) -> DomainMutationRecoveryFence {
         self.recovery_fence
+    }
+
+    /// The lease `owner` holds since its acquisition committed at `revision`, as durable
+    /// admission records it, for generated storage states.
+    #[cfg(test)]
+    pub(crate) fn recorded(owner: DomainMutationOwner, revision: u64) -> Self {
+        Self::new(owner, DomainMutationRecoveryFence::at_revision(revision))
     }
 }
 

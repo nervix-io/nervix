@@ -7,6 +7,14 @@
 //! - **Depends on.** OpenRaft, the replicated command vocabulary, and node identity vocabulary.
 //! - **Must not know.** Interconnect requests, HTTP/2, the storage engine, or control-plane policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,

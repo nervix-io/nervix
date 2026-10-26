@@ -8,7 +8,7 @@
 //!   end of their attachments, and the node's byte budget for producer payloads.
 //! - **Depends on.** Typed client source plans, the ingestor's bound routes and quiesce control,
 //!   the ingest group executor, ACK roots, and Arrow body decoding.
-//! - **Must not know.** Sessions, the session or interconnect wire, NSPL, or how a producer
+//! - **Must not know.** Sessions, the session or interconnect wire, Plexus, or how a producer
 //!   reached this node.
 //!
 //! Each client ingestor this node executes has one endpoint task. It owns every attachment, the
@@ -27,6 +27,10 @@
 //! routes. The window bounds how many admitted batches may await their acknowledgement across
 //! every producer, so attaching another producer never widens it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -641,8 +645,13 @@ impl Runtime {
 
     /// Attaches one producer to a client ingestor this node executes.
     ///
-    /// The refusal names why nothing was attached: the domain, the ingestor or its kind, an
-    /// execution this node does not run, the expected schema, the limits, or the budget.
+    /// The refusal names why nothing was attached: an endpoint this node does not run, the expected
+    /// schema, the limits, or the budget. The serving node checked the domain, the ingestor and its
+    /// kind against committed state before the open reached this node, whose installation trails
+    /// that state until it has installed its domains again after it started, or the revision the
+    /// serving node read. An endpoint this node does not run is therefore only unavailable here:
+    /// naming the domain missing or stopped, or the ingestor removed, from this node's installation
+    /// would end a restored producer for good while its endpoint is about to start.
     pub(crate) async fn open_client_producer(
         &self,
         request: ClientProducerOpenRequest,
@@ -658,10 +667,10 @@ impl Runtime {
         if !limits.is_within_bounds() {
             return Err(ClientProducerRefusal::InvalidLimits);
         }
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let key = DomainNodeRef::node_in(domain, ModelKind::Ingestor, ingestor);
         let commands = match self.inner.client_ingestors.get(&key) {
             Some(endpoint) => endpoint.commands.clone(),
-            None => return Err(self.client_producer_refusal(&domain, &ingestor)),
+            None => return Err(ClientProducerRefusal::EndpointUnavailable),
         };
         let serving = match retention {
             ClientProducerRetention::Local => ProducerServing::Local,
@@ -706,43 +715,10 @@ impl Runtime {
         })
     }
 
-    /// Why this node cannot attach a producer to an ingestor it runs no endpoint for.
-    fn client_producer_refusal(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-    ) -> ClientProducerRefusal {
-        let status = self
-            .inner
-            .domains
-            .get(domain)
-            .map(|state| state.status.clone());
-        match status {
-            None => return ClientProducerRefusal::DomainNotFound,
-            Some(nervix_models::DomainStatus::Stopped) => {
-                return ClientProducerRefusal::DomainStopped;
-            }
-            Some(_) => {}
-        }
-        let Some(execution) = self.inner.executions.get(domain) else {
-            return ClientProducerRefusal::EndpointUnavailable;
-        };
-        match execution
-            .revision
-            .entrypoints
-            .ingestor(ingestor)
-            .map(|plan| &plan.input)
-        {
-            None => ClientProducerRefusal::IngestorNotFound,
-            Some(IngestorInputPlan::Transport(_)) => ClientProducerRefusal::NotClientIngestor,
-            Some(IngestorInputPlan::Client(_)) => ClientProducerRefusal::EndpointUnavailable,
-        }
-    }
-
     /// Starts a client ingestor's execution on this node: its admission worker and the watch that
     /// tells its endpoint when admission opens or stops. The endpoint task is created the first
     /// time its ingestor starts here and kept across restarts.
-    pub(in crate::runtime) fn host_client_source(
+    pub(in crate::runtime) fn host_client_ingestor(
         &self,
         ingestor: &IngestorSpec,
         plan: &ClientIngestorStartPlan,
@@ -763,7 +739,11 @@ impl Runtime {
             &ModelName::from(&ingestor.name),
             branched_templates,
         );
-        self.prepare_ingestor_readiness(domain, &ingestor.name, NonZeroU64::MIN);
+        let readiness = self
+            .prepare_ingestor_readiness(domain, &ingestor.name, NonZeroU64::MIN)
+            .into_iter()
+            .next()
+            .assured("the client source has one declared instance");
         let (shutdown_tx, _) = watch::channel(false);
         let (jobs, job_receiver) = mpsc::channel(1);
         let execution = Arc::new(ClientExecution {
@@ -813,7 +793,7 @@ impl Runtime {
             commands.clone(),
             shutdown_tx.subscribe(),
         ));
-        self.mark_ingestor_instance_ready(domain, &ingestor.name, 0);
+        readiness.mark_ready();
         info!(
             domain = domain.as_str(),
             ingestor = ingestor.name.as_str(),
@@ -825,6 +805,7 @@ impl Runtime {
                 shutdown: shutdown_tx,
                 branched: branched_runtime.runtimes,
                 tasks: vec![worker, watcher],
+                domain_offsets: None,
             },
         );
     }
@@ -1913,7 +1894,7 @@ impl ClientIntake {
                 debug!(
                     domain = self.domain.as_str(),
                     ingestor = self.ingestor.as_str(),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "a client batch failed after it was admitted"
                 );
                 root.no_ack(error.current_context().to_string());
@@ -1932,7 +1913,9 @@ impl IngestorQuiesceControl {
     ///
     /// The root is tracked before the decision is read, so either the drain that follows a
     /// quiesce counts this root and waits for it, or this read observes the quiesce and the batch
-    /// is refused with its root resolved before anything was dispatched under it.
+    /// is refused with its root resolved before anything was dispatched under it. Tracking the
+    /// root and the drain's read of the root count are both read-modify-writes of that count, so
+    /// whichever comes second observes the first, as `AckRootTracker::outstanding` explains.
     pub(in crate::runtime) fn track_client_batch(
         &self,
         trackers: &IngestorAckRootTrackers,
@@ -1970,3 +1953,7 @@ mod tests;
 #[cfg(all(test, feature = "shuttle"))]
 #[path = "client_ingestor_shuttle_tests.rs"]
 mod shuttle_tests;
+
+#[cfg(all(test, feature = "loom"))]
+#[path = "client_ingestor_loom_models.rs"]
+mod loom_models;

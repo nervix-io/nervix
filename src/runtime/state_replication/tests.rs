@@ -3,6 +3,11 @@
 //! May depend on: runtime internals and test-only storage fixtures.
 //! Must not know: production control-plane orchestration or edge protocols.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::{collections::BTreeMap, time::Duration};
 
 use ahash::HashMap;
@@ -143,6 +148,18 @@ impl EmptyRelayHandoffFixture {
             )
             .await
             .expect("ownership handoff gate should engage");
+        assert!(
+            runtime
+                .entity_gate_operation_drain_status(
+                    &coordination,
+                    &self.domain,
+                    &[],
+                    std::slice::from_ref(&self.entity),
+                    EntityGatePurpose::OwnershipHandoff,
+                )
+                .expect("the empty relay should publish its capture freeze after draining")
+                .is_drained()
+        );
         runtime
             .prepare_ownership_handoff_state(PrepareOwnershipHandoffStateRequest {
                 coordination,
@@ -464,6 +481,154 @@ async fn committed_preparation_survives_coordinator_failure_and_destination_rest
 }
 
 #[nervix_primitives::test]
+async fn stopped_wasm_ownership_recovery_preserves_the_complete_checkpoint_inventory() {
+    let dir = tempdir().expect("temporary runtime state directory should open");
+    let db = Database::builder(dir.path())
+        .open()
+        .expect("database should open");
+    let runtime = Runtime::with_persistence(Some(db), Duration::from_secs(3_600))
+        .expect("runtime should open persisted state");
+    let domain = domain("stopped_guest");
+    let source = named::<ClusterNodeName>("node-1");
+    let destination = named::<ClusterNodeName>("node-2");
+    let destination_incarnation = attach_loopback_cluster(&runtime, &destination).await;
+    let mut state = unpaced_domain_state(domain.as_str());
+    state.status = DomainStatus::Stopped;
+    runtime.sync_domains(&BTreeMap::from([(domain.clone(), state)]));
+    let mut nodes = vec![ScheduledNode::new(
+        nervix_models::Model::Schema(CreateSchema {
+            name: named("counted_event"),
+            fields: Vec::new(),
+        }),
+        unchanged_schema_fingerprint(),
+    )];
+    for name in ["counted_input", "counted_output"] {
+        nodes.push(
+            ScheduledNode::new(
+                nervix_models::Model::Relay(CreateRelay {
+                    name: named(name),
+                    schema: named("counted_event"),
+                    buffer: nonzero!(4usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: None,
+                }),
+                unchanged_schema_fingerprint(),
+            )
+            .with_resolved_branching(Some(ResolvedBranching::unbranched())),
+        );
+    }
+    let processor = wasm_processor_node()
+        .with_resolved_branching(Some(ResolvedBranching::unbranched()))
+        .placed_on(
+            Some(source.clone()),
+            vec![source.clone(), destination.clone()],
+        );
+    let entity = NodeRef::new(ModelKind::WasmProcessor, processor.identifier.clone());
+    nodes.push(processor);
+    let schedule = DomainSchedule::new(domain.clone(), nodes, Vec::new());
+    let fingerprint = ExecutionRevision::ownership_fingerprint(&schedule)
+        .expect("the recovery schedule should have a fingerprint");
+    runtime
+        .rebuild_domain_from_schedule(&destination, &domain, Some(schedule), false)
+        .await
+        .expect("a stopped WASM domain should install its passive revision");
+    let entries = [BranchInstanceSnapshotEntry {
+        key: None,
+        last_ingestion: Timestamp::from_unix_nanos(42),
+        incarnation: 7,
+    }];
+    let store = runtime
+        .inner
+        .state_store
+        .as_ref()
+        .expect("runtime should own state storage");
+    let mut checkpoints = Vec::new();
+    for (kind, payload) in [
+        (
+            RuntimeStateKind::BranchLru,
+            encode_branch_lru_snapshot(&entries).expect("the complete lifecycle should encode"),
+        ),
+        (
+            RuntimeStateKind::WasmProcessor,
+            b"durable guest save".to_vec(),
+        ),
+    ] {
+        let placement = runtime
+            .state_placement(&domain, kind, entity.kind, &entity.identifier, None)
+            .expect("the installed revision should publish the state identity");
+        let checkpoint = PersistedRuntimeStateEntry { lsm: 9, payload };
+        store
+            .persist_latest_snapshot(&placement, checkpoint.lsm, &checkpoint.payload)
+            .expect("the replica's checkpoint should persist");
+        checkpoints.push((placement, checkpoint));
+    }
+    let metrics = runtime
+        .state_placement(
+            &domain,
+            RuntimeStateKind::BranchAggregated,
+            entity.kind,
+            &entity.identifier,
+            None,
+        )
+        .expect("the processor metrics should have a placement");
+    let checkpoint = runtime
+        .empty_ownership_handoff_snapshot(&metrics)
+        .expect("the complete metrics checkpoint should encode");
+    store
+        .persist_latest_snapshot(&metrics, checkpoint.lsm, &checkpoint.payload)
+        .expect("the replica's metrics should persist");
+    checkpoints.push((metrics, checkpoint));
+    let result = runtime
+        .prepare_forced_ownership_recovery(
+            nervix_interconnect::PrepareForcedOwnershipRecoveryRequest {
+                operation_id: "stopped-wasm-recovery".to_string(),
+                source,
+                destination,
+                destination_incarnation,
+                domain: domain.clone(),
+                entity: entity.clone(),
+                base_schedule_fingerprint: fingerprint,
+                target_schedule_fingerprint: fingerprint,
+            },
+            Instant::now() + Duration::from_secs(10),
+        )
+        .await
+        .expect("passive recovery should preserve saves without executing a guest");
+    assert_eq!(
+        result.state_recovery,
+        OwnershipStateRecoveryOutcome::Unverified
+    );
+    assert!(result.resets.is_empty());
+    let prepared = runtime
+        .inner
+        .prepared_forced_runtime_state_recoveries
+        .get(&entity.in_domain(&domain))
+        .expect("the complete recovery should be retained");
+    assert_eq!(prepared.checkpoints.len(), checkpoints.len());
+    for (placement, checkpoint) in checkpoints {
+        let (_, retained) = prepared
+            .checkpoints
+            .iter()
+            .find(|(retained, _)| retained == &placement)
+            .expect("every state component should be retained");
+        assert_eq!(retained.lsm, checkpoint.lsm);
+        assert_eq!(retained.payload, checkpoint.payload);
+    }
+    assert!(matches!(
+        runtime
+            .inner
+            .executions
+            .get(&domain)
+            .expect("the passive revision should remain")
+            .domain_clock
+            .snapshot()
+            .expect_err("recovery must leave the stopped clock unreadable")
+            .current_context(),
+        DomainClockAccessError::Stopped { .. }
+    ));
+}
+
+#[nervix_primitives::test]
 async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuild() {
     let dir = tempdir().expect("temporary runtime state directory should open");
     let domain = domain("default");
@@ -746,11 +911,14 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         .take()
         .expect("local Kafka state should grant authoritative access");
     let (_, kafka_payload) = kafka_originator
-        .replace_offsets(vec![KafkaOffsetPosition {
-            topic: "orders".to_string(),
-            partition: 3,
-            offset: 42,
-        }])
+        .apply_start(
+            1,
+            vec![KafkaOffsetPosition {
+                topic: "orders".to_string(),
+                partition: 3,
+                offset: 42,
+            }],
+        )
         .expect("Kafka offset should update");
     let deduplicator_placement = RuntimeStatePlacement {
         domain: domain.clone(),
@@ -826,8 +994,12 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_forced_recovery_preparation(
                 &kafka_recovery,
@@ -887,8 +1059,12 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let replayed_kafka_recovery = ForcedRuntimeStateRecoveryTransition {
             destination_incarnation: ClusterNodeIncarnation::new(43),
             target_schedule_fingerprint: [10; 32],
@@ -985,8 +1161,12 @@ fn forced_recovery_refuses_missing_or_stale_preparation_without_changing_state()
     let db = Database::builder(dir.path())
         .open()
         .expect("database should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let domain = domain("default");
     let source = named::<ClusterNodeName>("node-1");
     let destination = named::<ClusterNodeName>("node-2");
@@ -1118,8 +1298,12 @@ fn runtime_state_store_persists_latest_snapshot_with_monotonic_lsm() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::Deduplicator {
@@ -1288,16 +1472,14 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
         branch_key: None,
     };
     let schema = test_schema(&[("status", ParseAsType::String)]);
-    let mut assignment = runtime
-        .replicated_materialized_stream_state(
-            placement.clone(),
-            schema.arrow_schema(),
-            None,
-            Vec::new(),
-            None,
-        )
-        .expect("materialized relay state should initialize");
-    let state = assignment
+    let mut assignment = runtime.replicated_materialized_stream_state(
+        placement.clone(),
+        schema.arrow_schema(),
+        None,
+        Vec::new(),
+        None,
+    );
+    let mut state = assignment
         .originator
         .take()
         .expect("branch-local state should grant authoritative access");
@@ -1312,7 +1494,7 @@ async fn materialized_relay_snapshot_task_owns_persistence() {
     )]);
 
     runtime
-        .apply_materialized_stream_records(&state, &None, [record])
+        .apply_materialized_stream_records(&mut state, &None, [record])
         .await
         .expect("the materialized state assignment should remain authoritative");
 
@@ -1468,7 +1650,7 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
             snapshot_state
                 .replace_state(&live_state)
                 .change_context(ProcessorLiveStateError {
-                    branch: snapshot_branch,
+                    branch: BranchScope::from(&snapshot_branch),
                 });
         response
             .send(published)
@@ -1503,8 +1685,7 @@ fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one()
         identifier: named("latency_window"),
         branch_key: string_branch_key("tenant", "acme"),
     };
-    let state = ReplicatedWindowProcessorState::new(placement, None)
-        .expect("window processor state should initialize");
+    let state = ReplicatedWindowProcessorState::new(placement, None);
     let live_state = WindowProcessorState::new(
         &window_plan(
             "SET count = COUNT(input.latency)",
@@ -1549,8 +1730,7 @@ async fn a_recreated_window_branch_refuses_the_previous_lifetime_checkpoint() {
         &[("count", ParseAsType::I64)],
     );
     let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
-    let state = ReplicatedWindowProcessorState::new(placement, None)
-        .expect("window processor state should initialize");
+    let state = ReplicatedWindowProcessorState::new(placement, None);
     state
         .replace_state(&WindowProcessorState::new(&plan, 7))
         .expect("the first lifetime should publish");
@@ -1577,8 +1757,12 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let base = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::Deduplicator {
@@ -1635,61 +1819,17 @@ fn runtime_state_store_purges_only_stale_schema_fingerprints() {
 }
 
 #[test]
-fn runtime_state_store_purges_only_the_requested_domain() {
-    let dir = tempdir().expect("temp dir should open");
-    let db = Database::builder(dir.path())
-        .open()
-        .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
-    let stopped = RuntimeStatePlacement {
-        domain: domain("stopped"),
-        state: RuntimeState::Deduplicator {
-            schema: SchemaFingerprint::from_digest([1; 32]),
-        },
-        kind: ModelKind::Deduplicator,
-        identifier: named("dedup_orders"),
-        branch_key: None,
-    };
-    let running = RuntimeStatePlacement {
-        domain: domain("running"),
-        ..stopped.clone()
-    };
-    store
-        .persist_latest_snapshot(&stopped, 1, b"stopped")
-        .expect("stopped-domain snapshot should persist");
-    store
-        .persist_latest_snapshot(&running, 2, b"running")
-        .expect("running-domain snapshot should persist");
-
-    store
-        .purge_domain(&stopped.domain)
-        .expect("stopped-domain snapshots should purge");
-
-    assert!(
-        store
-            .latest_snapshot(&stopped)
-            .expect("stopped-domain snapshot lookup should succeed")
-            .is_none()
-    );
-    assert_eq!(
-        store
-            .latest_snapshot(&running)
-            .expect("running-domain snapshot lookup should succeed")
-            .expect("running-domain snapshot should remain")
-            .payload,
-        b"running".to_vec()
-    );
-}
-
-#[test]
 fn runtime_state_store_purges_only_the_requested_entity() {
     let dir = tempdir().expect("temp dir should open");
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let removed = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::MaterializedRelay {
@@ -1741,8 +1881,12 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
     let db = Database::builder(dir.path())
         .open()
         .expect("db should open");
-    let store =
-        RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open");
     let placement = RuntimeStatePlacement {
         domain: domain("default"),
         state: RuntimeState::KafkaOffset,
@@ -1761,18 +1905,21 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
         .take()
         .expect("local Kafka state should grant authoritative access");
     let (offset_lsm, offset_payload) = originator
-        .replace_offsets(vec![
-            KafkaOffsetPosition {
-                topic: "notifications".to_string(),
-                partition: 0,
-                offset: 12,
-            },
-            KafkaOffsetPosition {
-                topic: "notifications".to_string(),
-                partition: 1,
-                offset: 18,
-            },
-        ])
+        .apply_start(
+            1,
+            vec![
+                KafkaOffsetPosition {
+                    topic: "notifications".to_string(),
+                    partition: 0,
+                    offset: 12,
+                },
+                KafkaOffsetPosition {
+                    topic: "notifications".to_string(),
+                    partition: 1,
+                    offset: 18,
+                },
+            ],
+        )
         .expect("offsets should update");
     store
         .persist_latest_snapshot(&placement, offset_lsm, &offset_payload)
@@ -1836,7 +1983,7 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
             relay: &relay,
             physical_node_id: Some(&ClusterNodeName::parse("node-1").expect("valid name")),
             direction: "sent",
-            branch_key: None,
+            branch: None,
         })
         .observe(2, 64, None);
     let lsm = state.mark_metrics_updated();
@@ -1869,6 +2016,57 @@ fn branch_aggregated_state_snapshot_roundtrips_metrics() {
     );
 }
 
+/// Metrics a batch records after a flush took its snapshot, and before that flush recorded the
+/// snapshot persisted, are persisted by the next flush rather than forgotten.
+#[test]
+fn a_metrics_update_after_a_flush_took_its_snapshot_is_persisted_by_the_next_flush() {
+    let metrics = RuntimeMetrics::default();
+    let node = ClusterNodeName::parse("node-1").assured("a literal node name");
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeState::BranchAggregated,
+        kind: ModelKind::Ingestor,
+        identifier: named("redis_notifications"),
+        branch_key: None,
+    };
+    let relay = named("notifications");
+    let state = ReplicatedBranchAggregatedState::new(
+        placement.clone(),
+        Some(node.clone()),
+        node.clone(),
+        &metrics,
+        None,
+    )
+    .assured("a state without a persisted snapshot initializes");
+    let batch_metrics = metrics.resolve_node_batch_metrics(NodeBatchMetricsSpec {
+        domain: &placement.domain,
+        kind: placement.kind,
+        node: &placement.identifier,
+        relay: &relay,
+        physical_node_id: Some(&node),
+        direction: "sent",
+        branch: None,
+    });
+    batch_metrics.observe(2, 64, None);
+    state.mark_metrics_updated();
+    let first = state
+        .snapshot_to_persist(&metrics)
+        .assured("the metrics snapshot encodes")
+        .verified("the batch above marked the metrics updated");
+
+    batch_metrics.observe(3, 96, None);
+    state.mark_metrics_updated();
+    state.persisted(first.lsm);
+
+    let next = state
+        .snapshot_to_persist(&metrics)
+        .assured("the metrics snapshot encodes");
+    assert!(
+        next.is_some(),
+        "metrics recorded after a flush took its snapshot were never persisted"
+    );
+}
+
 #[nervix_primitives::test]
 async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
     let runtime = Runtime::default();
@@ -1885,13 +2083,13 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         .replicated_deduplicator_state(placement.clone())
         .expect("deduplicator state should initialize");
     let initial = runtime
-        .handle_state_sync_request(&placement, None)
+        .capture_state_checkpoint(&placement, None)
         .await
         .expect("initial state sync request should succeed")
         .expect("an explicit empty checkpoint should be returned");
     assert_eq!(initial.lsm, 0);
     let unchanged_initial = runtime
-        .handle_state_sync_request(&placement, Some(0))
+        .capture_state_checkpoint(&placement, Some(0))
         .await
         .expect("state sync request at the initial LSM should succeed");
     assert!(unchanged_initial.is_none());
@@ -1902,7 +2100,7 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
         Duration::from_secs(600),
     ));
     let unpublished = runtime
-        .handle_state_sync_request(&placement, Some(0))
+        .capture_state_checkpoint(&placement, Some(0))
         .await
         .expect("state sync request before the branch publishes should succeed");
     assert!(
@@ -1913,14 +2111,14 @@ async fn state_sync_request_returns_latest_snapshot_only_when_lsm_advances() {
     let lsm = state.generations.load().revision;
 
     let first = runtime
-        .handle_state_sync_request(&placement, Some(0))
+        .capture_state_checkpoint(&placement, Some(0))
         .await
         .expect("state sync request should succeed")
         .expect("snapshot should be returned");
     assert_eq!(first.lsm, lsm);
 
     let none = runtime
-        .handle_state_sync_request(&placement, Some(lsm))
+        .capture_state_checkpoint(&placement, Some(lsm))
         .await
         .expect("state sync request should succeed");
     assert!(none.is_none());
@@ -1985,7 +2183,7 @@ async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
         .expect("a checkpoint of a branch without state persists");
 
     let answered = runtime
-        .handle_state_sync_request(&held, Some(0))
+        .capture_state_checkpoint(&held, Some(0))
         .await
         .expect("a held window answers");
     assert_eq!(
@@ -1993,13 +2191,13 @@ async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
         "a placement with state is answered from that state, not from storage"
     );
     let stored = runtime
-        .handle_state_sync_request(&unheld, Some(1))
+        .capture_state_checkpoint(&unheld, Some(1))
         .await
         .expect("a stored checkpoint answers")
         .expect("storage holds a newer checkpoint of a placement without state");
     assert_eq!(stored.lsm, 3);
     let nothing_newer = runtime
-        .handle_state_sync_request(&unheld, Some(3))
+        .capture_state_checkpoint(&unheld, Some(3))
         .await
         .expect("a stored checkpoint answers");
     assert_eq!(nothing_newer, None);
@@ -2022,7 +2220,7 @@ async fn an_owner_reads_storage_only_for_a_placement_it_holds_no_state_for() {
         .persist_latest_snapshot(&lifecycle, 7, &[7])
         .expect("a newer lifecycle persists");
     let held_lifecycle = runtime
-        .handle_state_sync_request(&lifecycle, Some(2))
+        .capture_state_checkpoint(&lifecycle, Some(2))
         .await
         .expect("a held lifecycle answers");
     assert_eq!(
@@ -2692,4 +2890,97 @@ async fn forced_recovery_never_selects_a_checkpoint_of_a_replaced_generation() {
         .forced_recovery_checkpoint(&replaced, &[], deadline)
         .await;
     assert_eq!(stale.snapshot.map(|snapshot| snapshot.lsm), Some(9));
+}
+
+/// A restore reads its entity's lifecycle without releasing it, so a failed attempt reads the same
+/// checkpoint again. Releasing consumes a checkpoint a transfer left only while it is still the one
+/// the restore read, and never the lifecycle the node holds.
+#[nervix_primitives::test]
+async fn a_restore_releases_only_the_transferred_lifecycle_it_read() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    let processor = named::<ModelName>("open_windows");
+    publish_state_identity(
+        &runtime,
+        &domain,
+        ModelKind::WindowProcessor,
+        processor.clone(),
+    );
+    let placement = runtime
+        .state_placement(
+            &domain,
+            RuntimeStateKind::BranchLru,
+            ModelKind::WindowProcessor,
+            processor,
+            None,
+        )
+        .expect("the processor's lifecycle is placed");
+    let alpha = string_branch_key("tenant", "alpha");
+    let transfer = |lsm| PreparedRuntimeStateSnapshot {
+        preparation: RuntimeStatePreparationIdentity::ForcedRecovery,
+        snapshot: branch_lifecycle_snapshot(lsm, std::slice::from_ref(&alpha)),
+    };
+    let restorable = |runtime: &Runtime| {
+        runtime
+            .restorable_branch_lru_snapshot(&placement)
+            .expect("the lifecycle reads")
+            .expect("the entity has a lifecycle")
+    };
+    runtime
+        .inner
+        .prepared_runtime_state_snapshots
+        .insert(placement.clone(), transfer(5));
+
+    let failed = restorable(&runtime);
+    drop(failed);
+    let read = restorable(&runtime);
+    assert_eq!(
+        read.lsm(),
+        5,
+        "a failed restore leaves the transfer to read again"
+    );
+    assert_eq!(
+        read.branches()
+            .expect("the transferred lifecycle decodes")
+            .into_iter()
+            .map(|branch| branch.key)
+            .collect::<Vec<_>>(),
+        vec![alpha.clone()]
+    );
+
+    runtime
+        .inner
+        .prepared_runtime_state_snapshots
+        .insert(placement.clone(), transfer(7));
+    runtime.release_restored_branch_lru_snapshot(read);
+    let replacement = restorable(&runtime);
+    assert_eq!(
+        replacement.lsm(),
+        7,
+        "releasing an earlier read keeps the transfer that replaced it"
+    );
+    runtime.release_restored_branch_lru_snapshot(replacement);
+    assert!(
+        runtime
+            .inner
+            .prepared_runtime_state_snapshots
+            .get(&placement)
+            .is_none(),
+        "releasing the transfer a restore installed consumes it"
+    );
+
+    runtime
+        .persist_branch_lru_snapshot(
+            placement.clone(),
+            branch_lifecycle_snapshot(8, std::slice::from_ref(&alpha)),
+        )
+        .expect("the node holds its lifecycle");
+    let held = restorable(&runtime);
+    assert_eq!(held.lsm(), 8);
+    runtime.release_restored_branch_lru_snapshot(held);
+    assert_eq!(
+        restorable(&runtime).lsm(),
+        8,
+        "the lifecycle the node holds outlives the restore that read it"
+    );
 }

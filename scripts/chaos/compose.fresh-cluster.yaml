@@ -1,0 +1,123 @@
+# The fresh three-node cluster a restore-fresh-cluster run restores its backup into, as a Compose
+# project of its own. Its nodes have their own cluster ID, node names, host names, volumes and
+# certificates, and they join the run's network so they read and write the same broker topics as
+# the original cluster. Every resource carries the run's label, so the run's cleanup removes it.
+x-nervix-environment: &nervix-environment
+  NERVIX_ADDR: 0.0.0.0:47391
+  NERVIX_WEB_CONSOLE_LISTEN_ADDR: 0.0.0.0:47420
+  NERVIX_OBSERVABILITY_LISTEN_ADDR: 0.0.0.0:9090
+  NERVIX_CLUSTER_ID: ${CHAOS_FRESH_CLUSTER_ID:?CHAOS_FRESH_CLUSTER_ID is required}
+  NERVIX_INTERCONNECT_LISTEN_ADDR: 0.0.0.0:47395
+  NERVIX_INTERCONNECT_TLS_CA: /etc/nervix/interconnect/ca.pem
+  NERVIX_INTERCONNECT_TLS_CERT: /etc/nervix/interconnect/node.pem
+  NERVIX_INTERCONNECT_TLS_KEY: /etc/nervix/interconnect/node-key.pem
+  NERVIX_REPLICA_COUNT: ${CHAOS_REPLICA_COUNT:-0}
+  NERVIX_STATE_SNAPSHOT_INTERVAL: ${CHAOS_STATE_SNAPSHOT_INTERVAL:-30s}
+  NERVIX_RAFT_HEARTBEAT_INTERVAL: ${CHAOS_RAFT_HEARTBEAT_INTERVAL:-250ms}
+  NERVIX_NODE_UNAVAILABILITY_TIMEOUT: ${CHAOS_NODE_UNAVAILABILITY_TIMEOUT:-10s}
+  NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD: ${CHAOS_RAFT_SNAPSHOT_ENTRY_THRESHOLD:-10000}
+  NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED: ${CHAOS_RAFT_COVERED_LOG_ENTRIES_RETAINED:-1000}
+  RUST_LOG: nervix=info
+
+x-nervix-service: &nervix-service
+  image: ${NERVIX_IMAGE:?NERVIX_IMAGE is required}
+  init: true
+  restart: "no"
+  stop_grace_period: 60s
+  logging:
+    driver: local
+    options:
+      max-file: "2"
+      max-size: 2m
+
+x-run-labels: &run-labels
+  io.nervix.chaos.run: ${CHAOS_RUN_ID:?CHAOS_RUN_ID is required}
+
+services:
+  nervix-fresh-1:
+    <<: *nervix-service
+    hostname: nervix-fresh-1
+    networks:
+      - chaos
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: node
+      io.nervix.chaos.cluster: fresh
+    environment:
+      <<: *nervix-environment
+      NERVIX_NODE_ID: fresh-1
+      NERVIX_GRPC_ADVERTISE_ADDR: nervix-fresh-1:47391
+      NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: nervix-fresh-1:47420
+      NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-fresh-1:47395
+      NERVIX_ALLOW_BOOTSTRAP: "true"
+      NERVIX_INIT_DEFAULT_USER_PASSWORD: ${CHAOS_PASSWORD:?CHAOS_PASSWORD is required}
+    volumes:
+      - fresh-1-data:/var/lib/nervix
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/ca.pem:/etc/nervix/interconnect/ca.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/fresh-1.pem:/etc/nervix/interconnect/node.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/fresh-1-key.pem:/etc/nervix/interconnect/node-key.pem:ro
+
+  nervix-fresh-2:
+    <<: *nervix-service
+    hostname: nervix-fresh-2
+    networks:
+      - chaos
+    depends_on:
+      - nervix-fresh-1
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: node
+      io.nervix.chaos.cluster: fresh
+    environment:
+      <<: *nervix-environment
+      NERVIX_NODE_ID: fresh-2
+      NERVIX_GRPC_ADVERTISE_ADDR: nervix-fresh-2:47391
+      NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: nervix-fresh-2:47420
+      NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-fresh-2:47395
+      NERVIX_CLUSTER_BOOTSTRAP_HOST: nervix-fresh-1:47395
+    volumes:
+      - fresh-2-data:/var/lib/nervix
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/ca.pem:/etc/nervix/interconnect/ca.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/fresh-2.pem:/etc/nervix/interconnect/node.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/fresh-2-key.pem:/etc/nervix/interconnect/node-key.pem:ro
+
+  nervix-fresh-3:
+    <<: *nervix-service
+    hostname: nervix-fresh-3
+    networks:
+      - chaos
+    depends_on:
+      - nervix-fresh-1
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: node
+      io.nervix.chaos.cluster: fresh
+    environment:
+      <<: *nervix-environment
+      NERVIX_NODE_ID: fresh-3
+      NERVIX_GRPC_ADVERTISE_ADDR: nervix-fresh-3:47391
+      NERVIX_WEB_CONSOLE_ADVERTISE_ADDR: nervix-fresh-3:47420
+      NERVIX_INTERCONNECT_ADVERTISE_ADDR: nervix-fresh-3:47395
+      NERVIX_CLUSTER_BOOTSTRAP_HOST: nervix-fresh-1:47395
+    volumes:
+      - fresh-3-data:/var/lib/nervix
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/ca.pem:/etc/nervix/interconnect/ca.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/fresh-3.pem:/etc/nervix/interconnect/node.pem:ro
+      - ${CHAOS_TLS_DIR:?CHAOS_TLS_DIR is required}/fresh-3-key.pem:/etc/nervix/interconnect/node-key.pem:ro
+
+networks:
+  # The original run's network, which Compose names after the original project.
+  chaos:
+    external: true
+    name: ${CHAOS_NETWORK:?CHAOS_NETWORK is required}
+
+volumes:
+  fresh-1-data:
+    labels:
+      <<: *run-labels
+  fresh-2-data:
+    labels:
+      <<: *run-labels
+  fresh-3-data:
+    labels:
+      <<: *run-labels

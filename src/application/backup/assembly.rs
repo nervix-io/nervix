@@ -1,10 +1,10 @@
 //! The sections of a configuration backup, planned from one captured revision.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //!
 //! - **Owns.** Turning a configuration capture into the archive's sections in archive order — the
-//!   users, and per domain its record, its Models as canonical NSPL, and the catalog metadata and
-//!   original archive of each resource version — and verifying that each domain's NSPL parses back
+//!   users, and per domain its record, its Models as canonical Plexus, and the catalog metadata and
+//!   original archive of each resource version — and verifying that each domain's Plexus parses back
 //!   to the Models it was rendered from.
 //! - **Depends on.** The consensus capture, the registry's creation order, the archive format, the
 //!   vocabulary's canonical rendering, and the language layer to parse the rendering back.
@@ -13,6 +13,14 @@
 //! The only coupling between internal state and the archive format is the conversion here: every
 //! record is built from the capture's vocabulary values, never from a consensus or registry
 //! struct.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "archive edge translates captured vocabulary into external Plexus sections"
+    )
+)]
 
 use std::num::NonZeroU64;
 
@@ -27,16 +35,16 @@ use nervix_consensus::ConfigurationCapture;
 use nervix_models::{
     BackupResources, DomainName, DomainSchedule, DomainState, DomainStatus, Model,
     RequestedResourceVersion, ResourceId, ResourceName, ResourceUploadState, ResourceVersion,
-    ResourceVersionStatus, Statement, Timestamp, canonical_nspl_document,
+    ResourceVersionStatus, Statement, Timestamp, canonical_plexus_document,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
 
 use super::BackupError;
 use crate::registry::creation_order;
 
 /// Where a planned section's bytes come from.
 pub(super) enum PlannedContent {
-    /// Bytes the plan holds: a record or a domain's NSPL.
+    /// Bytes the plan holds: a record or a domain's Plexus.
     Held {
         content: SectionContent,
         bytes: Vec<u8>,
@@ -131,7 +139,7 @@ fn plan_domain(
         path: SectionPath::domain_models(domain),
         domain: Some(domain.clone()),
         content: PlannedContent::Held {
-            content: SectionContent::Nspl,
+            content: SectionContent::Plexus,
             bytes: document.into_bytes(),
         },
     });
@@ -264,7 +272,7 @@ fn logical_frontier(
     }
 }
 
-/// The canonical NSPL of `domain`'s Models, each after every Model it names, verified to parse
+/// The canonical Plexus of `domain`'s Models, each after every Model it names, verified to parse
 /// back to exactly those Models.
 fn models_document(
     domain: &DomainName,
@@ -287,7 +295,7 @@ fn models_document(
         };
         models.push(scheduled.config.as_ref());
     }
-    let document = canonical_nspl_document(models.iter().copied()).map_err(|error| {
+    let document = canonical_plexus_document(models.iter().copied()).map_err(|error| {
         error.change_context(BackupError::Rendering {
             domain: domain.clone(),
         })
@@ -373,6 +381,10 @@ fn record_kind<R: ArchiveRecord>(_record: &R) -> nervix_backup::RecordKind {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::BTreeMap;
 
@@ -536,18 +548,18 @@ mod tests {
             [
                 "users.rkyv",
                 "domains/prod/domain.rkyv",
-                "domains/prod/models.nspl",
+                "domains/prod/models.plexus",
                 "domains/prod/resources/model/1/version.rkyv",
                 "domains/prod/resources/model/1/archive.tar",
                 "domains/prod/resources/model/2/version.rkyv",
                 "domains/staging/domain.rkyv",
-                "domains/staging/models.nspl",
+                "domains/staging/models.plexus",
             ]
         );
         let PlannedContent::Held { bytes, .. } = &sections[2].content else {
-            panic!("a domain's NSPL is held");
+            panic!("a domain's Plexus is held");
         };
-        let document = std::str::from_utf8(bytes).assured("NSPL is UTF-8");
+        let document = std::str::from_utf8(bytes).assured("Plexus is UTF-8");
         let schema = document
             .find("CREATE SCHEMA")
             .assured("the schema is rendered");
@@ -581,7 +593,7 @@ mod tests {
             paths(&sections),
             [
                 "domains/prod/domain.rkyv",
-                "domains/prod/models.nspl",
+                "domains/prod/models.plexus",
                 "domains/prod/resources/model/1/version.rkyv",
                 "domains/prod/resources/model/2/version.rkyv",
             ]
@@ -615,7 +627,7 @@ mod tests {
             error.current_context(),
             BackupError::Verification { .. }
         ));
-        let document = canonical_nspl_document(references.iter().copied())
+        let document = canonical_plexus_document(references.iter().copied())
             .assured("the committed models render");
         verify_document(&domain("prod"), &document, &references)
             .assured("the rendering of the committed models parses back to them");

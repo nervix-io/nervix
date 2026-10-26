@@ -6,9 +6,13 @@
 //!   supervisor, and durable initial checkpoints for a newly published state generation.
 //! - **Depends on.** Planned processor templates, branch runtimes, guest execution, and replicated
 //!   WASM state.
-//! - **Must not know.** NSPL text, consensus mutations, administrative protocols, or scheduling
+//! - **Must not know.** Plexus text, consensus mutations, administrative protocols, or scheduling
 //!   policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -27,6 +31,11 @@ pub(crate) enum WasmStateResetRuntimeError {
     GateNotHeld { processor: ModelName },
     #[error("WASM processor '{}' is not running on this node", .processor.as_str())]
     ProcessorUnavailable { processor: ModelName },
+    #[error(
+        "WASM processor '{}' has not restored the branches its lifecycle checkpoint names yet",
+        .processor.as_str()
+    )]
+    BranchesUnrestored { processor: ModelName },
     #[error("processor '{}' is not a WASM processor", .processor.as_str())]
     NotWasmProcessor { processor: ModelName },
     #[error(

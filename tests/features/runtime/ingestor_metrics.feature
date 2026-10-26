@@ -3,11 +3,11 @@ Feature: Ingestor metrics
   Scenario Outline: DESCRIBE INGESTOR and Prometheus report ingestor output metrics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -23,8 +23,8 @@ Feature: Ingestor metrics
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT ingestor_metrics_ingress ON edge PATH '/ingestor-metrics' TYPE HTTP;
-        CREATE INGESTOR ingestor_metrics_source
-        FROM ENDPOINT ingestor_metrics_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_source
+        FROM ingestor_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -49,7 +49,7 @@ Feature: Ingestor metrics
       {"user_id":42}
       {"user_id":43}
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE INGESTOR ingestor_metrics_source;
       """
@@ -101,7 +101,7 @@ Feature: Ingestor metrics
       """
       p90_1m=1.0
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE RELAY notifications;
       """
@@ -149,11 +149,11 @@ Feature: Ingestor metrics
   Scenario Outline: Ingestor MAX BATCH SIZE counts Arrow payload bytes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -167,8 +167,8 @@ Feature: Ingestor metrics
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge payload-size-{{test_id}}.example.com;
       CREATE ENDPOINT payload_size_ingress ON edge PATH '/payload-size' TYPE HTTP;
-      CREATE INGESTOR payload_size_source
-        FROM ENDPOINT payload_size_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR payload_size_source
+        FROM payload_size_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -193,18 +193,18 @@ Feature: Ingestor metrics
       | 1            |
       | 3            |
 
-  Scenario Outline: DESCRIBE INGESTOR reports a size-triggered batch for rapid <branch_strategy> <source_kind> input
+  Scenario Outline: DESCRIBE INGESTOR reports a size-triggered batch for rapid <branch_strategy> <entity_kind> input
     Given Redis is running
     And MQTT is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     # Ten required I64 values occupy 80B, so the size boundary closes this batch after the tenth
     # message without depending on how quickly the broker delivers the burst.
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -218,19 +218,19 @@ Feature: Ingestor metrics
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_ingestor_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification <relay_branching>;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingestor-metrics-{{test_id}}'
         };
-        CREATE CLIENT redis_main
-        TYPE REDIS
+        CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
-          'addr' = '{{redis_addr}}'
+          'addr' = '{{redis_addr}}',
+          'subscription_buffer_messages' = '1024',
+          'idle_timeout_ms' = '30000'
         };
-        CREATE INGESTOR ingestor_metrics_source
+        CREATE <source_head> INGESTOR ingestor_metrics_source
         FROM <source_clause>
         ON QUIESCE DROP
         DECODE USING notification_codec
@@ -243,7 +243,7 @@ Feature: Ingestor metrics
         START;
       """
     Then within "5s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "status: running"
-    When 10 JSON messages with user id 42 are rapidly published to "<source_kind>" input "<input>"
+    When 10 JSON messages with user id 42 are rapidly published to "<entity_kind>" input "<input>"
     Then within "10s" node "node-1" eventually reports describe ingestor "ingestor_metrics_source" as "messages_total sent relay=notifications physical_node=node-1 total=10"
     And the last command output metric "messages_total" "sent" relay "notifications" on any physical node has numeric values
       """
@@ -284,21 +284,21 @@ Feature: Ingestor metrics
       """
 
     Examples:
-      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | source_kind | source_clause                                                                    | input                     |
-      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | REDIS       | REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL | notifications_{{test_id}} |
-      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | REDIS       | REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL | notifications_{{test_id}} |
-      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | MQTT        | MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL            | notifications_{{test_id}} |
-      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | MQTT        | MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL            | notifications_{{test_id}} |
+      | cluster_size | branch_strategy | relay_branching                        | output_branching                                                     | entity_kind | source_head  | source_clause                                              | input                     |
+      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK | notifications_{{test_id}} |
+      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | REDIS       | REDIS PUBSUB | redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK | notifications_{{test_id}} |
+      | 1            | branched        | BRANCHED BY by_ingestor_metrics_source | BRANCHED BY by_ingestor_metrics_source SET user_id = message.user_id | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK    | notifications_{{test_id}} |
+      | 1            | unbranched      | UNBRANCHED                             | UNBRANCHED                                                           | MQTT        | MQTT TOPIC   | mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK    | notifications_{{test_id}} |
 
   Scenario Outline: FLUSH IMMEDIATE preserves batching during a rapid input burst
     Given MQTT is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -312,14 +312,13 @@ Feature: Ingestor metrics
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_immediate_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_immediate_source;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-immediate-flush-{{test_id}}'
         };
-        CREATE INGESTOR immediate_source
-        FROM MQTT mqtt_main TOPIC immediate_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR immediate_source
+        FROM mqtt_main TOPIC 'immediate_notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -347,11 +346,11 @@ Feature: Ingestor metrics
   Scenario Outline: DESCRIBE INGESTOR restores metrics for a running domain after process restart
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -367,8 +366,8 @@ Feature: Ingestor metrics
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ingestor_metrics_source;
         CREATE VHOST edge http-{{test_id}}-ingestor-restart.example.com;
         CREATE ENDPOINT ingestor_metrics_restart_ingress ON edge PATH '/ingestor-metrics-restart' TYPE HTTP;
-        CREATE INGESTOR ingestor_metrics_source
-        FROM ENDPOINT ingestor_metrics_restart_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR ingestor_metrics_source
+        FROM ingestor_metrics_restart_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -394,11 +393,11 @@ Feature: Ingestor metrics
       """
       total=2
       """
-    When these NSPL commands fail with "already running"
+    When these Plexus commands fail with "already running"
       """
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       DESCRIBE INGESTOR ingestor_metrics_source;
       """
@@ -417,11 +416,11 @@ Feature: Ingestor metrics
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -435,14 +434,15 @@ Feature: Ingestor metrics
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_remote_owner_metrics_source SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_remote_owner_metrics_source;
-        CREATE CLIENT redis_main
-        TYPE REDIS
+        CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
-          'addr' = '{{redis_addr}}'
+          'addr' = '{{redis_addr}}',
+          'subscription_buffer_messages' = '1024',
+          'idle_timeout_ms' = '30000'
         };
-        CREATE INGESTOR remote_owner_metrics_source
-        FROM REDIS PUBSUB redis_main CHANNEL remote_owner_notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE REDIS PUBSUB INGESTOR remote_owner_metrics_source
+        FROM redis_main CHANNEL 'remote_owner_notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -466,11 +466,11 @@ Feature: Ingestor metrics
   Scenario Outline: DESCRIBE INGESTOR counts every message a JAQ codec unfolds from one payload
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -482,8 +482,8 @@ Feature: Ingestor metrics
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT unfolded_metrics_ingress ON edge PATH '/unfolded-metrics' TYPE HTTP;
-      CREATE INGESTOR unfolded_metrics_source
-        FROM ENDPOINT unfolded_metrics_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR unfolded_metrics_source
+        FROM unfolded_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_batch_codec
         TO notifications
         INHERIT ALL

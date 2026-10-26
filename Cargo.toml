@@ -16,15 +16,40 @@ path = "src/main.rs"
 default = []
 # Exposes opaque benchmark drivers without making runtime internals part of the normal API.
 benchmarks = []
-# Selects Loom's primitives for the whole graph, so a Loom model of a server owner runs on them.
+# Builds a diagnostic node: the thread-blocking locks of the whole graph are tracked by the deadlock
+# detector, which the binary installs at start-up, and the first active deadlock it reports is
+# recorded and ends the process. A diagnostic artifact, never a release product.
+deloxide = [
+  "dep:nervix-deadlock",
+  "nervix-deadlock/deloxide",
+  "nervix-primitives/deloxide",
+]
+# The same diagnostic mode with compile-time historical lock-order instrumentation.
+deloxide-order = [
+  "deloxide",
+  "nervix-deadlock/deloxide-order",
+  "nervix-primitives/deloxide-order",
+]
+# The same diagnostic mode with Deloxide's bounded scheduling disturbance before nested acquisitions
+# of tracked locks, for active detection on contention-prone lifecycle paths.
+deloxide-stress = [
+  "deloxide",
+  "nervix-deadlock/deloxide-stress",
+  "nervix-primitives/deloxide-stress",
+]
+# Selects Loom's primitives for the whole graph, and runs the Loom models of the server's owners.
 loom = [
+  "nervix-connector-fake/loom",
+  "nervix-interconnect/loom",
   "nervix-consensus/loom",
   "nervix-execution/loom",
+  "nervix-model-harness/loom",
   "nervix-primitives/loom",
 ]
 # Selects Shuttle's primitives for the whole graph through nervix-primitives. Sockets and the edge
 # I/O modules remain Tokio's real implementations, outside every model.
 shuttle = [
+  "nervix-connector-fake/shuttle",
   "dep:shuttle",
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
@@ -44,8 +69,10 @@ shuttle = [
   "nervix-connector-sentry/shuttle",
   "nervix-connector-sqs/shuttle",
   "nervix-connector-syslog/shuttle",
+  "nervix-connector-websockets/shuttle",
   "nervix-connector-zeromq/shuttle",
   "nervix-consensus/shuttle",
+  "nervix-deadlock?/shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
   "nervix-model-harness/shuttle",
@@ -54,7 +81,11 @@ shuttle = [
 ]
 # Test-only feature used by the standard test recipes for fault injection, random multinode
 # scheduling, and lower intentionally expensive password hashing parameters.
-testing = ["nervix-connector-kafka/testing", "nervix-consensus/testing"]
+testing = [
+  "nervix-connector-kafka/testing",
+  "nervix-connector-syslog/testing",
+  "nervix-consensus/testing",
+]
 
 [dependencies]
 ahash = { workspace = true }
@@ -84,6 +115,7 @@ clap_complete = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
+flatbuffers = { workspace = true }
 futures-util = { workspace = true }
 governor = { workspace = true }
 hdrhistogram = { workspace = true }
@@ -99,6 +131,7 @@ hyper-util = { workspace = true, features = [
 ] }
 imbl = { workspace = true }
 indexmap = { workspace = true }
+memmap2 = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
 nervix-approx-into = { workspace = true }
@@ -106,8 +139,7 @@ nervix-backup = { workspace = true }
 nervix-bounded-write = { workspace = true }
 nervix-branch-instances = { workspace = true }
 nervix-checkpoint-replication = { workspace = true }
-nervix-client-core = { workspace = true }
-nervix-client-wire = { workspace = true }
+nervix-client-wire = { workspace = true, features = ["grpc"] }
 nervix-columnar-json = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-connector-clickhouse = { workspace = true }
@@ -131,19 +163,21 @@ nervix-connector-websockets = { workspace = true }
 nervix-connector-zeromq = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
+nervix-deadlock = { workspace = true, optional = true }
 nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
 nervix-jaq = { workspace = true }
 nervix-models = { workspace = true, features = ["arrow"] }
-nervix-nspl = { workspace = true }
+nervix-plexus = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
 nervix-simd-kernels = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
+nix = { workspace = true, features = ["fs"] }
 nonzero_ext = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true, default-features = false, features = [
@@ -153,7 +187,7 @@ opentelemetry-otlp = { workspace = true, default-features = false, features = [
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
 ordered-float = { workspace = true }
 ort = { workspace = true, features = [
-  "api-23",
+  "api-28",
   "cuda",
   "load-dynamic",
   "ndarray",
@@ -172,6 +206,7 @@ protox = { workspace = true }
 rkyv = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
+ryu = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shuttle = { workspace = true, optional = true }
@@ -207,11 +242,11 @@ aws-config = { workspace = true }
 aws-credential-types = { workspace = true }
 aws-sdk-sqs = { workspace = true }
 bolero = { workspace = true }
+nervix-connector-fake = { workspace = true }
 # The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
-flatbuffers = { workspace = true }
 flate2 = { workspace = true }
 h2 = { workspace = true }
 httparse = { workspace = true }
@@ -225,6 +260,8 @@ mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-arbitrary = { workspace = true }
 nervix-client-core = { workspace = true, features = ["arrow"] }
 nervix-client-ffi = { workspace = true }
+# The scenarios read the deadlock evidence diagnostic nodes record.
+nervix-deadlock = { workspace = true }
 # The runtime's timer tests advance a paused clock.
 nervix-model-harness = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native", "test-util"] }
@@ -255,6 +292,7 @@ rstest = { workspace = true }
 rumqttc = { workspace = true }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
+tokio-util = { workspace = true, features = ["codec"] }
 zeromq = { workspace = true }
 
 [[test]]
@@ -297,6 +335,11 @@ harness = false
 name = "state_replication"
 required-features = ["benchmarks"]
 
+[[bench]]
+harness = false
+name = "window_sketches"
+required-features = ["benchmarks"]
+
 [workspace]
 members = [
   ".",
@@ -312,6 +355,7 @@ members = [
   "crates/client-wire",
   "crates/columnar-json",
   "crates/connector",
+  "crates/connector-fake",
   "crates/connectors/clickhouse",
   "crates/connectors/http",
   "crates/connectors/iceberg",
@@ -333,6 +377,7 @@ members = [
   "crates/connectors/zeromq",
   "crates/consensus",
   "crates/dataflow-graph",
+  "crates/deadlock",
   "crates/dns",
   "crates/execution",
   "crates/expiry-map",
@@ -344,8 +389,8 @@ members = [
   "crates/nervix-roto",
   "crates/web-console",
   "crates/nervix-vm",
-  "crates/nspl",
-  "crates/nspl-format",
+  "crates/plexus",
+  "crates/plexus-format",
   "crates/model-harness",
   "crates/models",
   "crates/primitives",
@@ -354,6 +399,7 @@ members = [
   "crates/simd-kernels",
   "crates/test-environment",
   "crates/nervix-cli",
+  "examples/paced-simulation/rust",
 ]
 
 [workspace.package]
@@ -402,6 +448,7 @@ arrow-schema = "58"
 arrow-select = "58"
 arrow-string = "58"
 ascii-dag = "0.9"
+astral-tokio-tar = { version = "0.6.4", default-features = false }
 unicode-normalization = "0.1"
 # 0.49 uses provider-selectable rustls-webpki 0.103; the previous 0.42 line pulled in Ring.
 async-nats = { version = "0.49.1", default-features = false, features = [
@@ -441,11 +488,15 @@ ciborium = "0.2"
 clap = "4.6.0"
 clap_complete = "4.6.0"
 clickhouse = { version = "0.15.0", default-features = true }
+combine = { version = "4.6.8", features = ["tokio"] }
 concurrent-queue = "2.5.0"
 console_error_panic_hook = "0.1"
 criterion = "0.5"
 cucumber = "0.22"
 dashmap = "6"
+# The deadlock detector of the `deloxide` diagnostic mode. Pinned to the exact release its adapter
+# in nervix-primitives was qualified against: a later release may change what it tracks or reports.
+deloxide = { version = "=1.1.0", default-features = false }
 error-stack = "0.5"
 faster-hex = "0.10"
 fastrand = "2.4.1"
@@ -511,9 +562,11 @@ libc = "0.2"
 # so no ordinary dependency graph contains it.
 loom = "0.7.2"
 md5 = "0.8"
+memchr = "2.8"
 # `disallow-todo-on-release` is not enabled: the published crate gates the `todo` method on the
 # trait implementations but not on the trait declarations, so the feature fails every release build
 # with E0046 rather than only the builds that call `todo()`.
+memmap2 = "0.9.11"
 meticulous = "0.2.0-pre.2"
 # MongoDB 3.6 exposes an explicit AWS-LC backend; its TLS defaults select another provider.
 mongodb = { version = "3.6.0", default-features = false, features = [
@@ -535,6 +588,7 @@ nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wir
 nervix-columnar-json = { package = "nervix-columnar-json", path = "crates/columnar-json" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
 nervix-connector-clickhouse = { package = "nervix-connector-clickhouse", path = "crates/connectors/clickhouse" }
+nervix-connector-fake = { package = "nervix-connector-fake", path = "crates/connector-fake" }
 nervix-connector-http = { package = "nervix-connector-http", path = "crates/connectors/http" }
 nervix-connector-iceberg = { package = "nervix-connector-iceberg", path = "crates/connectors/iceberg" }
 nervix-connector-kafka = { package = "nervix-connector-kafka", path = "crates/connectors/kafka" }
@@ -555,6 +609,7 @@ nervix-connector-websockets = { package = "nervix-connector-websockets", path = 
 nervix-connector-zeromq = { package = "nervix-connector-zeromq", path = "crates/connectors/zeromq" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
+nervix-deadlock = { package = "nervix-deadlock", path = "crates/deadlock" }
 nervix-dns = { package = "nervix-dns", path = "crates/dns" }
 nervix-execution = { package = "nervix-execution", path = "crates/execution" }
 nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" }
@@ -562,7 +617,7 @@ nervix-interconnect = { package = "nervix-interconnect", path = "crates/intercon
 nervix-jaq = { package = "nervix-jaq", path = "crates/jaq" }
 nervix-model-harness = { package = "nervix-model-harness", path = "crates/model-harness" }
 nervix-models = { package = "nervix-models", path = "crates/models" }
-nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
+nervix-plexus = { package = "nervix-plexus", path = "crates/plexus", features = [
   "server",
 ] }
 nervix-primitives = { package = "nervix-primitives", path = "crates/primitives" }
@@ -588,7 +643,7 @@ opentelemetry-otlp = { version = "0.31", default-features = false }
 opentelemetry-proto = { version = "0.31", default-features = false }
 opentelemetry_sdk = "0.31"
 ordered-float = "4"
-ort = { version = "2.0.0-rc.12", default-features = false }
+ort = { version = "2.0.0-rc.13", default-features = false }
 otel-prost = { package = "prost", version = "0.14" }
 otel-tonic = { package = "tonic", version = "0.14", features = [
   "gzip",
@@ -611,8 +666,10 @@ prost-reflect = "0.15.3"
 prost-types = "0.13"
 protox = "0.8.0"
 # 6.9.0 with the broker's announced maxMessageSize kept per connection, a larger message refused
-# before it is written, and a broker SendError resolved with its server error.
-pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-max-message-size", default-features = false, features = [
+# before it is written, and a broker SendError resolved with its server error; acknowledgements
+# that wait for the broker's answer when a consumer enables ack receipts, and a negative
+# acknowledgement that reports a redelivery request it could not send.
+pulsar = { git = "https://github.com/nervix-io/pulsar-rs.git", branch = "nervix-message-size-ack-receipts", default-features = false, features = [
   "compression",
   "tokio-rustls-runtime",
 ] }
@@ -671,7 +728,11 @@ ryu = "1"
 sentry-types = "0.48.5"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
-serde_json = "1.0.149"
+# `float_roundtrip` reads a decimal as the float nearest to it. serde_json's default reader is
+# best-effort and names a neighbouring float for 10 to 25 percent of the sixteen- and
+# seventeen-digit decimals that computed floats print as, which changed an F64 on its way through
+# a JAQ program and through a protobuf message's JSON view.
+serde_json = { version = "1.0.149", features = ["float_roundtrip"] }
 sha2 = "0.10"
 shuttle = "0.9"
 shuttle-dashmap = { package = "shuttle-dashmap", version = "6" }
@@ -681,6 +742,8 @@ shuttle-tokio-stream = { package = "shuttle-tokio-stream", version = "0.1" }
 shuttle-tokio-util = { package = "shuttle-tokio-util", version = "0.7" }
 signal-hook = "0.4"
 simd-json = { version = "0.17.0", features = ["known-key"] }
+simdutf8 = "0.1.5"
+socket2 = "0.6"
 sorted-vec = "0.8"
 sqlx = { version = "0.9", default-features = false, features = [
   "postgres",
@@ -698,7 +761,7 @@ testcontainers = { version = "0.27.3", default-features = false, features = [
   "watchdog",
 ] }
 thiserror = "2"
-tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
+tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats", "use_std"] }
 tikv-jemallocator = { version = "0.7.0", features = ["stats"] }
 tokio = "1"
 turmoil = "0.7.2"
@@ -741,12 +804,31 @@ x509-parser = "0.18"
 zeromq = "0.4"
 
 [patch.crates-io]
+# A flush must drain async-nats' queued bytes before flushing the transport. The connection
+# generation lets a Core NATS write reject a replacement connection's flush after buffer loss.
+async-nats = { git = "https://github.com/glebpom/nats.rs.git", rev = "d131b7bc954fc57b8447e0d402a896b4b67010b1" }
+# rkyv 0.8.18 leaks partial allocations when semantic deserialization refuses
+# an element. Pin its 0.8.18 ownership fix until https://github.com/rkyv/rkyv/pull/710 ships.
+rkyv = { git = "https://github.com/glebpom/rkyv.git", rev = "868fa9c3c268560ad3459ddb95e271c7167bc097" }
 # The archived 2.0.1 release triggers Rust's future-incompatibility lint; this is the focused fix
 # from https://github.com/GnomedDev/proc-macro-error-2/pull/14.
 proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2.git", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }
+# fjall up to 3.1.12 closes a database with a blocking send of each worker's stop message, which
+# waits forever once a worker has failed and the bounded channel is full, so terminal teardown could
+# hang (https://github.com/fjall-rs/fjall/issues/260). Pin the 3.1.10 fix that never blocks on that
+# channel until a release carries one.
+fjall = { git = "https://github.com/glebpom/fjall.git", rev = "f2fad4eeb774943c0ed03af6f1db0319b6af7db5" }
 
 [profile.release]
 panic = "unwind"
+
+# Loom's coordinator has a fixed coroutine stack before it can start our larger model stacks.
+# Reduce instrumented allocation frames while retaining the dev profile's diagnostics and checks.
+[profile.loom]
+debug-assertions = true
+inherits = "dev"
+opt-level = 1
+overflow-checks = true
 
 [profile.fuzz]
 codegen-units = 1

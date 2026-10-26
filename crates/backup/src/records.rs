@@ -1,4 +1,4 @@
-//! The records an archive holds beside its NSPL: users, a domain's lifecycle and catalog, and the
+//! The records an archive holds beside its Plexus: users, a domain's lifecycle and catalog, and the
 //! catalog metadata of each resource version.
 //!
 //! Each record embeds vocabulary types and converts from its wire shape through their validating

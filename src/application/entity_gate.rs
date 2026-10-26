@@ -7,6 +7,14 @@
 //! - **Depends on.** The interconnect to reach every node and the runtime for the local gate.
 //! - **Must not know.** Why the caller is altering the entity.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeSet, time::Duration};
 
 use arch_into::ArchInto;
@@ -19,7 +27,10 @@ use nervix_interconnect::{
     EntityGatePurpose, EntityGateReleaseRequest as RemoteEntityGateReleaseRequest,
     EntityGateRequest as RemoteEntityGateRequest, RemoteOperationFailure, RemoteOperationSubject,
 };
-use nervix_models::{ClusterNodeName, CoordinationIdentity, DomainName, NodeRef, RelayName};
+use nervix_models::{
+    ClusterNodeName, CoordinationIdentity, DomainName, ModelKind, NodeRef, PauseRequirement,
+    QuiesceSubgraph, RelayName,
+};
 use nervix_primitives::time::{interval, sleep};
 use tracing::{debug, warn};
 
@@ -32,6 +43,10 @@ use crate::runtime::EntityGateLease;
 
 pub(in crate::application) const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration =
     Duration::from_millis(100);
+
+/// The pause before an ownership-handoff gate engagement retries a request whose interconnect
+/// stream broke, which gives the transport time to replace the connection.
+const ENTITY_GATE_ENGAGEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, strum::Display)]
 pub(in crate::application) enum EntityGateControlOperation {
@@ -221,6 +236,28 @@ struct EntityGateEngagement<'a> {
     purpose: EntityGatePurpose,
     deadline: nervix_primitives::time::Instant,
     reason: &'a str,
+}
+
+/// The nodes an entity gate asks to hold it. A node the cluster marks unavailable is never asked:
+/// it cannot answer, and asking it would only spend the gate's deadline.
+#[derive(Clone, Copy)]
+pub(in crate::application) enum EntityGateParticipants<'a> {
+    /// Every available node and the coordinator itself.
+    EveryAvailableNode,
+    /// The available nodes among these, which the coordinator itself is one of only when it is
+    /// named.
+    AvailableAmong(&'a BTreeSet<ClusterNodeName>),
+}
+
+/// What one cluster-wide entity gate holds: the relays and entities of a domain it fences, why,
+/// and which nodes it asks to hold them.
+#[derive(Clone, Copy)]
+pub(in crate::application) struct ClusterEntityGateScope<'a> {
+    pub(in crate::application) domain: &'a DomainName,
+    pub(in crate::application) relays: &'a [RelayName],
+    pub(in crate::application) affected_entities: &'a [NodeRef],
+    pub(in crate::application) purpose: EntityGatePurpose,
+    pub(in crate::application) participants: EntityGateParticipants<'a>,
 }
 
 #[derive(Clone, Copy)]
@@ -426,28 +463,100 @@ impl SessionServiceImpl {
                 Err(error) => EntityGateEngagementOutcome::Rejected(error.to_string()),
             };
         }
-        let remaining = deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
-        let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
-        let response = self
-            .inner
-            .interconnect
-            .request_with_timeout(
-                node_id,
-                RemoteEntityGateRequest {
-                    coordination: coordination.clone(),
-                    domain: domain.clone(),
-                    relays: relays.to_vec(),
-                    affected_entities: affected_entities.to_vec(),
-                    purpose,
-                    deadline_millis,
-                    reason: reason.to_string(),
-                },
-                remaining.min(Duration::from_secs(2)),
-            )
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => return EntityGateEngagementOutcome::Uncertain(error.to_string()),
+        let response = loop {
+            let remaining =
+                deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
+            let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
+            let reply_timeout = remaining.min(Duration::from_secs(2));
+            #[cfg(feature = "testing")]
+            let broken_stream = purpose == EntityGatePurpose::OwnershipHandoff
+                && self
+                    .inner
+                    .runtime
+                    .take_handoff_engagement_transport_failure(domain);
+            #[cfg(not(feature = "testing"))]
+            let broken_stream = false;
+            #[cfg(feature = "testing")]
+            let lost_request = purpose == EntityGatePurpose::OwnershipHandoff
+                && self
+                    .inner
+                    .runtime
+                    .loses_handoff_gate_engagement(self.inner.consensus.local_node_id(), node_id);
+            #[cfg(not(feature = "testing"))]
+            let lost_request = false;
+            let response = if broken_stream {
+                Err(Report::new(nervix_interconnect::RequestError::Transport {
+                    node: node_id.clone(),
+                    request:
+                        <RemoteEntityGateRequest as nervix_interconnect::InterconnectRequest>::NAME,
+                    reason: "injected broken interconnect stream".to_string(),
+                }))
+            } else if lost_request {
+                // A link that loses the request delivers nothing, so the reply times out.
+                sleep(reply_timeout).await;
+                Err(Report::new(nervix_interconnect::RequestError::Timeout {
+                    node: node_id.clone(),
+                    request:
+                        <RemoteEntityGateRequest as nervix_interconnect::InterconnectRequest>::NAME,
+                    timeout: reply_timeout,
+                }))
+            } else {
+                self.inner
+                    .interconnect
+                    .request_with_timeout(
+                        node_id,
+                        RemoteEntityGateRequest {
+                            coordination: coordination.clone(),
+                            domain: domain.clone(),
+                            relays: relays.to_vec(),
+                            affected_entities: affected_entities.to_vec(),
+                            purpose,
+                            deadline_millis,
+                            reason: reason.to_string(),
+                        },
+                        reply_timeout,
+                    )
+                    .await
+            };
+            match response {
+                Ok(response) => break response,
+                Err(error)
+                    if purpose == EntityGatePurpose::OwnershipHandoff
+                        && matches!(
+                            error.current_context(),
+                            nervix_interconnect::RequestError::Timeout { .. }
+                        )
+                        && nervix_primitives::time::Instant::now() < deadline =>
+                {
+                    // Await the same receiver-owned admission fence. Its flush request and
+                    // activation lease remain unchanged when a response is lost.
+                    nervix_primitives::task::consume_budget().await;
+                }
+                Err(error)
+                    if purpose == EntityGatePurpose::OwnershipHandoff
+                        && matches!(
+                            error.current_context(),
+                            nervix_interconnect::RequestError::Transport { .. }
+                        )
+                        && nervix_primitives::time::Instant::now() < deadline =>
+                {
+                    // A broken stream leaves delivery as uncertain as a lost reply: a receiver
+                    // that admitted the request finishes the engagement itself, and a retry of
+                    // the same identity and scope observes that operation. The pause gives the
+                    // transport time to replace the connection; the deadline bounds the retries.
+                    nervix_primitives::task::consume_budget().await;
+                    debug!(
+                        domain = domain.as_str(),
+                        node = %node_id,
+                        error = %format_args!("{error:#}"),
+                        "retrying an ownership-handoff gate engagement after a transport failure"
+                    );
+                    let remaining =
+                        deadline.saturating_duration_since(nervix_primitives::time::Instant::now());
+                    sleep(remaining.min(ENTITY_GATE_ENGAGEMENT_RETRY_INTERVAL)).await;
+                }
+                Err(error) => return EntityGateEngagementOutcome::Uncertain(error.to_string()),
+            }
         };
         match response.result {
             Ok(()) => EntityGateEngagementOutcome::Confirmed,
@@ -605,25 +714,141 @@ impl SessionServiceImpl {
 
     pub(in crate::application) async fn engage_cluster_entity_gates(
         &self,
-        domain: &DomainName,
-        relays: &[RelayName],
-        affected_entities: &[NodeRef],
-        purpose: EntityGatePurpose,
+        scope: ClusterEntityGateScope<'_>,
+        deadline: nervix_primitives::time::Instant,
+        impact: Option<(&TransactionStepImpactRecorder, PauseRequirement)>,
+    ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
+        let ClusterEntityGateScope {
+            domain,
+            relays,
+            affected_entities,
+            purpose,
+            ..
+        } = scope;
+        let ingestors = affected_entities
+            .iter()
+            .filter(|entity| entity.kind == ModelKind::Ingestor)
+            .cloned()
+            .collect::<Vec<_>>();
+        if purpose != EntityGatePurpose::ModelAlteration
+            || relays.is_empty()
+            || ingestors.is_empty()
+        {
+            return self
+                .engage_cluster_entity_gate_scope(scope, deadline, impact)
+                .await;
+        }
+
+        // A route may own an admitted partial batch that has not entered its relay yet. Closing
+        // that relay first would park the batch behind the very gate waiting for its ACK root.
+        // Hold source admission on every node and drain those roots with the relay still open.
+        let intake_impact = match &impact {
+            Some((recorder, PauseRequirement::Subgraph { scope })) => Some((
+                *recorder,
+                PauseRequirement::Subgraph {
+                    scope: QuiesceSubgraph::new(
+                        domain.clone(),
+                        scope
+                            .nodes()
+                            .iter()
+                            .filter(|node| ingestors.contains(&node.coverage.node))
+                            .cloned(),
+                        [],
+                    ),
+                },
+            )),
+            _ => None,
+        };
+        let intake_recorder = intake_impact.as_ref().map(|(recorder, _)| *recorder);
+        let intake_scope = ClusterEntityGateScope {
+            relays: &[],
+            affected_entities: &ingestors,
+            ..scope
+        };
+        let intake_gate = self
+            .engage_cluster_entity_gate_scope(intake_scope, deadline, intake_impact)
+            .await?;
+        if let Err(error) = self
+            .wait_for_cluster_entity_drain(&intake_gate, &[], &ingestors, purpose, &[], deadline)
+            .await
+        {
+            if let (Some(recorder), Some(attempt)) = (intake_recorder, intake_gate.impact_attempt())
+            {
+                recorder.fail(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Quiescence,
+                    error.to_string(),
+                );
+            }
+            self.release_cluster_entity_gates_recording(intake_gate, intake_recorder)
+                .await;
+            return Err(error);
+        }
+
+        let recorder = impact.as_ref().map(|(recorder, _)| *recorder);
+        let gate = match self
+            .engage_cluster_entity_gate_scope(scope, deadline, impact)
+            .await
+        {
+            Ok(gate) => gate,
+            Err(error) => {
+                self.release_cluster_entity_gates_recording(intake_gate, intake_recorder)
+                    .await;
+                return Err(error);
+            }
+        };
+        // The full hold now owns source suspension too. Overlap the two lifetimes so neither
+        // cancellation nor releasing the intake-only hold can reopen admission between phases.
+        if let Err(error) = self
+            .release_cluster_entity_gates_and_wait_recording(intake_gate, intake_recorder)
+            .await
+        {
+            self.release_cluster_entity_gates_recording(gate, recorder)
+                .await;
+            return Err(error.change_context(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: purpose.operation_name(),
+                reason: "failed to release the drained ingestor admission hold".to_string(),
+            }));
+        }
+        Ok(gate)
+    }
+
+    /// The nodes a gate engages, in name order: the available nodes and the coordinator itself,
+    /// kept only where `participants` names them.
+    async fn entity_gate_nodes(
+        &self,
+        participants: EntityGateParticipants<'_>,
+    ) -> BTreeSet<ClusterNodeName> {
+        let mut nodes = self
+            .available_node_ids()
+            .await
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        nodes.insert(self.inner.consensus.local_node_id().clone());
+        if let EntityGateParticipants::AvailableAmong(participants) = participants {
+            nodes.retain(|node| participants.contains(node));
+        }
+        nodes
+    }
+
+    async fn engage_cluster_entity_gate_scope(
+        &self,
+        scope: ClusterEntityGateScope<'_>,
         deadline: nervix_primitives::time::Instant,
         impact: Option<(
             &TransactionStepImpactRecorder,
             nervix_models::PauseRequirement,
         )>,
     ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
-        let mut nodes = self.available_node_ids().await;
-        if !nodes
-            .iter()
-            .any(|node| node == self.inner.consensus.local_node_id())
-        {
-            nodes.push(self.inner.consensus.local_node_id().clone());
-        }
-        nodes.sort();
-        nodes.dedup();
+        let ClusterEntityGateScope {
+            domain,
+            relays,
+            affected_entities,
+            purpose,
+            participants,
+        } = scope;
+        let nodes = self.entity_gate_nodes(participants).await;
         let coordination = self
             .inner
             .interconnect
@@ -1150,66 +1375,156 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn dropping_cluster_gate_owner_releases_local_durable_hold() {
+    async fn dropping_cluster_gate_owners_releases_overlapping_local_holds() {
+        use meticulous::ResultExt as _;
+
+        use super::super::test_fixtures::named;
+
         let TestService {
             service,
             registry: _registry,
             path,
         } = build_test_service(false).await;
-        let domain = DomainName::parse("default").expect("valid domain");
-        let coordination = service
-            .inner
-            .interconnect
-            .next_coordination_identity()
-            .expect("test interconnect should allocate a coordination identity");
-        service
-            .inner
-            .runtime
-            .engage_entity_gate_operation(
-                &coordination,
-                &domain,
-                &[],
-                &[],
-                EntityGatePurpose::ModelAlteration,
-                EntityGateLease {
-                    deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
-                    reason: "canceled coordinator test",
-                },
-            )
-            .await
-            .expect("local gate hold should engage");
-        assert!(
+        let domain: DomainName = named("default");
+        let ingestor = NodeRef::new(
+            ModelKind::Ingestor,
+            named::<nervix_models::ModelName>("orders_in"),
+        );
+        let relay: RelayName = named("orders");
+        let mut coordinations = Vec::new();
+        let mut gates = Vec::new();
+        for relays in [vec![], vec![relay]] {
+            let coordination = service
+                .inner
+                .interconnect
+                .next_coordination_identity()
+                .assured("the test interconnect has coordination capacity");
             service
                 .inner
                 .runtime
-                .entity_gate_operation_is_held(&coordination)
-        );
+                .engage_entity_gate_operation(
+                    &coordination,
+                    &domain,
+                    &relays,
+                    std::slice::from_ref(&ingestor),
+                    EntityGatePurpose::ModelAlteration,
+                    EntityGateLease {
+                        deadline: nervix_primitives::time::Instant::now() + Duration::from_secs(30),
+                        reason: "canceled coordinator with overlapping intake and full holds",
+                    },
+                )
+                .await
+                .assured("the passive participant owns each exact gate scope");
+            assert!(
+                service
+                    .inner
+                    .runtime
+                    .entity_gate_operation_is_held(&coordination)
+            );
+            let mut gate = ClusterEntityGate::new(&service, coordination.clone(), &domain);
+            gate.record_attempt(service.inner.consensus.local_node_id().clone());
+            gates.push(gate);
+            coordinations.push(coordination);
+        }
+        assert_ne!(coordinations[0], coordinations[1]);
+        drop(gates);
 
-        let mut gate = ClusterEntityGate::new(&service, coordination.clone(), &domain);
-        gate.record_attempt(service.inner.consensus.local_node_id().clone());
-        drop(gate);
-
-        nervix_primitives::time::timeout(Duration::from_secs(2), async {
-            while service
-                .inner
-                .runtime
-                .entity_gate_operation_is_held(&coordination)
-            {
+        nervix_primitives::time::timeout(Duration::from_secs(10), async {
+            while coordinations.iter().any(|coordination| {
+                service
+                    .inner
+                    .runtime
+                    .entity_gate_operation_is_held(coordination)
+            }) {
                 nervix_primitives::task::consume_budget().await;
                 nervix_primitives::task::yield_now().await;
             }
         })
         .await
-        .expect("dropped coordinator guard should release its local durable hold");
+        .assured("canceling the coordinator releases both exact overlapping holds");
 
         service.inner.drain_support_shutdown.cancel();
         let shutdown = crate::application::ShutdownCoordinator::default();
         shutdown.request_stop();
         let deadline = shutdown
             .request()
-            .expect("the stop request above was accepted")
+            .verified("the stop request above was accepted")
             .deadline();
         service.inner.service_tasks.shut_down(deadline).await;
-        let _ = std::fs::remove_dir_all(path);
+        std::fs::remove_dir_all(path).assured("the test database is removed after cleanup");
+    }
+
+    #[nervix_primitives::test]
+    async fn a_gate_that_names_its_participants_asks_no_other_node_to_hold_it() {
+        use meticulous::ResultExt as _;
+
+        use super::super::test_fixtures::named;
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let domain: DomainName = named("default");
+        let coordinator = service.inner.consensus.local_node_id().clone();
+        let unavailable_peer: ClusterNodeName = named("unavailable_peer");
+        let deadline = nervix_primitives::time::Instant::now() + Duration::from_secs(30);
+
+        // The coordinator is not a participant, and the participant it names is not available.
+        let elsewhere = BTreeSet::from([unavailable_peer.clone()]);
+        let gate = service
+            .engage_cluster_entity_gates(
+                ClusterEntityGateScope {
+                    domain: &domain,
+                    relays: &[],
+                    affected_entities: &[],
+                    purpose: EntityGatePurpose::OwnershipHandoff,
+                    participants: EntityGateParticipants::AvailableAmong(&elsewhere),
+                },
+                deadline,
+                None,
+            )
+            .await
+            .assured("a gate with no available participant engages nothing that can refuse it");
+        assert!(gate.nodes().is_empty());
+        assert!(
+            !service
+                .inner
+                .runtime
+                .entity_gate_operation_is_held(&gate.coordination)
+        );
+
+        let coordinator_and_elsewhere = BTreeSet::from([coordinator.clone(), unavailable_peer]);
+        let gate = service
+            .engage_cluster_entity_gates(
+                ClusterEntityGateScope {
+                    domain: &domain,
+                    relays: &[],
+                    affected_entities: &[],
+                    purpose: EntityGatePurpose::OwnershipHandoff,
+                    participants: EntityGateParticipants::AvailableAmong(
+                        &coordinator_and_elsewhere,
+                    ),
+                },
+                deadline,
+                None,
+            )
+            .await
+            .assured("the coordinator engages the empty scope on itself");
+        assert_eq!(gate.nodes(), vec![coordinator]);
+        assert!(
+            service
+                .inner
+                .runtime
+                .entity_gate_operation_is_held(&gate.coordination)
+        );
+        service
+            .release_cluster_entity_gates_and_wait_recording(gate, None)
+            .await
+            .assured("the coordinator releases the gate it holds on itself");
+
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).assured("the test database is removed after the test");
     }
 }

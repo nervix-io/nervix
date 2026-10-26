@@ -5,9 +5,17 @@
 //! - **Owns.** The root tracker per ingestor and per domain, the sets a batch fans out into, the
 //!   guard that holds a message waiting on materialized state, the one-word encoding of each
 //!   root's ownership-handoff tracking, and the outcome each root resolves to.
-//! - **Depends on.** The standard library and `triomphe`.
+//! - **Depends on.** The standard library, `triomphe`, and the primitives' timer that bounds how
+//!   long a waiter lets a root stay silent.
 //! - **Must not know.** What is being acknowledged. It counts outstanding work, and ack state is
 //!   hot-path memory that is never persisted.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
+use std::time::Duration;
 
 use meticulous::OptionExt as _;
 use nervix_primitives::sync::{
@@ -39,8 +47,47 @@ pub enum AckProgress {
 
 #[derive(Debug)]
 pub struct AckCompletion {
-    receiver: oneshot::Receiver<AckOutcome>,
-    alive_rx: watch::Receiver<u64>,
+    receiver: oneshot::Receiver<AckResolution>,
+    alive_rx: watch::Receiver<AckProgressStatus>,
+    /// What a confirmed root left counted when it resolved, held until this completion drops.
+    confirmation: Option<AckConfirmation>,
+}
+
+/// What a root delivers to its completion once it resolves.
+#[derive(Debug)]
+struct AckResolution {
+    outcome: AckOutcome,
+    /// The tracker counts a confirmed root hands to its owner. A root released as it resolves
+    /// hands none.
+    confirmation: Option<AckConfirmation>,
+}
+
+/// When the trackers of a resolved root stop counting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackerRelease {
+    /// As the root resolves.
+    AtResolution,
+    /// Once the completion that observed the resolution drops, so that the root's owner confirms
+    /// the outcome outside the tree, such as a source whose transport answers an acknowledgement,
+    /// before drains and ownership handoffs stop waiting for the root.
+    AfterConfirmation,
+}
+
+/// The tracker counts of a confirmed root that resolved while its owner had yet to confirm the
+/// outcome. Drains and ownership handoffs keep waiting for the root, exactly as they did before
+/// it resolved, until this drops.
+#[derive(Debug)]
+struct AckConfirmation {
+    trackers: Vec<Arc<AckRootTracker>>,
+    /// Whether the root still held an active share, which ownership handoffs wait for, as it
+    /// resolved. A root that resolved while all its pending shares were parked held none.
+    ownership_handoff: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AckProgressStatus {
+    sequence: u64,
+    parked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -66,8 +113,14 @@ pub struct AckRootTracker {
     ownership_handoff_outstanding: AtomicUsize,
 }
 
+/// Parks the acknowledgement shares of some sets for as long as it lives.
+///
+/// A parked share stays pending, while a drain or an ownership handoff stops waiting for it. A
+/// share parks while it waits on what only further input can supply: a `REQUIRED WAIT`
+/// dependency, or a window that retains its row until the window fills. Dropping the guard makes
+/// the shares active again, so a holder unparks a share before it acknowledges it.
 #[derive(Debug)]
-pub(crate) struct AckRequiredWaitGuard {
+pub(crate) struct AckParkGuard {
     handles: Vec<AckHandle>,
 }
 
@@ -81,8 +134,9 @@ enum AckShareResolution {
 /// What one root's ownership-handoff tracking holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AckHandoffState {
-    /// The root still tracks shares. No active share means every share it still holds is parked on
-    /// `REQUIRED WAIT`, which an ownership handoff does not wait for.
+    /// The root still tracks shares. No active share means every share it still holds is parked,
+    /// on `REQUIRED WAIT` or in a window that retains its row, which an ownership handoff does not
+    /// wait for.
     Tracking { active_shares: usize },
     /// The root resolved, so nothing it tracked is outstanding and nothing may make it active
     /// again.
@@ -127,8 +181,8 @@ struct AckState {
     /// Zero is terminal. Attaching a share reserves it here before publishing it as active below.
     /// An attachment that finds zero reserves nothing, yet still returns a handle to this root.
     pending: AtomicUsize,
-    /// The pending shares that are not parked on `REQUIRED WAIT`. Completing the root closes this
-    /// tracking, so a racing wait release or attachment cannot reactivate it.
+    /// The pending shares that are not parked. Completing the root closes this tracking, so a
+    /// racing unpark or attachment cannot reactivate it.
     ///
     /// Only a handle that owns a share removes one from this tracking. An acknowledgement resolves
     /// its share in `pending` before it removes the share here, and a share parks only while
@@ -143,9 +197,10 @@ struct AckState {
     /// work.
     handoff: AckHandoffTracking,
     alive_counter: AtomicU64,
-    alive_tx: watch::Sender<u64>,
-    sender: Mutex<Option<oneshot::Sender<AckOutcome>>>,
+    alive_tx: watch::Sender<AckProgressStatus>,
+    sender: Mutex<Option<oneshot::Sender<AckResolution>>>,
     root_trackers: Vec<Arc<AckRootTracker>>,
+    release: TrackerRelease,
 }
 
 struct OwnershipHandoffTrackerReservation<'a> {
@@ -290,41 +345,58 @@ impl AckHandoffTracking {
 const _: () = assert!(AckHandoffTracking::MAX_ACTIVE_SHARES < AckHandoffTracking::COMPLETE);
 
 impl AckRootTracker {
+    /// The roots this tracker still waits for, read by read-modify-write.
+    ///
+    /// A drain reads this after its side stopped new roots from being admitted, for example by
+    /// publishing a quiesce, and an admission tracks its root before it reads whether it may
+    /// proceed. A read-modify-write reads the newest count, and read-modify-writes of one count are
+    /// totally ordered: a root tracked before this read is counted, and a root tracked after it
+    /// acquires the read and observes what the drain's side published before it, so its admission
+    /// is refused. A plain load could miss both: it may return a count from before an increment
+    /// that preceded it, while that admission's read returns the intake still open.
     pub fn outstanding(&self) -> usize {
-        self.outstanding.load(Ordering::Acquire)
+        self.outstanding.fetch_add(0, Ordering::AcqRel)
     }
 
+    /// The roots an ownership handoff still waits for, read by read-modify-write for the reason
+    /// [`Self::outstanding`] gives.
     pub fn outstanding_for_ownership_handoff(&self) -> usize {
-        self.ownership_handoff_outstanding.load(Ordering::Acquire)
+        self.ownership_handoff_outstanding
+            .fetch_add(0, Ordering::AcqRel)
     }
 }
 
 impl AckCompletion {
+    pub(crate) fn remote_progress(&self) -> (u64, bool) {
+        let status = *self.alive_rx.borrow();
+        (status.sequence, status.parked)
+    }
+
     pub async fn wait_for_progress(&mut self) -> AckProgress {
         nervix_primitives::select! {
             biased;
-            result = &mut self.receiver => {
-                let outcome = match result {
-                    Ok(outcome) => outcome,
-                    Err(_) => AckOutcome::NoAck("ack completion sender dropped".to_string()),
-                };
-                AckProgress::Complete(outcome)
-            }
+            result = &mut self.receiver => AckProgress::Complete(self.resolved(result)),
             changed = self.alive_rx.changed() => {
                 match changed {
                     Ok(()) => AckProgress::Alive,
                     Err(_) => {
                         let result = (&mut self.receiver).await;
-                        let outcome = match result {
-                            Ok(outcome) => outcome,
-                            Err(_) => {
-                                AckOutcome::NoAck("ack completion sender dropped".to_string())
-                            }
-                        };
-                        AckProgress::Complete(outcome)
+                        AckProgress::Complete(self.resolved(result))
                     }
                 }
             }
+        }
+    }
+
+    /// The outcome a root's resolution delivered. What a confirmed root left counted stays with
+    /// this completion until it drops.
+    fn resolved(&mut self, result: Result<AckResolution, oneshot::error::RecvError>) -> AckOutcome {
+        match result {
+            Ok(resolution) => {
+                self.confirmation = resolution.confirmation;
+                resolution.outcome
+            }
+            Err(_) => AckOutcome::NoAck("ack completion sender dropped".to_string()),
         }
     }
 
@@ -335,30 +407,62 @@ impl AckCompletion {
             }
         }
     }
+
+    /// Waits for the root's terminal outcome for as long as the root keeps reporting progress.
+    ///
+    /// Every progress report restarts `silence`, so this bounds how long the root may stay silent
+    /// rather than how long it may take. A root silent for longer ends the wait with a negative
+    /// outcome without resolving the root itself.
+    pub async fn wait_while_alive(&mut self, silence: Duration) -> AckOutcome {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let progress =
+                nervix_primitives::time::timeout(silence, self.wait_for_progress()).await;
+            match progress {
+                Ok(AckProgress::Alive) => {}
+                Ok(AckProgress::Complete(outcome)) => return outcome,
+                Err(_) => {
+                    return AckOutcome::NoAck(format!(
+                        "ack timeout elapsed after {}",
+                        humantime::format_duration(silence)
+                    ));
+                }
+            }
+        }
+    }
 }
 
 impl AckHandle {
     pub fn root() -> (Self, AckCompletion) {
-        Self::new_root(Vec::new())
+        Self::new_root(Vec::new(), TrackerRelease::AtResolution)
     }
 
     fn tracked_root(tracker: Arc<AckRootTracker>) -> (Self, AckCompletion) {
-        Self::tracked_roots(vec![tracker])
+        Self::tracked_roots(vec![tracker], TrackerRelease::AtResolution)
     }
 
-    fn tracked_roots(trackers: Vec<Arc<AckRootTracker>>) -> (Self, AckCompletion) {
+    fn tracked_roots(
+        trackers: Vec<Arc<AckRootTracker>>,
+        release: TrackerRelease,
+    ) -> (Self, AckCompletion) {
         for tracker in &trackers {
             tracker.outstanding.fetch_add(1, Ordering::AcqRel);
             tracker
                 .ownership_handoff_outstanding
                 .fetch_add(1, Ordering::AcqRel);
         }
-        Self::new_root(trackers)
+        Self::new_root(trackers, release)
     }
 
-    fn new_root(root_trackers: Vec<Arc<AckRootTracker>>) -> (Self, AckCompletion) {
+    fn new_root(
+        root_trackers: Vec<Arc<AckRootTracker>>,
+        release: TrackerRelease,
+    ) -> (Self, AckCompletion) {
         let (sender, receiver) = oneshot::channel();
-        let (alive_tx, alive_rx) = watch::channel(0);
+        let (alive_tx, alive_rx) = watch::channel(AckProgressStatus {
+            sequence: 0,
+            parked: false,
+        });
         // A tracked root starts with its own share active. An untracked root tracks no handoff
         // share at all, so it starts idle and stays idle.
         let active_shares = usize::from(!root_trackers.is_empty());
@@ -370,8 +474,13 @@ impl AckHandle {
                 alive_tx,
                 sender: Mutex::new(Some(sender)),
                 root_trackers,
+                release,
             })),
-            AckCompletion { receiver, alive_rx },
+            AckCompletion {
+                receiver,
+                alive_rx,
+                confirmation: None,
+            },
         )
     }
 
@@ -458,7 +567,10 @@ impl AckHandle {
         reservation: OwnershipHandoffTrackerReservation<'_>,
     ) {
         match self.0.handoff.publish_shares(shares) {
-            AckHandoffPublication::Activated => reservation.retain(),
+            AckHandoffPublication::Activated => {
+                reservation.retain();
+                self.publish_progress();
+            }
             AckHandoffPublication::Joined | AckHandoffPublication::AlreadyComplete => {}
         }
     }
@@ -472,22 +584,43 @@ impl AckHandle {
             | AckHandoffRemoval::AlreadyComplete
             | AckHandoffRemoval::NoActiveShare => {}
         }
+        if removal == AckHandoffRemoval::WentIdle {
+            self.publish_progress();
+        }
         removal.removed_share()
     }
 
-    fn finish_handoff_tracking(&self) {
+    /// Closes this root's handoff tracking and delivers `outcome` to its completion. A root
+    /// released as it resolves stops counting against its trackers here; a confirmed root hands
+    /// its counts to its completion, which holds them until it drops.
+    fn resolve_tracked(&self, outcome: AckOutcome) {
         let previous = self.0.handoff.complete();
         debug_assert_ne!(
             previous,
             AckHandoffState::Complete,
             "ACK handoff tracking must complete only once"
         );
-        if previous.holds_active_shares() {
-            self.decrement_ownership_handoff_trackers();
-        }
+        let held_for_ownership_handoff = previous.holds_active_shares();
+        let confirmation = match self.0.release {
+            TrackerRelease::AtResolution => {
+                if held_for_ownership_handoff {
+                    self.decrement_ownership_handoff_trackers();
+                }
+                self.release_root_trackers();
+                None
+            }
+            TrackerRelease::AfterConfirmation => Some(AckConfirmation {
+                trackers: self.0.root_trackers.clone(),
+                ownership_handoff: held_for_ownership_handoff,
+            }),
+        };
+        self.finish_completion(AckResolution {
+            outcome,
+            confirmation,
+        });
     }
 
-    fn mark_required_wait(&self) -> bool {
+    fn park_share(&self) -> bool {
         if self.0.root_trackers.is_empty() {
             return false;
         }
@@ -499,7 +632,7 @@ impl AckHandle {
         self.remove_handoff_share()
     }
 
-    fn leave_required_wait(&self) {
+    fn unpark_share(&self) {
         if self.0.root_trackers.is_empty() {
             return;
         }
@@ -507,9 +640,14 @@ impl AckHandle {
         self.publish_handoff_shares(1, reservation);
     }
 
-    fn finish_completion(&self, result: AckOutcome) {
-        if let Some(sender) = self.0.sender.lock().take() {
-            sender.send(result).means_peer_left("ack completion waiter");
+    /// Delivers `resolution` to the completion. A completion that already dropped receives
+    /// nothing, and what a confirmed root handed it is released here instead.
+    fn finish_completion(&self, resolution: AckResolution) {
+        let sender = self.0.sender.lock().take();
+        if let Some(sender) = sender {
+            sender
+                .send(resolution)
+                .means_peer_left("ack completion waiter");
         }
     }
 
@@ -521,11 +659,7 @@ impl AckHandle {
 
     fn ack_success_tracked(&self) {
         match self.resolve_pending_share() {
-            AckShareResolution::Complete => {
-                self.finish_handoff_tracking();
-                self.release_root_trackers();
-                self.finish_completion(AckOutcome::Ack);
-            }
+            AckShareResolution::Complete => self.resolve_tracked(AckOutcome::Ack),
             AckShareResolution::Pending => {
                 // The share was pending, so it is still active unless a concurrent terminal
                 // transition closed handoff tracking, which leaves nothing to remove.
@@ -539,9 +673,7 @@ impl AckHandle {
         if !self.claim_completion() {
             return;
         }
-        self.finish_handoff_tracking();
-        self.release_root_trackers();
-        self.finish_completion(result);
+        self.resolve_tracked(result);
     }
 
     pub fn clone_attached_for_receivers(&self, receivers: usize) -> Self {
@@ -570,9 +702,24 @@ impl AckHandle {
         if self.is_resolved() {
             return;
         }
+        self.publish_progress();
+    }
 
-        let next = self.0.alive_counter.fetch_add(1, Ordering::AcqRel) + 1;
-        self.0.alive_tx.send_replace(next);
+    fn publish_progress(&self) {
+        let sequence = self.0.alive_counter.fetch_add(1, Ordering::AcqRel) + 1;
+        let parked = !self.0.root_trackers.is_empty()
+            && self.0.pending.load(Ordering::Acquire) != 0
+            && matches!(
+                self.0.handoff.state(),
+                AckHandoffState::Tracking { active_shares: 0 }
+            );
+        self.0.alive_tx.send_if_modified(|status| {
+            if sequence <= status.sequence {
+                return false;
+            }
+            *status = AckProgressStatus { sequence, parked };
+            true
+        });
     }
 
     pub fn ack_success(&self) {
@@ -581,7 +728,10 @@ impl AckHandle {
             return;
         }
         if self.resolve_pending_share() == AckShareResolution::Complete {
-            self.finish_completion(AckOutcome::Ack);
+            self.finish_completion(AckResolution {
+                outcome: AckOutcome::Ack,
+                confirmation: None,
+            });
         }
     }
 
@@ -602,7 +752,23 @@ impl AckHandle {
         if !self.claim_completion() {
             return;
         }
-        self.finish_completion(result);
+        self.finish_completion(AckResolution {
+            outcome: result,
+            confirmation: None,
+        });
+    }
+}
+
+impl Drop for AckConfirmation {
+    fn drop(&mut self) {
+        for tracker in &self.trackers {
+            if self.ownership_handoff {
+                tracker
+                    .ownership_handoff_outstanding
+                    .fetch_sub(1, Ordering::AcqRel);
+            }
+            tracker.outstanding.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -636,7 +802,7 @@ impl Drop for OwnershipHandoffTrackerReservation<'_> {
     }
 }
 
-impl AckRequiredWaitGuard {
+impl AckParkGuard {
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
@@ -648,7 +814,7 @@ impl AckRequiredWaitGuard {
         let mut handles = Vec::new();
         for set in sets {
             for handle in &set.handles {
-                if handle.mark_required_wait() {
+                if handle.park_share() {
                     handles.push(handle.clone());
                 }
             }
@@ -657,10 +823,10 @@ impl AckRequiredWaitGuard {
     }
 }
 
-impl Drop for AckRequiredWaitGuard {
+impl Drop for AckParkGuard {
     fn drop(&mut self) {
         for handle in &self.handles {
-            handle.leave_required_wait();
+            handle.unpark_share();
         }
     }
 }
@@ -691,7 +857,24 @@ impl AckSet {
     }
 
     pub fn tracked_roots(trackers: Vec<Arc<AckRootTracker>>) -> (Self, AckCompletion) {
-        let (handle, completion) = AckHandle::tracked_roots(trackers);
+        let (handle, completion) = AckHandle::tracked_roots(trackers, TrackerRelease::AtResolution);
+        (
+            Self {
+                handles: vec![handle],
+            },
+            completion,
+        )
+    }
+
+    /// A root counted against `trackers` whose owner confirms its outcome outside the tree.
+    ///
+    /// Once the root resolves, its completion keeps it counted, so drains and ownership handoffs
+    /// keep waiting for it as they did while it was unresolved, until the completion drops. The
+    /// owner drops the completion once it has confirmed the outcome. A completion that drops before
+    /// the root resolves releases the counts as the root resolves.
+    pub fn confirmed_roots(trackers: Vec<Arc<AckRootTracker>>) -> (Self, AckCompletion) {
+        let (handle, completion) =
+            AckHandle::tracked_roots(trackers, TrackerRelease::AfterConfirmation);
         (
             Self {
                 handles: vec![handle],
@@ -747,8 +930,8 @@ impl AckSet {
     }
 
     #[cfg(test)]
-    pub(crate) fn required_wait_guard(&self) -> AckRequiredWaitGuard {
-        AckRequiredWaitGuard::new([self])
+    pub(crate) fn park_guard(&self) -> AckParkGuard {
+        AckParkGuard::new([self])
     }
 
     #[cfg_attr(
@@ -800,6 +983,8 @@ mod tests {
 
     use super::{AckOutcome, AckProgress, AckRootTracker, AckSet};
 
+    const STOPPED_WAITING: &str = "node stopped while waiting for required materialized state";
+
     #[nervix_primitives::test]
     async fn root_completes_after_manual_ack() {
         let (acks, completion) = AckSet::root();
@@ -846,7 +1031,7 @@ mod tests {
         let tracker = Arc::new(AckRootTracker::default());
         let (waiting, completion) = AckSet::tracked_root(tracker.clone());
         let active = waiting.attached();
-        let required_wait = waiting.required_wait_guard();
+        let required_wait = waiting.park_guard();
 
         assert_eq!(tracker.outstanding(), 1);
         assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
@@ -863,6 +1048,97 @@ mod tests {
             completion.wait().await,
             AckOutcome::NoAck("ownership changed while waiting for required state".to_string())
         );
+        assert_eq!(tracker.outstanding(), 0);
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_confirmed_root_stays_counted_after_it_resolves_until_its_completion_drops() {
+        let domain = Arc::new(AckRootTracker::default());
+        let ingestor = Arc::new(AckRootTracker::default());
+        let (acks, mut completion) =
+            AckSet::confirmed_roots(vec![domain.clone(), ingestor.clone()]);
+        let attached = acks.attached();
+
+        acks.ack_success();
+        attached.ack_success();
+        assert_eq!(
+            completion.wait_for_progress().await,
+            AckProgress::Complete(AckOutcome::Ack)
+        );
+        for tracker in [&domain, &ingestor] {
+            assert_eq!(tracker.outstanding(), 1);
+            assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
+        }
+
+        drop(completion);
+        for tracker in [&domain, &ingestor] {
+            assert_eq!(tracker.outstanding(), 0);
+            assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+        }
+    }
+
+    #[test]
+    fn a_confirmed_root_whose_completion_dropped_first_releases_as_it_resolves() {
+        let tracker = Arc::new(AckRootTracker::default());
+        let (acks, completion) = AckSet::confirmed_roots(vec![tracker.clone()]);
+
+        drop(completion);
+        assert_eq!(tracker.outstanding(), 1);
+        acks.ack_success();
+
+        assert_eq!(tracker.outstanding(), 0);
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_confirmed_root_resolved_while_parked_holds_no_ownership_handoff() {
+        let tracker = Arc::new(AckRootTracker::default());
+        let (waiting, mut completion) = AckSet::confirmed_roots(vec![tracker.clone()]);
+        let required_wait = waiting.park_guard();
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+
+        waiting.no_ack(STOPPED_WAITING);
+        assert_eq!(
+            completion.wait_for_progress().await,
+            AckProgress::Complete(AckOutcome::NoAck(STOPPED_WAITING.to_string()))
+        );
+        assert_eq!(tracker.outstanding(), 1);
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+
+        drop(required_wait);
+        drop(completion);
+        assert_eq!(tracker.outstanding(), 0);
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+    }
+
+    #[nervix_primitives::test]
+    async fn a_root_silent_for_longer_than_its_bound_ends_the_wait_unresolved() {
+        let tracker = Arc::new(AckRootTracker::default());
+        let (acks, mut completion) = AckSet::confirmed_roots(vec![tracker.clone()]);
+
+        let outcome = completion.wait_while_alive(Duration::from_millis(10)).await;
+
+        assert_eq!(
+            outcome,
+            AckOutcome::NoAck("ack timeout elapsed after 10ms".to_string())
+        );
+        assert_eq!(tracker.outstanding(), 1);
+        acks.ack_success();
+        assert_eq!(tracker.outstanding(), 1);
+        drop(completion);
+        assert_eq!(tracker.outstanding(), 0);
+        assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+    }
+
+    #[test]
+    fn dropping_an_unresolved_confirmed_root_releases_its_counts() {
+        let tracker = Arc::new(AckRootTracker::default());
+        let (acks, completion) = AckSet::confirmed_roots(vec![tracker.clone()]);
+
+        drop(acks);
+        drop(completion);
+
         assert_eq!(tracker.outstanding(), 0);
         assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
     }
@@ -903,11 +1179,11 @@ mod tests {
 
         acks.split_into(2, &mut shares);
         shares[0].ack_success();
-        shares[1].no_ack("sink rejected the message");
+        shares[1].no_ack("emitter rejected the message");
 
         assert_eq!(
             completion.wait().await,
-            AckOutcome::NoAck("sink rejected the message".to_string())
+            AckOutcome::NoAck("emitter rejected the message".to_string())
         );
     }
 
@@ -1045,8 +1321,8 @@ mod shuttle_tests {
     };
 
     use super::{
-        AckCompletion, AckHandle, AckHandoffState, AckOutcome, AckRequiredWaitGuard,
-        AckRootTracker, AckSet, Ordering,
+        AckCompletion, AckHandle, AckHandoffState, AckOutcome, AckParkGuard, AckRootTracker,
+        AckSet, Ordering,
     };
 
     // Models with more than three tasks have too many interleavings to enumerate, so they sample
@@ -1146,9 +1422,11 @@ mod shuttle_tests {
                 "an unresolved root must track exactly its pending shares that are not parked as \
                  active"
             );
-            assert_eq!(
-                self.completion.receiver.try_recv(),
-                Err(TryRecvError::Empty),
+            assert!(
+                matches!(
+                    self.completion.receiver.try_recv(),
+                    Err(TryRecvError::Empty)
+                ),
                 "an unresolved root must not deliver an outcome"
             );
         }
@@ -1156,16 +1434,18 @@ mod shuttle_tests {
         fn observe_single_outcome(&mut self) {
             if self.outcome.is_none() {
                 match self.completion.receiver.try_recv() {
-                    Ok(outcome) => self.outcome = Some(outcome),
+                    Ok(resolution) => self.outcome = Some(resolution.outcome),
                     Err(error) => panic!(
                         "a resolved root must deliver its outcome, but its receiver reported \
                          {error:?}"
                     ),
                 }
             }
-            assert_eq!(
-                self.completion.receiver.try_recv(),
-                Err(TryRecvError::Closed),
+            assert!(
+                matches!(
+                    self.completion.receiver.try_recv(),
+                    Err(TryRecvError::Closed)
+                ),
                 "a resolved root must deliver exactly one outcome"
             );
         }
@@ -1265,7 +1545,7 @@ mod shuttle_tests {
                 let attached = root.attached();
                 let waiting = root.clone();
 
-                let wait_thread = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
+                let wait_thread = thread::spawn(move || AckParkGuard::new([&waiting]));
                 let ack_thread = thread::spawn(move || attached.ack_success());
 
                 let required_wait = wait_thread.join().assured(JOINED);
@@ -1293,12 +1573,43 @@ mod shuttle_tests {
     }
 
     #[test]
+    fn parked_remote_progress_survives_a_racing_heartbeat_and_resumes_once() {
+        check_dfs(
+            || {
+                let tracker = Arc::new(AckRootTracker::default());
+                let (root, completion) = AckSet::tracked_root(tracker.clone());
+                let waiting = root.clone();
+                let heartbeat = root.clone();
+
+                let wait_thread = thread::spawn(move || AckParkGuard::new([&waiting]));
+                let heartbeat_thread = thread::spawn(move || heartbeat.ack_alive());
+                let required_wait = wait_thread.join().assured(JOINED);
+                heartbeat_thread.join().assured(JOINED);
+
+                let (park_sequence, parked) = completion.remote_progress();
+                assert!(parked, "the remote owner publishes its parked cut state");
+                assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+
+                drop(required_wait);
+                let (resume_sequence, parked) = completion.remote_progress();
+                assert!(resume_sequence > park_sequence);
+                assert!(!parked, "the remote owner publishes its resumed cut state");
+                assert_eq!(tracker.outstanding_for_ownership_handoff(), 1);
+
+                root.ack_success();
+                assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+            },
+            None,
+        );
+    }
+
+    #[test]
     fn concurrent_wait_release_and_completion_leave_no_tracking() {
         check_dfs(
             || {
                 let tracker = Arc::new(AckRootTracker::default());
                 let (root, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
-                let required_wait = AckRequiredWaitGuard::new([&root]);
+                let required_wait = AckParkGuard::new([&root]);
 
                 let release_thread = thread::spawn(move || drop(required_wait));
                 let completion_thread = thread::spawn(move || root.no_ack("test completion"));
@@ -1354,7 +1665,7 @@ mod shuttle_tests {
                 let tracker = Arc::new(AckRootTracker::default());
                 let (processing, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
                 let waiting = processing.attached();
-                let required_wait = AckRequiredWaitGuard::new([&waiting]);
+                let required_wait = AckParkGuard::new([&waiting]);
 
                 let stopping = thread::spawn(move || waiting.no_ack(STOPPED_WHILE_WAITING));
                 let processor = thread::spawn(move || {
@@ -1389,12 +1700,12 @@ mod shuttle_tests {
                 let tracker = Arc::new(AckRootTracker::default());
                 let (processing, mut observed) = ObservedRoot::tracked(vec![tracker.clone()]);
                 let waiting = processing.attached();
-                let required_wait = AckRequiredWaitGuard::new([&waiting]);
+                let required_wait = AckParkGuard::new([&waiting]);
 
                 let stopping = thread::spawn(move || waiting.no_ack(STOPPED_WHILE_WAITING));
                 let processor = thread::spawn(move || {
                     let output = processing.attached();
-                    let output_wait = AckRequiredWaitGuard::new([&output]);
+                    let output_wait = AckParkGuard::new([&output]);
                     processing.ack_success();
                     (output, output_wait)
                 });
@@ -1428,7 +1739,7 @@ mod shuttle_tests {
                 let trackers = DomainTrackers::new();
                 let (active, mut observed) = trackers.first_ingestor_root();
                 let waiting = active.attached();
-                let required_wait = AckRequiredWaitGuard::new([&waiting]);
+                let required_wait = AckParkGuard::new([&waiting]);
 
                 let release = thread::spawn(move || drop(required_wait));
                 let acknowledgement = thread::spawn(move || active.ack_success());
@@ -1460,7 +1771,7 @@ mod shuttle_tests {
                 let waiting = root.clone();
 
                 let attachment = thread::spawn(move || attachment_source.attached());
-                let wait = thread::spawn(move || AckRequiredWaitGuard::new([&waiting]));
+                let wait = thread::spawn(move || AckParkGuard::new([&waiting]));
 
                 let attached = attachment.join().assured(JOINED);
                 let required_wait = wait.join().assured(JOINED);
@@ -1510,7 +1821,7 @@ mod shuttle_tests {
                     let output = batch.attached_for_receivers(2);
                     let waiting_consumer_share = output.clone();
                     let waiting_consumer = thread::spawn(move || {
-                        let required_wait = AckRequiredWaitGuard::new([&waiting_consumer_share]);
+                        let required_wait = AckParkGuard::new([&waiting_consumer_share]);
                         drop(required_wait);
                         waiting_consumer_share.ack_success();
                     });
@@ -1520,12 +1831,12 @@ mod shuttle_tests {
                     consumer.join().assured(JOINED);
                 });
                 let waiting = thread::spawn(move || {
-                    let required_wait = AckRequiredWaitGuard::new([&waiting_message]);
+                    let required_wait = AckParkGuard::new([&waiting_message]);
                     drop(required_wait);
                     waiting_message.ack_success();
                 });
                 let stopping = thread::spawn(move || {
-                    let required_wait = AckRequiredWaitGuard::new([&failing_payload]);
+                    let required_wait = AckParkGuard::new([&failing_payload]);
                     failing_payload.no_ack(STOPPED_WHILE_WAITING);
                     drop(required_wait);
                 });
@@ -1561,7 +1872,7 @@ mod shuttle_tests {
                 let (failing_payload, mut failing) = trackers.second_ingestor_root();
                 let (fanned_payload, mut fanned) = trackers.first_ingestor_root();
 
-                let rejected_by_sink = failing_payload.attached();
+                let rejected_by_emitter = failing_payload.attached();
                 let rejected_by_route = failing_payload.attached();
                 let batch = AckSet::merged([batched_payload, failing_payload]);
                 let fan_out_source = fanned_payload.attached();
@@ -1572,7 +1883,7 @@ mod shuttle_tests {
                     output
                 });
                 let parking = thread::spawn(move || {
-                    let required_wait = AckRequiredWaitGuard::new([&fanned_payload]);
+                    let required_wait = AckParkGuard::new([&fanned_payload]);
                     (fanned_payload, required_wait)
                 });
                 let fan_out = thread::spawn(move || {
@@ -1591,8 +1902,9 @@ mod shuttle_tests {
                 trackers.assert_counts(&[&batched, &fanned], &[&failing]);
 
                 let output_consumer = thread::spawn(move || output.ack_success());
-                let sink =
-                    thread::spawn(move || rejected_by_sink.no_ack("sink rejected the message"));
+                let connector = thread::spawn(move || {
+                    rejected_by_emitter.no_ack("emitter rejected the message")
+                });
                 let route = thread::spawn(move || {
                     rejected_by_route.no_ack("error route rejected the message");
                 });
@@ -1604,7 +1916,7 @@ mod shuttle_tests {
                 let second_consumer = thread::spawn(move || second_consumer_share.ack_success());
 
                 output_consumer.join().assured(JOINED);
-                sink.join().assured(JOINED);
+                connector.join().assured(JOINED);
                 route.join().assured(JOINED);
                 release.join().assured(JOINED);
                 first_consumer.join().assured(JOINED);
@@ -1617,7 +1929,7 @@ mod shuttle_tests {
                 assert_eq!(fanned.outcome(), Some(&AckOutcome::Ack));
                 match failing.outcome() {
                     Some(AckOutcome::NoAck(reason)) => assert!(
-                        reason == "sink rejected the message"
+                        reason == "emitter rejected the message"
                             || reason == "error route rejected the message",
                         "the failing root must resolve with one of its two rejections, not \
                          {reason:?}"
@@ -1630,6 +1942,60 @@ mod shuttle_tests {
             },
             PCT_ITERATIONS,
             PCT_DEPTH,
+        );
+    }
+
+    /// The owner of a confirmed root takes the root's resolution, if it has arrived, and drops
+    /// its completion at any point while the root resolves, as a source loop that stops during
+    /// the wait does, or once it has confirmed the outcome. A resolution the owner holds keeps the
+    /// root counted, and the root's counts are released exactly once, after both the resolution
+    /// and the owner's drop.
+    #[test]
+    fn a_confirmed_root_stays_counted_until_its_owner_confirms_and_releases_once() {
+        check_dfs(
+            || {
+                let domain = Arc::new(AckRootTracker::default());
+                let ingestor = Arc::new(AckRootTracker::default());
+                let (root, completion) =
+                    AckSet::confirmed_roots(vec![domain.clone(), ingestor.clone()]);
+                let share = root.attached();
+
+                let resolving = thread::spawn(move || {
+                    root.ack_success();
+                    share.ack_success();
+                });
+                let owner = thread::spawn({
+                    let domain = domain.clone();
+                    move || {
+                        let mut completion = completion;
+                        match completion.receiver.try_recv() {
+                            Ok(resolution) => {
+                                assert_eq!(resolution.outcome, AckOutcome::Ack);
+                                assert_eq!(
+                                    domain.outstanding_for_ownership_handoff(),
+                                    1,
+                                    "a resolved root its owner has not confirmed stays counted"
+                                );
+                                drop(resolution);
+                            }
+                            Err(TryRecvError::Empty) => {}
+                            Err(TryRecvError::Closed) => panic!(
+                                "a root that has not resolved keeps its sender, and one that \
+                                 resolved delivers its resolution"
+                            ),
+                        }
+                        drop(completion);
+                    }
+                });
+
+                resolving.join().assured(JOINED);
+                owner.join().assured(JOINED);
+                for tracker in [&domain, &ingestor] {
+                    assert_eq!(tracker.outstanding(), 0);
+                    assert_eq!(tracker.outstanding_for_ownership_handoff(), 0);
+                }
+            },
+            None,
         );
     }
 }

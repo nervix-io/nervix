@@ -78,6 +78,11 @@ pub fn relay_width(label: &str) -> i32 {
 
 pub fn graph_layout_item(node: &DataflowNode) -> LayoutItem<String, String> {
     let relay = node.role.is_relay();
+    let branch = if node.role.constructs_branches() || node.role.collapses_branches() {
+        None
+    } else {
+        node.branch.as_ref().map(|branch| branch.name.clone())
+    };
     LayoutItem {
         id: node.id.clone(),
         width: if relay {
@@ -89,11 +94,7 @@ pub fn graph_layout_item(node: &DataflowNode) -> LayoutItem<String, String> {
         relay,
         // Only items that run per branch belong to a group. The ingestors, reingestors and
         // emitters that construct or collapse a branch sit outside it, on its border.
-        branch: node
-            .branch
-            .as_ref()
-            .filter(|_| !node.role.constructs_branches() && !node.role.collapses_branches())
-            .map(|branch| branch.name.clone()),
+        branch,
     }
 }
 
@@ -158,8 +159,8 @@ mod tests {
         assert!(item.width >= RELAY_MIN_WIDTH && item.width <= RELAY_MAX_WIDTH);
 
         let emitter = DataflowNode::new(
-            "emitter:sink",
-            "sink",
+            "emitter:emitter",
+            "emitter",
             DataflowNodeRole::Emitter {
                 transport: "REDIS".to_string(),
             },

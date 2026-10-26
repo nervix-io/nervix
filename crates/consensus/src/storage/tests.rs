@@ -30,6 +30,191 @@ use crate::{
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+#[nervix_primitives::test]
+async fn restore_installation_authority_and_start_gate_survive_restart() -> TestResult {
+    use nervix_models::{
+        ArchiveDigest, Restore, RestoreArchive, RestoreMode, RestoreScope, RestoreState,
+        RestoreStep,
+    };
+
+    use crate::{
+        CommandExecution, CommandExecutionEffect, LeaderTenure, RestoreExecution, RestoreStepEffect,
+    };
+    let mut harness = Harness::new().await?;
+    let domain = DomainName::parse("restored")?;
+    let reference = Harness::command_reference(1);
+    let execution = CommandExecution::applying(
+        reference.clone(),
+        nervix_models::UserName::parse("operator")?,
+        None,
+        [1; 32],
+        nervix_models::Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
+        CommandExecutionEffect::Restore(Box::new(RestoreExecution::new(
+            Restore {
+                scope: RestoreScope::Domain {
+                    domain: domain.clone(),
+                    target: None,
+                },
+                source: "archive.nvxb".into(),
+                mode: RestoreMode::Apply,
+                state: RestoreState::All,
+                lifecycle: nervix_models::RestoreLifecycle::Stopped,
+            },
+            RestoreArchive {
+                total_bytes: NonZeroU64::MIN,
+                digest: ArchiveDigest::from_bytes([1; 32]),
+            },
+        ))),
+    );
+    harness
+        .apply(
+            1,
+            ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(execution),
+                mutation_domains: BTreeSet::from([domain.clone()]),
+                policy: Harness::command_policy(),
+            },
+        )
+        .await?;
+    harness
+        .apply(
+            2,
+            ConsensusCommand::ApplyRestoreStep {
+                reference: reference.clone(),
+                step: RestoreStep::CreateDomain(domain.clone()),
+                effect: Box::new(RestoreStepEffect::Domain {
+                    state: Box::new(Harness::domain("restored")),
+                    resources: vec![],
+                }),
+            },
+        )
+        .await?;
+    harness
+        .apply(
+            3,
+            ConsensusCommand::ApplyRestoreStep {
+                reference: reference.clone(),
+                step: RestoreStep::ImportResources(domain.clone()),
+                effect: Box::new(RestoreStepEffect::Completion),
+            },
+        )
+        .await?;
+    let tenure = LeaderTenure {
+        leader_id: Harness::node(),
+        term: 3,
+    };
+    harness
+        .apply(
+            4,
+            ConsensusCommand::BeginRestoreStateInstallation {
+                reference: reference.clone(),
+                domain: domain.clone(),
+                tenure: tenure.clone(),
+            },
+        )
+        .await?;
+    let mut harness = harness.reopen().await?;
+    let state = harness.store.inner.state();
+    let Some(crate::restore::DomainRestoreInstallation::Installing(authority)) =
+        state.domain_restore_installations.get(&domain)
+    else {
+        panic!("installation authority must recover");
+    };
+    let authority = authority.clone();
+    assert_eq!(authority.generation, 4);
+    assert!(crate::restore::validate_restored_domain_start(&state, &domain).is_err());
+    harness
+        .store
+        .inner
+        .with_restore_state_installation(&domain, &authority, || Some(tenure.clone()), || ())
+        .assured("current authority enters mutation boundary");
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || None,
+                || panic!("no leader cannot mutate")
+            )
+            .is_err()
+    );
+    let successor = LeaderTenure {
+        leader_id: ClusterNodeName::parse("node-2")?,
+        term: 4,
+    };
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || Some(successor),
+                || panic!("stale tenure cannot mutate")
+            )
+            .is_err()
+    );
+    harness
+        .apply(
+            5,
+            ConsensusCommand::BeginRestoreStateInstallation {
+                reference: reference.clone(),
+                domain: domain.clone(),
+                tenure: tenure.clone(),
+            },
+        )
+        .await?;
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || Some(tenure.clone()),
+                || panic!("stale generation cannot mutate")
+            )
+            .is_err()
+    );
+    let state = harness.store.inner.state();
+    let Some(crate::restore::DomainRestoreInstallation::Installing(current)) =
+        state.domain_restore_installations.get(&domain)
+    else {
+        panic!("new authority was admitted");
+    };
+    harness
+        .apply(
+            6,
+            ConsensusCommand::ApplyRestoreStep {
+                reference,
+                step: RestoreStep::ApplyModels(domain.clone()),
+                effect: Box::new(RestoreStepEffect::InstalledState {
+                    authority: current.clone(),
+                    clock: None,
+                }),
+            },
+        )
+        .await?;
+    let harness = harness.reopen().await?;
+    crate::restore::validate_restored_domain_start(&harness.store.inner.state(), &domain)
+        .assured("completed installation releases durable start gate");
+    assert!(
+        harness
+            .store
+            .inner
+            .with_restore_state_installation(
+                &domain,
+                &authority,
+                || Some(tenure),
+                || panic!("completed installation cannot mutate")
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
 struct Harness {
     directory: TempDir,
     store: FjallStore,
@@ -815,6 +1000,65 @@ async fn complete_log_reads_return_every_entry_in_a_large_range() -> TestResult 
         .map(|entry| entry.log_id.index)
         .collect::<Vec<_>>();
     assert_eq!(indexes, vec![1, 2, 3]);
+    Ok(())
+}
+
+#[nervix_primitives::test]
+async fn log_chunks_keep_their_charge_only_while_they_hold_entries() -> TestResult {
+    let mut harness = Harness::new().await?;
+    harness.append(2).await?;
+    let mut entries = LogEntryStream::new(harness.store.inner.clone(), .., None);
+
+    let first = entries.next().await?.verified("two entries were appended");
+    assert_eq!(first.log_id.index, 1);
+    assert_eq!(
+        harness.executor.snapshot().commands_memory.reserved_bytes,
+        harness
+            .executor
+            .limits()
+            .command_state_storage_working_bytes()
+            .verified("the default command storage working set is addressable"),
+        "a chunk with an unread entry keeps its complete allocation charged"
+    );
+    let second = entries.next().await?.verified("one stored entry remains");
+    assert_eq!(second.log_id.index, 2);
+    assert_eq!(
+        harness.executor.snapshot().commands_memory.reserved_bytes,
+        0
+    );
+    assert!(entries.next().await?.is_none());
+    Ok(())
+}
+
+#[nervix_primitives::test]
+async fn exhausted_log_chunks_leave_room_for_another_reader_and_source_control() -> TestResult {
+    let mut harness = Harness::new().await?;
+    harness.append(1).await?;
+    let mut first = LogEntryStream::new(harness.store.inner.clone(), .., None);
+    let mut second = LogEntryStream::new(harness.store.inner.clone(), .., None);
+
+    let first_entry = first.next().await?.verified("one entry was appended");
+    assert_eq!(first_entry.log_id.index, 1);
+    // The consumer has taken the complete chunk but has not polled its stream again. A second
+    // reader must not consume the remaining budget while waiting for that empty chunk to release.
+    let second_read = second.next();
+    tokio::pin!(second_read);
+    let second_ready = second_read.as_mut().now_or_never();
+    let control = harness
+        .executor
+        .try_reserve(MemoryClass::Commands, 176)
+        .assured("an exhausted log chunk leaves room for a source control call");
+    let second_entry = match second_ready {
+        Some(result) => result?,
+        None => second_read.await?,
+    }
+    .verified("the second reader sees the same stored entry");
+    assert_eq!(second_entry.log_id.index, 1);
+    drop(control);
+    assert_eq!(
+        harness.executor.snapshot().commands_memory.reserved_bytes,
+        0
+    );
     Ok(())
 }
 
@@ -2327,5 +2571,39 @@ async fn current_consensus_storage_rejects_an_unknown_keyspace() -> TestResult {
             .to_string()
             .contains("recreate the node's stored state")
     );
+    Ok(())
+}
+
+/// An append stores every entry under its own index, so a log record under another index is damaged
+/// storage, which every read refuses with the documented typed failure.
+#[nervix_primitives::test]
+async fn a_log_entry_stored_under_another_index_fails_typed() -> TestResult {
+    let mut harness = Harness::new().await?;
+    harness.append(2).await?;
+    let logs = &harness.store.inner.shared.logs;
+    let second = logs
+        .get(StoreInner::log_key(2))?
+        .ok_or("the harness appended a second entry")?;
+    logs.remove(StoreInner::log_key(2))?;
+    logs.insert(StoreInner::log_key(3), second)?;
+
+    let read = harness
+        .store
+        .get_log_reader()
+        .await
+        .try_get_log_entries(..)
+        .await;
+    let state = harness.store.get_log_state().await;
+
+    for outcome in [read.map(|_| ()), state.map(|_| ())] {
+        let error = outcome.expect_err("the entry of index 2 is stored under index 3");
+        let failure = error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StorageFailure>());
+        assert!(
+            matches!(failure, Some(StorageFailure::InvalidState)),
+            "{error:?}"
+        );
+    }
     Ok(())
 }

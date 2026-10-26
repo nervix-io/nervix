@@ -29,7 +29,7 @@ message OrderEvent {
 streams it to the cluster — so it cannot sit inside a transaction, and its path resolves relative
 to where `nervix-cli` runs:
 
-```nspl
+```plexus
 BEGIN;
 CREATE RESOURCE order_proto;
 COMMIT;
@@ -49,7 +49,7 @@ The clause order is rigid: resource and its mandatory version, `CONFIG` (mandato
 that number. The message's JSON view keeps snake_case proto field names and numeric 64-bit
 integers, so a field-for-field message needs only the identity program `'.'`:
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE CODEC order_protobuf_codec
@@ -64,8 +64,8 @@ CREATE RELAY proto_orders SCHEMA order_record UNBRANCHED;
 
 CREATE ENDPOINT proto_ingress ON edge PATH '/proto-orders' TYPE HTTP;
 
-CREATE INGESTOR proto_order_source
-  FROM ENDPOINT proto_ingress MODE NO_ACK SEQUENTIAL
+CREATE HTTP ENDPOINT INGESTOR proto_order_source
+  FROM proto_ingress MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_protobuf_codec
   TO proto_orders
     INHERIT ALL

@@ -6,13 +6,18 @@
 //! - **Depends on.** Scheduled Models and their typed node identities.
 //! - **Must not know.** Runtime tasks, gate leases, cluster coordination or persistence.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use ahash::HashSet;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ConcreteBranchCoverage, DomainSchedule, ImpactGateBoundary, ImpactNodeCoverage, Model,
-    ModelKind, NodeRef, RelayName, ScheduledNode,
+    ClusterNodeName, ConcreteBranchCoverage, DomainSchedule, ImpactGateBoundary,
+    ImpactNodeCoverage, Model, ModelKind, NodeRef, RelayName, ScheduledNode,
 };
 
 use super::{graph::is_schedulable_model, validation::branching::model_branch_selection};
@@ -178,6 +183,37 @@ pub(crate) fn ownership_handoff_relays_for_schedule(
     relays
 }
 
+/// The nodes an ownership-handoff gate holds: every node on which the base or the target schedule
+/// runs an affected entity, one of the gated relays, or an entity that writes to one of them. Only
+/// those nodes can admit work into the moved scope, hold work it must drain, or run it once the
+/// handoff activates, so no other node has anything for the gate to hold.
+pub(crate) fn ownership_handoff_gate_participants(
+    base: &DomainSchedule,
+    target: &DomainSchedule,
+    affected_entities: &[NodeRef],
+    relays: &[RelayName],
+) -> BTreeSet<ClusterNodeName> {
+    let affected = affected_entities.iter().cloned().collect::<HashSet<_>>();
+    let gated_relays = relays.iter().cloned().collect::<HashSet<_>>();
+    let mut participants = BTreeSet::new();
+    for schedule in [base, target] {
+        for node in schedule.nodes.values() {
+            let identity = node.identity();
+            let is_affected = affected.contains(&identity);
+            let is_gated_relay = identity.kind == ModelKind::Relay
+                && gated_relays.contains(&RelayName::from(&identity.identifier));
+            let writes_gated_relay = match node.config.output_routes() {
+                Some(outputs) => outputs.relays().any(|output| gated_relays.contains(output)),
+                None => false,
+            };
+            if is_affected || is_gated_relay || writes_gated_relay {
+                participants.extend(node.execution_nodes().iter().cloned());
+            }
+        }
+    }
+    participants
+}
+
 fn model_change_relays_for_schedule(
     schedule: &DomainSchedule,
     affected_entities: &[NodeRef],
@@ -251,11 +287,111 @@ fn entity_input_relays(model: &Model) -> Vec<RelayName> {
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        DomainName, ModelName, PlacementGroupSchedule, ScheduledNode, SchemaFingerprint,
+        DomainName, EndpointIngestMode, HttpEndpointIngestor, HttpIngestor, IngestQuiesceMode,
+        IngestorEntity, IngestorInput, ModelName, PlacementGroupSchedule, ScheduledNode,
+        SchemaFingerprint,
     };
 
     use super::*;
-    use crate::registry::test_fixtures::{ingestor, junction, named, relay};
+    use crate::registry::test_fixtures::{ingestor, ingestor_statement, junction, named, relay};
+
+    fn placed_on(model: Model, nodes: &[&str]) -> ScheduledNode {
+        let nodes = nodes
+            .iter()
+            .map(|node| named::<ClusterNodeName>(node))
+            .collect::<Vec<_>>();
+        let primary = nodes.first().cloned();
+        ScheduledNode::new(model, SchemaFingerprint::from_digest([1; 32])).placed_on(primary, nodes)
+    }
+
+    /// An HTTP endpoint ingestor writing to `into`. It runs on every node it is assigned to.
+    fn listener_ingestor(name: &str, into: &str) -> Model {
+        let mut statement = ingestor_statement(name, into, "codec", "client", &[]);
+        let IngestorInput::Transport(transport) = &mut statement.input else {
+            panic!("the fixture ingestor reads a transport");
+        };
+        transport.source = IngestorEntity::Http(HttpIngestor::Endpoint(HttpEndpointIngestor {
+            endpoint: named("public_http"),
+            mode: EndpointIngestMode::NoAck,
+            quiesce: IngestQuiesceMode::EndpointBuffer {
+                max_size: "1MiB".to_string(),
+            },
+        }));
+        Model::Ingestor(statement)
+    }
+
+    /// A handoff that moves the junction `moved` from node-3 to node-4. node-1 runs the relays it
+    /// reads and writes, and node-2 runs a junction of its own between relays the handoff does not
+    /// touch, beside the scheduled nodes in `extra`.
+    fn bystander_handoff(extra: Vec<ScheduledNode>) -> (DomainSchedule, DomainSchedule) {
+        let mut nodes = vec![
+            placed_on(relay("input", "event_schema"), &["node-1"]),
+            placed_on(relay("output", "event_schema"), &["node-1"]),
+            placed_on(junction("moved", &["input"], "output"), &["node-3"]),
+            placed_on(relay("side_input", "event_schema"), &["node-2"]),
+            placed_on(relay("side_output", "event_schema"), &["node-2"]),
+            placed_on(
+                junction("side", &["side_input"], "side_output"),
+                &["node-2"],
+            ),
+        ];
+        nodes.extend(extra);
+        let base = DomainSchedule::new(named::<DomainName>("default"), nodes, Vec::new());
+        let mut target = base.clone();
+        let moved = target
+            .nodes
+            .get_mut(&NodeRef::new(
+                ModelKind::Junction,
+                named::<ModelName>("moved"),
+            ))
+            .assured("the base schedule runs the moved junction");
+        moved.primary_node = Some(named("node-4"));
+        moved.assigned_nodes = vec![named("node-4")];
+        (base, target)
+    }
+
+    #[test]
+    fn ownership_participants_are_the_nodes_that_run_the_moved_scope_before_or_after_it_moves() {
+        let (base, target) = bystander_handoff(Vec::new());
+        let moved = [NodeRef::new(
+            ModelKind::Junction,
+            named::<ModelName>("moved"),
+        )];
+        let relays = ownership_handoff_relays_for_schedule(&base, &moved);
+        assert_eq!(relays, [named::<RelayName>("input")]);
+
+        let participants = ownership_handoff_gate_participants(&base, &target, &moved, &relays);
+
+        assert_eq!(
+            participants,
+            BTreeSet::from(["node-1", "node-3", "node-4"].map(named::<ClusterNodeName>)),
+            "the owner of the fenced relay, the former owner and the destination hold the gate, \
+             and node-2 runs none of the moved scope"
+        );
+    }
+
+    #[test]
+    fn ownership_participants_include_every_node_a_listener_writing_a_fenced_relay_runs_on() {
+        let every_node = ["node-1", "node-2", "node-3", "node-4"];
+        let (base, target) = bystander_handoff(vec![placed_on(
+            listener_ingestor("listener", "input"),
+            &every_node,
+        )]);
+        let moved = [NodeRef::new(
+            ModelKind::Junction,
+            named::<ModelName>("moved"),
+        )];
+        let relays = ownership_handoff_relays_for_schedule(&base, &moved);
+        assert_eq!(relays, [named::<RelayName>("input")]);
+
+        let participants = ownership_handoff_gate_participants(&base, &target, &moved, &relays);
+
+        assert_eq!(
+            participants,
+            BTreeSet::from(every_node.map(named::<ClusterNodeName>)),
+            "a listener that writes the fenced relay can admit work on every node it runs on"
+        );
+    }
 
     #[test]
     fn model_scope_gates_only_external_admission_without_widening_to_ingestors() {

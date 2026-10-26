@@ -2,16 +2,16 @@ Feature: Relay capacity
   Scenario Outline: Relay capacities keep every bit through replication and a full cluster restart
     Given the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (seq I64);
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY <capacity>;
       """
-    And these NSPL commands are executed on node "<reader>"
+    And these Plexus commands are executed on node "<reader>"
       """
       SHOW CREATE RELAY notifications;
       """
@@ -19,12 +19,12 @@ Feature: Relay capacity
       """
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY <capacity>;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER RELAY notifications SET CAPACITY <altered_capacity>;
       """
     And the cluster is restarted
-    And these NSPL commands are executed on node "<reader>"
+    And these Plexus commands are executed on node "<reader>"
       """
       SHOW CREATE RELAY notifications;
       """
@@ -43,11 +43,11 @@ Feature: Relay capacity
   Scenario Outline: Relay CAPACITY is persisted and rendered through SHOW CREATE
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -80,11 +80,11 @@ Feature: Relay capacity
   Scenario Outline: ALTER RELAY SET CAPACITY updates a branched relay and its active branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -109,8 +109,8 @@ Feature: Relay capacity
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_relay_capacity_source CAPACITY 2;
 
       CREATE VHOST edge http-{{test_id}}.example.com;
-      CREATE ENDPOINT relay_capacity_ingress ON edge PATH '/relay-capacity' TYPE HTTP; CREATE INGESTOR relay_capacity_source
-        FROM ENDPOINT relay_capacity_ingress MODE NO_ACK SEQUENTIAL
+      CREATE ENDPOINT relay_capacity_ingress ON edge PATH '/relay-capacity' TYPE HTTP; CREATE HTTP ENDPOINT INGESTOR relay_capacity_source
+        FROM relay_capacity_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -137,7 +137,7 @@ Feature: Relay capacity
       "seq":1,"tenant":"acme"
       "seq":1,"tenant":"beta"
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER RELAY notifications SET CAPACITY 5;
       """
@@ -145,7 +145,7 @@ Feature: Relay capacity
       """
       quiesce level: DYNAMIC
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE RELAY notifications;
       """
@@ -180,12 +180,12 @@ Feature: Relay capacity
   Scenario Outline: Shrinking relay CAPACITY preserves owner-buffered and producer-slot payloads
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         seq I64
@@ -201,8 +201,7 @@ Feature: Relay capacity
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 3;
 
-      CREATE CLIENT zeromq_capacity_shrink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_capacity_shrink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -211,8 +210,8 @@ Feature: Relay capacity
       CREATE VHOST edge http-{{test_id}}-shrink.example.com;
       CREATE ENDPOINT relay_capacity_shrink_ingress ON edge PATH '/relay-capacity-shrink' TYPE HTTP;
 
-      CREATE INGESTOR relay_capacity_shrink_source
-        FROM ENDPOINT relay_capacity_shrink_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR relay_capacity_shrink_source
+        FROM relay_capacity_shrink_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -221,7 +220,7 @@ Feature: Relay capacity
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER zeromq_capacity_shrink_out FROM notifications TO ZEROMQ zeromq_capacity_shrink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE ZEROMQ PUSH EMITTER zeromq_capacity_shrink_out FROM notifications TO zeromq_capacity_shrink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -264,7 +263,7 @@ Feature: Relay capacity
       direction="received"
       relay="notifications"
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       ALTER RELAY notifications SET CAPACITY 1;
       """

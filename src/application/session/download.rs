@@ -17,6 +17,11 @@
 //! does not retain it either, answers from the backup's durable outcome: the archive was already
 //! downloaded, or its node no longer holds it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::pin::Pin;
 
 use error_stack::Report;
@@ -132,7 +137,13 @@ impl SessionServiceImpl {
             }
         };
         let (frames, archive_frames) = mpsc::channel(DOWNLOAD_FRAME_CAPACITY);
+        #[cfg(feature = "testing")]
+        let runtime = self.inner.runtime.clone();
+        #[cfg(feature = "testing")]
+        let node_id = self.inner.consensus.local_node_id().clone();
         self.inner.service_tasks.spawn(async move {
+            #[cfg(feature = "testing")]
+            runtime.pause_backup_download_if_armed(&node_id).await;
             let end = stream_archive(lease, reader, frames, limits).await;
             match end {
                 DownloadEnd::Collected => {

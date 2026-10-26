@@ -7,11 +7,11 @@ Feature: Physical infrastructure deadlines under domain pacing
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA physical_poll_record (
         user_id I64
@@ -23,16 +23,15 @@ Feature: Physical infrastructure deadlines under domain pacing
         FROM WIRE JSON SCHEMA physical_poll_wire
         TO SCHEMA physical_poll_record;
       CREATE RELAY physical_poll_records SCHEMA physical_poll_record UNBRANCHED;
-      CREATE CLIENT physical_poll_source
-        TYPE HTTP
+      CREATE HTTP CLIENT physical_poll_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?delay_ms=10000',
           'method' = 'GET',
           'timeout_ms' = 30000
         };
-      CREATE INGESTOR physical_poll_reader
-        FROM HTTP physical_poll_source EVERY 1h
-        ON QUIESCE SUSPEND DECODE USING physical_poll_codec
+      CREATE HTTP REQUEST INGESTOR physical_poll_reader
+        FROM physical_poll_source EVERY 1h
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING physical_poll_codec
         TIMESTAMP NOW
         TO physical_poll_records
           INHERIT ALL
@@ -43,16 +42,16 @@ Feature: Physical infrastructure deadlines under domain pacing
       START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
       """
     Then within "2s" clock source recorder "{{test_id}}" records 1 requests
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2010-01-01T00:00:00Z' TIME RATE 100.0;
       """
     Then within "2s" clock source recorder "{{test_id}}" records 2 requests
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
@@ -68,11 +67,11 @@ Feature: Physical infrastructure deadlines under domain pacing
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA physical_prometheus_sample (
         source STRING,
@@ -91,15 +90,14 @@ Feature: Physical infrastructure deadlines under domain pacing
         TO SCHEMA physical_prometheus_sample;
       CREATE RELAY physical_prometheus_samples
         SCHEMA physical_prometheus_sample UNBRANCHED;
-      CREATE CLIENT physical_prometheus_source
-        TYPE PROMETHEUS
+      CREATE PROMETHEUS CLIENT physical_prometheus_source
         CONFIG {
           'addr' = '{{mock_http_addr}}/prometheus-clock-source/{{test_id}}/10000',
           'timeout_ms' = 30000
         };
-      CREATE INGESTOR physical_prometheus_reader
-        FROM PROMETHEUS physical_prometheus_source QUERY 'vector(42.5)' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING physical_prometheus_codec
+      CREATE PROMETHEUS QUERY INGESTOR physical_prometheus_reader
+        FROM physical_prometheus_source QUERY 'vector(42.5)' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING physical_prometheus_codec
         TIMESTAMP NOW
         TO physical_prometheus_samples
           INHERIT ALL
@@ -110,7 +108,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       START AT '2000-01-01T00:00:00Z' TIME RATE 100.0;
       """
     Then within "2s" clock source recorder "{{test_id}}" records 1 requests
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
@@ -126,11 +124,11 @@ Feature: Physical infrastructure deadlines under domain pacing
     And clock source recorder "{{test_id}}" is reset
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA physical_timeout_record (
         user_id I64
@@ -142,16 +140,15 @@ Feature: Physical infrastructure deadlines under domain pacing
         FROM WIRE JSON SCHEMA physical_timeout_wire
         TO SCHEMA physical_timeout_record;
       CREATE RELAY physical_timeout_records SCHEMA physical_timeout_record UNBRANCHED;
-      CREATE CLIENT physical_timeout_source
-        TYPE HTTP
+      CREATE HTTP CLIENT physical_timeout_source
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/clock-source/{{test_id}}?delay_ms=10000',
           'method' = 'GET',
           'timeout_ms' = 250
         };
-      CREATE INGESTOR physical_timeout_reader
-        FROM HTTP physical_timeout_source EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING physical_timeout_codec
+      CREATE HTTP REQUEST INGESTOR physical_timeout_reader
+        FROM physical_timeout_source EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING physical_timeout_codec
         TIMESTAMP NOW
         TO physical_timeout_records
           INHERIT ALL
@@ -164,18 +161,18 @@ Feature: Physical infrastructure deadlines under domain pacing
     Then within "2s" clock source recorder "{{test_id}}" records 1 requests
     When physical time passes for "700ms"
     Then within "50ms" clock source recorder "{{test_id}}" records 1 requests
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
     Given clock source recorder "{{test_id}}" is reset
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2010-01-01T00:00:00Z' TIME RATE 100.0;
       """
     Then within "1500ms" clock source recorder "{{test_id}}" records at least 3 requests
     And the first 3 requests recorded by clock source recorder "{{test_id}}" are separated by at least "200ms"
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
@@ -189,11 +186,11 @@ Feature: Physical infrastructure deadlines under domain pacing
   Scenario Outline: Required materialized state has no physical lifetime and preserves each branch
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA physical_wait_notification (
         tenant STRING,
@@ -239,8 +236,8 @@ Feature: Physical infrastructure deadlines under domain pacing
         ON edge
         PATH '/input'
         TYPE HTTP;
-      CREATE INGESTOR physical_wait_state_source
-        FROM ENDPOINT physical_wait_state_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR physical_wait_state_source
+        FROM physical_wait_state_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_preference_codec
         TIMESTAMP NOW
         TO physical_wait_preferences
@@ -250,8 +247,8 @@ Feature: Physical infrastructure deadlines under domain pacing
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR physical_wait_input_source
-        FROM ENDPOINT physical_wait_input_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR physical_wait_input_source
+        FROM physical_wait_input_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING physical_wait_notification_codec
         TIMESTAMP NOW
         TO physical_wait_pending
@@ -301,7 +298,7 @@ Feature: Physical infrastructure deadlines under domain pacing
       {"tenant":"initech","id":"i-1","source":"input"}
       """
     Then the relay subscription does not receive a payload within "250ms"
-    And within "9s" these NSPL commands complete on the leader node
+    And within "9s" these Plexus commands complete on the leader node
       """
       STOP;
       """
@@ -318,12 +315,12 @@ Feature: Physical infrastructure deadlines under domain pacing
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
     And Kafka topic "physical_ack_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA physical_ack_record (
         user_id I64
@@ -335,14 +332,13 @@ Feature: Physical infrastructure deadlines under domain pacing
         FROM WIRE JSON SCHEMA physical_ack_wire
         TO SCHEMA physical_ack_record;
       CREATE RELAY physical_ack_records SCHEMA physical_ack_record UNBRANCHED;
-      CREATE CLIENT physical_ack_kafka
-        TYPE KAFKA
+      CREATE KAFKA CLIENT physical_ack_kafka
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-      CREATE INGESTOR physical_ack_source
-        FROM KAFKA physical_ack_kafka TOPIC physical_ack_in_{{test_id}} OFFSET BY CONSUMER GROUP physical_ack_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+      CREATE KAFKA TOPIC INGESTOR physical_ack_source
+        FROM physical_ack_kafka TOPIC 'physical_ack_in_{{test_id}}' OFFSET BY CONSUMER GROUP 'physical_ack_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
         ON QUIESCE SUSPEND DECODE USING physical_ack_codec
         TIMESTAMP NOW
         TO physical_ack_records
@@ -351,10 +347,10 @@ Feature: Physical infrastructure deadlines under domain pacing
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER physical_ack_sink
+      CREATE KAFKA TOPIC EMITTER physical_ack_sink
         FROM physical_ack_records
-        TO KAFKA physical_ack_kafka TOPIC physical_ack_out_{{test_id}}
-        MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        TO physical_ack_kafka TOPIC 'physical_ack_out_{{test_id}}'
+        MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING physical_ack_codec
         INHERIT ALL
         FLUSH IMMEDIATE
@@ -386,7 +382,7 @@ Feature: Physical infrastructure deadlines under domain pacing
   Scenario: Silent peers obey the same shutdown bound without and after a domain clock
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 1s;
       """
@@ -397,7 +393,7 @@ Feature: Physical infrastructure deadlines under domain pacing
     When node "node-3" is started
     Then node "node-1" eventually reports interconnect to "node-3" as "connected"
     And node "node-2" eventually reports interconnect to "node-3" as "connected"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '1970-01-01T00:00:00Z' TIME RATE 0.0001;
       STOP;

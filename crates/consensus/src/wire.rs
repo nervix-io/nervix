@@ -6,6 +6,14 @@
 //! - **Depends on.** OpenRaft, shared Raft records, and the interconnect request primitive.
 //! - **Must not know.** HTTP/2 framing, durable storage, peer addresses, or control-plane policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{io, time::Duration};
 
 use nervix_interconnect::{
@@ -29,6 +37,14 @@ type SnapshotMetaOf =
     SnapshotMeta<super::CommittedLeaderIdOf<TypeConfig>, ClusterNodeName, BasicNode>;
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed consensus wire response carries a projection of the answering node's \
+                  failure"
+    )
+)]
 pub(crate) enum ConsensusRequestError {
     #[error("the authenticated request origin is invalid: {0}")]
     InvalidOrigin(String),
@@ -485,4 +501,78 @@ impl InterconnectRequest for TransferLeadership {
     const NAME: &'static str = "raft_transfer_leadership";
     const CLASS: PoolClass = PoolClass::Management;
     const TIMEOUT: Duration = Duration::from_secs(5);
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use openraft::{Entry, LogId, Vote, entry::EntryPayload, impls::leader_id_adv::LeaderId};
+
+    use super::*;
+
+    #[test]
+    fn an_append_request_refusing_its_second_entry_frees_the_first() {
+        let leader = ClusterNodeName::parse("replica_leader").assured("the leader name is valid");
+        let name = |value| ClusterNodeName::parse(value).assured("the entry name is valid");
+        let entries = ["first_entry_node", "second_entry_node"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| Entry {
+                log_id: LogId::new(
+                    LeaderId {
+                        term: 3,
+                        node_id: name(value),
+                    },
+                    u64::try_from(index).assured("the fixture index fits"),
+                ),
+                payload: EntryPayload::Blank,
+            })
+            .collect();
+        let request = AppendEntriesRecord::from_request(AppendEntriesRequest::<TypeConfig> {
+            vote: Vote::new_committed(3, leader),
+            prev_log_id: None,
+            entries,
+            leader_commit: None,
+        });
+        let mut bytes =
+            rkyv::to_bytes::<rkyv::rancor::Error>(&request).assured("the append request archives");
+        let target = b"second_entry_node";
+        assert_eq!(
+            bytes
+                .windows(target.len())
+                .filter(|window| *window == target)
+                .count(),
+            1,
+            "the second entry name occurs once"
+        );
+        let start = bytes
+            .windows(target.len())
+            .position(|window| window == target)
+            .assured("the second entry name is archived");
+        bytes[start + 6] = b'!';
+        rkyv::access::<rkyv::Archived<AppendEntriesRecord>, rkyv::rancor::Error>(&bytes)
+            .assured("the changed name leaves a valid archive shape");
+
+        let decode = || {
+            let result = rkyv::from_bytes::<AppendEntriesRecord, rkyv::rancor::Error>(&bytes);
+            assert!(result.is_err());
+            result
+        };
+        drop(decode());
+        let before = alloc_count::stats();
+        drop(decode());
+        let after = alloc_count::stats();
+        let allocated = after
+            .alloc_calls
+            .checked_sub(before.alloc_calls)
+            .assured("a thread's allocation count only grows");
+        let freed = after
+            .dealloc_calls
+            .checked_sub(before.dealloc_calls)
+            .assured("a thread's deallocation count only grows");
+        assert_eq!(
+            allocated, freed,
+            "a refused append request retains no allocation"
+        );
+    }
 }

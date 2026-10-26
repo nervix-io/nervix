@@ -42,28 +42,22 @@ pub(super) enum ProcessorTemplateError {
     #[error("dynamic {} update changed materialized-state dependencies", .kind.as_str())]
     MaterializedDependencies { kind: ModelKind },
     #[error(
-        "failed to open {} '{}' replicated state for branch '{}'",
+        "failed to open {} '{}' replicated state ({branch})",
         .kind.as_str(),
-        .processor.as_str(),
-        branch_key_display(.branch)
+        .processor.as_str()
     )]
     ReplicatedState {
         kind: ModelKind,
         processor: ModelName,
-        branch: Option<BranchKey>,
+        branch: BranchScope,
     },
-    #[error("window processor '{}' requires an input relay", .processor.as_str())]
-    WindowInputRelay { processor: ModelName },
-    #[error("failed to resolve window processor '{}' input schema", .processor.as_str())]
-    WindowInputSchema { processor: ModelName },
     #[error(
-        "failed to restore window processor '{}' state for branch '{}'",
-        .processor.as_str(),
-        branch_key_display(.branch)
+        "failed to restore window processor '{}' state ({branch})",
+        .processor.as_str()
     )]
     WindowRestore {
         processor: ModelName,
-        branch: Option<BranchKey>,
+        branch: BranchScope,
     },
     #[error("could not bind branch domain clock")]
     BindDomainClock,
@@ -491,14 +485,14 @@ impl RelayProcessorTemplate {
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     let state = runtime
                         .replicated_deduplicator_state(placement)
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     RelayProcessorOperationNode::Deduplicator {
                         output_routes: Self::instantiate_outputs(output_routes),
@@ -510,6 +504,7 @@ impl RelayProcessorTemplate {
                 }
                 RelayProcessorOperationTemplate::WindowProcessor {
                     output_routes,
+                    input_schema,
                     width_messages,
                     step_messages,
                     width_duration,
@@ -529,30 +524,21 @@ impl RelayProcessorTemplate {
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     let replicated_state = runtime
                         .replicated_window_processor_state(placement)
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
-                        })?;
-                    let input_relay = self.input_relays.first().ok_or_else(|| {
-                        Report::new(ProcessorTemplateError::WindowInputRelay {
-                            processor: self.processor.clone(),
-                        })
-                    })?;
-                    let input_schema = relay_schema_for_runtime(runtime, domain, input_relay)
-                        .change_context_lazy(|| ProcessorTemplateError::WindowInputSchema {
-                            processor: self.processor.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     let state = replicated_state
-                        .restore_state(plan, &input_schema, incarnation, &runtime.inner.executor)
+                        .restore_state(plan, input_schema, incarnation, &runtime.inner.executor)
                         .await
                         .change_context_lazy(|| ProcessorTemplateError::WindowRestore {
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     RelayProcessorOperationNode::WindowProcessor {
                         output_routes: Self::instantiate_outputs(output_routes),
@@ -665,14 +651,14 @@ impl RelayProcessorTemplate {
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     let replicated_state = runtime
                         .replicated_wasm_processor_state(placement)
                         .change_context_lazy(|| ProcessorTemplateError::ReplicatedState {
                             kind: self.kind,
                             processor: self.processor.clone(),
-                            branch: key.clone(),
+                            branch: BranchScope::from(key),
                         })?;
                     RelayProcessorOperationNode::WasmProcessor {
                         output_routes: Self::instantiate_outputs(output_routes),
@@ -728,6 +714,24 @@ impl BranchInstanceTemplate {
         Ok(())
     }
 
+    /// End the delivery channels this branch lane publishes through for `key`, and every delivery
+    /// still waiting for admission on them, because the lane's branch for that key has ended. A
+    /// recreated branch binds fresh channels. The channels another relay holds for the same key
+    /// belong to that relay's own branch, which ends only with its own expiry or eviction.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "branch expiry scans and capacity admission end the channels of each branch \
+                      they release"
+        )
+    )]
+    pub(super) fn retire_branch_channels(&self, key: &Option<BranchKey>) {
+        for relay in self.relays.values() {
+            relay.services.remove_branch_slots(key);
+        }
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -773,31 +777,33 @@ impl BranchInstanceTemplate {
         }
         let dispatcher = runtime.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
-        let branch_key = branch_key_display(&key);
+        // Unbranched execution has no per-branch series: it records only the node's own.
+        let branch = key.as_ref().map(BranchKey::fingerprint);
         let source_metrics =
             runtime
                 .inner
                 .metrics
                 .resolve_node_batch_metrics(NodeBatchMetricsSpec {
                     domain,
-                    kind: self.source_kind,
+                    kind: self.entity_kind,
                     node: &ModelName::from(&self.source),
                     relay: &self.root_relay,
                     physical_node_id,
                     direction: "sent",
-                    branch_key: Some(branch_key),
+                    branch,
                 });
-        let source_input_metrics = if self.source_kind == ModelKind::Ingestor {
-            Some(runtime.inner.metrics.resolve_branch_node_message_metrics(
-                domain,
-                self.source_kind,
-                &ModelName::from(&self.source),
-                physical_node_id,
-                "received",
-                branch_key,
-            ))
-        } else {
-            None
+        let source_input_metrics = match branch {
+            Some(branch) if self.entity_kind == ModelKind::Ingestor => {
+                Some(runtime.inner.metrics.resolve_branch_node_message_metrics(
+                    domain,
+                    self.entity_kind,
+                    &ModelName::from(&self.source),
+                    physical_node_id,
+                    "received",
+                    branch,
+                ))
+            }
+            _ => None,
         };
         let processor_inputs = processors
             .iter()
@@ -812,7 +818,7 @@ impl BranchInstanceTemplate {
                             &processor.processor,
                             relay,
                             physical_node_id,
-                            Some(branch_key),
+                            branch,
                         );
                         (relay.clone(), metrics)
                     })
@@ -837,7 +843,7 @@ impl BranchInstanceTemplate {
                                 relay: &output.relay,
                                 physical_node_id,
                                 direction: "sent",
-                                branch_key: Some(branch_key),
+                                branch,
                             },
                         );
                         (output.relay.clone(), metrics)
@@ -863,7 +869,7 @@ impl BranchInstanceTemplate {
             routing: runtime.domain_routing_cache(domain),
             routing_snapshot: None,
             domain_clock,
-            source_kind: self.source_kind,
+            entity_kind: self.entity_kind,
             source: self.source.clone(),
             root_relay: self.root_relay.clone(),
             relays,
@@ -872,7 +878,7 @@ impl BranchInstanceTemplate {
             processors,
             error_policies: self.error_policies.clone(),
             metrics: BranchRuntimeMetrics {
-                source_dirty: runtime.branch_metrics_mark(domain, self.source_kind, &self.source),
+                source_dirty: runtime.branch_metrics_mark(domain, self.entity_kind, &self.source),
                 processor_dirty,
                 source: source_metrics,
                 source_input: source_input_metrics,
@@ -884,6 +890,14 @@ impl BranchInstanceTemplate {
 }
 
 #[cfg(test)]
+#[path = "branch_lane_channel_tests.rs"]
+mod branch_lane_channel_tests;
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 

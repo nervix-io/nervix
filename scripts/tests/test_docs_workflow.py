@@ -11,12 +11,12 @@ from scripts.publish_docs_alias import update_alias
 
 
 class DocsWorkflowTests(unittest.TestCase):
-    def test_nspl_agent_skill_is_a_top_level_book_section(self) -> None:
+    def test_plexus_agent_skill_is_a_top_level_book_section(self) -> None:
         summary = Path("docs/src/SUMMARY.md").read_text()
 
-        self.assertIn("- [NSPL Agent Skill](./nspl-agent-skill.md)", summary.splitlines())
+        self.assertIn("- [Plexus Agent Skill](./plexus-agent-skill.md)", summary.splitlines())
         self.assertNotIn(
-            "  - [NSPL Agent Skill](./nspl-agent-skill.md)",
+            "  - [Plexus Agent Skill](./plexus-agent-skill.md)",
             summary.splitlines(),
         )
 
@@ -109,6 +109,17 @@ class DocsWorkflowTests(unittest.TestCase):
 
         self.assertIn("    - [nervix-cli Reference](./nervix-cli-reference.md)", summary)
         self.assertFalse(Path("docs/src/nervix-cli-reference.md").exists())
+
+    def test_server_reference_is_a_generated_chapter_under_running_nervix(self) -> None:
+        summary = Path("docs/src/SUMMARY.md").read_text().splitlines()
+
+        self.assertIn("    - [nervix-server Reference](./nervix-server-reference.md)", summary)
+        self.assertFalse(Path("docs/src/nervix-server-reference.md").exists())
+
+    def test_running_page_points_at_the_generated_server_reference(self) -> None:
+        page = Path("docs/src/quickstart-running.md").read_text()
+
+        self.assertIn("(nervix-server-reference.md)", page)
 
     def test_cli_page_points_at_the_generated_reference(self) -> None:
         page = Path("docs/src/client-tools-cli.md").read_text()
@@ -233,7 +244,7 @@ class DocsWorkflowTests(unittest.TestCase):
         self.assertTrue(Path("docs/theme/nervix-pdf-mark.pdf").is_file())
 
     def test_pdf_chapter_uses_local_license_link(self) -> None:
-        agent_skill = Path("docs/src/nspl-agent-skill.md").read_text()
+        agent_skill = Path("docs/src/plexus-agent-skill.md").read_text()
 
         self.assertIn("[FCL-1.0-ALv2 license](license.md)", agent_skill)
         self.assertNotIn(

@@ -7,7 +7,7 @@ Feature: Delivery latency metrics
   Scenario Outline: Node inputs record each batch's delivery latency from its rows' ingestion watermarks
     Given a <cluster_size> node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 1m SKEW 1m;
       CREATE SCHEMA reading ( tenant STRING, sequence I64, occurred_at DATETIME );
@@ -24,7 +24,7 @@ Feature: Delivery latency metrics
       CREATE RELAY emitted_readings SCHEMA reading BRANCHED BY tenants;
       CREATE VHOST edge delivery-latency-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_batch_codec
         TIMESTAMP AT occurred_at
         TO raw_readings INHERIT ALL BRANCHED BY tenants SET tenant = message.tenant
@@ -39,13 +39,12 @@ Feature: Delivery latency metrics
       CREATE JUNCTION forward FROM reingested_readings
         BRANCHED BY tenants
         TO emitted_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
         };
-      CREATE EMITTER publish FROM emitted_readings TO ZEROMQ zeromq_main MODE NO_ACK
+      CREATE ZEROMQ PUSH EMITTER publish FROM emitted_readings TO zeromq_main MODE NO ACK
         RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING reading_wire_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:01:00Z' TIME RATE 1e-300;
@@ -72,7 +71,7 @@ Feature: Delivery latency metrics
       "sequence":3
       "sequence":4
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE JUNCTION admit;
       """
@@ -122,7 +121,7 @@ Feature: Delivery latency metrics
       relay="raw_readings"
       le="+Inf"
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE REINGESTOR reingest;
       """
@@ -156,7 +155,7 @@ Feature: Delivery latency metrics
       relay="admitted_readings"
       le="5"
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE JUNCTION forward;
       """
@@ -184,7 +183,7 @@ Feature: Delivery latency metrics
       relay="reingested_readings"
       le="0.1"
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE EMITTER publish;
       """

@@ -4,8 +4,12 @@
 //! - **Owns.** WASM invocation, guest output routing, branch-local timeout handling, and the
 //!   lifecycle stage and diagnostic identity of every WASM processor failure.
 //! - **Depends on.** Compiled WASM processors, Arrow batches and explicit execution contexts.
-//! - **Must not know.** NSPL parsing, placement policy or external connector clients.
+//! - **Must not know.** Plexus parsing, placement policy or external connector clients.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -86,6 +90,14 @@ pub(crate) enum WasmInstanceError {
         acks: usize,
         metadata: usize,
     },
+    #[error("failed to concatenate the pending input batches")]
+    ConcatenateInput,
+    #[error("the processor has no output destinations")]
+    NoOutputs,
+    #[error("the processor has no input relays")]
+    NoInputs,
+    #[error("the branch instance is unavailable")]
+    InstanceUnavailable,
 }
 
 /// The stage of a WASM processor branch instance's lifecycle at which a failure happened.
@@ -177,7 +189,11 @@ impl WasmInstanceError {
             | Self::ReadModule { .. }
             | Self::CompileModule { .. }
             | Self::EncodeInput
-            | Self::InputRowCount { .. } => None,
+            | Self::InputRowCount { .. }
+            | Self::ConcatenateInput
+            | Self::NoOutputs
+            | Self::NoInputs
+            | Self::InstanceUnavailable => None,
         }
     }
 }
@@ -255,13 +271,10 @@ impl WasmBranchModule {
 
 impl std::fmt::Display for WasmBranchModule {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.branch {
-            Some(branch) => write!(formatter, "branch {branch}")?,
-            None => formatter.write_str("unbranched")?,
-        }
         write!(
             formatter,
-            ", resource '{}' version {} file '{}'",
+            "{}, resource '{}' version {} file '{}'",
+            BranchScope::from(&self.branch),
             self.resource.identifier.as_str(),
             self.resource.version,
             self.file
@@ -380,20 +393,14 @@ pub(super) async fn flush_branch_wasm_processor(
     let forwarded = match RelayRecordBatch::concat(grouped_batches.clone()) {
         Ok(forwarded) => forwarded,
         Err(error) => {
-            for batch in grouped_batches {
-                branch.runtime.handle_internal_processor_error_for_acks(
-                    &branch.domain,
-                    node_kind,
-                    processor,
-                    error_policies,
-                    batch.acks.iter(),
-                    format!(
-                        "wasm processor '{}' failed to concat arrow batches: {}",
-                        processor.as_str(),
-                        error
-                    ),
-                );
-            }
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                node_kind,
+                processor,
+                error_policies,
+                grouped_batches.iter().flat_map(|batch| batch.acks.iter()),
+                &error.change_context(WasmInstanceError::ConcatenateInput),
+            );
             return;
         }
     };
@@ -405,10 +412,7 @@ pub(super) async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             forwarded.acks.iter(),
-            format!(
-                "wasm processor '{}' has no output destinations",
-                processor.as_str()
-            ),
+            &Report::new(WasmInstanceError::NoOutputs),
         );
         return;
     }
@@ -419,10 +423,7 @@ pub(super) async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             forwarded.acks.iter(),
-            format!(
-                "wasm processor '{}' has no input relays",
-                processor.as_str()
-            ),
+            &Report::new(WasmInstanceError::NoInputs),
         );
         return;
     };
@@ -435,7 +436,7 @@ pub(super) async fn flush_branch_wasm_processor(
                 processor,
                 error_policies,
                 forwarded.acks.iter(),
-                error.to_string(),
+                &error,
             );
             return;
         }
@@ -451,7 +452,7 @@ pub(super) async fn flush_branch_wasm_processor(
                     processor,
                     error_policies,
                     forwarded.acks.iter(),
-                    error.to_string(),
+                    &error,
                 );
                 return;
             }
@@ -484,7 +485,7 @@ pub(super) async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             forwarded.acks.iter(),
-            format!("{error:#}"),
+            &error,
         );
         return;
     }
@@ -495,10 +496,7 @@ pub(super) async fn flush_branch_wasm_processor(
             processor,
             error_policies,
             forwarded.acks.iter(),
-            format!(
-                "wasm processor '{}' instance is unavailable",
-                processor.as_str()
-            ),
+            &Report::new(WasmInstanceError::InstanceUnavailable),
         );
         return;
     }
@@ -515,7 +513,7 @@ pub(super) async fn flush_branch_wasm_processor(
                     processor,
                     error_policies,
                     forwarded.acks.iter(),
-                    format!("{error:#}"),
+                    &error,
                 );
                 return;
             }
@@ -568,7 +566,7 @@ pub(super) async fn flush_branch_wasm_processor(
                             "the is_none check above returned unless this branch holds an instance",
                         )
                         .module,
-                    dispatch_error: "failed to forward message",
+                    callback: WasmCallbackOutput::Process,
                     execution_now,
                 },
                 outputs,
@@ -583,7 +581,7 @@ pub(super) async fn flush_branch_wasm_processor(
                     processor,
                     error_policies,
                     holds.acks(),
-                    format!("{error:#}"),
+                    &error,
                 );
             }
         }
@@ -916,6 +914,10 @@ pub(super) async fn wasm_envelope_from_relay_batch(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use arrow_array::{Array, Int32Array};
     use nervix_models::{ParseAsType, WasmStateGeneration};
@@ -1066,9 +1068,10 @@ mod tests {
         assert_eq!(
             format!("{failure:#}"),
             "wasm processor 'sessionizer' application state restoration failed (branch \
-             {\"tenant\":\"alpha\"}, resource 'sessionizer' version 3 file 'sessionizer.wasm', \
-             export 'nervix_load_state', saved state revision 12): wasm guest rejected the \
-             application state in its saved snapshot: counters header is truncated"
+             40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource \
+             'sessionizer' version 3 file 'sessionizer.wasm', export 'nervix_load_state', saved \
+             state revision 12): wasm guest rejected the application state in its saved snapshot: \
+             counters header is truncated"
         );
     }
 
@@ -1451,5 +1454,21 @@ mod tests {
             !Arc::ptr_eq(&first.compiled, &recompiled.compiled),
             "the module of a processor no longer assigned to the node must be dropped"
         );
+    }
+
+    /// A processor's own failures to bring input to its guest say nothing about the saved state
+    /// its guest would restore, so none of them is a verdict on that state.
+    #[test]
+    fn a_processor_failure_outside_its_guest_is_no_verdict_on_saved_state() {
+        let failures = [
+            WasmInstanceError::EncodeInput,
+            WasmInstanceError::ConcatenateInput,
+            WasmInstanceError::NoOutputs,
+            WasmInstanceError::NoInputs,
+            WasmInstanceError::InstanceUnavailable,
+        ];
+        for failure in failures {
+            assert_eq!(failure.saved_state_rejection(), None, "{failure}");
+        }
     }
 }

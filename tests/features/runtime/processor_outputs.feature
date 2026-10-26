@@ -2,11 +2,11 @@ Feature: Processor output routing
   Scenario Outline: Each output route owns its message error policy
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA routed_event (
         id STRING,
@@ -35,8 +35,8 @@ Feature: Processor output routing
       CREATE RELAY route_errors SCHEMA error_record UNBRANCHED;
       CREATE VHOST edge output-error-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
         TO source_events
         INHERIT ALL
@@ -87,11 +87,11 @@ Feature: Processor output routing
   Scenario Outline: Each processor output owns its flush policy
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA routed_event (
         id STRING,
@@ -109,8 +109,8 @@ Feature: Processor output routing
       CREATE RELAY delayed_events SCHEMA routed_event UNBRANCHED;
       CREATE VHOST edge output-flush-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_event_codec
         TO incoming_events
         INHERIT ALL
@@ -156,11 +156,11 @@ Feature: Processor output routing
   Scenario Outline: Ingestor output routes filter input before fan-out
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event_in (
         id STRING,
@@ -196,8 +196,8 @@ Feature: Processor output routing
         PATH '/ingestor-output'
         TYPE HTTP;
 
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         FILTER WHERE input.active
         TO error_events
@@ -250,11 +250,11 @@ Feature: Processor output routing
   Scenario Outline: SET assignments observe earlier assignments to the same destination field
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA source_event (
         id STRING
@@ -272,8 +272,8 @@ Feature: Processor output routing
       CREATE RELAY projected_events SCHEMA projected_event UNBRANCHED;
       CREATE VHOST edge sequential-set-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source_events
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_events
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_event_codec
         TO projected_events
         INHERIT ALL
@@ -302,11 +302,11 @@ Feature: Processor output routing
   Scenario Outline: Validation rejects required output fields that are neither inherited nor assigned
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "required output field 'amount' remains uninitialized"
+    When these Plexus commands fail with "required output field 'amount' remains uninitialized"
       """
       CREATE SCHEMA source_event (
         note STRING OPTIONAL
@@ -338,11 +338,11 @@ Feature: Processor output routing
   Scenario Outline: Processor output routes fan out to conditional and unconditional destinations
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         id STRING,
@@ -375,8 +375,8 @@ Feature: Processor output routing
         ON edge
         PATH '/route-b'
         TYPE HTTP;
-        CREATE INGESTOR source_logs_a
-        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_logs_a
+        FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs_a
         INHERIT ALL
@@ -385,8 +385,8 @@ Feature: Processor output routing
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR source_logs_b
-        FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_logs_b
+        FROM ingress_b MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs_b
         INHERIT ALL
@@ -461,11 +461,11 @@ Feature: Processor output routing
   Scenario Outline: Single processor output route preserves branching and applies destination rewrites
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification_in (
         tenant STRING,
@@ -499,8 +499,8 @@ Feature: Processor output routing
         ON edge
         PATH '/output-route'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
           INHERIT ALL
@@ -557,11 +557,11 @@ Feature: Processor output routing
   Scenario Outline: Processor output routes project each destination independently
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification_in (
         id STRING,
@@ -594,8 +594,8 @@ Feature: Processor output routing
         ON edge
         PATH '/project-output'
         TYPE HTTP;
-        CREATE INGESTOR source_logs
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_logs
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming_logs
           INHERIT ALL
@@ -672,11 +672,11 @@ Feature: Processor output routing
   Scenario Outline: Processor output routes isolate materialized state across interleaved branches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -717,8 +717,8 @@ Feature: Processor output routing
         CREATE VHOST edge http-branch-state-{{test_id}}.example.com;
         CREATE ENDPOINT state_ingress ON edge PATH '/branch-state' TYPE HTTP;
         CREATE ENDPOINT ingress ON edge PATH '/branch-input' TYPE HTTP;
-        CREATE INGESTOR preference_source
-        FROM ENDPOINT state_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR preference_source
+        FROM state_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING preference_codec
         TO tenant_preferences
         INHERIT ALL
@@ -727,8 +727,8 @@ Feature: Processor output routing
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE INGESTOR notification_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR notification_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO incoming
         INHERIT ALL

@@ -13,6 +13,14 @@
 //! never be given capacity the connection does not have and the shared remainder is always what
 //! the reservations leave behind.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use nervix_primitives::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
@@ -37,10 +45,13 @@ pub(super) struct StreamSlotQuotas {
 
 struct StreamSlotQuotasInner {
     /// Raised when the connection begins to drain and never lowered, because a drained connection
-    /// is closed rather than reused. A lease reads it only after taking its slot, and the drain
-    /// raises it before taking any slot back. With sequentially consistent reads and writes, a
-    /// lease therefore either finds it raised and returns its slot, or took its slot before the
-    /// drain began and is one the drain waits for.
+    /// is closed rather than reused.
+    ///
+    /// The semaphores decide what the drain waits for: it takes every permit back, so a lease
+    /// whose slot came first is one the drain waits for, and a lease after the drain holds every
+    /// permit finds none left. A lease also reads this after taking its slot and returns the slot
+    /// when it is raised, which stops leasing as soon as the drain begins rather than once the
+    /// drain holds every permit.
     draining: AtomicBool,
     partition: StreamSlotPartition,
 }
@@ -433,9 +444,10 @@ pub(super) fn configure_client_builder(
     let streams = u32::try_from(stream_slots).map_err(|_| TransportError::InvalidOptions {
         reason: "pool stream slots exceed the HTTP/2 setting width".to_string(),
     })?;
+    let windows = options.receive_windows(class);
     builder
-        .initial_window_size(options.initial_stream_window_bytes)
-        .initial_connection_window_size(options.initial_connection_window_bytes)
+        .initial_window_size(windows.stream)
+        .initial_connection_window_size(windows.connection)
         .max_header_list_size(options.max_header_bytes)
         .max_concurrent_streams(streams)
         .initial_max_send_streams(stream_slots)

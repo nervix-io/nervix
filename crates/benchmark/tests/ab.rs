@@ -245,16 +245,15 @@ fn rejects_arms_with_mismatched_workload_configuration() {
     let error = AbSummary::from_arms(baseline, candidate)
         .expect_err("different partition counts must not compare");
     assert!(matches!(
-        &error,
-        AbError::MismatchedConfiguration { arm, source, .. }
-            if arm == CANDIDATE_LABEL
-                && matches!(
-                    **source,
-                    ComparisonError::MismatchedConfiguration {
-                        field: "partitions",
-                        ..
-                    }
-                )
+        error.current_context(),
+        AbError::MismatchedConfiguration { arm, .. } if arm == CANDIDATE_LABEL
+    ));
+    assert!(matches!(
+        error.downcast_ref::<ComparisonError>(),
+        Some(ComparisonError::MismatchedConfiguration {
+            field: "partitions",
+            ..
+        })
     ));
 }
 
@@ -276,7 +275,7 @@ fn rejects_an_empty_arm() {
     let error =
         AbSummary::from_arms(baseline, candidate).expect_err("an empty arm must not compare");
     assert!(matches!(
-        &error,
+        error.current_context(),
         AbError::EmptyArm { arm } if arm == CANDIDATE_LABEL
     ));
 }
@@ -301,9 +300,98 @@ fn rejects_a_failed_run_with_its_arm_named() {
     let error = AbSummary::from_arms(baseline, candidate)
         .expect_err("a failed run must not contribute to a summary");
     assert!(matches!(
-        &error,
-        AbError::Artifact { arm, source, .. }
-            if arm == CANDIDATE_LABEL
-                && matches!(**source, ComparisonError::UnsuccessfulRun { .. })
+        error.current_context(),
+        AbError::Artifact { arm, .. } if arm == CANDIDATE_LABEL
+    ));
+    assert!(matches!(
+        error.downcast_ref::<ComparisonError>(),
+        Some(ComparisonError::UnsuccessfulRun { status, .. }) if status == "fail"
+    ));
+}
+
+#[test]
+fn names_the_arm_and_run_of_an_unreadable_artifact_and_its_cause_once() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let baseline = arm(
+        artifacts.path(),
+        "baseline",
+        BASELINE_LABEL,
+        &[(1_000.0, 512)],
+    );
+    let missing = artifacts.path().join("candidate/never-ran");
+    let candidate = AbArm {
+        label: CANDIDATE_LABEL.to_string(),
+        server_binary: artifacts.path().join("candidate/nervix-server"),
+        run_directories: vec![missing.clone()],
+    };
+
+    let error = AbSummary::from_arms(baseline, candidate)
+        .expect_err("a run directory that was never written must not compare");
+
+    assert!(matches!(
+        error.current_context(),
+        AbError::Artifact { arm, directory } if arm == CANDIDATE_LABEL && *directory == missing
+    ));
+    assert!(matches!(
+        error.downcast_ref::<ComparisonError>(),
+        Some(ComparisonError::Read { path }) if *path == missing.join("status.txt")
+    ));
+    let cause = error
+        .downcast_ref::<std::io::Error>()
+        .expect("the read failure should stay beneath the artifact context");
+    assert_eq!(cause.kind(), std::io::ErrorKind::NotFound);
+    let rendered = format!("{error:#}");
+    assert_eq!(
+        rendered,
+        format!(
+            "A/B arm '{CANDIDATE_LABEL}' has an unusable run {}: failed to read benchmark \
+             artifact {}: {cause}",
+            missing.display(),
+            missing.join("status.txt").display(),
+        )
+    );
+}
+
+#[test]
+fn refuses_an_arm_that_measured_a_different_benchmark() {
+    let artifacts = tempfile::tempdir().expect("temporary artifacts should be created");
+    let baseline = arm(
+        artifacts.path(),
+        "baseline",
+        BASELINE_LABEL,
+        &[(1_000.0, 512)],
+    );
+    let candidate = arm(
+        artifacts.path(),
+        "candidate",
+        CANDIDATE_LABEL,
+        &[(1_150.0, 512)],
+    );
+    let manifest_path = candidate.run_directories[0].join("run.toml");
+    let manifest = fs::read_to_string(&manifest_path).expect("fixture manifest should exist");
+    write(
+        &manifest_path,
+        &manifest.replace(
+            "benchmark = \"kafka-filter-map\"",
+            "benchmark = \"kafka-dedup-window\"",
+        ),
+    );
+    let mismatched = candidate.run_directories[0].clone();
+
+    let error = AbSummary::from_arms(baseline, candidate)
+        .expect_err("arms measuring different benchmarks must not compare");
+
+    assert!(matches!(
+        error.current_context(),
+        AbError::MismatchedConfiguration { arm, directory }
+            if arm == CANDIDATE_LABEL && *directory == mismatched
+    ));
+    assert!(matches!(
+        error.downcast_ref::<ComparisonError>(),
+        Some(ComparisonError::MismatchedConfiguration {
+            benchmark,
+            implementation,
+            field: "benchmark",
+        }) if benchmark == "kafka-filter-map" && implementation == "nervix"
     ));
 }

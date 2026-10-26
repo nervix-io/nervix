@@ -7,6 +7,11 @@
 //!   labels and timeout triggers of Shuttle's Tokio.
 //! - **Must not know.** Relays, branches, batches, acknowledgements, or what a dispatch delivers.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 // Unmodeled atomics are not Shuttle scheduling points, so each gate and wake record below changes
 // in the same scheduling step as the operation it records.
 use std::{

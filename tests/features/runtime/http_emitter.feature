@@ -1,17 +1,17 @@
-Feature: HTTP emitter
-  An HTTP emitter sends one request for each eligible relay record to an operator-provisioned
+Feature: HTTP REQUEST emitter
+  An HTTP REQUEST emitter sends one request for each eligible relay record to an operator-provisioned
   endpoint, with an independently configured method, path, headers, and body. See
   docs/specifications/http-emitter.md and tests/http-emitter-acceptance-ledger.md.
 
   @http_emitter_configuration
-  Scenario Outline: HTTP emitter body selections round-trip through public configuration
+  Scenario Outline: HTTP REQUEST emitter body selections round-trip through public configuration
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (event_id STRING, request_method STRING, request_path STRING);
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
@@ -19,16 +19,16 @@ Feature: HTTP emitter
       );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'http://127.0.0.1:19080',
         'timeout_ms' = 5000
       };
-      CREATE EMITTER encoded FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER encoded FROM outgoing TO api
         METHOD input.request_method PATH input.request_path
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING event_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER empty FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER empty FROM outgoing TO api
         METHOD 'DELETE' PATH input.request_path
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
         WITHOUT BODY INVOKE write_header('X-Event', input.event_id)
@@ -40,7 +40,7 @@ Feature: HTTP emitter
       | encoded | PATH input.request_path     |
       | encoded | ENCODE USING event_codec    |
       | empty   | WITHOUT BODY                |
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER encoded;
       """
@@ -48,12 +48,12 @@ Feature: HTTP emitter
       """
       codec: event_codec
       body: codec
-      sink: HTTP client=api method=input.request_method path=input.request_path
+      to: HTTP REQUEST api METHOD input.request_method PATH input.request_path
       batch: none
       flush: FLUSH IMMEDIATE
       publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER empty;
       """
@@ -61,21 +61,21 @@ Feature: HTTP emitter
       """
       codec: none
       body: without body
-      sink: HTTP client=api method='DELETE' path=input.request_path
+      to: HTTP REQUEST api METHOD 'DELETE' PATH input.request_path
       batch: none
       flush: FLUSH IMMEDIATE
       publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
       """
-    When these NSPL commands fail with "HTTP METHOD and PATH require exact non-sensitive STRING values"
+    When these Plexus commands fail with "HTTP METHOD and PATH require exact non-sensitive STRING values"
       """
-      CREATE EMITTER invalid_method FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid_method FROM outgoing TO api
         METHOD 42 PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER encoded SET CLIENT api,
+      ALTER HTTP REQUEST EMITTER encoded SET CLIENT api,
         SET MODE ACK RETRY POLICY BACKOFF 500ms MAX 30s,
         SET ENCODE USING event_codec;
       """
@@ -83,7 +83,7 @@ Feature: HTTP emitter
       | emitter | clause                             |
       | encoded | RETRY POLICY BACKOFF 500ms MAX 30s |
       | encoded | ENCODE USING event_codec           |
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER encoded;
       """
@@ -91,31 +91,27 @@ Feature: HTTP emitter
       """
       codec: event_codec
       body: codec
-      sink: HTTP client=api method=input.request_method path=input.request_path
+      to: HTTP REQUEST api METHOD input.request_method PATH input.request_path
       batch: none
       flush: FLUSH IMMEDIATE
       publishing mode: ACK RETRY POLICY BACKOFF 500ms MAX 30s
       """
-    When these NSPL commands fail with "emitter body selection does not support the retained construction"
+    When these Plexus commands fail with "emitter body selection does not support the retained construction"
       """
-      ALTER EMITTER encoded SET TO HTTP api
+      ALTER HTTP REQUEST EMITTER encoded SET TO api
         METHOD 'DELETE' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY;
       """
     Then SHOW CREATE EMITTER on the leader node renders these clauses
       | emitter | clause                   |
       | encoded | ENCODE USING event_codec |
-    When these NSPL commands fail with "HTTP emitters select an absent body"
+    When these Plexus commands fail with "HTTP REQUEST emitters select an absent body"
       """
-      ALTER EMITTER empty DROP ENCODE;
+      ALTER HTTP REQUEST EMITTER empty DROP ENCODE;
       """
-    When these NSPL commands fail with "HTTP emitters send one request per record"
+    When these Plexus commands are executed on the leader node
       """
-      ALTER EMITTER empty SET BATCH MAX MESSAGES 2 MAX SIZE 1MiB;
-      """
-    When these NSPL commands are executed on the leader node
-      """
-      ALTER EMITTER empty SET TO HTTP api
+      ALTER HTTP REQUEST EMITTER empty SET TO api
         METHOD 'HEAD' PATH '/health'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY;
       """
@@ -124,7 +120,7 @@ Feature: HTTP emitter
       | empty   | METHOD 'HEAD'  |
       | empty   | PATH '/health' |
       | empty   | WITHOUT BODY   |
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE EMITTER empty;
       """
@@ -132,7 +128,7 @@ Feature: HTTP emitter
       """
       codec: none
       body: without body
-      sink: HTTP client=api method='HEAD' path='/health'
+      to: HTTP REQUEST api METHOD 'HEAD' PATH '/health'
       batch: none
       flush: FLUSH IMMEDIATE
       publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -144,19 +140,19 @@ Feature: HTTP emitter
       | 3            |
 
   @http_emitter_configuration @http_emitter_timeout
-  Scenario Outline: HTTP emitter requires an explicit usable client timeout before activation
+  Scenario Outline: HTTP REQUEST emitter requires an explicit usable client timeout before activation
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (id STRING);
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
-      CREATE CLIENT api TYPE HTTP CONFIG {'endpoint' = 'https://api.example.com'};
+      CREATE HTTP CLIENT api CONFIG {'endpoint' = 'https://api.example.com'};
       """
-    When these NSPL commands fail with "timeout_ms"
+    When these Plexus commands fail with "timeout_ms"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -168,10 +164,10 @@ Feature: HTTP emitter
       | 3            |
 
   @http_emitter_configuration @http_emitter_validation
-  Scenario Outline: HTTP emitter rejects unsafe literal request fields and implicit header leakage
+  Scenario Outline: HTTP REQUEST emitter rejects unsafe literal request fields and implicit header leakage
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event (
@@ -188,195 +184,191 @@ Feature: HTTP emitter
       CREATE SCHEMA state_snapshot (path STRING);
       CREATE RELAY latest_path SCHEMA state_snapshot UNBRANCHED
         WITH MATERIALIZED STATE LAST BY TIMESTAMP;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000
       };
-      CREATE CLIENT other TYPE SENTRY CONFIG {
+      CREATE SENTRY CLIENT other CONFIG {
         'dsn' = 'http://public@127.0.0.1:8000/1'
       };
       """
-    When these NSPL commands fail with "requires a HTTP client"
+    When these Plexus commands fail with "requires a HTTP client"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP other
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO other
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "no matching USING MATERIALIZED STATE declaration"
+    When these Plexus commands fail with "no matching USING MATERIALIZED STATE declaration"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH relay_state.latest_path.path
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "header"
+    When these Plexus commands fail with "header"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header('Authorization', input.secret)
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "sensitive"
+    When these Plexus commands fail with "sensitive"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING sensitive_body_codec
         INHERIT id, secret
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "publish method"
+    When these Plexus commands fail with "publish method"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'TRACE' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "publish path"
+    When these Plexus commands fail with "publish path"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '//other.example/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "header name"
+    When these Plexus commands fail with "header name"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header('Host', 'other.example')
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "header value"
+    When these Plexus commands fail with "header value"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header('X-Reason', ' bad')
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "STRING"
+    When these Plexus commands fail with "STRING"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD input.attempts PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "null"
+    When these Plexus commands fail with "null"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH input.optional_path
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "output"
+    When these Plexus commands fail with "output"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH output.id
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "WITHOUT BODY"
+    When these Plexus commands fail with "WITHOUT BODY"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'GET' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING body_codec
         INHERIT id
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "WITHOUT BODY"
+    When these Plexus commands fail with "WITHOUT BODY"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'HEAD' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING body_codec
         INHERIT id
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "would store sensitive data in a non-sensitive output field"
+    When these Plexus commands fail with "would store sensitive data in a non-sensitive output field"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH concat('/events/', input.secret)
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "would store sensitive data in a non-sensitive output field"
+    When these Plexus commands fail with "would store sensitive data in a non-sensitive output field"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD input.secret PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "write_header name requires leak_sensitive(...)"
+    When these Plexus commands fail with "write_header name requires leak_sensitive(...)"
       """
-      CREATE EMITTER invalid FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER invalid FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header(input.secret, 'value')
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      CREATE EMITTER allowed FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER allowed FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         INVOKE write_header('Authorization', leak_sensitive(input.secret))
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE CLIENT unsafe_endpoint TYPE HTTP CONFIG {
-        'endpoint' = 'https://key@api.example.com', 'timeout_ms' = 5000
+      CREATE HTTP CLIENT unsafe_endpoint CONFIG {
+        'endpoint' = 'http://key@api.example.com', 'timeout_ms' = 5000
       };
-      CREATE CLIENT zero_timeout TYPE HTTP CONFIG {
-        'endpoint' = 'https://api.example.com', 'timeout_ms' = 0
-      };
-      CREATE CLIENT text_timeout TYPE HTTP CONFIG {
-        'endpoint' = 'https://api.example.com', 'timeout_ms' = 'invalid'
-      };
-      CREATE CLIENT overflow_timeout TYPE HTTP CONFIG {
-        'endpoint' = 'https://api.example.com',
-        'timeout_ms' = '18446744073709551616'
-      };
-      CREATE CLIENT incomplete_tls TYPE HTTP CONFIG {
-        'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000,
-        'tls_cert_file' = '/tmp/client.pem'
-      };
-      CREATE EMITTER encoded FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER encoded FROM outgoing TO api
         METHOD 'POST' PATH output.id
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING body_codec
         INHERIT id
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER leaked_body FROM outgoing TO HTTP api
+      CREATE HTTP REQUEST EMITTER leaked_body FROM outgoing TO api
         METHOD 'POST' PATH '/events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING sensitive_body_codec
         INHERIT id SET secret = leak_sensitive(input.secret)
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER with_state FROM outgoing
+      CREATE HTTP REQUEST EMITTER with_state FROM outgoing
         USING MATERIALIZED STATE latest_path REQUIRED SKIP
-        TO HTTP api METHOD 'POST' PATH relay_state.latest_path.path
+        TO api METHOD 'POST' PATH relay_state.latest_path.path
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "origin"
+    When these Plexus commands fail with "origin"
       """
-      ALTER EMITTER allowed SET CLIENT unsafe_endpoint;
+      ALTER HTTP REQUEST EMITTER allowed SET CLIENT unsafe_endpoint;
       """
-    When these NSPL commands fail with "timeout_ms"
+    When these Plexus commands fail with "invalid client config key 'timeout_ms'"
       """
-      ALTER EMITTER allowed SET CLIENT zero_timeout;
+      CREATE HTTP CLIENT zero_timeout CONFIG {
+        'endpoint' = 'http://api.example.com', 'timeout_ms' = 0
+      };
       """
-    When these NSPL commands fail with "timeout_ms"
+    When these Plexus commands fail with "invalid client config key 'timeout_ms'"
       """
-      ALTER EMITTER allowed SET CLIENT text_timeout;
+      CREATE HTTP CLIENT text_timeout CONFIG {
+        'endpoint' = 'http://api.example.com', 'timeout_ms' = 'invalid'
+      };
       """
-    When these NSPL commands fail with "timeout_ms"
+    When these Plexus commands fail with "invalid client config key 'timeout_ms'"
       """
-      ALTER EMITTER allowed SET CLIENT overflow_timeout;
+      CREATE HTTP CLIENT overflow_timeout CONFIG {
+        'endpoint' = 'http://api.example.com', 'timeout_ms' = '18446744073709551616'
+      };
       """
-    When these NSPL commands fail with "tls_key_file"
+    When these Plexus commands fail with "client config key 'tls_cert_file' requires 'tls_key_file'"
       """
-      ALTER EMITTER allowed SET CLIENT incomplete_tls;
+      CREATE HTTP CLIENT incomplete_tls CONFIG {
+        'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000,
+        'tls_cert_file' = '/tmp/client.pem'
+      };
       """
     Then SHOW CREATE EMITTER on the leader node renders these clauses
-      | emitter | clause      |
-      | allowed | TO HTTP api |
+      | emitter | clause                       |
+      | allowed | HTTP REQUEST EMITTER allowed |
+      | allowed | TO api                       |
 
     Examples:
       | cluster_size |
@@ -384,16 +376,16 @@ Feature: HTTP emitter
       | 3            |
 
   @http_emitter_requests
-  Scenario Outline: An HTTP emitter sends each record with its own method, path, headers, and codec body
+  Scenario Outline: An HTTP REQUEST emitter sends each record with its own method, path, headers, and codec body
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (
         event_id STRING,
@@ -423,8 +415,8 @@ Feature: HTTP emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_event_codec
         TO outgoing
           INHERIT ALL
@@ -432,15 +424,14 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api
-        TYPE HTTP
+      CREATE HTTP CLIENT api
         CONFIG {
           'endpoint' = '{{http_receiver.api}}',
           'timeout_ms' = 5000
         };
-      CREATE ATTACHED EMITTER deliver_event
+      CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
         FROM outgoing
-        TO HTTP api
+        TO api
           METHOD input.request_method
           PATH input.request_path
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -488,16 +479,16 @@ Feature: HTTP emitter
       | 3            |
 
   @http_emitter_requests
-  Scenario Outline: An HTTP emitter declared without a body sends zero content bytes
+  Scenario Outline: An HTTP REQUEST emitter declared without a body sends zero content bytes
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (
         event_id STRING,
@@ -519,8 +510,8 @@ Feature: HTTP emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_event_codec
         TO outgoing
           INHERIT ALL
@@ -528,15 +519,14 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api
-        TYPE HTTP
+      CREATE HTTP CLIENT api
         CONFIG {
           'endpoint' = '{{http_receiver.api}}',
           'timeout_ms' = 5000
         };
-      CREATE EMITTER delete_event
+      CREATE HTTP REQUEST EMITTER delete_event
         FROM outgoing WHERE input.request_method = 'DELETE'
-        TO HTTP api
+        TO api
           METHOD 'DELETE'
           PATH input.request_path
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -568,8 +558,79 @@ Feature: HTTP emitter
       | 1            |
       | 3            |
 
+  @http_emitter_requests @http_emitter_bodyless_length
+  Scenario Outline: A bodyless POST, PUT or PATCH declares its empty content, which a strict endpoint requires, and a bodyless DELETE declares none
+    # The receiver answers a POST, PUT or PATCH that declares no length with 411 and does not
+    # capture it, as a strict origin server does.
+    Given HTTP receiver "api" is running and requires a declared length on POST, PUT and PATCH requests
+    And HTTP receiver "api" answers unscripted requests with "respond 204"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA outbound_event (event_id STRING, request_method STRING);
+      CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
+      CREATE VHOST edge http-emitter-{{test_id}}.example.com;
+      CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
+        TO outgoing INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE HTTP CLIENT api CONFIG {
+        'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
+      };
+      CREATE HTTP REQUEST EMITTER published FROM outgoing
+        TO api
+          METHOD input.request_method
+          PATH concat('/events/', input.event_id)
+          MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
+          WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "http-emitter-{{test_id}}.example.com" path "/events"
+      """
+      [{"event_id":"1","request_method":"POST"},{"event_id":"2","request_method":"PUT"},{"event_id":"3","request_method":"PATCH"},{"event_id":"4","request_method":"DELETE"}]
+      """
+    # One emitter execution sends its requests one at a time in record order, and a refused request
+    # would be answered 411 rather than captured.
+    Then HTTP receiver "api" eventually receives at least 4 requests
+    And HTTP receiver "api" request 1 is
+      """
+      POST /events/1
+      Content-Length: 0
+      """
+    And HTTP receiver "api" request 2 is
+      """
+      PUT /events/2
+      Content-Length: 0
+      """
+    And HTTP receiver "api" request 3 is
+      """
+      PATCH /events/3
+      Content-Length: 0
+      """
+    And HTTP receiver "api" request 4 is
+      """
+      DELETE /events/4
+      """
+    And HTTP receiver "api" request 4 has no header "Content-Length"
+    And HTTP receiver "api" has captured exactly 4 requests
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @http_emitter_requests
-  Scenario Outline: HTTP emitters send constant requests, and GET and HEAD only without a body
+  Scenario Outline: HTTP REQUEST emitters send constant requests, and GET and HEAD only without a body
     Given HTTP receiver "posted" is running
     And HTTP receiver "posted" answers unscripted requests with "respond 202"
     And HTTP receiver "probed" is running
@@ -577,11 +638,11 @@ Feature: HTTP emitter
     And HTTP receiver "computed" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, request_method STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -596,8 +657,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -605,17 +666,17 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT posted_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT posted_api CONFIG {
         'endpoint' = '{{http_receiver.posted}}', 'timeout_ms' = 5000
       };
-      CREATE CLIENT probed_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT probed_api CONFIG {
         'endpoint' = '{{http_receiver.probed}}', 'timeout_ms' = 5000
       };
-      CREATE CLIENT computed_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT computed_api CONFIG {
         'endpoint' = '{{http_receiver.computed}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER post_event FROM outgoing
-        TO HTTP posted_api
+      CREATE HTTP REQUEST EMITTER post_event FROM outgoing
+        TO posted_api
           METHOD 'POST'
           PATH '/v1/events'
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -624,8 +685,8 @@ Feature: HTTP emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER probe_event FROM outgoing
-        TO HTTP probed_api
+      CREATE HTTP REQUEST EMITTER probe_event FROM outgoing
+        TO probed_api
           METHOD input.request_method
           PATH concat('/v1/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -633,8 +694,8 @@ Feature: HTTP emitter
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE EMITTER put_event FROM outgoing
-        TO HTTP computed_api
+      CREATE HTTP REQUEST EMITTER put_event FROM outgoing
+        TO computed_api
           METHOD input.request_method
           PATH concat('/v1/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -713,11 +774,11 @@ Feature: HTTP emitter
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, request_method STRING, padding I64);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -732,8 +793,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -741,11 +802,11 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER methods FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER methods FROM outgoing
+        TO api
           METHOD concat(input.request_method, repeat('X', input.padding))
           PATH concat('/methods/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -816,11 +877,11 @@ Feature: HTTP emitter
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING, payload STRING, divisor I64);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -835,8 +896,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -844,11 +905,11 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER shaped FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER shaped FROM outgoing
+        TO api
           METHOD 'PUT'
           PATH concat('/v1/', output.payload, '/', event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -916,11 +977,11 @@ Feature: HTTP emitter
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -947,8 +1008,8 @@ Feature: HTTP emitter
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT routes_ingress ON edge PATH '/routes' TYPE HTTP;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR routes_source
-        FROM ENDPOINT routes_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR routes_source
+        FROM routes_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
         TO routes
           INHERIT ALL
@@ -956,8 +1017,8 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -965,12 +1026,12 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER guarded FROM outgoing
+      CREATE HTTP REQUEST EMITTER guarded FROM outgoing
         USING MATERIALIZED STATE routes REQUIRED WAIT
-        TO HTTP api
+        TO api
           METHOD 'POST'
           PATH concat(relay_state.routes.prefix, '/events/', event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1038,11 +1099,11 @@ Feature: HTTP emitter
     And HTTP receiver "crowded" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (
         event_id STRING,
@@ -1066,8 +1127,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1075,20 +1136,20 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE CLIENT crowded_api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT crowded_api CONFIG {
         'endpoint' = '{{http_receiver.crowded}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER headed FROM outgoing WHERE NOT input.crowd
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER headed FROM outgoing WHERE NOT input.crowd
+        TO api
           METHOD 'POST'
           PATH concat('/headers/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
           WITHOUT BODY
         INVOKE write_header('X-Replaced', input.replacement),
-               write_header('x-replaced', 'final'),
+               write_header(lower('X-REPLACED'), 'final'),
                write_header('X-Empty', ''),
                write_header('X-Spaced', 'a  b'),
                write_header(input.header_name, input.header_value),
@@ -1102,8 +1163,8 @@ Feature: HTTP emitter
               operation_index = error.operation_index,
               affected_fields = error.fields
         ON GENERAL ERROR LOG;
-      CREATE EMITTER crowded FROM outgoing
-        TO HTTP crowded_api
+      CREATE HTTP REQUEST EMITTER crowded FROM outgoing
+        TO crowded_api
           METHOD 'POST'
           PATH concat('/crowded/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1322,11 +1383,11 @@ Feature: HTTP emitter
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, request_path STRING, padding I64);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -1338,8 +1399,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1347,11 +1408,11 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER targeted FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER targeted FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat(input.request_path, repeat('a', input.padding))
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1427,11 +1488,11 @@ Feature: HTTP emitter
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (
         event_id STRING, tenant STRING, request_path STRING, payload STRING
@@ -1448,8 +1509,8 @@ Feature: HTTP emitter
       CREATE RELAY rejected_requests SCHEMA rejected_request BRANCHED BY by_tenant;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1458,11 +1519,11 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER tenant_events FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER tenant_events FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat('/tenants/', input.tenant, input.request_path)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1528,11 +1589,11 @@ Feature: HTTP emitter
     And HTTP receiver "api" answers unscripted requests with "respond 204; after 100ms"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, tenant STRING, source STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -1549,8 +1610,8 @@ Feature: HTTP emitter
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
       CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
-      CREATE INGESTOR from_a
-        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR from_a
+        FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO source_a
           INHERIT ALL
@@ -1559,8 +1620,8 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR from_b
-        FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR from_b
+        FROM ingress_b MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO source_b
           INHERIT ALL
@@ -1569,13 +1630,13 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER tenant_events
+      CREATE HTTP REQUEST EMITTER tenant_events
         FROM source_a, source_b
         COLLECT FOR 200ms MAX BATCH SIZE 1MiB
-        TO HTTP api
+        TO api
           METHOD 'POST'
           PATH concat('/tenants/', input.tenant, '/', input.source, '/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1674,11 +1735,11 @@ Feature: HTTP emitter
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -1689,8 +1750,8 @@ Feature: HTTP emitter
       CREATE RELAY outgoing SCHEMA outbound_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1698,11 +1759,11 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER stamped FROM outgoing
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER stamped FROM outgoing
+        TO api
           METHOD 'POST'
           PATH concat('/v1/events/', input.event_id)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 1s
@@ -1737,11 +1798,11 @@ Feature: HTTP emitter
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA outbound_event (event_id STRING, request_path STRING, payload STRING);
       CREATE CODEC outbound_events_codec FROM JSON TO SCHEMA outbound_event
@@ -1768,8 +1829,8 @@ Feature: HTTP emitter
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT routes_ingress ON edge PATH '/routes' TYPE HTTP;
       CREATE ENDPOINT outgoing_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR routes_source
-        FROM ENDPOINT routes_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR routes_source
+        FROM routes_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routes_codec
         TO routes
           INHERIT ALL
@@ -1777,8 +1838,8 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR outgoing_source
-        FROM ENDPOINT outgoing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR outgoing_source
+        FROM outgoing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING outbound_events_codec
         TO outgoing
           INHERIT ALL
@@ -1786,12 +1847,12 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER routed FROM outgoing
+      CREATE HTTP REQUEST EMITTER routed FROM outgoing
         USING MATERIALIZED STATE routes REQUIRED WAIT
-        TO HTTP api
+        TO api
           METHOD relay_state.routes.method
           PATH concat(relay_state.routes.prefix, input.request_path)
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -1859,11 +1920,11 @@ Feature: HTTP emitter
     And HTTP receiver "api" answers unscripted requests with "respond 204"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA account_event (
         account_id STRING SENSITIVE, verb STRING SENSITIVE, token STRING SENSITIVE, note STRING
@@ -1876,8 +1937,8 @@ Feature: HTTP emitter
       CREATE RELAY accounts SCHEMA account_event UNBRANCHED;
       CREATE VHOST edge http-emitter-{{test_id}}.example.com;
       CREATE ENDPOINT accounts_ingress ON edge PATH '/accounts' TYPE HTTP;
-      CREATE INGESTOR accounts_source
-        FROM ENDPOINT accounts_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR accounts_source
+        FROM accounts_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING account_events_codec
         TO accounts
           INHERIT ALL
@@ -1885,11 +1946,11 @@ Feature: HTTP emitter
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT api TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT api CONFIG {
         'endpoint' = '{{http_receiver.api}}', 'timeout_ms' = 5000
       };
-      CREATE EMITTER leaked FROM accounts
-        TO HTTP api
+      CREATE HTTP REQUEST EMITTER leaked FROM accounts
+        TO api
           METHOD leak_sensitive(input.verb)
           PATH concat('/accounts/', leak_sensitive(input.account_id))
           MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s

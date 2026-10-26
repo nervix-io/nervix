@@ -1,15 +1,15 @@
 Feature: SQS emission
-  Scenario Outline: SQS emitter publishes JSON payloads from a relay
+  Scenario Outline: SQS QUEUE emitter publishes JSON payloads from a relay
     Given MQTT is running
     And SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -23,14 +23,13 @@ Feature: SQS emission
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_ingress
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_ingress
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-ingress-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_ingress TOPIC notifications_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_ingress TOPIC 'notifications_in_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -39,13 +38,12 @@ Feature: SQS emission
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT sqs_main
-        TYPE SQS
+        CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
-        CREATE EMITTER sqs_notifications FROM notifications TO SQS sqs_main QUEUE notifications_out_{{test_id}} MODE <publishing_mode> RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE SQS QUEUE EMITTER sqs_notifications FROM notifications TO sqs_main QUEUE 'notifications_out_{{test_id}}' MODE <publishing_mode> RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -82,12 +80,12 @@ Feature: SQS emission
     And SQS is running
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "sqs_batch_poison_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -106,14 +104,13 @@ Feature: SQS emission
       TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-poison-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_notifications
-      FROM MQTT mqtt_ingress TOPIC sqs_poison_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_notifications
+      FROM mqtt_ingress TOPIC 'sqs_poison_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -121,15 +118,14 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_notifications
+      CREATE SQS QUEUE EMITTER sqs_notifications
       FROM notifications
-      TO SQS sqs_main QUEUE sqs_batch_poison_{{test_id}}
+      TO sqs_main QUEUE 'sqs_batch_poison_{{test_id}}'
       MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
@@ -164,18 +160,102 @@ Feature: SQS emission
       | 1            | 0             |
       | 3            | 1             |
 
+  Scenario Outline: SQS emission rejects a body holding a noncharacter and delivers the others
+    Given MQTT is running
+    And SQS is running
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "sqs_noncharacter_{{test_id}}" is observed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA note_event (
+        user_id I64,
+        note STRING
+      );
+      CREATE SCHEMA emitter_error (
+        error_code STRING,
+        source_user_id I64
+      );
+      CREATE WIRE JSON SCHEMA note_wire MODE STRICT (
+        user_id integer,
+        note string
+      );
+      CREATE CODEC note_codec
+      FROM WIRE JSON SCHEMA note_wire
+      TO SCHEMA note_event;
+      CREATE RELAY notes SCHEMA note_event UNBRANCHED;
+      CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
+      CREATE MQTT CLIENT mqtt_ingress
+      CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-sqs-noncharacter-{{test_id}}'
+      };
+      CREATE MQTT TOPIC INGESTOR mqtt_notes
+      FROM mqtt_ingress TOPIC 'sqs_noncharacter_in_{{test_id}}' MODE NO ACK
+      ON QUIESCE DROP DECODE USING note_codec
+      TO notes
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE SQS CLIENT sqs_main
+      CONFIG {
+        'endpoint' = '{{sqs_endpoint}}',
+        'region' = 'us-east-1'
+      };
+      CREATE SQS QUEUE EMITTER sqs_notes
+      FROM notes
+      TO sqs_main QUEUE 'sqs_noncharacter_{{test_id}}'
+      MODE <publishing_mode> RETRY POLICY BACKOFF 100ms MAX 1s
+      ENCODE USING note_codec
+      INHERIT ALL
+      FLUSH EACH 2s MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR SEND TO emitter_errors
+      SET error_code = error.code,
+          source_user_id = input.user_id
+      ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION emitter_errors_subscription TO emitter_errors;
+      START;
+      """
+    When these MQTT messages are rapidly published to topic "sqs_noncharacter_in_{{test_id}}"
+      """
+      {"user_id":1,"note":"replacement \ufffd and emoji \ud83d\ude00"}
+      {"user_id":2,"note":"noncharacter \uffff"}
+      {"user_id":3,"note":"private use \ue000"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      "source_user_id":2
+      """
+    And the relay subscription does not receive a payload within "1s"
+    And within "10s" the observed broker receives payloads
+      """
+      "user_id":1
+      "user_id":3
+      """
+
+    Examples:
+      | cluster_size | replica_count | publishing_mode |
+      | 1            | 0             | SINGLE          |
+      | 3            | 1             | BATCH           |
+
   @sqs_fifo_group_ordering @domain_execution_time
   Scenario Outline: SQS FIFO preserves order independently for interleaved branch groups
     Given MQTT is running
     And SQS is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
     And SQS queue "fifo_orders_{{test_id}}.fifo" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA order_event (
         tenant STRING,
@@ -191,14 +271,13 @@ Feature: SQS emission
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-fifo-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_orders
-      FROM MQTT mqtt_ingress TOPIC sqs_fifo_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_orders
+      FROM mqtt_ingress TOPIC 'sqs_fifo_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING order_codec
       TIMESTAMP NOW
       TO orders
@@ -208,15 +287,14 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_orders
+      CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
-      TO SQS sqs_main QUEUE fifo_orders_{{test_id}}.fifo
+      TO sqs_main QUEUE 'fifo_orders_{{test_id}}.fifo'
       FIFO GROUP CASE
         WHEN now() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN input.tenant
         ELSE ''
@@ -259,12 +337,12 @@ Feature: SQS emission
     And SQS is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "fifo_kept_{{test_id}}.fifo" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA order_event (
         tenant STRING,
@@ -280,14 +358,13 @@ Feature: SQS emission
       CREATE SCHEMA tenant_branch ( tenant STRING );
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY orders SCHEMA order_event BRANCHED BY by_tenant;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-fifo-kept-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_orders
-      FROM MQTT mqtt_ingress TOPIC sqs_fifo_kept_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_orders
+      FROM mqtt_ingress TOPIC 'sqs_fifo_kept_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING order_codec
       TIMESTAMP NOW
       TO orders
@@ -297,15 +374,14 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_orders
+      CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
-      TO SQS sqs_main QUEUE fifo_kept_{{test_id}}.fifo
+      TO sqs_main QUEUE 'fifo_kept_{{test_id}}.fifo'
       FIFO GROUP FROM BRANCH
       MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
       ENCODE USING order_codec
@@ -344,12 +420,12 @@ Feature: SQS emission
     And SQS is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "fifo_failed_{{test_id}}.fifo" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA order_event (
         tenant STRING,
@@ -371,14 +447,13 @@ Feature: SQS emission
       TO SCHEMA order_event;
       CREATE RELAY orders SCHEMA order_event UNBRANCHED;
       CREATE RELAY rejected_orders SCHEMA rejected_order UNBRANCHED;
-      CREATE CLIENT mqtt_ingress
-      TYPE MQTT
+      CREATE MQTT CLIENT mqtt_ingress
       CONFIG {
         'addr' = '{{mqtt_addr}}',
         'client_id' = 'nervix-cucumber-sqs-fifo-failed-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_orders
-      FROM MQTT mqtt_ingress TOPIC sqs_fifo_failed_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      CREATE MQTT TOPIC INGESTOR mqtt_orders
+      FROM mqtt_ingress TOPIC 'sqs_fifo_failed_in_{{test_id}}' MODE NO ACK
       ON QUIESCE DROP DECODE USING order_codec
       TIMESTAMP NOW
       TO orders
@@ -387,15 +462,14 @@ Feature: SQS emission
       FLUSH EACH 100ms MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE CLIENT sqs_main
-      TYPE SQS
+      CREATE SQS CLIENT sqs_main
       CONFIG {
         'endpoint' = '{{sqs_endpoint}}',
         'region' = 'us-east-1'
       };
-      CREATE EMITTER sqs_orders
+      CREATE SQS QUEUE EMITTER sqs_orders
       FROM orders
-      TO SQS sqs_main QUEUE fifo_failed_{{test_id}}.fifo
+      TO sqs_main QUEUE 'fifo_failed_{{test_id}}.fifo'
       FIFO GROUP CASE
         WHEN input.sequence = (2 AS I64) THEN (input.sequence / (input.sequence - (2 AS I64))) AS STRING
         ELSE input.tenant

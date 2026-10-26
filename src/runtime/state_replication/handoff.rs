@@ -8,6 +8,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "state handoff checkpoints and authority changes transfer one ownership \
@@ -237,7 +241,7 @@ impl Runtime {
                 &entity.domain,
                 &entity.node,
             )
-            .map_err(|error| OwnershipHandoffError::persistence(error.current_context().clone()))?;
+            .change_context(OwnershipHandoffError::Persistence)?;
             discarded = discarded
                 .checked_add(1)
                 .assured("the discarded count cannot exceed the collected preparation count");

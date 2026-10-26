@@ -15,7 +15,17 @@
 //! it does not depend on the platform. Exactness takes integer arithmetic on the float's significand
 //! rather than a scaled floating-point product, which would round the scaled value before it is
 //! rounded to an integer. A lane is therefore a scalar computation that no loop vectorizes, and the
-//! kernels skip null lanes.
+//! kernels skip null lanes. Skipping rounding must account for both neighboring floats: at a
+//! normal power of two the neighbor toward zero is half a unit away. A decimal step near that
+//! smaller gap takes the exact decimal-expansion path.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
 
 use std::{fmt::Display, str::FromStr};
 
@@ -419,9 +429,14 @@ impl BinaryParts {
     /// Rounds to `places` decimal places, `places >= 0`.
     fn rounded_to_places<F: DecimalRounding>(self, places: i16) -> SignificandRounding<F> {
         let places = i32::from(places);
-        // When the unit in the last place exceeds 10^-places, the rounded decimal lies closer to
-        // the value than half that unit, so the value itself is the nearest float.
-        if self.exponent >= -binary_exponent_of_power_of_ten(places) {
+        let unit_bound = -binary_exponent_of_power_of_ten(places);
+        // A decimal step below the distance to both neighbors cannot change the nearest float.
+        // At a power of two, the neighbor toward zero can be half a unit away. At the bound the
+        // full-unit comparison cannot decide that case, so use the exact decimal expansion.
+        if self.exponent >= unit_bound {
+            if self.significand.is_power_of_two() && self.exponent == unit_bound {
+                return SignificandRounding::NeedsDecimalExpansion;
+            }
             return SignificandRounding::Unchanged;
         }
         let places_index = usize::try_from(places).assured("places is nonnegative");
@@ -469,9 +484,15 @@ impl BinaryParts {
     ) -> SignificandRounding<F> {
         let exponent_of_ten = i32::from(exponent_of_ten);
         let binary_exponent = binary_exponent_of_power_of_ten(exponent_of_ten);
-        // A unit in the last place above 10^exponent_of_ten keeps the rounded value within half a
-        // unit of the value, so the value is its own rounding.
-        if self.exponent > binary_exponent {
+        let unit_bound = binary_exponent
+            .checked_add(1)
+            .assured("a power of ten bounded by DIGITS_BOUND has a binary exponent below 2^11");
+        // The decimal step must be below both neighbor gaps, including a possible half-unit gap
+        // toward zero. The boundary power of two therefore needs the exact expansion here too.
+        if self.exponent >= unit_bound {
+            if self.significand.is_power_of_two() && self.exponent == unit_bound {
+                return SignificandRounding::NeedsDecimalExpansion;
+            }
             return SignificandRounding::Unchanged;
         }
         // The magnitude is below 2^(exponent + SIGNIFICAND_BITS), and when that is at most

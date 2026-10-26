@@ -1,47 +1,47 @@
 Feature: MQTT name resolution
 
-  An MQTT source or sink resolves the host of its client's `addr` through the node's resolver every
+  An MQTT source or emitter resolves the host of its client's `addr` through the node's resolver every
   time its client connects to the broker, first and after every lost connection, dials the answers
   in order, and verifies an `mqtts` broker's certificate against that host. These scenarios point
   every node at a DNS fixture the scenario controls.
 
-  Scenario Outline: MQTT sources and sinks reach a broker named by the node DNS fixture over <scheme>
+  Scenario Outline: MQTT sources and emitters reach a broker named by the node DNS fixture over <scheme>
     Given MQTT is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the MQTT endpoints are published under fixture DNS name "mqtt.nervix.test"
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MQTT topic "dns_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_in TYPE MQTT MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE MQTT CLIENT mqtt_in MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
         'client_id' = 'nervix-dns-in-{{test_id}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE CLIENT mqtt_out TYPE MQTT MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE MQTT CLIENT mqtt_out MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{<address>}}',
         'client_id' = 'nervix-dns-out-{{test_id}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE INGESTOR mqtt_in
-      FROM MQTT mqtt_in TOPIC dns_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC INGESTOR mqtt_in
+      FROM mqtt_in TOPIC 'dns_in_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -49,8 +49,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER mqtt_out FROM notifications
-      TO MQTT mqtt_out TOPIC dns_out_{{test_id}} MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -85,36 +85,36 @@ Feature: MQTT name resolution
     And a <cluster_size> node nervix cluster is started
     And the MQTT endpoints are published under fixture DNS name "mqtt.unlisted.test"
     And node "node-1" has dev TLS resource directory "dev_tls"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE RESOURCE dev_tls;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE dev_tls VERSION "{{dev_tls}}";
       """
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_in TYPE MQTT MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE MQTT CLIENT mqtt_in MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{mqtt_tls_dns_addr}}',
         'client_id' = 'nervix-dns-in-{{test_id}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE CLIENT mqtt_out TYPE MQTT MOUNT dev_tls VERSION 1 CONFIG {
+      CREATE MQTT CLIENT mqtt_out MOUNT dev_tls VERSION 1 CONFIG {
         'addr' = '{{mqtt_tls_dns_addr}}',
         'client_id' = 'nervix-dns-out-{{test_id}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem'
       };
-      CREATE INGESTOR mqtt_in
-      FROM MQTT mqtt_in TOPIC dns_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC INGESTOR mqtt_in
+      FROM mqtt_in TOPIC 'dns_in_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -122,8 +122,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE EMITTER mqtt_out FROM notifications
-      TO MQTT mqtt_out TOPIC dns_out_{{test_id}} MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC EMITTER mqtt_out FROM notifications
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -146,33 +146,33 @@ Feature: MQTT name resolution
       | 1            |
       | 3            |
 
-  Scenario Outline: MQTT sources and sinks reconnect once their broker name resolves again after <answer>
+  Scenario Outline: MQTT sources and emitters reconnect once their broker name resolves again after <answer>
     Given MQTT is running
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And MQTT is forwarded as "mqtt.nervix.test" from the fixture addresses "127.0.5.1,127.0.5.2"
     And the DNS fixture answers "mqtt.nervix.test" with addresses "127.0.5.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MQTT topic "dns_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_in TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_in CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-dns-in-{{test_id}}'
       };
-      CREATE CLIENT mqtt_out TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_out CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-dns-out-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_in
-      FROM MQTT mqtt_in TOPIC dns_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC INGESTOR mqtt_in
+      FROM mqtt_in TOPIC 'dns_in_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -180,8 +180,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER mqtt_out FROM notifications
-      TO MQTT mqtt_out TOPIC dns_out_{{test_id}} MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -233,13 +233,13 @@ Feature: MQTT name resolution
     And a <cluster_size> node nervix cluster is started
     And MQTT is forwarded as "mqtt.nervix.test" from the fixture addresses "127.0.5.1,127.0.5.2"
     And the DNS fixture answers "mqtt.nervix.test" with addresses "127.0.5.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "mqtt_dns_boundary_in_{{test_id}}" exists with 1 partitions
     And MQTT topic "mqtt_dns_boundary_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
@@ -247,13 +247,13 @@ Feature: MQTT name resolution
         FROM WIRE JSON SCHEMA notification_wire
         TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_ingress TOPIC mqtt_dns_boundary_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP mqtt_dns_boundary_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_ingress TOPIC 'mqtt_dns_boundary_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'mqtt_dns_boundary_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING notification_codec
@@ -263,12 +263,12 @@ Feature: MQTT name resolution
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT mqtt_sink TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_sink CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-mqtt-dns-boundary-{{test_id}}'
       };
-      CREATE ATTACHED EMITTER mqtt_boundary FROM notifications
-        TO MQTT mqtt_sink TOPIC mqtt_dns_boundary_out_{{test_id}}
+      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_boundary FROM notifications
+        TO mqtt_sink TOPIC 'mqtt_dns_boundary_out_{{test_id}}'
           MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 300ms
             RETRY POLICY BACKOFF 100ms MAX 200ms
           ENCODE USING notification_codec
@@ -309,27 +309,27 @@ Feature: MQTT name resolution
     And a <cluster_size> node nervix cluster is started
     And MQTT is forwarded as "mqtt.nervix.test" from the fixture addresses "127.0.5.1,127.0.5.2"
     And the DNS fixture answers "mqtt.nervix.test" with addresses "127.0.5.3,127.0.5.1"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MQTT topic "dns_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
       CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA notification;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
-      CREATE CLIENT mqtt_in TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_in CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-dns-in-{{test_id}}'
       };
-      CREATE CLIENT mqtt_out TYPE MQTT CONFIG {
+      CREATE MQTT CLIENT mqtt_out CONFIG {
         'addr' = '{{mqtt_forwarded_addr}}',
         'client_id' = 'nervix-dns-out-{{test_id}}'
       };
-      CREATE INGESTOR mqtt_in
-      FROM MQTT mqtt_in TOPIC dns_in_{{test_id}} SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE MQTT TOPIC INGESTOR mqtt_in
+      FROM mqtt_in TOPIC 'dns_in_{{test_id}}' SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 1s
       ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
@@ -337,8 +337,8 @@ Feature: MQTT name resolution
       FLUSH IMMEDIATE
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER mqtt_out FROM notifications
-      TO MQTT mqtt_out TOPIC dns_out_{{test_id}} MODE QOS 0 RETRY POLICY BACKOFF 200ms MAX 1s
+      CREATE ATTACHED MQTT TOPIC EMITTER mqtt_out FROM notifications
+      TO mqtt_out TOPIC 'dns_out_{{test_id}}' MODE QOS 0 RETRY POLICY BACKOFF 200ms MAX 1s
       ENCODE USING notification_codec
       INHERIT ALL
       FLUSH IMMEDIATE
@@ -375,7 +375,7 @@ Feature: MQTT name resolution
       """
       {"user_id":45}
       """
-    Then the observed broker receives a payload
+    Then within "30s" the observed broker receives payloads
       """
       {"user_id":45}
       """

@@ -7,6 +7,11 @@
 //! - **Depends on.** Shared schema type drafts and the semantic UDF Model.
 //! - **Must not know.** Roto compilation, test execution, or registry application.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::Report;
@@ -134,10 +139,14 @@ pub(super) enum UdfDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{CreateStatement, Model, ParseAsType, Statement};
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{UdfArgumentDraft, UdfDraft, UdfDraftError};
 
@@ -171,7 +180,7 @@ mod tests {
         assert_eq!(udf.code, code);
         assert!(udf.has_valid_code_hash());
         let statement = Statement::Create(CreateStatement::new(Box::new(Model::Udf(udf)), false));
-        let source = statement.to_canonical_nspl().assured("UDF renders");
+        let source = statement.to_canonical_plexus().assured("UDF renders");
         assert!(source.contains("$roto_1$"));
         assert!(source.contains("VOLATILE"));
         assert_eq!(

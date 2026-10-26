@@ -1,11 +1,20 @@
 //! Admission and retained outcomes for persistent session commands.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //! - **Owns.** Binding a command reference to one semantic request and publishing its final result.
 //! - **Depends on.** Consensus command records and the authoritative visibility barrier.
 //! - **Must not know.** Parser recovery, transport reconnect policy, or runtime implementation.
 
-use std::{collections::BTreeSet, time::Duration};
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "session command admission translates parsed client operations into durable \
+                  requests"
+    )
+)]
+
+use std::{collections::BTreeSet, convert::Infallible, time::Duration};
 
 use ahash::RandomState;
 use blake3::Hasher;
@@ -21,10 +30,12 @@ use nervix_consensus::{
     ConsensusError, RestoreExecution,
 };
 use nervix_models::{
+    Backup, BackupCapture, BackupResources, BackupScope, ClusterParameters,
     CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Restore,
-    RestoreArchive, Statement, Timestamp, TransactionPosition, TransactionStatus, UserName,
+    RestoreArchive, Setting, SettingDefinition, Statement, Timestamp, TransactionPosition,
+    TransactionStatus, UserName,
 };
-use nervix_nspl::client_statement::ClientStatement;
+use nervix_plexus::client_statement::ClientStatement;
 use nervix_primitives::{
     collections::DashMap,
     sync::{Mutex as AsyncMutex, OwnedMutexGuard, StdArc, StdWeak},
@@ -42,52 +53,110 @@ use super::{
     transaction::is_queueable_transaction_statement,
 };
 
-const DEFAULT_COMMAND_RETRY_VALIDITY: Duration = Duration::from_secs(15 * 60);
-const DEFAULT_COMMAND_EXECUTION_CAPACITY: usize = 65_536;
+/// The server's capture inputs. The destination belongs exclusively to the client's download.
+#[derive(rkyv::Archive, rkyv::Serialize)]
+struct BackupExecutionParameters {
+    scope: BackupScope,
+    resources: BackupResources,
+    capture: BackupCapture,
+}
 
-#[derive(Debug, Clone, Copy, clap::Args)]
+impl From<&Backup> for BackupExecutionParameters {
+    fn from(backup: &Backup) -> Self {
+        Self {
+            scope: backup.scope.clone(),
+            resources: backup.resources,
+            capture: backup.capture,
+        }
+    }
+}
+
+/// How long the cluster recognizes a command reference, so a client's retry of the same command
+/// finds its first outcome instead of running it again.
+pub struct CommandRetryValidity;
+
+impl SettingDefinition for CommandRetryValidity {
+    type Class = ClusterParameters;
+    type Value = Duration;
+    type Context = ();
+    type Error = Infallible;
+
+    const NAME: &'static str = "command-retry-validity";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> Duration {
+        Duration::from_secs(15 * 60)
+    }
+
+    fn validate(_: &Duration, _: &()) -> Result<(), Report<Infallible>> {
+        Ok(())
+    }
+}
+
+/// The most command executions the cluster retains outcomes for at once.
+pub struct CommandExecutionCapacity;
+
+impl SettingDefinition for CommandExecutionCapacity {
+    type Class = ClusterParameters;
+    type Value = usize;
+    type Context = ();
+    type Error = Infallible;
+
+    const NAME: &'static str = "command-execution-capacity";
+    const DERIVATION: Option<&'static str> = None;
+
+    fn default_value(_: &()) -> usize {
+        65_536
+    }
+
+    fn validate(_: &usize, _: &()) -> Result<(), Report<Infallible>> {
+        Ok(())
+    }
+}
+
+/// How the cluster admits persistent session commands and how long it retains their outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommandExecutionPolicy {
-    #[arg(
-        long = "command-retry-validity",
-        env = "NERVIX_COMMAND_RETRY_VALIDITY",
-        default_value = "15m",
-        value_parser = super::parse_human_duration
-    )]
-    retry_validity: Duration,
-    #[arg(
-        long = "command-execution-capacity",
-        env = "NERVIX_COMMAND_EXECUTION_CAPACITY",
-        default_value_t = DEFAULT_COMMAND_EXECUTION_CAPACITY
-    )]
-    capacity: usize,
+    retry_validity: Setting<CommandRetryValidity>,
+    capacity: Setting<CommandExecutionCapacity>,
 }
 
 impl CommandExecutionPolicy {
-    pub fn new(retry_validity: Duration, capacity: usize) -> Self {
-        Self {
-            retry_validity,
-            capacity,
-        }
+    /// Resolves each value that is not given through its definition's default.
+    pub fn resolve(
+        retry_validity: Option<Duration>,
+        capacity: Option<usize>,
+    ) -> Result<Self, Report<Infallible>> {
+        Ok(Self {
+            retry_validity: Setting::resolve(retry_validity, &())?,
+            capacity: Setting::resolve(capacity, &())?,
+        })
     }
 
-    pub(in crate::application) fn retry_validity(self) -> Duration {
-        self.retry_validity
+    pub fn new(retry_validity: Duration, capacity: usize) -> Self {
+        Self::resolve(Some(retry_validity), Some(capacity))
+            .assured("the command execution settings declare no validation")
+    }
+
+    pub fn retry_validity(self) -> Duration {
+        *self.retry_validity.value()
+    }
+
+    pub fn capacity(self) -> usize {
+        *self.capacity.value()
     }
 
     pub(in crate::application) fn admission_at(
         self,
         now: Timestamp,
     ) -> CommandExecutionAdmissionPolicy {
-        CommandExecutionAdmissionPolicy::at(now, self.retry_validity, self.capacity)
+        CommandExecutionAdmissionPolicy::at(now, self.retry_validity(), self.capacity())
     }
 }
 
 impl Default for CommandExecutionPolicy {
     fn default() -> Self {
-        Self::new(
-            DEFAULT_COMMAND_RETRY_VALIDITY,
-            DEFAULT_COMMAND_EXECUTION_CAPACITY,
-        )
+        Self::resolve(None, None).assured("the command execution defaults declare no validation")
     }
 }
 
@@ -229,7 +298,7 @@ impl PersistentCommandRequest {
             let SessionCommandOperation::Execute(pending) = operation else {
                 continue;
             };
-            let nervix_nspl::client_statement::ClientStatement::Server(statement) =
+            let nervix_plexus::client_statement::ClientStatement::Server(statement) =
                 &pending.statement
             else {
                 continue;
@@ -257,12 +326,18 @@ impl PersistentCommandRequest {
         if let Statement::CreateUser(create) = &mut digest_statement {
             create.body.password.clear();
         }
-        let encoded =
-            rkyv::to_bytes::<rkyv::rancor::Error>(&digest_statement).map_err(|error| {
-                Report::new(PersistentCommandRequestError::Encoding {
-                    message: error.to_string(),
-                })
-            })?;
+        let encoded = match &digest_statement {
+            Statement::Backup(backup) => {
+                hasher.update(b"BACKUP");
+                rkyv::to_bytes::<rkyv::rancor::Error>(&BackupExecutionParameters::from(backup))
+            }
+            _ => rkyv::to_bytes::<rkyv::rancor::Error>(&digest_statement),
+        }
+        .map_err(|error| {
+            Report::new(PersistentCommandRequestError::Encoding {
+                message: error.to_string(),
+            })
+        })?;
         let encoded_bytes = encoded.as_slice();
         let encoded_length = u64::try_from(encoded_bytes.len())
             .map_err(|_| Report::new(PersistentCommandRequestError::SemanticsTooLarge))?;
@@ -475,7 +550,7 @@ impl SessionServiceImpl {
                 let result = service
                     .execute_persistent_command(&execution, &mut subscriptions)
                     .await;
-                if result.is_not_leader() {
+                if command_awaits_recovery(&result) {
                     return;
                 }
                 if let Err(error) = service
@@ -486,6 +561,7 @@ impl SessionServiceImpl {
                         &result,
                     )
                     .await
+                    && !command_awaits_recovery(&error)
                 {
                     service.broadcast_error(format!(
                         "failed to record resumed command execution '{}': {}",
@@ -848,7 +924,12 @@ impl SessionServiceImpl {
         request_digest: [u8; 32],
         result: &CommandResult,
     ) -> Result<CommandResult, Box<CommandResult>> {
-        let durable_result = durable_command_result(result);
+        let durable_result = durable_command_result(result)?;
+        #[cfg(feature = "testing")]
+        self.inner
+            .runtime
+            .pause_command_finalization_if_armed(self.inner.consensus.local_node_id())
+            .await;
         let execution = match self
             .inner
             .consensus
@@ -1046,12 +1127,20 @@ fn outcome_unknown(cause: OutcomeUnknownCause, message: String) -> CommandResult
     }
 }
 
-/// The record the execution ledger keeps of a finished command.
-///
-/// Only a completion, a failure and a refused commit are ever recorded: a command that was
-/// redirected or whose outcome is unknown is not finished. Such a disposition reaching this point
-/// is kept as a failure.
-fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
+/// Whether another attempt under the same reference must determine the outcome.
+fn command_awaits_recovery(result: &CommandResult) -> bool {
+    matches!(
+        result.disposition,
+        CommandDisposition::NotLeader(_)
+            | CommandDisposition::OutcomeUnknown(_)
+            | CommandDisposition::TransactionDetached { .. }
+    )
+}
+
+/// A terminal record, or the unchanged disposition that leaves the execution applying.
+fn durable_command_result(
+    result: &CommandResult,
+) -> Result<CommandExecutionResult, Box<CommandResult>> {
     let disposition = match &result.disposition {
         CommandDisposition::Completed { already_existed } => {
             CommandExecutionDisposition::Completed {
@@ -1064,15 +1153,17 @@ fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
                 current: current.clone(),
             })
         }
-        CommandDisposition::Failed
-        | CommandDisposition::NotLeader(_)
-        | CommandDisposition::TransactionDetached { .. }
-        | CommandDisposition::TransactionTakenOver { .. }
+        CommandDisposition::NotLeader(_)
         | CommandDisposition::OutcomeUnknown(_)
+        | CommandDisposition::TransactionDetached { .. } => {
+            return Err(Box::new(result.clone()));
+        }
+        CommandDisposition::Failed
+        | CommandDisposition::TransactionTakenOver { .. }
         | CommandDisposition::ExecutionReferenceConflict(_)
         | CommandDisposition::ExecutionReferenceExpired => CommandExecutionDisposition::Failed,
     };
-    CommandExecutionResult {
+    Ok(CommandExecutionResult {
         disposition,
         message: result.message.clone(),
         diagnostics: result
@@ -1089,7 +1180,7 @@ fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
         transaction_admission: result.transaction_admission.clone(),
         backup: result.backup.as_deref().cloned(),
         restore: result.restore.as_deref().cloned(),
-    }
+    })
 }
 
 fn durable_transaction_status(status: &TransactionStatus) -> CommandExecutionTransactionStatus {
@@ -1187,6 +1278,10 @@ fn statement_result(result: CommandExecutionStatementResult) -> CommandResult {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{
         CreateStatement, CreateUser, ImpactPlanningBasis, TransactionLifecycle,
@@ -1225,6 +1320,65 @@ mod tests {
             statement: ClientStatement::Server(statement),
             domain: None,
         })
+    }
+
+    fn backup_request_digest(backup: Backup, selected_domain: DomainName) -> [u8; 32] {
+        let operation = SessionCommandOperation::Execute(PendingSessionCommand {
+            request_reference: CommandExecutionReference::parse("backup.request")
+                .assured("the test reference is valid"),
+            expected_transaction_position: None,
+            source: backup.to_canonical_plexus(),
+            statement: ClientStatement::Server(Statement::Backup(backup)),
+            domain: Some(selected_domain.clone()),
+        });
+        PersistentCommandRequest::from_operations(&[operation], Some(&selected_domain))
+            .assured("backup semantics encode")
+            .assured("the backup is persistent")
+            .digest
+    }
+
+    #[test]
+    fn backup_request_identity_binds_capture_inputs_and_selected_domain() {
+        let backup = Backup {
+            scope: BackupScope::Cluster,
+            destination: "cluster.nvxb".to_string(),
+            resources: BackupResources::Included,
+            capture: BackupCapture::Quiesced {
+                timeout: Some(Duration::from_secs(30)),
+            },
+        };
+        let expected = backup_request_digest(backup.clone(), domain());
+        let mut alternate = backup.clone();
+        alternate.destination = "another-directory/recovered.nvxb".to_string();
+        assert_eq!(backup_request_digest(alternate, domain()), expected);
+        let another_domain = DomainName::parse("tenant").assured("the selected domain is valid");
+        assert_ne!(
+            backup_request_digest(backup.clone(), another_domain.clone()),
+            expected
+        );
+        let mut alternate = backup.clone();
+        alternate.resources = BackupResources::Omitted;
+        assert_ne!(backup_request_digest(alternate, domain()), expected);
+        for scope in [
+            BackupScope::Domain(None),
+            BackupScope::Domain(Some(another_domain)),
+        ] {
+            let mut alternate = backup.clone();
+            alternate.scope = scope;
+            assert_ne!(backup_request_digest(alternate, domain()), expected);
+        }
+        for capture in [
+            BackupCapture::Live,
+            BackupCapture::ConfigurationOnly,
+            BackupCapture::Quiesced { timeout: None },
+            BackupCapture::Quiesced {
+                timeout: Some(Duration::from_secs(31)),
+            },
+        ] {
+            let mut alternate = backup.clone();
+            alternate.capture = capture;
+            assert_ne!(backup_request_digest(alternate, domain()), expected);
+        }
     }
 
     #[test]
@@ -1369,25 +1523,39 @@ mod tests {
             )
         };
 
-        let restored = command_result(durable_command_result(&result));
+        let restored = command_result(
+            durable_command_result(&result).assured("the command has a terminal outcome"),
+        );
 
         assert_eq!(restored, result);
     }
 
     #[test]
-    fn durable_command_results_keep_only_finished_dispositions() {
+    fn an_unknown_command_outcome_remains_unfinished() {
+        for cause in [
+            OutcomeUnknownCause::LeadershipLost,
+            OutcomeUnknownCause::StillApplying,
+            OutcomeUnknownCause::NotYetAuthoritative,
+        ] {
+            let result = outcome_unknown(cause, "the admitted command needs recovery".to_string());
+            assert!(command_awaits_recovery(&result));
+            assert_eq!(durable_command_result(&result), Err(Box::new(result)));
+        }
+    }
+
+    #[test]
+    fn routing_results_leave_the_admitted_command_applying() {
         for disposition in [
             CommandDisposition::NotLeader(crate::application::command_result::LeaderRedirect {
                 leader: None,
             }),
-            CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::LeadershipLost),
-            CommandDisposition::ExecutionReferenceExpired,
+            CommandDisposition::TransactionDetached {
+                transaction_id: "transaction-1".to_string(),
+            },
         ] {
             let result = CommandResult::new(disposition, "not finished".to_string());
-            let durable = durable_command_result(&result);
-            assert_eq!(durable.disposition, CommandExecutionDisposition::Failed);
-            let restored = command_result(durable);
-            assert_eq!(restored.disposition, CommandDisposition::Failed);
+            assert!(command_awaits_recovery(&result));
+            assert_eq!(durable_command_result(&result), Err(Box::new(result)));
         }
     }
 
@@ -1401,7 +1569,9 @@ mod tests {
             "transaction 'transaction-1' was planned from different inputs".to_string(),
         );
 
-        let restored = command_result(durable_command_result(&result));
+        let restored = command_result(
+            durable_command_result(&result).assured("the refused commit has a terminal outcome"),
+        );
 
         assert_eq!(restored, result);
     }

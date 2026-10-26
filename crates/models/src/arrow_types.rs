@@ -2,20 +2,26 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** The one mapping from a schema type to its Arrow data type, and from declared
-//!   fields to the canonical Arrow schema a batch of them carries.
-//! - **Depends on.** The schema Models and Arrow's schema types.
+//! - **Owns.** The one mapping from a schema type to its Arrow data type, from declared fields
+//!   to the canonical Arrow schema a batch of them carries, and from a source's metadata
+//!   namespace to the Arrow schema of its typed fields.
+//! - **Depends on.** The schema Models, the metadata scopes, and Arrow's schema types.
 //! - **Must not know.** Arrow arrays, how a batch is built, decoded or validated, or who reads it.
 //!
 //! The mapping is part of the data model rather than of any one reader of it: the server compiles
 //! schemas with it and the client library builds the batches it submits with it, so the two can
 //! never disagree about the representation of a type.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use meticulous::ResultExt as _;
 use nervix_primitives::sync::StdArc;
 
-use crate::{ParseAsType, SchemaField};
+use crate::{IngestorMetadataScope, ParseAsType, SchemaField};
 
 impl ParseAsType {
     /// The Arrow data type a value of this type is represented as. A datetime is nanoseconds in
@@ -65,6 +71,26 @@ impl SchemaField {
     }
 }
 
+impl IngestorMetadataScope {
+    /// The Arrow schema of the typed fields this namespace exposes, in declared order and every one
+    /// nullable. A scope that exposes transport headers only has no typed namespace, so it has no
+    /// schema.
+    ///
+    /// A host builds this once for every ingest group, so the fields are read straight from the
+    /// namespace's declaration, without the schema fields a validation reads them as.
+    pub fn arrow_schema(self) -> Option<Schema> {
+        let declared = self.declared_fields();
+        if declared.is_empty() {
+            return None;
+        }
+        let fields = declared
+            .iter()
+            .map(|field| Field::new(field.name, field.ty.arrow_data_type(), true))
+            .collect::<Vec<_>>();
+        Some(Schema::new(fields))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
@@ -104,6 +130,58 @@ mod tests {
             inner.data_type(),
             &DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into()))
         );
+    }
+
+    #[test]
+    fn a_metadata_scope_is_carried_as_its_declared_fields_and_headers_alone_as_none() {
+        let described = |scope: IngestorMetadataScope| {
+            scope.arrow_schema().map(|schema| {
+                schema
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name().clone(),
+                            field.data_type().clone(),
+                            field.is_nullable(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(described(IngestorMetadataScope::Headers), None);
+        assert_eq!(
+            described(IngestorMetadataScope::Kafka),
+            Some(vec![
+                ("topic".to_owned(), DataType::Utf8, true),
+                ("partition".to_owned(), DataType::Int32, true),
+                ("offset".to_owned(), DataType::Int64, true),
+            ])
+        );
+        assert_eq!(
+            described(IngestorMetadataScope::Syslog),
+            Some(vec![("peer_addr".to_owned(), DataType::Utf8, true)])
+        );
+        assert_eq!(
+            described(IngestorMetadataScope::Websockets),
+            Some(vec![("frame_type".to_owned(), DataType::Utf8, true)])
+        );
+    }
+
+    #[test]
+    fn a_metadata_scope_s_columns_are_the_schema_fields_a_program_is_validated_against() {
+        for scope in [
+            IngestorMetadataScope::Kafka,
+            IngestorMetadataScope::Syslog,
+            IngestorMetadataScope::Websockets,
+        ] {
+            assert_eq!(
+                scope.arrow_schema(),
+                Some(SchemaField::arrow_schema(&scope.fields())),
+                "{scope:?}"
+            );
+        }
+        assert!(IngestorMetadataScope::Headers.fields().is_empty());
     }
 
     #[test]

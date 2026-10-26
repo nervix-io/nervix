@@ -4,11 +4,25 @@
 //! - **Owns.** Reingestor input evaluation, branch construction and route-local buffering.
 //! - **Depends on.** Decision-layer reingestor plans, their bound programs, Arrow batches,
 //!   materialized state and bound clocks.
-//! - **Must not know.** NSPL parsing, placement selection or source transport lifecycle.
+//! - **Must not know.** Plexus parsing, placement selection or source transport lifecycle.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use indexmap::IndexMap;
 
 use super::*;
+
+/// Every way a reingestor fails to accept the input its relay interaction delivered. The
+/// reingestor names itself when it reports the failure, and the acknowledgements of the input fail
+/// with it.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum ReingestorError {
+    #[error("could not read the domain time of accepted input")]
+    AcceptedInputClock,
+}
 
 /// Where the task of one reingestor input reads its relay's batches from.
 pub(super) enum ReingestorInputConsumer {
@@ -301,20 +315,16 @@ impl Runtime {
             Vec<PendingProcessorOutputBatch>,
             Vec<PendingProcessorOutputMessageError>,
         ),
-        PlannedGeneralError,
+        PlannedGeneralFailure,
     > {
         let ReingestorDispatchContext { reingestor, .. } = context;
+        let operation = MessageErrorOperation::Set;
         let program = &output.program;
         let Some(output_schema) = scope.output_schemas[output_index].clone() else {
-            return Err(PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!(
-                    "reingestor '{}' evaluated output route '{}' without preparing its relay \
-                     schema",
-                    reingestor.as_str(),
-                    output.relay.as_str()
-                ),
+            let error = Report::new(PlannedGeneralError::OutputSchemaUnprepared {
+                relay: output.relay.clone(),
             });
+            return Err(PlannedGeneralFailure::new(error, batch.acks.clone()));
         };
         let execution_now = scope.execution_now;
         let executed = execute_filter_map_program_on_batch(
@@ -322,8 +332,6 @@ impl Runtime {
                 executor: self.executor(),
                 now: execution_now,
             },
-            "reingestor",
-            reingestor,
             program,
             FilterMapBatchInputs {
                 carrier: &batch.batch,
@@ -342,16 +350,15 @@ impl Runtime {
         for (output_row, input_row) in executed.selected_rows.iter().enumerate() {
             if let Some(side_error) = executed.batch.errors().row(output_row).first() {
                 let partial_output = captured_partial_output(&executed.batch, output_row);
-                let record = batch
-                    .runtime_row(input_row)
-                    .map_err(|error| PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: format!(
-                            "reingestor '{}' failed to materialize FILTER-MAP error input row: {}",
-                            reingestor.as_str(),
-                            error
-                        ),
-                    })?;
+                let record = batch.runtime_row(input_row).map_err(|error| {
+                    PlannedGeneralFailure::new(
+                        error.change_context(PlannedGeneralError::MaterializeErrorInput {
+                            operation,
+                            row: input_row,
+                        }),
+                        batch.acks.clone(),
+                    )
+                })?;
                 errors.push(PendingProcessorOutputMessageError {
                     row: input_row,
                     key: batch.keys[input_row].clone(),
@@ -383,36 +390,28 @@ impl Runtime {
                 &executed.batch,
                 &success_output_rows,
             )
-            .map_err(|error| PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!(
-                    "reingestor '{}' failed to materialize successful FILTER-MAP rows: {}",
-                    reingestor.as_str(),
-                    error
-                ),
+            .map_err(|error| {
+                PlannedGeneralFailure::new(
+                    error.change_context(PlannedGeneralError::MaterializeOutput { operation }),
+                    batch.acks.clone(),
+                )
             })?;
             if output_batch.schema().as_ref() != output_schema.arrow_schema().as_ref() {
-                return Err(PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: format!(
-                        "reingestor '{}' FILTER-MAP output schema does not match relay '{}'",
-                        reingestor.as_str(),
-                        output.relay.as_str()
-                    ),
+                let error = Report::new(PlannedGeneralError::OutputSchemaMismatch {
+                    relay: output.relay.clone(),
                 });
+                return Err(PlannedGeneralFailure::new(error, batch.acks.clone()));
             }
             let metadata = batch.metadata.take(&success_input_rows).verified(
                 "the program selects rows of this batch, whose metadata has one entry for every \
                  row",
             );
-            let input_batch =
-                batch
-                    .batch
-                    .take(&success_input_rows)
-                    .map_err(|reason| PlannedGeneralError {
-                        acks: batch.acks.clone(),
-                        reason: reason.to_string(),
-                    })?;
+            let input_batch = batch.batch.take(&success_input_rows).map_err(|error| {
+                PlannedGeneralFailure::new(
+                    error.change_context(PlannedGeneralError::SelectBranchInputs),
+                    batch.acks.clone(),
+                )
+            })?;
             let input_keys = success_input_rows
                 .iter()
                 .map(|row| batch.keys[*row].clone())
@@ -420,29 +419,36 @@ impl Runtime {
             let keys = match &output.branch {
                 BoundRouteBranch::Unbranched => vec![None; output_batch.batch().num_rows()],
                 BoundRouteBranch::Preserved => input_keys,
-                BoundRouteBranch::Constructed(branch_program) => evaluate_output_branch_program(
-                    ProgramRun {
-                        executor: self.executor(),
-                        now: execution_now,
-                    },
-                    reingestor,
-                    branch_program,
-                    &input_batch,
-                    &output_batch,
-                    &input_keys,
-                    &scope.side_inputs,
-                )
-                .await
-                .map_err(|error| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: error.to_string(),
-                })?
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| PlannedGeneralError {
-                    acks: batch.acks.clone(),
-                    reason: error.to_string(),
-                })?,
+                BoundRouteBranch::Constructed(branch_program) => {
+                    let outcomes = evaluate_output_branch_program(
+                        ProgramRun {
+                            executor: self.executor(),
+                            now: execution_now,
+                        },
+                        branch_program,
+                        &input_batch,
+                        &output_batch,
+                        &input_keys,
+                        &scope.side_inputs,
+                    )
+                    .await
+                    .map_err(|error| PlannedGeneralFailure::new(error, batch.acks.clone()))?;
+                    // A row whose branch cannot be constructed fails the reingestor's whole
+                    // batch, which its error policy then reports.
+                    let mut keys = Vec::with_capacity(outcomes.len());
+                    for (input_row, outcome) in success_input_rows.iter().zip(outcomes) {
+                        match outcome {
+                            Ok(key) => keys.push(Some(key)),
+                            Err(error) => {
+                                let error = Report::new(error).change_context(
+                                    PlannedGeneralError::BranchRow { row: *input_row },
+                                );
+                                return Err(PlannedGeneralFailure::new(error, batch.acks.clone()));
+                            }
+                        }
+                    }
+                    keys
+                }
             };
             pending_output_batches_by_key(
                 output_index,
@@ -451,9 +457,11 @@ impl Runtime {
                 output_batch,
                 &metadata,
             )
-            .map_err(|reason| PlannedGeneralError {
-                acks: batch.acks.clone(),
-                reason: format!("{reason:#}"),
+            .map_err(|error| {
+                PlannedGeneralFailure::new(
+                    error.change_context(PlannedGeneralError::GroupByBranch),
+                    batch.acks.clone(),
+                )
             })?
         };
 
@@ -523,7 +531,7 @@ impl Runtime {
                         reingestor,
                         error_policies,
                         batch.acks.iter(),
-                        error.to_string(),
+                        &error,
                     );
                     return;
                 }
@@ -552,14 +560,14 @@ impl Runtime {
                 .await
             {
                 Ok(events) => events,
-                Err(error) => {
+                Err(failure) => {
                     self.handle_internal_processor_error_for_acks(
                         domain,
                         ModelKind::Reingestor,
                         reingestor,
                         error_policies,
-                        error.acks.iter(),
-                        error.reason,
+                        failure.acks.iter(),
+                        &failure.error,
                     );
                     return;
                 }
@@ -611,8 +619,7 @@ impl Runtime {
                     reingestor,
                     error_policies,
                     batch_acks.iter(),
-                    "reingestor output batch ack count does not match selected row count"
-                        .to_string(),
+                    &Report::new(ProcessorOutputError::SelectedRowAcks),
                 );
                 return;
             }
@@ -627,7 +634,7 @@ impl Runtime {
                         reingestor,
                         error_policies,
                         error_acks.iter(),
-                        format!("{error:#}"),
+                        &error,
                     );
                     return;
                 }
@@ -664,22 +671,19 @@ impl Runtime {
         let flush_snapshot = match domain_clock.snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                for batches in batches_by_output {
-                    for batch in batches {
-                        self.handle_internal_processor_error_for_acks(
-                            domain,
-                            ModelKind::Reingestor,
-                            reingestor,
-                            error_policies,
-                            batch.acks.iter(),
-                            format!(
-                                "reingestor '{}' could not read the domain clock while buffering \
-                                 output: {error}",
-                                reingestor.as_str(),
-                            ),
-                        );
-                    }
-                }
+                // The clock failed for every route at once, so the output all of them built fails
+                // as one.
+                self.handle_internal_processor_error_for_acks(
+                    domain,
+                    ModelKind::Reingestor,
+                    reingestor,
+                    error_policies,
+                    batches_by_output
+                        .iter()
+                        .flatten()
+                        .flat_map(|batch| batch.acks.iter()),
+                    &error.change_context(RouteOutputError::BufferClock),
+                );
                 return;
             }
         };
@@ -694,10 +698,9 @@ impl Runtime {
                         reingestor,
                         error_policies,
                         batch.acks.iter(),
-                        format!(
-                            "missing reingestor branched entrypoint for relay '{}'",
-                            relay.as_str()
-                        ),
+                        &Report::new(RouteOutputError::MissingEntrypoint {
+                            relay: relay.clone(),
+                        }),
                     );
                 }
                 continue;
@@ -729,12 +732,9 @@ impl Runtime {
                             reingestor,
                             error_policies,
                             batch_acks.iter(),
-                            format!(
-                                "reingestor '{}' could not start output '{}' flush deadline: \
-                                 {error}",
-                                reingestor.as_str(),
-                                relay.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::StartFlushDeadline {
+                                relay: relay.clone(),
+                            }),
                         );
                     }
                 }
@@ -772,13 +772,9 @@ impl Runtime {
                     reingestor,
                     error_policies,
                     pending_acks.iter(),
-                    format!(
-                        "reingestor '{}' failed to concat buffered output batches for relay '{}': \
-                         {}",
-                        reingestor.as_str(),
-                        output_relay.as_str(),
-                        error
-                    ),
+                    &error.change_context(RouteOutputError::Concatenate {
+                        relay: output_relay.clone(),
+                    }),
                 );
                 return;
             }
@@ -790,10 +786,9 @@ impl Runtime {
                 reingestor,
                 error_policies,
                 forwarded.acks.iter(),
-                format!(
-                    "missing reingestor branched entrypoint for relay '{}'",
-                    output_relay.as_str()
-                ),
+                &Report::new(RouteOutputError::MissingEntrypoint {
+                    relay: output_relay.clone(),
+                }),
             );
             return;
         };
@@ -811,12 +806,9 @@ impl Runtime {
                 reingestor,
                 error_policies,
                 batch.acks.iter(),
-                format!(
-                    "reingestor '{}' failed to forward buffered batch to branch entrypoint for \
-                     relay '{}'",
-                    reingestor.as_str(),
-                    output_relay.as_str()
-                ),
+                &Report::new(RouteOutputError::Forward {
+                    relay: output_relay.clone(),
+                }),
             );
         }
     }
@@ -832,33 +824,22 @@ impl Runtime {
             ReingestorOutputFlush::Due => match context.domain_clock.snapshot() {
                 Ok(snapshot) => Some(snapshot),
                 Err(error) => {
-                    let keys = output_buffers.keys();
-                    for key in keys {
+                    // The clock failed for every route at once, so the output all of them hold
+                    // fails as one.
+                    let mut acks = Vec::new();
+                    for key in output_buffers.keys() {
                         nervix_primitives::task::consume_budget().await;
-                        let relay = &routes
-                            .get(key.output_index)
-                            .verified("the buffer key came from this reingestor's route list")
-                            .route
-                            .relay;
                         let pending = output_buffers.take(&key);
-                        let acks = pending
-                            .iter()
-                            .flat_map(|batch| batch.acks.iter().cloned())
-                            .collect::<Vec<_>>();
-                        self.handle_internal_processor_error_for_acks(
-                            context.domain,
-                            ModelKind::Reingestor,
-                            context.reingestor,
-                            context.error_policies,
-                            acks.iter(),
-                            format!(
-                                "reingestor '{}' could not read the domain clock while releasing \
-                                 output '{}': {error}",
-                                context.reingestor.as_str(),
-                                relay.as_str(),
-                            ),
-                        );
+                        acks.extend(pending.iter().flat_map(|batch| batch.acks.iter().cloned()));
                     }
+                    self.handle_internal_processor_error_for_acks(
+                        context.domain,
+                        ModelKind::Reingestor,
+                        context.reingestor,
+                        context.error_policies,
+                        acks.iter(),
+                        &error.change_context(RouteOutputError::ReleaseClock),
+                    );
                     return;
                 }
             },
@@ -891,12 +872,9 @@ impl Runtime {
                             context.reingestor,
                             context.error_policies,
                             acks.iter(),
-                            format!(
-                                "reingestor '{}' could not inspect output '{}' flush deadline: \
-                                 {error}",
-                                context.reingestor.as_str(),
-                                relay.as_str(),
-                            ),
+                            &error.change_context(RouteOutputError::InspectFlushDeadline {
+                                relay: relay.clone(),
+                            }),
                         );
                         continue;
                     }
@@ -945,14 +923,14 @@ impl Runtime {
         .await
         {
             Ok(plan) => plan,
-            Err(error) => {
+            Err(failure) => {
                 self.handle_internal_processor_error_for_acks(
                     domain,
                     ModelKind::Reingestor,
                     reingestor,
                     error_policies,
-                    error.acks.iter(),
-                    error.reason,
+                    failure.acks.iter(),
+                    &failure.error,
                 );
                 return None;
             }
@@ -1013,7 +991,7 @@ impl Runtime {
                 Err(error) => {
                     runtime.events().report_error(format!(
                         "reingestor '{}' in domain '{}' could not bind its routing snapshot: \
-                         {error}",
+                         {error:#}",
                         task_reingestor.as_str(),
                         task_domain.as_str(),
                     ));
@@ -1025,7 +1003,7 @@ impl Runtime {
                 Ok(clock) => clock,
                 Err(error) => {
                     runtime.events().report_error(format!(
-                        "reingestor '{}' in domain '{}' could not bind its clock: {error}",
+                        "reingestor '{}' in domain '{}' could not bind its clock: {error:#}",
                         task_reingestor.as_str(),
                         task_domain.as_str(),
                     ));
@@ -1072,7 +1050,7 @@ impl Runtime {
                         if let Err(error) = result {
                             runtime.events().report_error(format!(
                                 "reingestor '{}' in domain '{}' could not wait for an output \
-                                 flush deadline: {error}",
+                                 flush deadline: {error:#}",
                                 task_reingestor.as_str(),
                                 task_domain.as_str(),
                             ));
@@ -1092,18 +1070,14 @@ impl Runtime {
                 };
                 let work = match work {
                     Ok(work) => work,
-                    Err(error) => {
-                        let reason = format!(
-                            "reingestor '{}' relay interaction failed: {error}",
-                            task_reingestor.as_str()
-                        );
+                    Err(failure) => {
                         runtime.handle_internal_processor_error_for_acks(
                             &task_domain,
                             ModelKind::Reingestor,
                             &task_reingestor,
                             &task_error_policies,
-                            error.acks(),
-                            reason,
+                            [&failure.acks],
+                            &failure.error,
                         );
                         continue;
                     }
@@ -1152,19 +1126,13 @@ impl Runtime {
                         let accepted_at = match domain_clock.snapshot() {
                             Ok(snapshot) => snapshot.now(),
                             Err(error) => {
-                                let reason = format!(
-                                    "reingestor '{}' in domain '{}' could not read the domain \
-                                     time of accepted input: {error}",
-                                    task_reingestor.as_str(),
-                                    task_domain.as_str(),
-                                );
                                 runtime.handle_internal_processor_error_for_acks(
                                     &task_domain,
                                     ModelKind::Reingestor,
                                     ModelName::from(&task_reingestor),
                                     &task_error_policies,
                                     batch.acks.iter(),
-                                    reason,
+                                    &error.change_context(ReingestorError::AcceptedInputClock),
                                 );
                                 continue;
                             }
@@ -1200,11 +1168,7 @@ impl Runtime {
                                     &task_reingestor,
                                     &task_error_policies,
                                     dependency_error_acks.iter(),
-                                    format!(
-                                        "reingestor '{}' failed to resolve materialized \
-                                         dependencies: {error}",
-                                        task_reingestor.as_str()
-                                    ),
+                                    &error,
                                 );
                                 continue;
                             }
@@ -1245,6 +1209,10 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 
@@ -1260,8 +1228,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime::branch_runtime::{
-            BranchExecutionDispatchContext, BranchExecutionRuntime, IngestorRouteTask,
+        runtime::{
+            RuntimeEvent,
+            branch_runtime::{
+                BranchExecutionDispatchContext, BranchExecutionRuntime, IngestorRouteTask,
+            },
         },
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
@@ -1284,6 +1255,7 @@ mod tests {
             Vec::new(),
             None,
             Arc::new(BranchPresence::new()),
+            nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
@@ -1294,7 +1266,7 @@ mod tests {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            source_kind: ModelKind::Reingestor,
+            entity_kind: ModelKind::Reingestor,
             source: named("tenant_partition"),
             root_relay: root_relay.clone(),
             branch: None,
@@ -1441,6 +1413,7 @@ mod tests {
             Vec::new(),
             None,
             Arc::new(BranchPresence::new()),
+            nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ));
         let owner_task = runtime.spawn_relay_owner_task(
             &domain,
@@ -1451,7 +1424,7 @@ mod tests {
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
             revision: ProcessorPlanRevision::new(),
-            source_kind: ModelKind::Reingestor,
+            entity_kind: ModelKind::Reingestor,
             source: named("tenant_partition"),
             root_relay: root_relay.clone(),
             branch: None,
@@ -1536,9 +1509,31 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn reingestor_propagates_attached_ack_into_branched_entrypoint() {
+        use futures_util::FutureExt as _;
+        use nervix_models::{DomainClockState, DomainTimeRate};
+
         let runtime = Runtime::default();
         let domain = domain("default");
         install_unpaced_test_domain(&runtime, &domain);
+        let clock_lifecycle = DomainClockLifecycle::new(domain.clone());
+        // Actual UTC stays before the mapping's origin, so scheduling cannot advance logical
+        // time past a branch deadline while this test observes its output and acknowledgement.
+        let set_logical_time = |elapsed| {
+            clock_lifecycle.install_paced(
+                0,
+                DomainClockState::new(
+                    Timestamp::from_unix_nanos(i64::MAX),
+                    Timestamp::from_unix_nanos(0)
+                        .checked_add(elapsed)
+                        .expect("the fixture's logical times fit the timestamp range"),
+                    DomainTimeRate::ONE,
+                ),
+            );
+        };
+        set_logical_time(Duration::ZERO);
+        let domain_clock = clock_lifecycle
+            .bind()
+            .expect("the fixture installs its controlled domain clock");
         let relay = named("tenant_orders");
         let output_services = test_relay_boundary_services();
         let owner_task = runtime.spawn_relay_owner_task(
@@ -1559,7 +1554,7 @@ mod tests {
             DomainExecution {
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
-                domain_clock: test_domain_clock(&domain),
+                domain_clock: domain_clock.clone(),
                 shutdown: execution_shutdown,
                 routing: runtime.stage_domain_routing(
                     &domain,
@@ -1599,7 +1594,7 @@ mod tests {
             IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
                     revision: ProcessorPlanRevision::new(),
-                    source_kind: ModelKind::Reingestor,
+                    entity_kind: ModelKind::Reingestor,
                     source: named("tenant_partition"),
                     root_relay: relay.clone(),
                     branch: None,
@@ -1626,9 +1621,6 @@ mod tests {
             branched_runtime.sender().max_capacity(),
             STUPID_CHANNEL_CAPACITY_REMOVE_ME.get()
         );
-        let (shutdown_tx, _) = watch::channel(false);
-        let broadcast = RelayBroadcast::with_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME);
-        let fan_in = RelayRuntimeFanIn::new(broadcast.new_receiver());
         let mut branched_entrypoint_senders = HashMap::default();
         branched_entrypoint_senders.insert(relay, branched_runtime.sender());
         let plan = EntrypointTestDomain {
@@ -1662,13 +1654,6 @@ mod tests {
         let input = ExecutionBuildDeps::from_routing(&domain, &routing)
             .bind_reingestor_input(&plan, &plan.inputs[0])
             .expect("the planned reingestor input binds");
-        let task = runtime.spawn_reingestor_task(
-            &domain,
-            &shutdown_tx,
-            branched_entrypoint_senders,
-            input,
-            fan_in,
-        );
         let (acme_acks, acme_completion) = AckSet::root();
         let (beta_acks, beta_completion) = AckSet::root();
         let mut acme_completion = Box::pin(acme_completion.wait());
@@ -1680,6 +1665,23 @@ mod tests {
                 named::<ReingestorName>("tenant_partition"),
             ),
         );
+        let error_policies = internal_processor_error_policies(GeneralErrorPolicy::Log);
+        let mut context = ReingestorDispatchContext {
+            routing: &routing,
+            domain: &domain,
+            reingestor: &input.reingestor,
+            mode: AckMode::Attached,
+            error_policies: &error_policies,
+            branched_senders: &branched_entrypoint_senders,
+            domain_clock: &domain_clock,
+            execution_now: domain_clock
+                .snapshot()
+                .expect("the fixture's clock remains installed")
+                .now(),
+        };
+        let mut output_buffers =
+            ReingestorOutputBuffers::new(input.routes.len(), output_counters.clone());
+        let materialized_values = HashMap::default();
         let input_batch = |tenant: &str, user_id, acks| {
             RelayRecordBatch::single(
                 schema.clone(),
@@ -1695,42 +1697,77 @@ mod tests {
             )
             .expect("input batch should build")
         };
-        broadcast
-            .broadcast(input_batch("acme", 42, acme_acks.attached()))
-            .await
-            .expect("acme message should broadcast");
-        acme_acks.ack_success();
-        timeout(Duration::from_secs(1), async {
-            while output_counters.admitted_work() != 1 {
-                nervix_primitives::task::consume_budget().await;
-                nervix_primitives::task::yield_now().await;
-            }
-        })
+        timeout(
+            Duration::from_secs(1),
+            runtime.dispatch_reingestor_outputs(
+                context,
+                &input,
+                &mut output_buffers,
+                input_batch("acme", 42, acme_acks.attached()),
+                &materialized_values,
+            ),
+        )
         .await
         .expect("acme output should enter its branch buffer");
+        acme_acks.ack_success();
+        assert_eq!(output_counters.admitted_work(), 1);
+        let acme_admitted_at = domain_clock
+            .snapshot()
+            .expect("the fixture's clock remains installed")
+            .now();
 
-        sleep(Duration::from_millis(200)).await;
-        broadcast
-            .broadcast(input_batch("beta", 7, beta_acks.attached()))
-            .await
-            .expect("beta message should broadcast");
-        beta_acks.ack_success();
-        timeout(Duration::from_secs(1), async {
-            while output_counters.admitted_work() != 2 {
-                nervix_primitives::task::consume_budget().await;
-                nervix_primitives::task::yield_now().await;
-            }
-        })
+        set_logical_time(Duration::from_millis(200));
+        context.execution_now = domain_clock
+            .snapshot()
+            .expect("the fixture's clock remains installed")
+            .now();
+        timeout(
+            Duration::from_secs(1),
+            runtime.dispatch_reingestor_outputs(
+                context,
+                &input,
+                &mut output_buffers,
+                input_batch("beta", 7, beta_acks.attached()),
+                &materialized_values,
+            ),
+        )
         .await
         .expect("beta output should enter its branch buffer");
+        beta_acks.ack_success();
+        assert_eq!(output_counters.admitted_work(), 2);
+        assert_eq!(output_buffers.deadlines().len(), 2);
+        let beta_admitted_at = domain_clock
+            .snapshot()
+            .expect("the fixture's clock remains installed")
+            .now();
 
         assert!(
-            timeout(Duration::from_millis(1), &mut beta_completion)
-                .await
-                .is_err(),
+            acme_completion.as_mut().now_or_never().is_none(),
+            "attached acme ACK must remain pending with the buffered output"
+        );
+        assert!(
+            beta_completion.as_mut().now_or_never().is_none(),
             "attached beta ACK must remain pending with the buffered output"
         );
+        assert!(output_subscription.recv().now_or_never().is_none());
 
+        set_logical_time(Duration::from_millis(500));
+        timeout(
+            Duration::from_secs(1),
+            runtime.flush_reingestor_outputs(
+                context.output_flush(),
+                &input.routes,
+                &mut output_buffers,
+                ReingestorOutputFlush::Due,
+            ),
+        )
+        .await
+        .expect("the due-output pass should complete");
+        assert_eq!(
+            output_buffers.deadlines().len(),
+            1,
+            "only acme is due; beta must stay in its own branch buffer"
+        );
         let first_output_batch = timeout(Duration::from_secs(1), output_subscription.recv())
             .await
             .expect("first output subscription should receive")
@@ -1744,6 +1781,15 @@ mod tests {
             ),
             Some(RuntimeValue::String("acme".to_string()))
         );
+        let acme_arrived_at = domain_clock
+            .snapshot()
+            .expect("the fixture's clock remains installed")
+            .now();
+        assert_eq!(
+            acme_arrived_at.duration_since(acme_admitted_at),
+            Some(Duration::from_millis(500)),
+            "acme flushes one cadence after its own admission"
+        );
         assert_eq!(
             timeout(Duration::from_secs(1), &mut acme_completion)
                 .await
@@ -1751,17 +1797,26 @@ mod tests {
             AckOutcome::Ack
         );
         assert!(
-            timeout(Duration::from_millis(100), output_subscription.recv())
-                .await
-                .is_err(),
+            output_subscription.recv().now_or_never().is_none(),
             "beta branch must retain its independent flush deadline"
         );
         assert!(
-            timeout(Duration::from_millis(1), &mut beta_completion)
-                .await
-                .is_err(),
+            beta_completion.as_mut().now_or_never().is_none(),
             "beta ACK must remain pending until the beta branch flushes"
         );
+        set_logical_time(Duration::from_millis(700));
+        timeout(
+            Duration::from_secs(1),
+            runtime.flush_reingestor_outputs(
+                context.output_flush(),
+                &input.routes,
+                &mut output_buffers,
+                ReingestorOutputFlush::Due,
+            ),
+        )
+        .await
+        .expect("the due-output pass should complete");
+        assert!(output_buffers.deadlines().is_empty());
         let second_output_batch = timeout(Duration::from_secs(1), output_subscription.recv())
             .await
             .expect("second output subscription should receive")
@@ -1775,6 +1830,16 @@ mod tests {
             ),
             Some(RuntimeValue::String("beta".to_string()))
         );
+        let beta_arrived_at = domain_clock
+            .snapshot()
+            .expect("the fixture's clock remains installed")
+            .now();
+        assert_eq!(
+            beta_arrived_at.duration_since(beta_admitted_at),
+            Some(Duration::from_millis(500)),
+            "beta flushes one cadence after its own admission"
+        );
+        assert!(beta_arrived_at > acme_arrived_at);
         assert_eq!(
             timeout(Duration::from_secs(1), &mut beta_completion)
                 .await
@@ -1782,8 +1847,6 @@ mod tests {
             AckOutcome::Ack
         );
 
-        let _ = shutdown_tx.send(true);
-        let _ = task.await;
         branched_runtime.shutdown().await;
         owner_task
             .stop(Duration::from_secs(1))
@@ -1793,6 +1856,9 @@ mod tests {
 
     #[nervix_primitives::test]
     async fn reingestor_force_and_shutdown_flush_buffered_routes() {
+        use futures_util::FutureExt as _;
+        use nervix_models::{DomainClockState, DomainTimeRate};
+
         let runtime = Runtime::default();
         let domain = domain("default");
         let input_relay = named::<RelayName>("orders");
@@ -1802,13 +1868,27 @@ mod tests {
             ("tenant", ParseAsType::String),
             ("user_id", ParseAsType::U32),
         ]);
+        // Actual UTC stays before the mapping's origin, so logical time holds still: the route's
+        // 10s cadence never comes due, and only the force flush or the shutdown can release what
+        // the reingestor buffers.
+        let clock_lifecycle = DomainClockLifecycle::new(domain.clone());
+        clock_lifecycle.install_paced(
+            0,
+            DomainClockState::new(
+                Timestamp::from_unix_nanos(i64::MAX),
+                Timestamp::from_unix_nanos(0),
+                DomainTimeRate::ONE,
+            ),
+        );
         let (execution_shutdown, _) = watch::channel(false);
         runtime.install_domain_execution(
             &domain,
             DomainExecution {
                 revision: test_execution_revision(&domain, Vec::new()),
                 start_version: 0,
-                domain_clock: test_domain_clock(&domain),
+                domain_clock: clock_lifecycle
+                    .bind()
+                    .expect("the fixture installs its controlled domain clock"),
                 shutdown: execution_shutdown,
                 routing: runtime.stage_domain_routing(
                     &domain,
@@ -1876,6 +1956,8 @@ mod tests {
         let input = ExecutionBuildDeps::from_routing(&domain, &routing)
             .bind_reingestor_input(&plan, &plan.inputs[0])
             .expect("the planned reingestor input binds");
+        let output_counters = runtime
+            .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Reingestor, &reingestor));
         let task = runtime.spawn_reingestor_task(
             &domain,
             &shutdown_tx,
@@ -1906,41 +1988,44 @@ mod tests {
             .await
             .expect("first input should broadcast");
         first_acks.ack_success();
+        wait_until_one_output_is_buffered(&clock_lifecycle, &output_counters).await;
         assert!(
-            timeout(Duration::from_millis(20), output_rx.recv())
-                .await
-                .is_err(),
+            output_rx.recv().now_or_never().is_none(),
             "long-cadence reingestor output must remain buffered"
         );
         assert!(
-            timeout(Duration::from_millis(1), &mut first_completion)
-                .await
-                .is_err(),
+            first_completion.as_mut().now_or_never().is_none(),
             "force-flush input ACK must remain pending with buffered output"
         );
 
         runtime.force_flush_domain(&domain);
-        let forced = timeout(Duration::from_secs(1), output_rx.recv())
+        let forced = timeout(Duration::from_secs(10), output_rx.recv())
             .await
             .expect("force flush should publish buffered output")
             .expect("reingestor output should remain open");
+        let forced_row = forced
+            .runtime_row(0)
+            .expect("forced output should contain an Arrow row");
         assert_eq!(
-            row_value(
-                &forced
-                    .runtime_row(0)
-                    .expect("forced output should contain an Arrow row"),
-                "user_id",
-            ),
+            row_value(&forced_row, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
+        );
+        assert_eq!(
+            row_value(&forced_row, "user_id"),
             Some(RuntimeValue::U32(1))
+        );
+        assert!(
+            first_completion.as_mut().now_or_never().is_none(),
+            "the input ACK must wait for the forced output's own acknowledgement"
         );
         forced.ack_success();
         assert_eq!(
-            timeout(Duration::from_secs(1), &mut first_completion)
+            timeout(Duration::from_secs(10), &mut first_completion)
                 .await
                 .expect("force-flushed ACK should resolve"),
             AckOutcome::Ack
         );
-        timeout(Duration::from_secs(1), async {
+        timeout(Duration::from_secs(10), async {
             loop {
                 nervix_primitives::task::consume_budget().await;
                 let pending = runtime
@@ -1957,6 +2042,16 @@ mod tests {
         })
         .await
         .expect("force-flush generation should complete after output publication");
+        assert_eq!(
+            output_counters.admitted_work(),
+            0,
+            "the force flush must release everything the reingestor buffered"
+        );
+        assert_eq!(
+            clock_lifecycle.notification_receivers(),
+            0,
+            "with nothing buffered the reingestor must wait for no flush deadline"
+        );
 
         let (second_acks, second_completion) = AckSet::root();
         let mut second_completion = Box::pin(second_completion.wait());
@@ -1965,45 +2060,202 @@ mod tests {
             .await
             .expect("second input should broadcast");
         second_acks.ack_success();
+        wait_until_one_output_is_buffered(&clock_lifecycle, &output_counters).await;
         assert!(
-            timeout(Duration::from_millis(20), &mut second_completion)
-                .await
-                .is_err(),
+            output_rx.recv().now_or_never().is_none(),
+            "shutdown output must remain buffered until the reingestor stops"
+        );
+        assert!(
+            second_completion.as_mut().now_or_never().is_none(),
             "shutdown input ACK must remain pending while its output is buffered"
         );
         shutdown_tx
             .send(true)
             .expect("reingestor shutdown receiver should remain open");
-        timeout(Duration::from_secs(1), task)
+        timeout(Duration::from_secs(10), task)
             .await
             .expect("reingestor should stop after draining input")
             .expect("reingestor task should not panic");
-        let stopped = timeout(Duration::from_secs(1), output_rx.recv())
+        let stopped = timeout(Duration::from_secs(10), output_rx.recv())
             .await
             .expect("shutdown should publish buffered output")
             .expect("reingestor output should remain open");
+        let stopped_row = stopped
+            .runtime_row(0)
+            .expect("shutdown output should contain an Arrow row");
         assert_eq!(
-            row_value(
-                &stopped
-                    .runtime_row(0)
-                    .expect("shutdown output should contain an Arrow row"),
-                "user_id",
-            ),
+            row_value(&stopped_row, "tenant"),
+            Some(RuntimeValue::String("acme".to_string()))
+        );
+        assert_eq!(
+            row_value(&stopped_row, "user_id"),
             Some(RuntimeValue::U32(2))
+        );
+        assert!(
+            second_completion.as_mut().now_or_never().is_none(),
+            "the input ACK must wait for the shutdown output's own acknowledgement"
         );
         stopped.ack_success();
         assert_eq!(
-            timeout(Duration::from_secs(1), &mut second_completion)
+            timeout(Duration::from_secs(10), &mut second_completion)
                 .await
                 .expect("shutdown-flushed ACK should resolve"),
             AckOutcome::Ack
         );
         assert_eq!(
-            runtime
-                .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Reingestor, &reingestor))
-                .admitted_work(),
+            output_counters.admitted_work(),
             0,
             "reingestor output gauge must be cleared when the task exits"
         );
+    }
+
+    /// Waits until the reingestor holds one admitted output batch and waits for that batch's flush
+    /// deadline. Its loop waits on the logical clock only after a processed input entered an output
+    /// buffer, so the clock's one waiter shows the reingestor finished producing that output, which
+    /// a window of silence cannot show.
+    async fn wait_until_one_output_is_buffered(
+        clock: &DomainClockLifecycle,
+        counters: &NodeQuiesceCounters,
+    ) {
+        timeout(Duration::from_secs(10), async {
+            while clock.notification_receivers() != 1 {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the reingestor buffers its output and waits for that output's flush deadline");
+        assert_eq!(
+            counters.admitted_work(),
+            1,
+            "the reingestor must hold exactly the buffered output batch"
+        );
+    }
+
+    /// A reingestor route whose relay has no branched entrypoint on this node fails the input that
+    /// built its output, as one internal error naming the relay.
+    #[nervix_primitives::test]
+    async fn reingestor_output_without_an_entrypoint_fails_its_input_as_an_internal_error() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let input_relay = named::<RelayName>("orders");
+        let output_relay = named::<RelayName>("tenant_orders");
+        let schema = test_schema(&[
+            ("tenant", ParseAsType::String),
+            ("user_id", ParseAsType::U32),
+        ]);
+        let (execution_shutdown, _) = watch::channel(false);
+        runtime.install_domain_execution(
+            &domain,
+            DomainExecution {
+                revision: test_execution_revision(&domain, Vec::new()),
+                start_version: 0,
+                domain_clock: test_domain_clock(&domain),
+                shutdown: execution_shutdown,
+                routing: runtime.stage_domain_routing(
+                    &domain,
+                    DomainRoutingSnapshot {
+                        relay_schemas: [
+                            (input_relay.clone(), schema.clone()),
+                            (output_relay.clone(), schema.clone()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        relay_branchings: [
+                            (input_relay.clone(), ResolvedBranching::unbranched()),
+                            (output_relay.clone(), ResolvedBranching::unbranched()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                        ..DomainRoutingSnapshot::default()
+                    },
+                ),
+                branched_entrypoints: HashMap::default(),
+                endpoint_routes: HashMap::default(),
+                node_tasks: HashMap::default(),
+                emitter_tasks: HashMap::default(),
+                generator_tasks: HashMap::default(),
+                reingestor_tasks: HashMap::default(),
+                placement_tasks: HashMap::default(),
+                relay_state_tasks: HashMap::default(),
+                relay_owner_tasks: HashMap::default(),
+                tasks: Vec::new(),
+            },
+        );
+        let (shutdown_tx, _) = watch::channel(false);
+        let broadcast = RelayBroadcast::with_capacity(nonzero_capacity(4));
+        let fan_in = RelayRuntimeFanIn::new(broadcast.new_receiver());
+        let plan = EntrypointTestDomain {
+            relays: &["orders", "tenant_orders"],
+            fields: &[
+                ("tenant", ParseAsType::String),
+                ("user_id", ParseAsType::U32),
+            ],
+            branch_fields: &[],
+        }
+        .plan_reingestor(
+            &domain,
+            CreateReingestor {
+                name: named("tenant_partition"),
+                from: ProcessorInputs::single(input_relay.clone()),
+                output_routes: with_inherit_all(ProcessorOutputs::single(output_relay.clone()))
+                    .with_flush_policy(FlushPolicy::Immediate)
+                    .with_branch(OutputBranch::Unbranched),
+                mode: AckMode::Attached,
+                filter_where: None,
+                materialized_state: Vec::new(),
+            },
+        );
+        let routing = runtime
+            .domain_routing(&domain)
+            .expect("the test domain routing is installed")
+            .load_full();
+        let input = ExecutionBuildDeps::from_routing(&domain, &routing)
+            .bind_reingestor_input(&plan, &plan.inputs[0])
+            .expect("the planned reingestor input binds");
+        let mut events = runtime.subscribe_events();
+        // No branched entrypoint is installed for the route's relay on this node.
+        let task =
+            runtime.spawn_reingestor_task(&domain, &shutdown_tx, HashMap::default(), input, fan_in);
+        let (acks, completion) = AckSet::root();
+        let batch = RelayRecordBatch::single(
+            schema,
+            None,
+            test_runtime_row([
+                (
+                    "tenant".to_string(),
+                    RuntimeValue::String("acme".to_string()),
+                ),
+                ("user_id".to_string(), RuntimeValue::U32(1)),
+            ]),
+            acks.attached(),
+        )
+        .expect("input batch should build");
+        broadcast
+            .broadcast(batch)
+            .await
+            .expect("the input should broadcast");
+        acks.ack_success();
+
+        let RuntimeEvent::Error(message) = timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("the reingestor reports the failure within its test deadline")
+            .expect("the runtime keeps publishing its events");
+        let expected = "reingestor 'tenant_partition' internal error in domain 'default': relay \
+                        'tenant_orders' has no branched entrypoint on this node";
+        assert_eq!(message, expected);
+        assert_eq!(
+            timeout(Duration::from_secs(10), completion.wait())
+                .await
+                .expect("the failed input's acknowledgements resolve"),
+            AckOutcome::NoAck(expected.to_string())
+        );
+        shutdown_tx
+            .send(true)
+            .expect("reingestor shutdown receiver should remain open");
+        timeout(Duration::from_secs(10), task)
+            .await
+            .expect("reingestor should stop after its shutdown")
+            .expect("reingestor task should not panic");
     }
 }

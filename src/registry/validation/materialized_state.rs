@@ -7,6 +7,11 @@
 //! - **Depends on.** The relay Models and the expressions that reference them.
 //! - **Must not know.** How state is stored, snapshotted or evicted.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use ahash::{HashMap, HashSet};
 use arrow_schema::Schema as ArrowSchema;
 use error_stack::Report;
@@ -164,30 +169,35 @@ fn validate_materialized_state_default(
             ),
         })
     })?;
-    compile_program_with_options_for_bindings_with_sensitivity(
-        &parsed,
-        output_schema,
-        schema_sensitivity_for_internal_schema(schema),
-        vec![writable_binding_for_internal_schema("output", schema)],
-        udf_compile_options(
-            models,
-            CompileOptions {
-                output_mode: OutputMode::ExplicitOnly,
-                ..CompileOptions::default()
-            },
-        ),
-    )
-    .map_err(|error| {
-        let message = error.current_context().message.clone();
-        error.change_context(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "materialized-state DEFAULT for '{}' is invalid: {}",
-                dependency.relay, message
+    {
+        let mapping_input = compile_program_with_options_for_bindings_with_sensitivity(
+            &parsed,
+            output_schema,
+            schema_sensitivity_for_internal_schema(schema),
+            vec![writable_binding_for_internal_schema("output", schema)],
+            udf_compile_options(
+                models,
+                CompileOptions {
+                    output_mode: OutputMode::ExplicitOnly,
+                    ..CompileOptions::default()
+                },
             ),
-        })
-    })?;
+        );
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let message = error.current_context().message.clone();
+                error.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "materialized-state DEFAULT for '{}' is invalid: {}",
+                        dependency.relay, message
+                    ),
+                })
+            }),
+        }
+    }?;
     Ok(())
 }
 

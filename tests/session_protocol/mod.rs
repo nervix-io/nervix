@@ -52,7 +52,7 @@ fn execution_reference(raw: &str) -> CommandExecutionReference {
     CommandExecutionReference::parse(raw).expect("scenario execution references are valid")
 }
 
-#[when(expr = "the active session sends request {string} with this NSPL command")]
+#[when(expr = "the active session sends request {string} with this Plexus command")]
 async fn when_active_session_sends_named_command(
     world: &mut ScenarioWorld,
     name: String,
@@ -69,7 +69,7 @@ async fn when_active_session_sends_named_command(
 
 #[when(
     expr = "the active session sends request {string} with execution reference {string} and this \
-            NSPL command"
+            Plexus command"
 )]
 async fn when_active_session_sends_named_referenced_command(
     world: &mut ScenarioWorld,
@@ -223,6 +223,21 @@ async fn then_completion_search_used_pages_without_duplicates(
     assert_eq!(unique.len(), values.len(), "completion pages: {values:?}");
 }
 
+#[then("the collected completion candidates are")]
+fn then_collected_completion_candidates_are(world: &mut ScenarioWorld, #[step] step: &Step) {
+    let expected = docstring(step)
+        .trim()
+        .lines()
+        .collect::<std::collections::BTreeSet<_>>();
+    let actual = world
+        .last_completion_values
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual.len(), world.last_completion_values.len());
+    assert_eq!(actual, expected);
+}
+
 #[when(expr = "the active session cancels request {string}")]
 async fn when_active_session_cancels_request(world: &mut ScenarioWorld, name: String) {
     let target = named_request(world, &name);
@@ -343,6 +358,32 @@ async fn when_active_session_sends_split_cursor(
         .send_altered(&original, &variant, &[cursor_byte])
         .await
         .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
+    world.session_requests.insert(name, request_id);
+}
+
+#[when(expr = "the active session sends request {string} completing with invalid page size {int}")]
+async fn when_active_session_sends_invalid_page_size(
+    world: &mut ScenarioWorld,
+    name: String,
+    page_size: u8,
+) {
+    assert!(page_size == 0 || page_size > 100);
+    let session = active_session(world);
+    let request_id = session.reserve_request_id();
+    let domain = session.domain().cloned();
+    let suggestion = |size| ClientMessage {
+        request_id,
+        request: ClientRequest::Suggest(
+            SuggestRequest::new("SHOW ".to_owned(), 5, domain.clone())
+                .assured("the cursor is at the end of the literal ASCII input")
+                .with_page(size, None)
+                .assured("one and two are valid completion page sizes"),
+        ),
+    };
+    session
+        .send_altered(&suggestion(1), &suggestion(2), &[page_size])
+        .await
+        .assured("the connected scenario session sends the altered page size");
     world.session_requests.insert(name, request_id);
 }
 

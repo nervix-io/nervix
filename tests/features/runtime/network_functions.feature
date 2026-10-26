@@ -2,11 +2,11 @@ Feature: IP address, network and URL functions
   Scenario Outline: Addresses and URLs parse into typed addresses and URL Standard components
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_endpoint (
         id STRING,
@@ -45,8 +45,8 @@ Feature: IP address, network and URL functions
       CREATE RELAY url_views SCHEMA url_view UNBRANCHED;
       CREATE VHOST edge network-values-{{test_id}}.example.com;
       CREATE ENDPOINT endpoint_ingress ON edge PATH '/endpoints' TYPE HTTP;
-      CREATE INGESTOR endpoint_source
-        FROM ENDPOINT endpoint_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR endpoint_source
+        FROM endpoint_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_endpoint_batch_codec
         TO raw_endpoints
           INHERIT ALL
@@ -117,11 +117,11 @@ Feature: IP address, network and URL functions
   Scenario Outline: A route filter selects messages by the network their typed address belongs to
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_client (
         id STRING,
@@ -139,8 +139,8 @@ Feature: IP address, network and URL functions
       CREATE RELAY internal_clients SCHEMA internal_client UNBRANCHED;
       CREATE VHOST edge network-filter-{{test_id}}.example.com;
       CREATE ENDPOINT client_ingress ON edge PATH '/clients' TYPE HTTP;
-      CREATE INGESTOR client_source
-        FROM ENDPOINT client_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR client_source
+        FROM client_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_client_batch_codec
         TO raw_clients
           INHERIT ALL
@@ -181,11 +181,11 @@ Feature: IP address, network and URL functions
   Scenario Outline: Malformed addresses, prefixes, networks, URLs and escapes fail only their message, and guards route them explicitly
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_probe (
         id STRING,
@@ -224,8 +224,8 @@ Feature: IP address, network and URL functions
       CREATE RELAY probe_errors SCHEMA probe_error UNBRANCHED;
       CREATE VHOST edge network-errors-{{test_id}}.example.com;
       CREATE ENDPOINT probe_ingress ON edge PATH '/probes' TYPE HTTP;
-      CREATE INGESTOR probe_source
-        FROM ENDPOINT probe_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR probe_source
+        FROM probe_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_probe_batch_codec
         TO raw_probes
           INHERIT ALL
@@ -298,11 +298,11 @@ Feature: IP address, network and URL functions
   Scenario Outline: Network functions keep the sensitivity of the values they read
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA secret_visit (
         id STRING,
@@ -324,8 +324,8 @@ Feature: IP address, network and URL functions
       CREATE RELAY visit_facts SCHEMA visit_facts UNBRANCHED;
       CREATE VHOST edge network-sensitive-{{test_id}}.example.com;
       CREATE ENDPOINT visit_ingress ON edge PATH '/visits' TYPE HTTP;
-      CREATE INGESTOR visit_source
-        FROM ENDPOINT visit_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR visit_source
+        FROM visit_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING secret_visit_codec
         TO secret_visits
           INHERIT ALL
@@ -370,7 +370,7 @@ Feature: IP address, network and URL functions
 
   Scenario Outline: A statement is rejected for an invalid constant network, a text address or a leaked result
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "<error>"
+    When these Plexus commands fail with "<error>"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA raw_client (

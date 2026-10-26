@@ -24,9 +24,27 @@ Replica catch-up retains the entity's lifecycle handle and the replica task's ow
 branch (see [Replica catch-up](#replica-catch-up-the-repair-typed-ratchet-14-makes)); Typed
 Ratchet 15 owns the remaining state-replication frame, synchronization, listing and announcer
 reads, including the lifecycle lookup those requests share. The primary's synchronization request
-handler remains recurring debt. Source readiness marking
-also reaches its registry from polling and remains debt for Typed Ratchet 03. This tooling cutover
-changes no runtime map, access cadence or ownership protocol.
+handler remains recurring debt. Source hosts retain an exact instance readiness handle; installation and observers alone reach
+the readiness registry. Relay channels, transport selection and domain publications use the
+immutable tables and retained lifetimes described below.
+
+## Diagnostic acquisition history
+
+`nervix-primitives::deadlock::OrderHistory::edges` is a diagnostic-only
+`DashMap<EdgeKey, EdgeRecord>`. An order-enabled attempted nested acquisition reaches it once per
+held source context; the findings owner reads it when correlating a historical cycle. It retains
+at most 16,384 directed run-local instance edges and 1,024 contexts per edge until process exit,
+including ended locks. Refusal is explicit overload. No borrowed shard crosses a tracked lock
+acquisition. Runtime-disabled order checking skips edge access; the compiled instrumentation and
+actual-guard tracking still remain. Ordinary execution contains neither the map nor its access.
+
+The existing diagnostic live registry retains construction, waiting-attempt and thread-name maps
+for their corresponding lifetimes. The order selection also reads construction/name entries while
+recording nested attempts and copies bounded source context into history before they disappear.
+This is retained diagnostic bookkeeping, outside ordinary recurring data-plane execution, not a
+repair or suppression of a product map. The canonical
+[diagnostic contract](../docs/src/data-plane-concurrency.md#diagnostic-deadlock-detection) states its
+upstream graph, callback and modeled-scheduling limits.
 
 ## How accesses are classified
 
@@ -35,6 +53,17 @@ read side; `get_mut`, `entry`, `insert`, `remove`, `retain` and `alter` take its
 when the key is absent or already present; a borrowed `Ref` holds its shard until it is dropped.
 Method names are not evidence: each access below was traced from its call site to the loop that
 drives it.
+
+Forced ownership schedule swaps make one additional lifecycle read of `RuntimeInner::executions`
+to resolve the affected relays' retained services after closing their dispatch gates. The typed
+plan identifies those relays; channel-generation retirement and record delivery use the retained
+handles, without another recurring map lookup. Publication or domain teardown keeps ownership of
+the registry entries. The read guard ends before waiting for dispatch quiescence.
+
+Kafka domain-offset resume clones its committed partition schedule from `RuntimeInner::executions`.
+A normal resume reads it once; accepting an explicit start adds a canonical reread, for at most two
+reads per resume attempt. Each guard ends before persistence, replica waits or native connector I/O.
+Consumer polling and offset commits retain their existing state handles.
 
 The frequency of a map is its hottest access:
 
@@ -134,6 +163,18 @@ replica's synchronization task, and it retires with the state, ending its announ
 | a replica's copy of a branch checkpoint | a full payload clone under the `passive_runtime_state_snapshots` write guard | a revision comparison and a move under the guard |
 | `ReplicatedBranchAggregatedState::replica_progress` and its notification | written per acknowledgement and never read | deleted |
 
+Kafka offset replica polling first describes the revision through the immutable published state
+routes. An advancing revision opens one Snapshot stream and resolves its placement once more; an
+unchanged revision opens none. The stream retains that exact admitted state and its quota-owned
+artifact through bounded chunk reads, without consulting a concurrent registry per chunk. The
+replica task retains its assignment-qualified installer and checkpoint progress. These two route
+resolutions add no access to the lifecycle-only `replicated_kafka_offset_states` registry and no
+concurrent map.
+Each successful poll sends the held revision back, including when no checkpoint advanced. The
+acknowledgement resolves the owner's immutable replication route once per poll and uses the
+retained replica assignment for its report; it neither opens the Kafka state registry nor adds a
+lookup per partition or transport chunk. Repeating this progress recovers a lost acknowledgement.
+
 ## Replica catch-up: the repair Typed Ratchet 14 makes
 
 Before this repair, a replica's poll task walked every branch its entity's lifecycle named once
@@ -169,36 +210,31 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 
 | Map | Hottest access | Delivery |
 | --- | --- | --- |
-| `RelayBoundaryServices::ingress_slots` | `ingress_slot` get per batch forwarded to a remote owner | Typed Ratchet 03 |
-| `RelayBoundaryServices::outbound_slots` | `outbound_slot` get with a rebuilt key per batch per remote consumer and per interested node; full `retain` per eviction for every relay of the domain | Typed Ratchet 03 |
-| interconnect `targets`, `slots`, `connections` | `try_lease` and `ensure_slot` reads per outbound request, acknowledgement and relay send | Typed Ratchet 03 |
-| `RuntimeInner::message_error_routes` | occupied `entry` per buffered failed record, holding the write lock across route construction | Typed Ratchet 03 |
-| `RuntimeInner::domain_routings` | get for every fresh ingest route collector (per endpoint request and per acknowledged source batch) and per branch eviction | Typed Ratchet 03 |
-| `ReplicatedMaterializedRelayState::entries` | `get_mut` per record; `record` per batch per dependency | Typed Ratchet 04 |
-| `RuntimeInner::replicated_materialized_stream_states` | get per materialized dependency read; full iteration per generator tick | Typed Ratchet 04 |
-| `RuntimeInner::relay_branch_presences` | get per materialized dependency read and per generated record in `materialized_stream_key_is_visible` | Typed Ratchet 04 |
-| `RuntimeInner::state_identities` | `state_placement` per materialized read | Typed Ratchet 04 |
-| `RuntimeInner::relay_state_epochs` | occupied `entry` per branch relay dispatch | Typed Ratchet 04 |
-| interconnect `grants`, `relay_attempts`, `active_relay_channels`, `relay_admissions`, `relay_watermarks` | several reads and writes per granted relay frame and per terminal acknowledgement; a 100 ms full scan of attempts | Typed Ratchet 05 |
-| interconnect `outbound_relay_epochs`, `outbound_relay_admissions` | `entry` per sent relay batch, lookup per received terminal acknowledgement, full `retain` on reconciliation | Typed Ratchet 05 |
-| `RemoteDispatchRegistry::pending_acks` | insert per forwarded row; get per admitted delivery row and per `Alive`, every 100 ms per unresolved row; a full iteration every second; remove per terminal | Typed Ratchet 05 |
-| `RemoteDispatchRegistry::pending_relay_admissions` | insert per relay payload; get per `Alive`; write-locked remove per terminal, including misses for record acknowledgements | Typed Ratchet 05 |
-| `RuntimeInner::in_flight_by_domain` | generators bind their tracker once; retained roots adjust it directly; per remote row resolution remains with Typed Ratchet 05 | Typed Ratchet 05; generator registration retained |
+| `ReplicatedMaterializedRelayState::entries` (immutable publication) | retained row views for reads and captures; membership changes at branch installation, deletion or snapshot installation | completed: Typed Ratchet 04 |
+| `RuntimeInner::replicated_materialized_stream_states` | cold installation, public observation and active-domain lifecycle backup capture (running or paused); stopped backups select immutable checkpoint readers; dependency readers and generators retain the per-relay publication | retain: lifecycle registry |
+| `RuntimeInner::relay_branch_presences` | domain construction retains presence in relay services; materialized reads load those services | retain: lifecycle registry |
+| `RuntimeInner::state_identities` | cold assignment registration, observation and a read per retained checkpoint at backup capture; materialized placement reads use the shared immutable assignment publication | retain: lifecycle registry |
+| `RuntimeInner::relay_state_epochs` | domain routing retains the epoch once; branches load their routing epoch directly | retain: lifecycle registry |
+| each `RelayPeerProtocol` inbound collections | grant, body, cancel, progress and terminal transitions under the retained authenticated peer owner | completed: Typed Ratchet 05 |
+| each `RelayPeerProtocol` outbound collections | register, reconcile and terminal retirement under the retained peer owner | completed: Typed Ratchet 05 |
+| `RemoteDispatchRegistry::slots` record owners | exact delivery generation and row routing; progress, outcome and sweep mutate only that delivery | completed: Typed Ratchet 05 |
+| `RemoteDispatchRegistry::slots` admission owners | exact position and generation routing; replaceable progress and one terminal reply | completed: Typed Ratchet 05 |
+| `RuntimeInner::in_flight_by_domain` | source and relay construction retain the domain tracker; observer and teardown accesses only | retain: lifecycle registry |
 | `RuntimeInner::in_flight_by_ingestor` | ingest executions, groups and endpoint bindings retain the tracker pair resolved at startup | retain: lifecycle registry |
-| `RuntimeInner::ingestor_statuses` | sources retain one failure/retry publication; healthy operations read it without a registry access or publication write; observers load one complete status | retain: lifecycle registry |
-| `RuntimeInner::emitter_statuses` | sinks and their event tasks retain one failure/retry publication; healthy clears read it; task teardown removes its registration | retain: lifecycle registry |
-| `RuntimeInner::pool_waits` | register/remove once per pooled sink; only a borrow returning Pending publishes its retained wait slot, cleared on completion or cancellation | retain: lifecycle registry |
+| `RuntimeInner::ingestor_statuses` | sources and endpoint bindings retain one status holding a failure/retry publication and a last-decode-rejection publication; healthy operations read it without a registry access or publication write; a codec refusal stores one rejection through the retained status; observers load one complete status | retain: lifecycle registry |
+| `RuntimeInner::emitter_statuses` | emitters and their event tasks retain one failure/retry publication; healthy clears read it; task teardown removes its registration | retain: lifecycle registry |
+| `RuntimeInner::pool_waits` | register/remove once per pooled emitter; only a borrow returning Pending publishes its retained wait slot, cleared on completion or cancellation | retain: lifecycle registry |
 | `RuntimeInner::emitter_confirmation_waits` | counters resolve at emitter spawn and are removed with the task; flush/commit guards use the retained counter | retain: lifecycle registry |
-| `RuntimeInner::replicated_branch_aggregated_states` | tasks bind a placement dirty mark beside their metric series; recurring marks reach only that retained state, while incoming replica frames still resolve the registry | registration retained; Typed Ratchet 15 owns frame routing |
+| `RuntimeInner::replicated_branch_aggregated_states` | tasks and replication routes retain metric placement and progress; the registry handles registration and observation | retain: lifecycle registry |
 | `RuntimeInner::frozen_ownership_handoff_entities` | tasks bind one entity publication; watches register before reading it and handoff release publishes before waking | retain: lifecycle registry |
 | `RuntimeInner::domains` | task startup binds the lifecycle allocation; ingestion reads pause and clock from one publication, Kafka reads its generation, and generators use their retained clock | retain: lifecycle registry |
-| `RuntimeInner::executions` | processor, relay-state and subscription clocks bind at startup; WASM states retain assignment publication; error handlers use retained routing snapshots; checkpoint announcer assignment reads remain | Typed Ratchet 15 owns announcer reads; other consumers retain publications |
+| `RuntimeInner::executions` | schedule installation and observation bind clock, routing and state assignment publications; Kafka resume clones its committed partition schedule in at most two initialization phases; a forced-recovery request checks for its domain under the application sequence and waits on installation changes within its existing deadline; announcers retain their installed route and assignment slot | retain: lifecycle registry |
 | `DomainForceFlush::state` mutex | participant idle and claimed polls read their readiness hint; an available obligation acquires the coordinator for its authoritative generation claim | retain: bounded generation protocol |
-| Prometheus `MetricVec` children | client outcome children, quiesce payload counters/gauges and subscription drop counters resolve once with their owner | retain: lifecycle registry |
+| Prometheus `MetricVec` children | client outcome children, quiesce payload counters/gauges, a source host's unfolding refusal, transport redelivery and oversized payload counters, and subscription drop counters resolve once with their owner | retain: lifecycle registry |
 | `RuntimeInner::endpoint_intake_routes` | one immutable publication; borrowed host/path resolution per HTTP request, retained route per WebSocket connection | completed publication: Typed Ratchet 12 |
-| replicated-state registries, `RuntimeInner::replicated_branch_lifecycles` | borrowed get per replica ACK, checkpoint-available frame, synchronization request and catalog listing | Typed Ratchet 15 |
-| `RuntimeInner::executions`, `state_identities` | assignment validation per checkpoint frame and per branch checkpoint a replica fetches or installs; execution get per announcer step, repeated every 100 ms while a replica lags | Typed Ratchet 15 |
-| `RuntimeInner::passive_runtime_state_snapshots` | full retain when a received branch lifecycle prunes branches | Typed Ratchet 15 |
+| replicated-state registries, `RuntimeInner::replicated_branch_lifecycles` | state installation binds the actual state to published routes; frames and announcers use those retained handles | retain: lifecycle registry |
+| `RuntimeInner::passive_runtime_state_snapshots` | non-branch handoff staging and cold promotion; branch copies and pruning belong to the retained entity lifecycle | retain: lifecycle registry |
+
 
 ## Inventory by owner
 
@@ -207,30 +243,30 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
 | `RelayBoundaryServices::branch_presence` (not a map: the owner task's published `BranchPresence`) | the relay owner publishes on branch creation, eviction, expiry, claim and release; `DESCRIBE`, materialized visibility and the console branch list load it | lifecycle (publication); observer (loads) | owner task, fenced by owner lifetime | lock-free load; one publication per changed owner step | retain: bounded protocol (owner-published membership) |
-| `RelayBoundaryServices::ingress_slots` | `entry` on a branch's first forwarded batch; get on every later one; remove and cancel on eviction | per batch | first batch installs; channel incarnation reopened after idleness or an indeterminate outcome | slot gate held across encode and dispatch by design | Typed Ratchet 03 |
-| `RelayBoundaryServices::outbound_slots` | `entry` on a channel's first batch; get with a rebuilt key per batch and destination; `retain` per eviction | per batch per destination | relay owner task; as ingress | as ingress; slots of departed consumers stay until eviction | Typed Ratchet 03 |
 | `RuntimeInner::relay_boundary_fanouts` | inserted at domain build; read by capacity changes, gates, generators, drain polls | lifecycle, observer | services keep the fanout; never removed | values cloned out | retain: lifecycle registry |
-| `RemoteDispatchRegistry::pending_acks` | insert per forwarded row with acknowledgements, naming its receiver; get per admitted delivery row and per `Alive`; a sweep iterates every entry once a second and fails a silent one through a predicate-rechecked `remove_if`; remove per terminal | per record, per ACK; sweep every second | shared by dispatchers, the incoming loop and the sweep; process-run identity fence | `Ref` over the admission and `Alive` updates; an admitted share fails after 15 s without a report from its receiver; no cap | Typed Ratchet 05 |
-| `RemoteDispatchRegistry::pending_relay_admissions` | insert per relay payload and destination; get per `Alive`; remove per terminal | per remote frame, per ACK | waiter keeps its receiver; process-run identity fence | ≤1 per outbound channel; 5 s inactivity, 300 s total | Typed Ratchet 05 |
+| `RemoteDispatchRegistry::slots` record owners | registration, admission, ordered parked progress, Alive, terminal resolution, sweep and shutdown | per delivery or ACK; sweep once a second | one charged delivery owns its rows; full registrar identity and exact slot generation | 8,192 delivery positions; row memory charged to Relay; 300 s before admission, 15 silent sweeps after admission; ACK outcomes after the short guard | retain: bounded delivery protocol, Typed Ratchet 05 |
+| `RemoteDispatchRegistry::slots` admission owners | registration, replaceable progress, one terminal reply, waiter withdrawal and shutdown | per remote frame or ACK | one admission position and exact generation; full registrar identity | separate 8,192 positions; one watch value; 5 s inactivity and 300 s total; closed waiters reclaimed by progress or sweep | retain: bounded admission protocol, Typed Ratchet 05 |
 
 ### Materialized and replicated state
 
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
-| `ReplicatedMaterializedRelayState::entries` | `get_mut` replace or first insert per record; `record` per dependency read; `capture` for snapshots, handoff, `SHOW` and remote reads | per record | one originator per assignment; assignment fence, branch generation, installed fence | `capture` holds the barrier over iteration and sort | Typed Ratchet 04 |
-| `RuntimeInner::replicated_materialized_stream_states` | get-then-insert at placement; get per dependency read; iteration per generator tick; borrowed read per replica acknowledgement and checkpoint announcement of a materialized snapshot | per batch, per remote frame | writers retain; readers resolve each time; assignment generation | cloned out | Typed Ratchet 04 (materialized reads), Typed Ratchet 15 (replication frames) |
-| `RuntimeInner::relay_branch_presences` | get-or-insert at domain build under the schedule lock; get per materialized visibility check | per batch, per generated record | shares the relay's presence across rebuilds; placement carries the schema fingerprint | `Ref` over one lock-free load | Typed Ratchet 04 (the reader's placement lookup) |
-| `RuntimeInner::restored_materialized_stream_states` | insert after an asynchronous open; take at build | lifecycle | schedule application | short | retain: lifecycle registry |
-| `RuntimeInner::relay_state_epochs` | occupied `entry` per branch relay dispatch; bumped at schedule application | per batch | branch caches only the number | dropped after clone | Typed Ratchet 04 |
-| `RuntimeInner::state_identities` | schedule installation replaces each retained assignment slot; state placement binds it; WASM callbacks read it directly | lifecycle, observer; materialized reads per batch and replica placement checks per frame and per branch checkpoint a replica fetches or installs | one entity publication contains identity and checkpoint owners; removal publishes absence | no callback registry guard | registry retained; Typed Ratchet 04 owns materialized resolution; Typed Ratchet 15 owns replica placement resolution |
-| `RuntimeInner::replicated_deduplicator_states`, `replicated_window_processor_states`, `replicated_wasm_processor_states`, `replicated_kafka_offset_states` | get-then-insert at branch or source start; a synchronization request reads the one registry of its placement's kind; replica acknowledgements and checkpoint announcements find their placement's state with a borrowed read | lifecycle; per remote frame (borrowed read) | tasks retain their state, and with it its replication and catalog entry; fingerprint, incarnation or generation | values cloned out before an encode | installation: lifecycle; recurring reads: Typed Ratchet 15 |
-| `RuntimeInner::replicated_branch_aggregated_states` | registration, snapshot synchronization, acknowledgement, announcement and observation; tasks retain dirty marks | lifecycle, observer; per remote frame | exact metric placement retained with its series | synchronization guards stay on snapshot paths | registration: lifecycle; frame routing: Typed Ratchet 15 |
+| `ReplicatedMaterializedRelayState::entries` (immutable persistent index) | lifecycle publishes branch row slots; readers and captures load them | membership changes only | one exclusive originator task; assignment fence, branch generation and installed revision | established replacements mutate task-local selection and publish one Arrow view; capture holds the assignment barrier while sharing views; backup admits at most 8 MiB of generation metadata before capture | completed publication: Typed Ratchet 04 |
+| `RuntimeInner::replicated_materialized_stream_states` | installation, cold recovery, public observation and active-domain lifecycle backup capture (running or paused); stopped backups select immutable checkpoint readers | lifecycle, observer | writers, snapshots and relay routing retain installed state; assignment identity fences replacement | cloned out only at cold boundaries | retain: lifecycle registry |
+| `RuntimeInner::relay_branch_presences` | get-or-insert at domain build under the schedule lock | lifecycle | retained relay services share the presence across rebuilds | no dependency or generator shard lookup | retain: lifecycle registry |
+| `RuntimeInner::restored_materialized_stream_states` | lookup before native preparation; insert after bounded asynchronous open of a pinned checkpoint reader; take at build; clear after durable restore publication | lifecycle | schedule application and generation replacement | short | retain: lifecycle registry |
+| `RuntimeInner::relay_state_epochs` | created during domain routing installation; bumped at schedule application | lifecycle | routing retains the shared epoch; each branch caches the observed number | no branch dispatch registry access | retain: lifecycle registry |
+| `RuntimeInner::state_identities` | schedule installation publishes assignment slots; state construction binds them; observation and backup read identity, including stopped materialized checkpoints | lifecycle, observer | one entity slot publishes identity, primary, executors and replicas; frames, catch-up and materialized placement use immutable routing | no recurring registry guard | retain: lifecycle registry |
+| `RuntimeInner::replicated_deduplicator_states`, `replicated_window_processor_states`, `replicated_wasm_processor_states`, `replicated_kafka_offset_states` | get-then-insert at branch or source start; cold replacement, recovery and teardown; frames use installed route handles | lifecycle | executing tasks and resolved replication routes retain the actual state; fingerprint and guest generation fence assignment; exact intake ends before withdrawal | no frame registry acquisition | retain: lifecycle registry |
+| `RuntimeInner::replicated_branch_aggregated_states` | registration, recovery and observation; frame routes retain the metric state | lifecycle, observer | exact metric state, progress and one encoded checkpoint retained per placement; inventory capture occurs once per dirty revision under the placement's cold snapshot guard | no frame registry acquisition; repeated reads of a captured revision reuse bytes without scanning the metrics inventory | retain: lifecycle registry |
 | Each replicated state's `CheckpointReplication` (not a map: one placement's replica progress and announcement) | the originator offers per checkpoint or commit; one announcer steps every 100 ms while a replica lags; acknowledgements record; waits register before they read | per batch, per ACK | owned by the replicated state, which retires it and ends its announcer | one lock scoped to the placement, never held across an await; WASM 10 s, Kafka 5 s and reset deadlines | retain: bounded protocol (one placement's announcement and replica progress) |
-| `RuntimeInner::passive_runtime_state_snapshots` | `entry` per replica installation of a branch checkpoint, comparing revisions and moving the newer one in; get once per branch the entity's replica task first looks at; taken when a replica is promoted; full retain when a branch lifecycle drops a branch | per installed branch checkpoint; per installed lifecycle (retain) | LSM-monotonic; the replica task keeps what it learned | the entry guard covers one comparison and a move | entry: bounded protocol (LSM-monotonic single-winner installation); first read per branch: lifecycle; retain: Typed Ratchet 15 |
-| `RuntimeInner::replicated_branch_lifecycles` | get-or-insert when an owner publishes a lifecycle or catalogues a branch state, or a replica task starts; borrowed reads by acknowledgements, announcements, lifecycle synchronization requests and catalog listing requests | lifecycle; per remote frame (borrowed read) | the replica task retains its handle and installs through it; each owned branch state retains its catalog entry; each lifecycle checkpoint decodes its branches once | readers load the handle's published checkpoint | registration: lifecycle; frame routing: Typed Ratchet 15 |
+| `RuntimeInner::passive_runtime_state_snapshots` | cold non-branch handoff and recovery staging; taken at activation; cleared at entity or domain teardown | lifecycle | coordination and placement; branch passive copies belong to their entity lifecycle | no recurring installation or pruning | retain: lifecycle registry |
+| `RuntimeInner::replicated_branch_lifecycles` | get-or-insert at owner publication, branch construction or replica task start; backup iteration and cold teardown | lifecycle, observer | replica tasks and resolved routes retain the lifecycle; each branch retains its catalog registration | no frame or listing registry acquisition | retain: lifecycle registry |
 | Each entity's `BranchCheckpointCatalog` (not a map: one published immutable catalog) | each owned branch state registers at creation, records every revision it offers its replicas, and leaves when it is dropped; a catalog listing loads it | per branch publication or WASM checkpoint (record); per remote frame (load) | owned by the entity's lifecycle handle; a registration fences a replaced branch state; an epoch fences another catalog's cursor | one read-copy-update per change, lock-free loads; at most 1,024 removals kept | retain: bounded protocol (one entity's catalog; a change never waits for a reader) |
 | `ReplicatedBranchLifecycle::announcements` mutex | an owner's announcement of the entity's lifecycle or of a branch checkpoint adds the newest per branch; the entity's replica task takes all at the start of each round | per remote frame | one replica task per entity takes them | never held across an await; one entry per branch | retain: bounded protocol (one entity's pending announcements) |
-| `RuntimeInner::prepared_runtime_state_handoffs`, `activated_runtime_state_handoffs`, `prepared_forced_runtime_state_recoveries`, `prepared_runtime_state_snapshots` | handoff and recovery protocol steps | lifecycle | coordination and handoff identities | the prepare `entry` spans payload comparison and store writes | retain: lifecycle registry |
+| `StateReplicationRouting` (immutable publication, not a concurrent map) | cold state and assignment installation publishes resolved handles; frames select them; teardown ends routes before withdrawal | lifecycle writes; per remote frame loads | existing assignment slot; exact state intake lifetime; no second identity | persistent maps share unchanged paths; no registry guard | retain: published state |
+| `ReplicatedBranchLifecycle::passive` (immutable publication, not a concurrent map) | the entity replica task moves newer copies in and prunes unnamed branches; assignment cleanup discards superseded generations; promotion takes a copy | per changed branch or lifecycle; cold assignment cleanup and promotion | one entity; retained assignment and LSM monotonicity | persistent publication; no shared map shard or payload copy during installation | retain: published entity state |
+| `RuntimeInner::prepared_runtime_state_handoffs`, `activated_runtime_state_handoffs`, `prepared_forced_runtime_state_recoveries`, `prepared_runtime_state_snapshots` | handoff and recovery protocol steps; an interrupted shutdown drain repeats only remaining moves through the next leader after the interrupted attempt finishes its abort cleanup path | lifecycle; retries share the stopping node's remaining drain budget | coordination and handoff identities; committed moves remain in the current schedule | the prepare `entry` spans payload comparison and store writes | retain: lifecycle registry |
 | `RaisedWasmStateRecoveries::raised` | claim per refused restore; released by the coordinator | failure path, per batch | generation in the key | ≤33 entries | retain: bounded protocol (one outstanding recovery per refused lifetime) |
 | `PendingGuestWasmStateResets::requests` | insert per fenced batch; drained by the coordinator | failure path, per batch | generation in the value | one request per fenced branch | retain: bounded protocol (its per-batch `info!` belongs at `debug`) |
 
@@ -238,40 +274,61 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
-| `RuntimeInner::executions` | schedule installation and observation; tasks bind clock, routing and assignment handles | lifecycle, observer | start version and published lifecycle generation | no record or batch guard for the repaired sites | retain: lifecycle registry |
-| `RuntimeInner::domain_routings` | inserted at install; read at task start and by the sites above | per batch, per record | one stable publication handle per domain | cloned out | map: retain: lifecycle registry; recurring sites: Typed Ratchet 03 |
-| `RuntimeInner::domains` | committed lifecycle installation and task binding | lifecycle, observer | pause, generation and start point publish with clock installation | no ingest-group, Kafka-poll or generator-record guard | retain: lifecycle registry |
-| `RuntimeInner::message_error_routes` | `entry` per buffered failed record; removed at domain stop | per record (failure path) | plan pointer identity | write guard spans route construction | Typed Ratchet 03 |
-| `RuntimeInner::ingestors`, `ingestor_quiescence`, `client_ingestors` | start, stop and swap; drain polls and `DESCRIBE` | lifecycle, observer | hosts keep their control and command handles | short | retain: lifecycle registry |
-| `RuntimeInner::ingestor_readiness` | source poll success and suspension mark the current source instance ready/unready through `get_mut`; observers read status | per successful poll, source transition, observer | retain the readiness publication with the source host and its exact incarnation | one short shard write, no await | recurring marking: Typed Ratchet 03; installation/observation: lifecycle/observer |
-| `RuntimeInner::ingestor_statuses` | sources retain a coherent failure/retry publication; healthy clears do not write | lifecycle, observer | one status per ingestor, shared by its instances | task preparation installs the slot; stop removes it | retain: lifecycle registry |
-| `RuntimeInner::emitter_statuses` | sinks retain a coherent failure/retry publication; healthy clears do not write | lifecycle, observer | sink and event-loop readers share status; retry remains drain work even without buffered messages | task registration and teardown; no recurring map guard | retain: lifecycle registry |
+| `RuntimeInner::executions` | schedule installation and observation; Kafka resume clones its committed partition schedule; input retirement snapshots locally owned previous and replacement entrypoint plans before source stop; forced recovery waits for an absent execution under its operation deadline; tasks bind clock, routing and assignment handles | lifecycle, observer; at most two reads per Kafka resume attempt; one additional read per rebuild or entity swap | start version and published lifecycle generation; retirement keeps immutable typed plans | no record or batch guard for the repaired sites; Kafka schedule guards end before persistence or connector I/O; the retirement snapshot releases its guard before network cleanup | retain: lifecycle registry |
+| `RuntimeInner::domain_routings` (`ArcSwap` persistent table) | installed at successful publication, withdrawn at domain removal and cleared on shutdown; tasks retain the selected domain publisher; fresh intake and eviction read the immutable table | per fresh request or source intake group; one group per delivery for RabbitMQ ACK PARALLEL; per eviction | one stable routing publisher per installed domain | changed key copies a persistent path; reads acquire no discovery shard | retain: immutable publication |
+| `RuntimeInner::domains` | committed lifecycle installation by graph installation, authority-only fence installation by the domain clock owner on each committed domain change, and task binding | lifecycle, observer | pause, generation and start point publish with clock installation; each entry records the committed revision of its lifecycle so an older installation never replaces a newer one | no ingest-group, Kafka-poll or generator-record guard | retain: lifecycle registry |
+| `RuntimeInner::ingestors`, `ingestor_quiescence`, `client_ingestors` | start, stop and swap; intake-only and full alteration hold engagement/release; the first local intake close snapshots quiescence keys before shutdown ownership handoffs; drain polls and `DESCRIBE` | lifecycle, observer; one scan on the open-to-closed intake transition, repeated closes return before scanning | hosts and both overlapping holds retain the exact control; releasing one hold removes only its share | short; the intake-close scan copies keys before engaging their controls | retain: lifecycle registry |
+| `RuntimeInner::ingestor_readiness` | prepare and retire exact instance handles; readiness observers read aggregate state | lifecycle, observer | source host retains its instance scalar; retirement is final | source polling acquires no registry guard; predecessor retired before replacement | retain: lifecycle registry |
+| `RuntimeInner::ingestor_statuses` | sources retain a coherent failure/retry publication and the last decode rejection; healthy clears do not write, and a refused payload replaces the rejection through the retained status | lifecycle, observer | one status per ingestor, shared by its instances and endpoint bindings | task preparation installs the slot; stop removes it | retain: lifecycle registry |
+| `RuntimeInner::emitter_statuses` | emitters retain a coherent failure/retry publication; healthy clears do not write | lifecycle, observer | emitter and event-loop readers share status; retry remains drain work even without buffered messages | task registration and teardown; no recurring map guard | retain: lifecycle registry |
 | `RuntimeInner::emitter_confirmation_waits` | resolve at emitter spawn; guards increment/decrement the retained scalar | lifecycle, observer | registration follows emitter task lifetime | removed at task end with pointer identity | retain: lifecycle registry |
-| `RuntimeInner::emitter_buffers`, `generator_activity_by_domain`, `node_quiesce_counters` | `entry` at task or branch start; drain reads | lifecycle, observer | hot paths use the retained atomics | single-winner installation | retain: lifecycle registry |
-| `RuntimeInner::shared_clients` | `entry` at sink open; release decrements then removes | lifecycle | the lease keeps the client | release removes without rechecking its users | retain: lifecycle registry |
-| `RuntimeInner::pool_waits` | register at pooled sink creation, remove at sink drop; DESCRIBE reads publication | lifecycle, observer | one serialized borrow per sink; a pending borrow retains its guard | no ready-borrow publication or registry guard; cancellation clears pending | retain: lifecycle registry |
-| `RuntimeInner::in_flight_by_domain`, `in_flight_by_ingestor` | startup binds generator trackers and ingest tracker pairs; remote row binding remains | lifecycle; per remote row | ingest groups and endpoint bindings retain the same tracker pair as their execution | atomic accounting after cold single-winner registration | Typed Ratchet 05 owns remote row binding; remaining registry retained |
-| `RuntimeInner::force_flush_by_domain` and `DomainForceFlush::state` | register participant/request generation; claim, complete, release or unregister an obligation | lifecycle and flush transitions | participant retains an idle/available/closed scalar hint | only available polls acquire the authoritative mutex; idle and claimed polls acquire none | retain: bounded generation protocol |
-| `RuntimeInner::entity_gate_holds`, `active_domain_alters` | gate engagement and release; ALTER exclusion | lifecycle, control plane | coordination identity and pointer identity | the drain `Ref` spans the entity drain status | retain: lifecycle registry |
-| `RuntimeInner::frozen_ownership_handoff_entities` | register watches and engage/release handoffs; observation reads retained publication | lifecycle, observer | slot stays stable through repeated freezes; domain removal drops registry interest | register-before-read; publish-before-wake | retain: lifecycle registry |
-| `RuntimeInner::endpoint_intake_routes` (`ArcSwap`) and each `EndpointBindingLifetime::intake` (`ArcSwapOption`) | definitions replaced at domain install/teardown; exact lifetimes bound at source start and ended before unbind | one table load per HTTP request or WebSocket upgrade; one borrowed intake lease per payload | request retains its route; WebSocket retains its route and signaling protocol; an admitted request retains its intake lease | whole-table RCU preserves unrelated writers; ended lifetimes refuse later intake through retained tables | retain: immutable publication, Typed Ratchet 12 |
+| `RuntimeInner::emitter_buffers`, `generator_activity_by_domain`, `node_quiesce_counters` | `entry` at task or branch start; source-only drain reads before full subgraph drain reads; exact-operation ownership drain-status queries inspect local affected work before publishing the freeze | lifecycle, observer | hot paths use the retained atomics | single-winner installation | retain: lifecycle registry |
+| `RuntimeInner::shared_clients` | `entry` at emitter open; release decrements then removes | lifecycle | the lease keeps the client | release removes without rechecking its users | retain: lifecycle registry |
+| `RuntimeInner::pool_waits` | register at pooled emitter creation, remove at emitter drop; DESCRIBE reads publication | lifecycle, observer | one serialized borrow per emitter; a pending borrow retains its guard | no ready-borrow publication or registry guard; cancellation clears pending | retain: lifecycle registry |
+| `RuntimeInner::in_flight_by_domain` and `in_flight_by_ingestor` | source and relay construction retain drain tracker handles; drain observes and domain teardown removes | lifecycle and observer | relay services and admitted ACK roots keep the exact domain tracker; source executions retain their tracker pair | one cold registration; per-row accounting uses retained atomics | retain: lifecycle registry, Typed Ratchet 05 |
+| `RuntimeInner::force_flush_by_domain` and `DomainForceFlush::state` | register participant/request generation at intake-only and full hold engagement; claim, complete, release or unregister an obligation; pending drain polls request only if idle | lifecycle and flush transitions | participant retains an idle/available/closed scalar hint | only available polls acquire the authoritative mutex; idle and claimed polls acquire none | retain: bounded generation protocol |
+| `BranchSnapshotTasks::domains` | `entry` once as a deduplicator or window branch task starts, counting its snapshot task while the entry is held; a domain's stop reads its entry once every task of its execution has ended, waits on the cloned tracker with no guard held, and removes the entry only while it counts no task | lifecycle | the runtime's snapshot task owner; each tracker counts one domain's snapshot tasks and is closed as it is created | one short shard guard per branch start and per domain stop, none across the wait; an entry lives only while its domain has snapshot tasks | retain: lifecycle registry |
+| `RuntimeInner::entity_gate_holds`, `active_domain_alters` | gate engagement, exact-operation drain status before handoff freeze, and release; ALTER exclusion; an alteration with affected ingestors and shared relay gates retains an intake-only operation until the full operation engages | lifecycle, control plane | distinct coordination identities for overlapping operations and pointer identity on retirement; guard drop, receiver-owned release, lease expiry and runtime teardown, which ends every lease the node holds, dispose of each exact operation | the exact-operation drain `Ref` spans status observation and freeze publication | retain: lifecycle registry |
+| `RuntimeInner::frozen_ownership_handoff_entities` | register watches; exact-operation drained status publishes each handoff freeze; capture verifies its identity; release removes it; observation reads retained publication | lifecycle, observer | slot stays stable through repeated freezes; domain removal drops registry interest | register-before-read; publish-before-wake | retain: lifecycle registry |
+| `RuntimeInner::endpoint_intake_routes` (`ArcSwap`) and each `EndpointBindingLifetime::intake` (`ArcSwapOption`) | definitions replaced at domain install/teardown; exact lifetimes bound at source start and ended before unbind | one table load per HTTP request or WebSocket upgrade; intake borrows for preflight and payload dispatch | request retains its route; WebSocket retains its route and signaling protocol; an admitted request retains its intake lease | whole-table RCU preserves unrelated writers; ended lifetimes refuse later intake through retained tables | retain: immutable publication, Typed Ratchet 12 |
 | `RuntimeInner::compiled_domain_udfs`, `compiled_wasm_modules`, `domain_instantiation_errors` | domain installation; observers | lifecycle, observer | content identity | short | retain: lifecycle registry |
 | `IngestorQuiesceControl::buffers` (`Mutex<HashMap>`) | locked only after the published decision selects buffering; a drain locks it to take the oldest payload out for delivery and again to end that delivery | per record, only while quiesced or draining what a quiesce retained | instance tasks and endpoints; a delivery borrows the control until it ends | `MAX SIZE` per instance, counting a payload out for delivery; no guard crosses an await | retain: bounded protocol (retained-payload buffer) |
 | `RelayConsumerQueue::batches` (`ConcurrentQueue`) | one push per batch per consumer; one receiver pops | per batch | receiver owns its queue | lock-free, bounded by admitted count | retain: bounded protocol (relay fan-out queue) |
 | `DeduplicatorKeyspace::recent_keys` (`ExpiryMap`), `BranchInstanceRegistry`, `WasmAckMap` | their one task mutates them through `&mut self` | per record, single owner | branch or task owner | no locks | retain: single owner |
 
+Endpoint `MODE ACK` creates one acknowledgement root per admitted request through the binding's
+retained domain/ingestor tracker pair; request dispatch does not acquire either lifecycle registry.
+Remote ACK-bearing deliveries use the existing charged delivery-owner rows and their limits. The
+declared `MAX` bounds held response waits, not downstream work that outlives an HTTP timeout; that
+work retains its existing acknowledgement ownership and registry bounds.
+
+### Relay channel publications
+
+| Publication | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
+| --- | --- | --- | --- | --- | --- |
+| `RelayChannels::branches` (`ArcSwap` persistent table) | producer binding, exact branch withdrawal | first use and explicit branch invalidation; fresh fanout selection | retained branch allocation; receiver and producer endings are distinct | CAS gives first-use races one winner; withdrawal cancels before removing the exact allocation; persistent changed-key path | retain: immutable publication |
+| `RelayBranchChannels::routes` and `BranchRoutes::destinations` | producers select route generation and destination slot | per batch; insertion only on first use or route replacement | owner/consumer publication cancellation parent, branch lifetime and exact slot token | one ordering gate per channel; cancellation bounds gate and transport waits; no per-batch table rebuild | retain: immutable publication and bounded ordering |
+| `BranchRoutes::subscriptions` | observed gossip snapshot replaces the live advertisement selection | first observed snapshot; stable fanout reads | node incarnation and advertisement version; exact subscription generation | equal advertisements retain slots; changed live set cancels the preceding generation; table bounded to advertised peers | retain: immutable publication |
+
 ### Interconnect
 
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
-| `targets` | health passes, gossip registration and bootstrap write; `try_lease` reads | per remote frame | no retained selection; endpoint identity renews slot keys | ≤ `max_peers` | Typed Ratchet 03 |
-| `slots` | `entry` installs one `run_slot` per key; `contains_key` per lease | per remote frame | per-key slot task; cancel-token identity | single run task per key | Typed Ratchet 03 |
-| `connections` | registered after connect; get per lease | per remote frame | retiring token and peer epoch | one connection per slot key | Typed Ratchet 03 |
+| `targets` (`ArcSwap` persistent table) | health, gossip and bootstrap publish endpoints; leases read immutable targets | per operation | target retains a fixed array of slots for each pool class | at most `max_peers`; persistent changed-key path | retain: immutable publication |
+| `SlotControl::connection` (`ArcSwapOption`) | one claimed slot worker publishes authenticated connections and clears on loss | per lease, connection lifecycle | endpoint/TLS cancellation lifetime and authenticated peer epoch; lease retains exact connection | one current connection per slot; one atomic worker claim; fixed pool scan | retain: immutable publication |
+| `connections` | connection registration, exact retirement, statistics and shutdown | lifecycle, observer | cancel-token and allocation identity prevent predecessor teardown from removing its replacement | one connection per slot key; no recurring selection guard | retain: lifecycle registry |
 | `peer_connections`, `inbound_pool_connections` | connection open and close | lifecycle | registration paths | peer and pool caps | retain: lifecycle registry |
-| `grants` | insert per grant request; claim per body; expiry task per grant | per remote frame | no single owner; random id checked against peer, epochs and expiry | queue and terminal permits, 5 s lifetime | Typed Ratchet 05 |
-| `relay_attempts`, `active_relay_channels`, `relay_admissions`, `relay_watermarks` | grant, body, cancel and terminal handlers; 100 ms progress scan; 60 s sweep | per remote frame, per ACK, steady poll | channel, sequence and process epochs; pointer identity on retirement | consistent lock order; ≤1 unadmitted batch per channel; watermarks time-bounded only | Typed Ratchet 05 |
-| `outbound_relay_epochs`, `outbound_relay_admissions` | `entry` per sent relay batch; removed per terminal acknowledgement | per remote frame, per ACK | receiver epoch; registration incarnation | no cap; an outcome that never arrives keeps its entry | Typed Ratchet 05 |
+| `RelayPeerProtocol::grants`, `attempts`, `active_channels`, `admissions` | grant, body, cancel, terminal and peer ending use the retained authenticated peer owner | per remote frame or ACK; progress every 100 ms | exact authenticated epoch, channel, sequence and full admission identity; exact record pointer on retirement | one short peer guard then record guard, no await; each collection <= incoming capacity Q; 5 s grant lifetime; idle records bounded at 10 min | retain: bounded peer protocol, Typed Ratchet 05 |
+| `RelayPeerProtocol::watermarks` | terminal retirement, grant/status/cancel consultation and 60 s expiry sweep | per remote frame or ACK; steady poll | retained peer owner; channel sequence and typed terminal outcome | at most 2Q: Q retained positions plus Q live attempts; never evict early to admit a replay; ten-minute reconciliation retention | retain: bounded peer protocol, Typed Ratchet 05 |
+| `RelayPeerProtocol::outbound_attempts`, `outbound_admissions` | send, status/cancel reconciliation, exact terminal reply, refusal cleanup and peer ending | per remote frame or ACK | retained peer owner; receiver epoch and full registrar identity | at most 2Q of each; idle retention 10 min; exact correlation retires once | retain: bounded peer protocol, Typed Ratchet 05 |
 | `RequestState::handlers` (`ArcSwap` of an immutable map) | copy-on-write registration; one load per request | per remote frame, lock-free | fixed at startup | none | retain: bounded protocol (copy-on-write table) |
+
+Generator source reads still issue one description per occurrence, but issue a snapshot fetch only
+when the selected owner, placement or complete sealed envelope changes. An unchanged generation
+therefore avoids the fetch handler's immutable-table load and bulk connection lease. Connection
+registries retain their lifecycle-only access. The generator's retained decoded view is one
+task-owned optional generation with its admission, released on replacement or task/read ending;
+it adds no map or lock and does not change relay-frame or ACK protocol maps.
 
 ### Metrics
 
@@ -281,7 +338,7 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 | `MetricSeries::branch_counters`, `branch_histograms` | `entry` per branch appearance; removed only with a relay | lifecycle, observer | branch recorders keep the series | processor branch series are never removed | retain: lifecycle registry (unbounded growth recorded under follow-up findings) |
 | `MetricSeries::branch_instance_references` | reference count per branch create, remove and detach | lifecycle | key rebuilt per event | removed at zero | retain: bounded protocol (per-key reference count) |
 | `HistogramSeries::rolling_histograms` mutex | one lock per recording through a retained handle | per batch | shared by every branch of a node | bounded accumulator, no await | retain: bounded protocol (documented accumulator fence) |
-| Prometheus `MetricVec` children (`RwLock<HashMap>`) | resolve client outcome, quiesce and subscription children at owner startup | lifecycle | task retains children; increments perform no label resolution | third-party metric registry reached only at registration | retain: lifecycle registry |
+| Prometheus `MetricVec` children (`RwLock<HashMap>`) | resolve client outcome, quiesce, source host and subscription children at owner startup; `DESCRIBE INGESTOR` resolves the ingestor's counters it reports | lifecycle, observer | task retains children; increments perform no label resolution | third-party metric registry reached only at registration and describe | retain: lifecycle registry |
 | `InterconnectionCollector::sources` | installed once; read per scrape | observer | write-once | read lock per scrape | retain: observer |
 
 ### Connectors and host maps reached through them
@@ -290,8 +347,8 @@ The connector crates and the connector contract crate own no concurrent map, cac
 map in product code. Their plan- and task-local maps have one owner. RabbitMQ's one-slot
 `ConcurrentQueue` hands one broker stream to the client library per connection: retain: bounded
 protocol. The host maps connectors reach through the contract are the runtime maps above:
-`pool_waits` is resolved once by Redis, MySQL and Postgres pooled sinks; their pending borrow
-publishes through a retained slot. Sources and sinks retain `ingestor_statuses` and
+`pool_waits` is resolved once by Redis, MySQL and Postgres pooled emitters; their pending borrow
+publishes through a retained slot. Sources and emitters retain `ingestor_statuses` and
 `emitter_statuses`, so success and error reporting do not reach their registries. Kafka offsets
 retain their domain lifecycle handle. A Kafka commit
 awaiting replicas offers its revision through the offset state it retains and reaches no map.
@@ -309,7 +366,26 @@ awaiting replicas offers its revision through the offset state it retains and re
 | consensus `incoming_snapshots` | per snapshot chunk, consensus bulk traffic | retain: bounded protocol (one transfer per peer) |
 | client-core `previews`, `servers`, `submissions`, exchange requests | client-side | retain: client-side |
 | `FaultInjectionState::executions` | registered once per testing-node startup; queried by explicit occupancy, saturation and release controls | test-only |
-| Other `src/fault_injection.rs` maps, consensus `append_stream_opens`, the test DNS authority | test-only | test-only |
+| `FaultInjectionState::startup_voter_gossip` | Armed after cluster stop; direct-link controls, digest heartbeat freezing, and the first reconciliation barrier read receiver-scoped entries; release removes the entry after that pass completes | test-only startup fault observation |
+| `FaultInjectionState::guest_save_interruptions` | Armed by a guest-save backup scenario and consumed once as that entity's owner starts its selected section; never reached during ordinary product execution | test-only capture fault control |
+| `FaultInjectionState::domain_clock_authority_proposal_rejections` | Armed by a clock takeover scenario or unit test and consumed once as that node, as leader, proposes an authority reconciliation; never reached during ordinary product execution | test-only clock fault control |
+| `FaultInjectionState::command_pauses` | Scenario-controlled one-shot boundaries, including standalone transaction lookup and preflight, and a domain resume proposal and its refusal on a selected node; the forced-recovery startup fixture also records a missing destination schedule and releases that node's held initial installation. Transaction reconciliation in a testing build checks a node/domain cleanup pause for each retained finished transaction before its removal sweep; arming every node preserves the public expiry observations across leadership transfer, and release permits ordinary cleanup. Application-revision handlers clone a node's response pause after sampling each reply; these repeatable controls remain until explicit release and cleanup, including when a request is cancelled. Scenario cleanup releases and clears the retained observations | test-only command and startup fault control |
+| `FaultInjectionState::refused_model_publications` | Armed by a pause recovery scenario or owner test; a testing build's coordinator looks its domain up before each transaction model step publication and each domain pause release, delivers the publication refusal and then the release refusal once each, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only model publication fault control |
+| `FaultInjectionState::handoff_engagement_transport_failures` | Armed by a drain scenario; a testing build's coordinator looks its domain up before each remote ownership-handoff gate engagement request and delivers the failure once, and the entry stays marked delivered for the scenario's assertion; absent from product builds | test-only handoff transport fault control |
+| `FaultInjectionState::lost_handoff_gate_engagements` | Armed by a drain scenario for one coordinator-to-node link; a testing build's coordinator looks that link up before each attempt to send it an ownership-handoff gate engagement request, loses and counts every such request, and the count stays for the scenario's assertion; absent from product builds | test-only handoff link fault control |
+| `FaultInjectionState::owner_relay_fanout_delays` | Armed by the slow busy relay scenario; a testing build's relay owner looks its domain up before every batch it fans out and waits the armed delay; absent from product builds | test-only relay delivery fault control |
+| `FaultInjectionState::wasm_reset_publication_authority_losses` | Armed for one scenario domain; looked up once before a generation publication and by explicit harness observations; its bounded remaining/delivered counts remain until that world's injector is dropped; absent from product builds | test-only WASM publication fault control |
+| `FaultInjectionState::failed_wasm_reset_publications` | Armed before ordinary graph publications; only reset generation publication reads it, and delivery is recorded after unpublished preparation is aborted; it stays enabled through uncertain outcome recording, then is explicitly cleared before exact replay; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped WASM publication failure in `fault_injection/wasm_reset_publication.rs` |
+| `FaultInjectionState::failed_restore_state_publications` | Armed before a restore for one restored domain; a testing build's state owner looks the domain up once after each durable publication of that domain's restored state and records the delivery there; it stays enabled through uncertain outcome recording and a resumed restore, then is explicitly cleared; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped restore publication failure in `fault_injection/restore_publication.rs` |
+| Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
+
+A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in
+addition to the transaction-list snapshot. `StoreInner::state` releases its read guard after the
+snapshot clone and before the pure eligibility decision. Replicated removal rechecks the same
+references when it applies. `transaction_bindings` receives one removal attempt for each retained
+finished transaction per pass; an applying execution can extend these attempts beyond the minimum
+tombstone age. These remain control-plane sweeps, including absent-key shard writes. Retaining a
+tombstone does not retain a session binding: terminal request handling and session close release it.
 
 ### Rust client attachment recovery
 
@@ -344,9 +420,17 @@ epic, but tracing them found defects:
 - `shared_clients` release removes its slot after decrementing without rechecking its users, so a
   lease that joins in between can be orphaned.
 - The gossip `outgoing` map keeps one idle worker per address forever.
-- `relay_boundary_fanouts` and `domain_routings` are never removed with their domain.
+- `relay_boundary_fanouts` is never removed with its domain.
 - The Shuttle `DashMap` adapter documentation claims it observes every shard acquisition; it models
   one lock over the whole map.
+
+### Backup and restore cold paths
+
+| Owner and map | Access and lifecycle | Classification |
+| --- | --- | --- |
+| `RuntimeInner::state_identities` | Backup capture reads current scheduled identities before decoding retained checkpoints. Restore clears domain state handles only after complete publication under the consensus authority guard. | observer and stopped-domain lifecycle |
+| Session capture sections and restore uploads | Coordinator-scoped registration, bounded chunk transfer and expiration; checkpoint finish stages bytes, and publish replaces the complete set. | control-plane transfer; quota and deadline bounded |
+| Test command pauses and failed restore checkpoints | Armed by a scenario and consumed at restore publication or staging, the route polling boundary, and handoff force-flush publication. | test-only fault observation |
 
 ## Task dependency qualification
 
@@ -357,7 +441,7 @@ registered `task-status-transitions` and `entity-freeze-transitions` Bolero prop
 production freeze release, status observer and force-flush generation checks run through the
 Shuttle inventory. The idle/claimed force-flush regression counts coordinator acquisitions and
 requires zero for repeated idle polls. Pool regressions cover ready, pending, completed, cancelled
-and replaced sink lifetimes. Public slow-domain force-flush coverage interleaves alpha and beta
+and replaced emitter lifetimes. Public slow-domain force-flush coverage interleaves alpha and beta
 branches on one and three nodes; DESCRIBE, handoff and connector suites qualify their public
 outcomes. External smoke and soak integration belongs to Typed Ratchet 10.
 
@@ -404,7 +488,7 @@ passed its 282 Python checks and documentation build. Fresh server and Python re
 Shuttle evidence above were collected before this integration; unchanged endpoint HTTP edge
 paths are exercised by the full PR scenario gate as well.
 
-The final pre-push integration also preserves the subsequent NSPL repairs and Typed Ratchet 13's
+The final pre-push integration also preserves the subsequent Plexus repairs and Typed Ratchet 13's
 checkpoint-replication publication. Endpoint owner and HTTP edge code are unchanged by that merge;
 server Clippy across all targets with `testing`, formatting, the 30 runner tests and the debt
 ratchet passed. The inventory now has 27 Bolero targets, and the combined recurring-lock count is
@@ -436,3 +520,16 @@ is subject to other work on the host; byte averages below are whole bytes per op
 The request measurement is approximately 4.0 times faster on this host. The allocation result,
 non-Clone intake type, and prepared-route reference probe establish that endpoint routing shares
 its prepared state. They do not claim an end-to-end ingestion throughput improvement.
+
+## Restore generation installation
+
+The restore failure-control maps are `failed_restore_state_installations`, keyed by domain and
+holding a typed one-shot guest, materialized or branch-state staging failure, and
+`failed_restore_state_publications`, keyed by domain and holding a durable-publication failure
+that stays armed until cleared. The first is reached once at the corresponding staging boundary
+and the second once after each durable generation publication, as test-only lifecycle control.
+Neither is reached from record or acknowledgement execution. The receiver upload map retains its
+existing per-transfer lifetime and cadence; finalization moves the sealed file into the admitted storage job
+and keeps its disk-quota owner there. Successful generation publication clears runtime state maps
+under the same applied authority guard after durable pointer publication and bounded storage
+cleanup. Checkpoint reads and writes add no concurrent map lookup.

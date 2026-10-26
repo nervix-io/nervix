@@ -5,9 +5,14 @@
 //! - **Owns.** The units, zones, compiled formats and parsers a datetime call lowers its literal
 //!   arguments into, the row-valued arguments it keeps, and the typed failure of every literal
 //!   argument that does not select a computation, with the messages that name what a call accepts.
-//! - **Depends on.** The VM frontend, the NSPL expression parser, and the compiled datetime
+//! - **Depends on.** The VM frontend, the Plexus expression parser, and the compiled datetime
 //!   constants.
 //! - **Must not know.** Compilation, execution, or registers.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
 
 use meticulous::ResultExt as _;
 use nervix_models::Expression as ModelExpression;
@@ -27,7 +32,7 @@ use crate::{
 };
 
 fn expression(source: &str) -> ModelExpression {
-    nervix_nspl::parse_expression(source).assured("test expressions are valid NSPL")
+    nervix_plexus::parse_expression(source).assured("test expressions are valid Plexus")
 }
 
 fn zone(written: &str) -> Zone {

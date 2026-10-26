@@ -7,6 +7,11 @@
 //!   drop and cycle checks the graph answers.
 //! - **Depends on.** The vocabulary and the dataflow-graph description.
 //! - **Must not know.** How a node is placed or executed.
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -19,9 +24,9 @@ use nervix_dataflow_graph::{
 };
 use nervix_models::{
     ConcreteBranchCoverage, CreateSchema, DomainName, DomainSchedule, ImpactEdgeKind,
-    ImpactNodeCoverage, IngestSource, IngestorInput, Model, ModelIndex, ModelKind, ModelName,
-    NodeRef, ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode,
-    SchemaField, SchemaFingerprint,
+    ImpactNodeCoverage, IngestorInput, Model, ModelIndex, ModelKind, ModelName, NodeRef,
+    ParseAsType, PlacementPolicy, RelayName, ResolvedBranching, ScheduledNode, SchemaField,
+    SchemaFingerprint,
 };
 use nervix_primitives::sync::Arc;
 use petgraph::{
@@ -106,10 +111,10 @@ impl ActiveGraph {
             } else {
                 nodes.insert(node.dataflow_id());
             }
-            if let Some(client) = node.dataflow_source_client_node() {
+            if let Some(client) = node.dataflow_ingestor_client_node() {
                 nodes.insert(client.id);
             }
-            if let Some(client) = node.dataflow_sink_client_node() {
+            if let Some(client) = node.dataflow_emitter_client_node() {
                 nodes.insert(client.id);
             }
         }
@@ -409,7 +414,7 @@ impl ActiveGraph {
                 edges.push(flow_edge);
             }
 
-            if let Some(client) = source.dataflow_source_client() {
+            if let Some(client) = source.dataflow_ingestor_client() {
                 let ingest_edge = DataflowEdge::data(
                     client.node.id.clone(),
                     source.dataflow_id(),
@@ -419,7 +424,7 @@ impl ActiveGraph {
                 edges.push(ingest_edge);
                 nodes.push(client.node);
             }
-            if let Some(client) = source.dataflow_sink_client() {
+            if let Some(client) = source.dataflow_emitter_client() {
                 let emit_edge = DataflowEdge::data(
                     source.dataflow_id(),
                     client.node.id.clone(),
@@ -578,17 +583,17 @@ impl ActiveNode {
 
     /// The external system node an ingestor reads from. Graph counts use the node alone so they do
     /// not allocate metric strings that only a rendered edge needs.
-    fn dataflow_source_client_node(&self) -> Option<DataflowNode> {
+    fn dataflow_ingestor_client_node(&self) -> Option<DataflowNode> {
         let Model::Ingestor(ingestor) = self.config.as_ref() else {
             return None;
         };
-        let transport = ingestor.input.source_label().to_string();
+        let transport = ingestor.input.source_phrase().to_string();
         match &ingestor.input {
             IngestorInput::Transport(input) => {
                 let source = input.source.source_ref();
-                let source_kind = input.source.source_kind().as_str();
+                let entity_kind = input.source.entity_kind().as_str();
                 Some(DataflowNode::new(
-                    format!("{}_source:{}", source_kind, source.as_str()),
+                    format!("{}_ingestor:{}", entity_kind, source.as_str()),
                     source.as_str(),
                     DataflowNodeRole::Client { transport },
                 ))
@@ -596,7 +601,7 @@ impl ActiveNode {
             // Application producers have no configured identity of their own; they submit
             // through the ingestor, so the node is named by it.
             IngestorInput::Client(_) => Some(DataflowNode::new(
-                format!("CLIENT_source:{}", ingestor.name.as_str()),
+                format!("CLIENT_ingestor:{}", ingestor.name.as_str()),
                 "applications",
                 DataflowNodeRole::Client { transport },
             )),
@@ -605,8 +610,8 @@ impl ActiveNode {
 
     /// The external system an ingestor reads from. The ingest and emit sides of one named client
     /// are separate identities, so a client both ingested from and emitted to is drawn twice.
-    fn dataflow_source_client(&self) -> Option<DataflowClient> {
-        let node = self.dataflow_source_client_node()?;
+    fn dataflow_ingestor_client(&self) -> Option<DataflowClient> {
+        let node = self.dataflow_ingestor_client_node()?;
         let metric = DataflowMetricRef::new(
             self.kind.as_str().to_ascii_uppercase(),
             self.identifier.as_str(),
@@ -618,24 +623,24 @@ impl ActiveNode {
 
     /// The external system node an emitter writes to. Graph counts use the node alone so they do
     /// not allocate metric strings that only a rendered edge needs.
-    fn dataflow_sink_client_node(&self) -> Option<DataflowNode> {
+    fn dataflow_emitter_client_node(&self) -> Option<DataflowNode> {
         let Model::Emitter(emitter) = self.config.as_ref() else {
             return None;
         };
-        let client = emitter.sink.client()?;
+        let client = emitter.connector.client()?;
         Some(DataflowNode::new(
-            format!("client_sink:{}", client.as_str()),
+            format!("client_emitter:{}", client.as_str()),
             client.as_str(),
             DataflowNodeRole::Client {
-                transport: emitter.sink.transport_label().to_string(),
+                transport: emitter.connector.transport_label().to_string(),
             },
         ))
     }
 
     /// The external system an emitter writes to. The metric names the input relay only when the
     /// emitter has exactly one, since that is what makes the count attributable to a relay.
-    fn dataflow_sink_client(&self) -> Option<DataflowClient> {
-        let node = self.dataflow_sink_client_node()?;
+    fn dataflow_emitter_client(&self) -> Option<DataflowClient> {
+        let node = self.dataflow_emitter_client_node()?;
         let Model::Emitter(emitter) = self.config.as_ref() else {
             return None;
         };
@@ -860,23 +865,19 @@ fn parse_as_to_dataflow_label(ty: &ParseAsType) -> String {
     }
 }
 
+/// The pair an ingestor reads, as its statement's head names it.
 fn ingestor_subtype(model: &Model) -> &str {
     let Model::Ingestor(ingestor) = model else {
         return "INGESTOR";
     };
-    if let IngestorInput::Transport(input) = &ingestor.input
-        && let IngestSource::Endpoint { .. } = input.source
-    {
-        return "INGESTOR";
-    }
-    ingestor.input.source_label()
+    ingestor.input.source_phrase()
 }
 
 fn emitter_subtype(model: &Model) -> &str {
     let Model::Emitter(emitter) = model else {
         return "EMITTER";
     };
-    emitter.sink.transport_label()
+    emitter.connector.transport_label()
 }
 
 const fn dataflow_processor_kind(kind: ModelKind) -> Option<DataflowProcessorKind> {
@@ -1105,6 +1106,10 @@ pub(in crate::registry) fn ensure_drop_targets_are_not_in_use(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::{collections::BTreeSet, fs};
 
@@ -1364,7 +1369,7 @@ mod tests {
         assert_eq!(
             edges,
             std::collections::BTreeSet::from([
-                ("client_source:broker_in", "ingestor:ingest_events"),
+                ("client_ingestor:broker_in", "ingestor:ingest_events"),
                 ("ingestor:ingest_events", "relay:raw_events"),
                 ("relay:raw_events", "deduplicator:dedup_events"),
                 ("deduplicator:dedup_events", "relay:deduped_events"),
@@ -1426,7 +1431,7 @@ mod tests {
         assert_eq!(
             edges,
             std::collections::BTreeSet::from([
-                ("client_source:broker_in", "ingestor:ingest_events"),
+                ("client_ingestor:broker_in", "ingestor:ingest_events"),
                 ("ingestor:ingest_events", "relay:raw_events"),
                 ("relay:raw_events", "wasm_processor:filter_events"),
                 ("wasm_processor:filter_events", "relay:filtered_events"),
@@ -1467,12 +1472,12 @@ mod tests {
             .map(|node| node.id.as_str())
             .collect::<std::collections::BTreeSet<_>>();
         assert!(
-            node_ids.contains("client_source:broker"),
-            "source client missing from {node_ids:?}"
+            node_ids.contains("client_ingestor:broker"),
+            "ingestor client missing from {node_ids:?}"
         );
         assert!(
-            node_ids.contains("client_sink:broker"),
-            "sink client missing from {node_ids:?}"
+            node_ids.contains("client_emitter:broker"),
+            "emitter client missing from {node_ids:?}"
         );
         let edges = dataflow_graph
             .edges
@@ -1482,19 +1487,19 @@ mod tests {
         assert_eq!(
             edges,
             std::collections::BTreeSet::from([
-                ("client_source:broker", "ingestor:ingest_events"),
+                ("client_ingestor:broker", "ingestor:ingest_events"),
                 ("ingestor:ingest_events", "relay:raw_events"),
                 ("relay:raw_events", "emitter:emit_events"),
-                ("emitter:emit_events", "client_sink:broker"),
+                ("emitter:emit_events", "client_emitter:broker"),
             ])
         );
-        let sink_metric = dataflow_graph
+        let emitter_metric = dataflow_graph
             .edges
             .iter()
-            .find(|edge| edge.target == "client_sink:broker")
+            .find(|edge| edge.target == "client_emitter:broker")
             .and_then(|edge| edge.metric.as_ref())
-            .expect("single-input emitter sink edge must carry a metric");
-        assert_eq!(sink_metric.relay.as_deref(), Some("raw_events"));
+            .expect("single-input emitter edge must carry a metric");
+        assert_eq!(emitter_metric.relay.as_deref(), Some("raw_events"));
 
         let _ = fs::remove_dir_all(path);
     }
@@ -1538,7 +1543,7 @@ mod tests {
                                 relay: named("correlator_errors"),
                                 assignments: vec![Assignment {
                                     target: AssignmentTarget::bare(named("value")),
-                                    value: nervix_nspl::parse_expression("left.value")
+                                    value: nervix_plexus::parse_expression("left.value")
                                         .expect("error assignment must parse"),
                                 }],
                             };
@@ -1672,7 +1677,7 @@ mod tests {
         assert_eq!(
             edges,
             std::collections::BTreeSet::from([
-                ("client_source:broker_in", "ingestor:state_txns_ingestor"),
+                ("client_ingestor:broker_in", "ingestor:state_txns_ingestor"),
                 ("ingestor:state_txns_ingestor", "relay:state_txns")
             ])
         );

@@ -6,7 +6,7 @@ This is the executable acceptance ledger for [Client Wire
 later Client Wire tasks own, the deterministic seams that reproduce them, and the end-to-end
 protobuf baseline that task 16 will compare with FlatBuffers.
 
-The public scenarios use native gRPC sessions and NSPL commands. The console probe and graph
+The public scenarios use native gRPC sessions and Plexus commands. The console probe and graph
 baseline use the console WebSocket session. Process recovery starts the actual `nervix-server`
 binary, sends `SIGKILL`, and reopens the same database and ports. Focused unit probes are used only
 where a public client cannot observe the dispatcher's waiter identity or the server's internal
@@ -31,6 +31,7 @@ integrated qualification and its validation commands are recorded in
 | CW-F08 | Every same-relay subscription increments interest, but deletion unregisters only when the final local subscription disappears, leaving the count positive. | [10](https://app.clickup.com/t/86bapbpt3) | `application::subscription::tests::deleting_two_same_relay_subscriptions_withdraws_the_interest_exactly`; `A node's interest in a relay follows every subscription of every session exactly` in `session_subscription_lifecycle.feature`, one and three nodes |
 | CW-F09 | The native client does not own acknowledged desired subscriptions as generation-fenced state, so reconnect/leader movement loses the subscription. | [12](https://app.clickup.com/t/86bc1ahwj) | `A reconnected native client restores acknowledged subscriptions` (`@client_wire_subscription_restore`, three nodes and concrete `acme`/`beta` branches) |
 | CW-F10 | The console dispatcher lets an unsolicited domain-list response take the first pending user request. | [13](https://app.clickup.com/t/86bc1ahym); resolved by request-identity correlation in [09](https://app.clickup.com/t/86bc1ahv3) | `tests::untracked_domain_push_cannot_discard_a_pending_websocket_request` in the `nervix-web-console` binary |
+| CW-F11 | A transaction batch whose commit applied but whose outcome was not recorded before leadership moved is resumed against its finished transaction, which no longer holds the batch's appends, and records the failure "transaction is not open (state COMMITTED)" as the batch's one outcome. | [Return a committed transaction batch's recorded outcome](https://app.clickup.com/t/86bckvkt6) | `A committed transaction batch keeps its one outcome when leadership moves while each attempt records it` (`@client_wire_transaction_batch_finalization_recovery`, three nodes); `transaction::tests::a_finished_transaction_answers_each_accepted_append_with_its_recorded_admission` in `nervix-consensus` |
 
 The schema and verified codec belong to [02](https://app.clickup.com/t/86bc1ahm4); persisted domain
 mutation ownership to [04](https://app.clickup.com/t/86bc1ahmy); retained request-history bounds to
@@ -49,6 +50,7 @@ mutation ownership to [04](https://app.clickup.com/t/86bc1ahmy); retained reques
 | Before admission | Arm a node's command admission pause before proposal, wait until the request reaches it, then transfer leadership, commit from another session, cancel, or release. | CW-F01 and existing leader-loss scheduling coverage |
 | After durable admission | Arm the persistent-command pause after its applying record commits but before effects begin. The passing control drops the public stream and retries with the same reference. | `A command lost after durable admission is recovered by its request identity` (`@client_wire_durable_admission`) |
 | After execution, before response | Arm response delivery after a `CommandResult` exists, wait for the barrier, drop the gRPC stream, then release. The same seam is above both public session transports. | CW-F02 and CW-F03 |
+| After effects, before outcome recording | Arm a node's finalization pause, which holds the next persistent command whose effects returned a terminal result before the node proposes that outcome. It holds a request's own attempt and a leader's resumption of an applying execution alike, so a leadership transfer while it is held leaves the execution applying with its effects in place. | CW-F11 |
 | Transaction progress | Pause a named node/domain commit after an exact number of applied statements. | CW-F04 |
 | Planned schedule publication | Pause `RELOCATE` after it produces its target schedule and before it reads the publication base. | CW-F05 |
 | Leader movement | Select the old and new node explicitly, request transfer, and wait until the destination reports itself leader. | CW-F09 and existing admission tests |

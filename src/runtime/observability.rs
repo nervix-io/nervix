@@ -3,8 +3,12 @@
 //! Layer: data plane.
 //! - **Owns.** Read-only descriptions and metrics derived from installed runtime state.
 //! - **Depends on.** Execution plans, branch-local state and runtime metric collectors.
-//! - **Must not know.** NSPL parsing, persistence mutations or external telemetry transport.
+//! - **Must not know.** Plexus parsing, persistence mutations or external telemetry transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -77,6 +81,16 @@ pub(crate) struct IngestorDescribe {
     pub(crate) ready: bool,
     pub(crate) quiesce_state: Option<String>,
     pub(crate) quiesce_counters: IngestorQuiesceCounters,
+    /// Pending acknowledgements and rejections this node's source hosts discarded after a
+    /// reconnect, because the broker redelivers them.
+    pub(crate) transport_redeliveries_total: u64,
+    /// Payloads this node's intake of the ingestor consumed because its codec refused them.
+    pub(crate) decode_rejections_total: u64,
+    /// The latest of those payloads' decode rejections on this node.
+    pub(crate) last_decode_rejection: Option<DecodeRejection>,
+    /// Payloads this node's source hosts of the ingestor dropped because they exceed their
+    /// client's message size bound.
+    pub(crate) oversized_payloads_total: u64,
     pub(crate) memory_backpressure_paused: bool,
     pub(crate) transient_error: Option<String>,
     pub(crate) reconnect_backoff: Option<String>,
@@ -121,7 +135,7 @@ impl Runtime {
                 domain,
                 branch,
                 dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
-                branch_key_display(key),
+                key.as_ref().map(BranchKey::fingerprint),
             );
         }
     }
@@ -145,12 +159,13 @@ impl Runtime {
         };
         let dispatcher = self.inner.remote_dispatcher.load();
         let physical_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
+        let concrete_branch = key.as_ref().map(BranchKey::fingerprint);
         if let Some(reason) = reason {
             self.inner.metrics.observe_branch_instance_removed(
                 domain,
                 branch,
                 physical_node_id,
-                branch_key_display(key),
+                concrete_branch,
                 reason,
             );
         } else {
@@ -158,7 +173,7 @@ impl Runtime {
                 domain,
                 branch,
                 physical_node_id,
-                branch_key_display(key),
+                concrete_branch,
             );
         }
     }
@@ -192,15 +207,23 @@ impl BranchMetricsMark {
 }
 
 impl DataflowNodeTransientState {
-    fn from_failure<R>(
-        failure: Option<StdArc<task_status::TaskFailure<R>>>,
+    fn from_failures<R>(
+        failures: Option<nervix_primitives::sync::StdArc<task_status::TaskFailures<R>>>,
         retry_of: fn(&R) -> &RuntimeReconnectStatus,
     ) -> Self {
-        let Some(failure) = failure else {
+        let Some(failures) = failures else {
             return Self::default();
         };
+        let error = match failures.as_ref() {
+            task_status::TaskFailures::Task(failure)
+            | task_status::TaskFailures::Connector(failure) => failure.error.clone(),
+            task_status::TaskFailures::Both { task, connector } => {
+                format!("task: {}; connector: {}", task.error, connector.error)
+            }
+        };
+        let failure = failures.selected();
         let mut state = Self {
-            error: Some(failure.error.clone()),
+            error: Some(error),
             ..Self::default()
         };
         if let Some(retry) = failure.retry.as_ref() {
@@ -263,18 +286,16 @@ impl Runtime {
         domain: &DomainName,
         relay: &RelayName,
         key: &Option<BranchKey>,
-    ) -> Result<bool, RuntimeError> {
+    ) -> error_stack::Result<bool, RuntimeError> {
         let Some(execution) = self.inner.executions.get(domain) else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
+            return Err(Report::new(RuntimeError::relay_not_instantiated(
+                domain, relay,
+            )));
         };
         let Some(services) = execution.relay_services.get(relay) else {
-            return Err(RuntimeError::RelayNotInstantiated {
-                domain: domain.as_str().to_string(),
-                relay: relay.as_str().to_string(),
-            });
+            return Err(Report::new(RuntimeError::relay_not_instantiated(
+                domain, relay,
+            )));
         };
         Ok(services.branch_presence.contains(key.as_ref()))
     }
@@ -293,7 +314,7 @@ impl Runtime {
                 domain = domain.as_str(),
                 kind,
                 identifier = identifier.as_str(),
-                error = %error,
+                error = format!("{error:#}"),
                 "failed to refresh branch-aggregated metrics before describe"
             );
         }
@@ -397,16 +418,17 @@ impl Runtime {
         let Some(services) = execution.relay_services.get(relay) else {
             return Vec::new();
         };
+        // A branch is named by the fingerprint of its key: these statistics reach sessions, and a
+        // branch's key fields may be `SENSITIVE`.
         let membership = services.branch_presence.load();
-        let mut branches = membership
+        let branches = membership
             .branches()
-            .map(|branch| branch.as_str().to_string())
-            .collect::<Vec<_>>();
-        branches.sort();
+            .map(BranchKey::fingerprint)
+            .collect::<BTreeSet<_>>();
         branches
             .into_iter()
             .map(|branch| nervix_dataflow_graph::DataflowBranchStatistics {
-                branch,
+                branch: branch.to_string(),
                 statistics: Default::default(),
             })
             .collect()
@@ -498,20 +520,20 @@ impl Runtime {
         let identifier = identifier.into();
         if kind.eq_ignore_ascii_case("INGESTOR") {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, identifier);
-            let failure = self
+            let failures = self
                 .inner
                 .ingestor_statuses
                 .get(&key)
-                .and_then(|status| status.snapshot());
-            DataflowNodeTransientState::from_failure(failure, |retry| retry)
+                .and_then(|status| status.connection.failures());
+            DataflowNodeTransientState::from_failures(failures, |retry| retry)
         } else if kind.eq_ignore_ascii_case("EMITTER") {
             let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, identifier);
-            let failure = self
+            let failures = self
                 .inner
                 .emitter_statuses
                 .get(&key)
-                .and_then(|status| status.snapshot());
-            DataflowNodeTransientState::from_failure(failure, |retry| &retry.reconnect)
+                .and_then(|status| status.failures());
+            DataflowNodeTransientState::from_failures(failures, |retry| &retry.reconnect)
         } else {
             DataflowNodeTransientState::default()
         }
@@ -522,7 +544,7 @@ impl Runtime {
         domain: &DomainName,
         kind: &str,
         identifier: impl Into<ModelName>,
-    ) -> Result<(), RuntimePersistenceError> {
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
         let identifier = identifier.into();
         let Ok(kind) = kind.to_ascii_lowercase().parse::<ModelKind>() else {
             return Ok(());
@@ -574,6 +596,13 @@ impl Runtime {
         Ok(())
     }
 
+    /// The latest decode rejection the ingestor `key` names published on this node.
+    fn last_decode_rejection(&self, key: &DomainNodeRef) -> Option<DecodeRejection> {
+        let status = self.inner.ingestor_statuses.get(key)?;
+        let rejection = status.last_decode_rejection()?;
+        Some(DecodeRejection::clone(&rejection))
+    }
+
     pub(crate) fn describe_local_ingestor(
         &self,
         domain: &DomainName,
@@ -590,27 +619,40 @@ impl Runtime {
             Some(control) => control.counters(),
             None => IngestorQuiesceCounters::default(),
         };
-        if !self.inner.executions.contains_key(domain) {
-            let transient_error = match self.inner.domain_instantiation_errors.get(domain) {
-                Some(error) => Some(error.value().clone()),
-                None => transient.error.clone(),
-            };
-            return Ok(IngestorDescribe {
-                running: false,
-                ready: false,
-                quiesce_state: quiesce_state.clone(),
-                quiesce_counters,
-                memory_backpressure_paused,
-                transient_error,
-                reconnect_backoff: transient.reconnect_backoff.clone(),
-                reconnect_wait_millis: transient.reconnect_wait_millis,
-                kafka_domain_offsets: None,
-                client_producers: self.client_ingestor_gauges(domain, ingestor),
-            });
-        }
-
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let transport_redeliveries_total = self
+            .inner
+            .metrics
+            .ingestor_transport_redeliveries(
+                domain,
+                ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            )
+            .get();
+        let decode_rejections_total = self
+            .inner
+            .metrics
+            .ingestor_decode_rejections(
+                domain,
+                ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            )
+            .get();
+        let oversized_payloads_total = self
+            .inner
+            .metrics
+            .ingestor_oversized_payloads(
+                domain,
+                ingestor,
+                dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
+            )
+            .get();
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if !self.inner.ingestors.contains_key(&key) {
+        let last_decode_rejection = self.last_decode_rejection(&key);
+        if !self.inner.executions.contains_key(domain) || !self.inner.ingestors.contains_key(&key) {
+            // An ingestor that did not start describes its own start report. One that recorded no
+            // failure of its own is not running because its domain's execution failed to build,
+            // and describes that build's failure.
             let transient_error = if let Some(error) = transient.error.clone() {
                 Some(error)
             } else {
@@ -624,6 +666,10 @@ impl Runtime {
                 ready: false,
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
+                transport_redeliveries_total,
+                decode_rejections_total,
+                last_decode_rejection: last_decode_rejection.clone(),
+                oversized_payloads_total,
                 memory_backpressure_paused,
                 transient_error,
                 reconnect_backoff: transient.reconnect_backoff.clone(),
@@ -638,6 +684,10 @@ impl Runtime {
                 ready: self.ingestor_ready(domain, ingestor),
                 quiesce_state: quiesce_state.clone(),
                 quiesce_counters,
+                transport_redeliveries_total,
+                decode_rejections_total,
+                last_decode_rejection: last_decode_rejection.clone(),
+                oversized_payloads_total,
                 memory_backpressure_paused,
                 transient_error: transient.error.clone(),
                 reconnect_backoff: transient.reconnect_backoff.clone(),
@@ -650,12 +700,14 @@ impl Runtime {
             execution.revision.entrypoints.ingestor(ingestor)
             && let IngestorInputPlan::Transport(TransportInputPlan {
                 source:
-                    SourceStartPlan::Kafka(KafkaIngestorStartPlan {
-                        topic,
-                        offsets: KafkaOffsetPlan::Domain(_),
-                        instances,
-                        ..
-                    }),
+                    IngestorConnectorPlan::Kafka(KafkaIngestorStartPlan::Topic(
+                        KafkaTopicIngestorStartPlan {
+                            topic,
+                            offsets: KafkaOffsetPlan::Domain(_),
+                            instances,
+                            ..
+                        },
+                    )),
                 ..
             }) = &plan.input
             && let Some(node) = execution.revision.nodes.get(&NodeRef::new(
@@ -677,6 +729,10 @@ impl Runtime {
             ready: self.ingestor_ready(domain, ingestor),
             quiesce_state,
             quiesce_counters,
+            transport_redeliveries_total,
+            decode_rejections_total,
+            last_decode_rejection,
+            oversized_payloads_total,
             memory_backpressure_paused,
             transient_error: transient.error.clone(),
             reconnect_backoff: transient.reconnect_backoff.clone(),
@@ -768,13 +824,19 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 
     use ahash::HashMap;
     use fjall::Database;
     use futures_util::FutureExt as _;
-    use nervix_models::{ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType};
+    use nervix_models::{
+        ClusterNodeName, IngestorName, ModelKind, ModelName, ParseAsType, RelayName,
+    };
     use nervix_primitives::sync::Arc;
     use tempfile::tempdir;
 
@@ -842,8 +904,12 @@ mod tests {
             let db = Database::builder(dir.path())
                 .open()
                 .expect("db should open");
-            let store = RuntimeStateStore::from_database(db, Executor::default())
-                .expect("state store should open");
+            let store = RuntimeStateStore::from_database(
+                db,
+                Executor::default(),
+                crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            )
+            .expect("state store should open");
             let metrics = RuntimeMetrics::default();
             metrics
                 .resolve_node_batch_metrics(NodeBatchMetricsSpec {
@@ -853,7 +919,7 @@ mod tests {
                     relay: &named("notifications"),
                     physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
                     direction: "sent",
-                    branch_key: None,
+                    branch: None,
                 })
                 .observe(19, 1900, None);
             let snapshot = BranchAggregatedRuntimeStateSnapshot {
@@ -907,8 +973,12 @@ mod tests {
         let db = Database::builder(dir.path())
             .open()
             .expect("db should open");
-        let store = RuntimeStateStore::from_database(db.clone(), Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db.clone(),
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         let persisted_metrics = RuntimeMetrics::default();
         persisted_metrics
             .resolve_node_batch_metrics(NodeBatchMetricsSpec {
@@ -918,7 +988,7 @@ mod tests {
                 relay: &named("notifications"),
                 physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
                 direction: "sent",
-                branch_key: None,
+                branch: None,
             })
             .observe(19, 1900, None);
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
@@ -986,8 +1056,12 @@ mod tests {
         let db = Database::builder(dir.path())
             .open()
             .expect("db should open");
-        let store = RuntimeStateStore::from_database(db.clone(), Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db.clone(),
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         let persisted_metrics = RuntimeMetrics::default();
         persisted_metrics
             .resolve_node_batch_metrics(NodeBatchMetricsSpec {
@@ -997,7 +1071,7 @@ mod tests {
                 relay: &named("notifications"),
                 physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
                 direction: "sent",
-                branch_key: None,
+                branch: None,
             })
             .observe(19, 1900, None);
         let snapshot = BranchAggregatedRuntimeStateSnapshot {
@@ -1042,7 +1116,7 @@ mod tests {
                 relay: &named("notifications"),
                 physical_node_id: Some(&ClusterNodeName::parse("node-3").expect("valid name")),
                 direction: "sent",
-                branch_key: None,
+                branch: None,
             })
             .observe(1, 100, None);
 
@@ -1223,5 +1297,29 @@ mod tests {
             "describe should expose domain instantiation error, got {:?}",
             describe.transient_error
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn a_local_stream_is_described_only_for_a_relay_this_node_instantiates() {
+        let runtime = Runtime::new();
+        let domain = domain("default");
+        let relay = named::<RelayName>("events");
+        let not_instantiated = "relay 'events' in domain 'default' is not instantiated";
+
+        let unbuilt = runtime
+            .describe_local_stream_exists(&domain, &relay, &None)
+            .expect_err("a domain without an execution instantiates no relay");
+        assert_eq!(format!("{unbuilt:#}"), not_instantiated);
+
+        install_test_domain_execution(
+            &runtime,
+            &domain,
+            Vec::new(),
+            DomainRoutingSnapshot::default(),
+        );
+        let undeclared = runtime
+            .describe_local_stream_exists(&domain, &relay, &None)
+            .expect_err("an execution without the relay has no stream for it");
+        assert_eq!(format!("{undeclared:#}"), not_instantiated);
     }
 }

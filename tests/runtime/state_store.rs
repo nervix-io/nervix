@@ -5,6 +5,20 @@
 
 use super::*;
 
+/// Called only after the diagnostic process installed its detector, covering the other writers
+/// and purges that select the same physical generation under the installation barrier.
+#[cfg(feature = "deloxide")]
+pub(super) fn diagnostic_installation_writers_and_purges() {
+    ownership_handoff_preparation_retains_exact_coordination_identity_across_reopen();
+    forced_recovery_preparation_survives_reopen_and_activation_is_idempotent();
+    forced_recovery_preserves_checkpoint_after_incarnation_change();
+    forced_recovery_preserves_checkpoint_after_fingerprint_change();
+    purging_removes_only_guest_state_of_superseded_generations();
+    a_schema_change_replaces_only_schema_bound_state();
+    guest_checkpoints_and_replica_installs_return_once_synchronized();
+    forced_recovery_publishes_staged_guest_state_in_the_committed_generation();
+}
+
 #[test]
 fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reopen() {
     let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
@@ -33,8 +47,12 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_handoff_preparation(&transition, &[])
             .expect("ownership handoff preparation should persist");
@@ -43,8 +61,12 @@ fn ownership_handoff_preparation_retains_exact_coordination_identity_across_reop
     let db = Database::builder(dir.path())
         .open()
         .expect("database should reopen");
-    let store = RuntimeStateStore::from_database(db, Executor::default())
-        .expect("state store should reopen");
+    let store = RuntimeStateStore::from_database(
+        db,
+        Executor::default(),
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should reopen");
     let preparations = store
         .handoff_preparations()
         .expect("persisted handoff preparation should load");
@@ -149,8 +171,12 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_latest_snapshot(&placement, 4, &payload)
             .expect("earlier state should persist");
@@ -166,8 +192,12 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let activated = store
             .activate_forced_recovery(
                 &transition,
@@ -186,8 +216,12 @@ fn forced_recovery_preparation_survives_reopen_and_activation_is_idempotent() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen again");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let activated = store
             .activate_forced_recovery(
                 &transition,
@@ -243,8 +277,12 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_latest_snapshot(&placement, 4, &payload)
             .expect("earlier state should persist");
@@ -260,8 +298,12 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let activated = store
             .activate_forced_recovery(
                 &transition,
@@ -280,8 +322,12 @@ fn forced_recovery_preserves_checkpoint_after_incarnation_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen again");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let transition = ForcedRuntimeStateRecoveryTransition {
             destination_incarnation: ClusterNodeIncarnation::new(43),
             ..transition
@@ -340,8 +386,12 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should open");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should open");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should open");
         store
             .persist_latest_snapshot(&placement, 4, &payload)
             .expect("earlier state should persist");
@@ -357,8 +407,12 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let activated = store
             .activate_forced_recovery(
                 &transition,
@@ -377,8 +431,12 @@ fn forced_recovery_preserves_checkpoint_after_fingerprint_change() {
         let db = Database::builder(dir.path())
             .open()
             .expect("database should reopen again");
-        let store = RuntimeStateStore::from_database(db, Executor::default())
-            .expect("state store should reopen");
+        let store = RuntimeStateStore::from_database(
+            db,
+            Executor::default(),
+            crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+        )
+        .expect("state store should reopen");
         let transition = ForcedRuntimeStateRecoveryTransition {
             target_schedule_fingerprint: [10; 32],
             ..transition
@@ -428,10 +486,20 @@ fn wasm_guest_placement(tenant: &str, value: u64) -> RuntimeStatePlacement {
 }
 
 pub(super) fn open_store(dir: &tempfile::TempDir) -> RuntimeStateStore {
+    open_store_on(dir, Executor::default())
+}
+
+/// Opens a store whose storage work runs on `executor`.
+pub(super) fn open_store_on(dir: &tempfile::TempDir, executor: Executor) -> RuntimeStateStore {
     let db = Database::builder(dir.path())
         .open()
         .expect("database should open");
-    RuntimeStateStore::from_database(db, Executor::default()).expect("state store should open")
+    RuntimeStateStore::from_database(
+        db,
+        executor,
+        crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+    )
+    .expect("state store should open")
 }
 
 fn current_identity(generations: WasmStateGenerations) -> HashMap<NodeRef, ScheduledStateIdentity> {
@@ -528,18 +596,17 @@ fn purging_removes_only_guest_state_of_superseded_generations() {
 }
 
 #[test]
-fn persisted_runtime_state_decodes_from_unaligned_storage() {
-    let expected = PersistedRuntimeStateEntry {
+fn checkpoint_header_decodes_from_unaligned_storage() {
+    let expected = StoredCheckpoint::Inline(PersistedRuntimeStateEntry {
         lsm: 7,
         payload: vec![1, 2, 3],
-    };
-    let encoded =
-        rkyv::to_bytes::<rkyv::rancor::Error>(&expected).expect("runtime state should encode");
+    });
+    let encoded = expected.encode().assured("the checkpoint header encodes");
     let mut unaligned = vec![0];
     unaligned.extend_from_slice(&encoded);
 
-    let decoded = PersistedRuntimeStateEntry::decode(&unaligned[1..])
-        .expect("runtime state should decode from an unaligned database buffer");
+    let decoded = StoredCheckpoint::decode(&unaligned[1..])
+        .assured("the checkpoint header decodes from an unaligned database buffer");
 
     assert_eq!(decoded, expected);
 }
@@ -556,7 +623,7 @@ async fn guest_checkpoints_and_replica_installs_return_once_synchronized() {
     let guest = super::super::ReplicatedWasmProcessorState::new(
         placement.clone(),
         None,
-        Arc::new(nervix_primitives::publication::ArcSwapOption::empty()),
+        Default::default(),
     );
     let captured = guest.capture(
         vec![1, 2, 3],
@@ -669,21 +736,30 @@ fn forced_recovery_publishes_staged_guest_state_in_the_committed_generation() {
     );
 }
 
-/// A stored key is bytes read back from the database, so decoding one that ends inside the
-/// state-kind prefix must report a decode error rather than index past the key.
+/// A stored key is bytes read back from the database, so decoding one that ends where the
+/// separator after its state kind or after its Model kind belongs must report a decode error
+/// rather than index past the key.
 #[test]
 fn truncated_state_key_reports_a_decode_error() {
     let mut key = b"acme".to_vec();
     key.push(0);
     key.push(u8::from(RuntimeStateKind::Deduplicator));
+    assert_truncated_key_names(&key, StoredStateIssue::KeyStateKindSeparator);
 
-    let error = stored_placement(&key)
+    key.push(0);
+    key.extend_from_slice(b"deduplicator");
+    assert_truncated_key_names(&key, StoredStateIssue::KeyModelKindSeparator);
+}
+
+fn assert_truncated_key_names(key: &[u8], missing: StoredStateIssue) {
+    let error = stored_placement(key)
         .err()
-        .expect("a key that ends inside the state-kind prefix must not decode");
-
+        .expect("a key that ends inside its state-kind prefix must not decode");
     assert!(
-        matches!(error.current_context(), RuntimePersistenceError::DecodeState(message)
-            if message.contains("model-kind separator")),
+        matches!(
+            error.current_context(),
+            RuntimePersistenceError::DecodeState
+        ) && error.downcast_ref::<StoredStateIssue>() == Some(&missing),
         "unexpected error for a truncated state key: {error:?}"
     );
 }
@@ -825,10 +901,14 @@ fn a_key_that_ends_inside_its_schema_fingerprint_does_not_decode() {
         .err()
         .expect("a key that ends inside its schema fingerprint must not decode");
 
-    assert!(
-        matches!(error.current_context(), RuntimePersistenceError::DecodeState(message)
-            if message.contains("truncated schema fingerprint")),
+    assert_eq!(
+        error.downcast_ref::<StoredStateIssue>(),
+        Some(&StoredStateIssue::KeySchemaFingerprintTruncated),
         "unexpected error for a truncated schema fingerprint: {error:?}"
+    );
+    assert_eq!(
+        format!("{error:#}"),
+        "failed to decode runtime state: runtime state key has a truncated schema fingerprint"
     );
 }
 
@@ -842,11 +922,92 @@ fn an_unbranched_key_that_continues_after_its_scope_does_not_decode() {
         .err()
         .expect("an unbranched key with trailing bytes must not decode");
 
-    assert!(
-        matches!(error.current_context(), RuntimePersistenceError::DecodeState(message)
-            if message.contains("continues after its unbranched scope")),
+    assert_eq!(
+        error.downcast_ref::<StoredStateIssue>(),
+        Some(&StoredStateIssue::KeyAfterUnbranchedScope),
         "unexpected error for trailing key bytes: {error:?}"
     );
+}
+
+/// Each malformed segment of a stored key names its issue beneath the decoding failure: an unknown
+/// state kind, an identifier without its separator, an unknown branch scope, and a WASM guest key
+/// whose generation is missing, cut short or not followed by its separator.
+#[test]
+fn a_malformed_key_segment_names_its_issue() {
+    let mut unknown_state_kind = b"acme".to_vec();
+    unknown_state_kind.extend_from_slice(&[0, u8::MAX]);
+
+    let mut unterminated_identifier = b"acme".to_vec();
+    unterminated_identifier.extend_from_slice(&[0, u8::from(RuntimeStateKind::KafkaOffset), 0]);
+    unterminated_identifier.extend_from_slice(b"deduplicator\0orders");
+
+    let mut unknown_scope = orders_placement(RuntimeState::KafkaOffset, None).as_storage_key();
+    let scope = unknown_scope
+        .last_mut()
+        .expect("an unbranched key ends with its scope");
+    *scope = 2;
+
+    let guest = orders_placement(
+        RuntimeState::WasmProcessor {
+            schema: guest_schema(),
+            generation: generation(2),
+        },
+        None,
+    )
+    .as_storage_key();
+    // An unbranched guest key ends with its generation marker, the eight bytes of its
+    // generation, the generation separator and its scope.
+    let generation_marker = guest
+        .len()
+        .checked_sub(11)
+        .expect("an unbranched guest key ends with its generation segment and scope");
+    let mut without_generation = guest.clone();
+    without_generation.truncate(generation_marker);
+    let mut cut_generation = guest.clone();
+    cut_generation.truncate(
+        generation_marker
+            .checked_add(5)
+            .expect("the generation segment lies inside the key"),
+    );
+    let mut unseparated_generation = guest.clone();
+    let separator = unseparated_generation
+        .iter_mut()
+        .rev()
+        .nth(1)
+        .expect("the generation separator precedes the scope");
+    *separator = 9;
+
+    let keys = [
+        (unknown_state_kind, StoredStateIssue::KeyStateKind),
+        (
+            unterminated_identifier,
+            StoredStateIssue::KeyIdentifierSeparator,
+        ),
+        (unknown_scope, StoredStateIssue::KeyBranchScope),
+        (without_generation, StoredStateIssue::KeyStateGeneration),
+        (
+            cut_generation,
+            StoredStateIssue::KeyStateGenerationTruncated,
+        ),
+        (
+            unseparated_generation,
+            StoredStateIssue::KeyStateGenerationSeparator,
+        ),
+    ];
+    for (key, issue) in keys {
+        let error = stored_placement(&key)
+            .err()
+            .expect("a key with a malformed segment must not decode");
+        assert_eq!(
+            error.downcast_ref::<StoredStateIssue>(),
+            Some(&issue),
+            "{error:?}"
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            format!("failed to decode runtime state: {issue}")
+        );
+    }
 }
 
 #[test]

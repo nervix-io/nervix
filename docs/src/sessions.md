@@ -1,10 +1,12 @@
 #  Sessions
 
+*Plexus, the Nervix graph definition language.*
+
 Nervix supports session-local commands over its session protocol.
 
 These commands are not persisted in the registry:
 
-```nspl
+```plexus
 CREATE SUBSCRIPTION acme_notifications TO notifications WHERE tenant = 'acme';
 CREATE SUBSCRIPTION sampled_telemetry TO telemetry DROPPING BATCH SAMPLE RATE 0.1 WHERE input.tenant = 'acme';
 DELETE SUBSCRIPTION acme_notifications;
@@ -15,9 +17,12 @@ DETACH DOMAIN CLOCK;
 
 Following a domain clock is not a subscription; see
 [Domain Clock Attachment](#domain-clock-attachment). Publishing to a client ingestor uses
-[producers](#producers), which are not statements either.
+[producers](#producers), which are not statements.
 
-This page describes sessions as a user of NSPL sees them. [Client Session
+The [Client Ingestors And Emitters](./client-io-architecture.md) architecture chapter connects
+these transient handles to their persisted graph endpoints, ACK boundaries and restoration.
+
+This page describes sessions as a user of Plexus sees them. [Client Session
 Protocol](./client-session-protocol.md) explains the protocol that carries them, and the [Client
 Implementation Manual](./client-implementation-manual.md) states what a client implementation must
 do.
@@ -137,14 +142,19 @@ A session can follow the clock of a domain: its `START` generation and what the 
 installed for it. `ATTACH DOMAIN CLOCK;` starts following the clock of the active domain and
 `DETACH DOMAIN CLOCK;` stops following it. Clients send them as an `AttachDomainClockRequest` and a
 `DetachDomainClockRequest` naming the active domain, so each addresses the domain active when it
-runs. Selecting another domain with `USE` does not change what the session follows, and a session
-follows several domain clocks by attaching while each domain is active.
+runs. The Rust client, the CLI and every host of the shared C binding send each statement on its
+own: they refuse it beside other statements, and fail it when no domain is active. Selecting
+another domain with `USE` does not change what the session follows, and a session follows several
+domain clocks by attaching while each domain is active. The web console instead follows the clock
+of the domain it has selected: selecting another domain, from its domain menu or with `USE`,
+detaches the previous clock and attaches the selected one.
 
 An attachment is keyed by its domain alone. It is not a subscription: it reads no relay, has no
 name or generation of its own, and a session follows each domain clock at most once. The observed
 clock carries the `START` generation and one state:
 
-- **Stopped.** The generation exists but executes no domain work.
+- **Stopped.** The generation exists but executes no domain work. Generation 0 means the domain has
+  never started.
 - **Uninstalled.** A paced generation is running, but the serving node has no assigned clock
   authority or mapping for it, so it cannot execute paced work.
 - **Unpaced.** The domain reads actual UTC.
@@ -154,44 +164,60 @@ clock carries the `START` generation and one state:
 
 An attachment moves through one lifecycle:
 
-- **Attached.** The reply carries the clock as the serving node has it installed, and no frame about
-  the domain precedes it. A second attach is refused as already attached, and a domain the serving
-  node does not have is refused as not found. A node that has not installed the cluster's committed
-  domains since it started, as right after a restart, answers only once it has, so it never refuses
-  a domain the cluster has as not found. That wait ends early only with the session. When the reply
-  cannot be delivered, because the request was cancelled, the session ended, or the reply did not
-  fit the session limits, the attachment is abandoned before it delivers anything. If the
-  installation has not changed and the node already holds a tick of that generation, its newest
-  tick is the first frame after the reply.
+- **Attached.** The reply carries the clock as the serving node has it installed, and no frame of
+  this attachment precedes it. A second attach is refused as already attached, and a domain the
+  serving node does not have is refused as not found. A node that has not installed the cluster's
+  committed domains since it started, as right after a restart, answers only once it has, so it
+  never refuses a domain the cluster has as not found. That wait ends early only with the session.
+  While it waits, the attach holds the session's ordered lane, so the session's later commands and
+  ordered requests wait behind it. When the reply cannot be delivered, because the request was
+  cancelled, the session ended, or the reply did not fit the session limits, the attachment is
+  abandoned before it delivers anything; cancelling a waiting attach therefore attaches nothing,
+  though it does not end the wait. If the installation has not changed and the node already holds a
+  tick of that generation, its newest tick is the first frame after the reply.
 - **Following.** Each later change of the installed clock arrives as a `DomainClockObserved` frame
-  carrying the new clock: `STOP` delivers stopped, a `START` delivers its generation and mapping,
-  and a paced generation left without an assigned clock authority delivers uninstalled, then its
-  mapping again once an authority is assigned. A frame carries the clock installed when it is sent.
-  Changes made while an earlier frame waits for room on the session arrive together as the newest
-  clock, and a change that leaves the clock as the client last received it sends nothing: moving the
-  authority to another node and the pause that alters a running model are not observed. For a paced
-  installation, each newer accepted tick arrives as a `DomainClockTicked` frame with its generation,
-  one-based id, logical boundary, the authority's UTC observation, and the serving node's own
-  logical reading taken when it built the frame. A tick of a new generation follows that
-  generation's state frame. Ticks are replaceable on the control lane: each attached domain holds
-  at most one queued tick, updated to the newest while the client is slow. Tick ids may skip after
-  coalesced periods. An unpaced or uninstalled clock emits no ticks.
+  carrying the new clock: `STOP` delivers stopped, a `START` delivers its new generation, paced with
+  its mapping or unpaced, and a paced generation left without an assigned clock authority delivers
+  uninstalled, then its mapping again once an authority is assigned. A frame carries the clock
+  installed when the server built it. Changes made while an earlier frame waits for room on the
+  session arrive together as the newest clock, and a change that leaves the clock as the client last
+  received it sends nothing: moving the authority to another node and the pause that alters a
+  running model are not observed. For a paced installation, each newer accepted tick arrives as a
+  `DomainClockTicked` frame with its generation, one-based id, logical boundary, the authority's UTC
+  observation, and the serving node's own logical reading taken when it built the frame. A tick of
+  a new generation follows that generation's state frame. Ticks are replaceable on the control
+  lane: each attached domain holds at most one queued tick, updated to the newest while the client
+  is slow, and a changed clock withdraws a queued tick the transport has not taken yet. Tick ids may
+  skip after coalesced periods. An unpaced, stopped or uninstalled clock emits no ticks.
 - **Detached.** `DETACH DOMAIN CLOCK` stops delivery before its reply, so nothing about the domain
-  follows the reply. A detach without an attachment is refused as not attached.
+  follows the reply. A detach without an attachment is refused as not attached. The Rust client,
+  the CLI and every host of the shared C binding never attach a clock again on their own behind a
+  detach of it: a restoration attach they already decided to send reaches the session first, and
+  the detach releases what it attached.
 - **Ended by the server.** When the domain no longer exists on the serving node, the session
   receives `DomainClockAttachmentEnded` with reason `DomainRemoved`, the last frame about that
-  attachment. A request sent after that frame finds the attachment gone: an attach attaches again
-  and a detach is refused as not attached.
+  attachment. A request sent after that frame finds the attachment gone: an attach is served as a
+  new attachment, which the serving node refuses as not found unless it holds the domain again, and
+  a detach is refused as not attached.
 - **Session end.** The attachment ends with the session, and nothing is sent about it. The Rust
   client, the CLI, and every host of the shared C binding attach every clock they followed again on
-  their next session, which delivers the clock as it is then and the newest tick its serving node
-  holds. That tick can repeat one the client already received, or precede it when another node
-  serves the new session.
+  their next session, and the web console attaches its selected domain's clock again when it
+  reconnects. A console that holds a transaction attaches it first on the new connection, so the
+  server refuses that clock attach, and the console shows the refusal until its selection or
+  connection changes. The new attachment delivers the clock as it is then and the newest tick its
+  serving node holds. That tick can repeat one the client already received, or precede it when
+  another node serves the new session. When the new session's attach is answered while the old
+  session still holds the attachment, as after a redirect to the leader, the Rust client and the
+  shared C binding keep the newest tick of an unchanged clock and report a tick of the new session
+  only when it is newer.
 
-Both statements run in order with the session's commands and are refused, with the session-local
-refusal, while the session holds a transaction. Neither is persisted or becomes transaction
-content. See [Domains And Time](domains-and-time.md#following-a-domain-clock) for what a client
-computes from a paced clock.
+Both statements run in order with the session's commands. While the session holds a transaction,
+the server refuses them as it refuses a subscription change, and the Rust client, the CLI, every
+host of the shared C binding and the web console refuse them before sending, as they refuse every
+client-local statement. Neither is persisted or becomes transaction content. See
+[Domains And Time](domains-and-time.md#following-a-domain-clock) for what a client computes from a
+paced clock, and [Domain Clock](domain-clock.md#session-attachment) for how the serving node
+delivers an attachment.
 
 ## Producers
 
@@ -230,8 +256,6 @@ producers it opens. A producer is not a statement: clients open, feed, and close
   the producer handle and restores a fresh attachment if the domain generation and endpoint
   contract still match; it does not resend those uncertain batches.
 
-## Suggestions
-
 ## Emitter consumers
 
 An application opens a consumer of a `TO CLIENT` emitter by naming its domain, emitter, and the
@@ -257,7 +281,7 @@ defines the frames, and [Emitters](./emitters.md#client-emitters) defines their 
 
 ## Suggestions
 
-The session's `SuggestRequest` carries the full NSPL input, a UTF-8 byte cursor on a character
+The session's `SuggestRequest` carries the full Plexus input, a UTF-8 byte cursor on a character
 boundary, the selected domain, a page size from 1 through 100, and an optional continuation.
 The server asks the composed client/server grammar for expectations at that cursor, then resolves
 semantic references from one read of the selected domain's committed configuration with the
@@ -271,7 +295,7 @@ Inside a route expression, completion also offers ordinary VM builtins. For a ju
 through the output relay's declared schema. Qualified `udf::<name>` calls use the domain's UDF
 models, including the session's queued changes. In an ingestor construction expression,
 `read_header` and `read_headers` are offered only when the selected source supports header reads.
-In an emitter `INVOKE` expression, `write_header` is offered only when the selected sink supports
+In an emitter `INVOKE` expression, `write_header` is offered only when the selected emitter supports
 header writes.
 
 Each suggestion carries a display value, a kind, and a text edit with UTF-8 byte start and end
@@ -312,14 +336,23 @@ single frame:
 | Refused `Expired` | The retry validity of the execution reference has ended. |
 | Refused `NotOwner` | Another user ran the backup. |
 | Redirect to the leader | The node does not retain the archive and is not the leader. |
-| Refused `NotRetained` | The leader does not retain the archive: a download already collected it, the node that assembled it restarted, or the reference names no backup. |
+| Refused `NotRetained` | The leader does not retain the archive: the backup is still assembling it, the command assembled no archive, a download already collected it, the node that assembled it restarted, or the reference names no backup. |
 | Refused `ReadFailed` | The node could not read the archive it retains; the archive stays retained. |
 
 The first download whose completion frame was queued collects the archive, and a later download of
 it is refused. A download whose client goes away releases only its own hold, so the archive stays
 retained for the client to download again. The call is not bounded by the request timeout; the
 Rust client bounds the wait for each frame by it instead, and starts a failed download again from
-the first byte. [Backup And Restore](backup-and-restore.md) describes backups and their archives.
+the first byte. [Backup And Restore](backup-and-restore.md) describes backups and their archives,
+and [Transfer, Assembly And
+Retention](backup-and-restore-architecture.md#transfer-assembly-and-retention) how a node retains
+and serves one.
+
+The web console makes the same call over a WebSocket of its own on the console listener,
+`/console/backups/download`, authenticated like the console session. The connection carries the one
+request and the frames that answer it, one frame per binary message, and the node closes it
+normally after the last frame. The console checks the archive against the backup's summary exactly
+as the Rust client does before it hands the archive to the browser.
 
 ## Restore Streams
 
@@ -329,9 +362,11 @@ before it reads a frame, like every session method, and a call without valid cre
 `UNAUTHENTICATED`.
 
 The first frame is the restore's start. It names the request identity of the reply, the restore's
-execution reference, the `RESTORE` statement as canonical NSPL, and the archive's exact size and
-BLAKE3 digest. Every later frame carries the next bytes of the archive, at most 256 KiB each. The
-execution reference, the statement, and the archive's size and digest together are the restore's
+execution reference, the `RESTORE` statement as canonical Plexus, and the archive's exact size and
+BLAKE3 digest. Every later frame carries the next non-empty bytes of the archive, at most 256 KiB
+each from the Rust client and the console; the leader accepts any non-empty chunk that fits one
+frame. The execution reference, the statement, and the archive's size and digest together are the
+restore's
 request identity, so sending them again joins the same restore.
 
 The reply is either the restore's outcome as a command outcome, or a typed refusal of the stream
@@ -343,7 +378,7 @@ itself, which leaves nothing changed:
 | Refused `InvalidStatement` | The start does not name exactly one `RESTORE` statement. |
 | Refused `SizeMismatch` | The chunks add up to more, or fewer, bytes than the start declares. |
 | Refused `DigestMismatch` | The archive's bytes do not have the digest the start declares. |
-| Refused `QuotaExceeded` | The archive is larger than the leader stages, or its staging area cannot hold the archive now. |
+| Refused `QuotaExceeded` | The archive is larger than one staged artifact may be, or the leader's staging area cannot hold it now. |
 | Refused `StagingFailed` | The leader could not write the archive to its staging area. |
 | A redirect outcome | The node is not the leader. |
 | An outcome at once | A restore under the reference already finished, which answers with its recorded outcome, or still applies on this node, which answers `OutcomeUnknown` with the `StillApplying` cause. |
@@ -358,17 +393,24 @@ last frame arrived changes nothing and releases what the leader staged for it. O
 archive arrived, the restore goes on without the call.
 [Backup And Restore](backup-and-restore.md#restoring) describes restores.
 
+The web console makes the same call over a WebSocket of its own on the console listener,
+`/console/backups/restore`, authenticated like the console session. A WebSocket client cannot
+half-close the stream and still read the reply, so the stream ends with the chunk that completes the
+size the start declares, and the node answers on the open connection, then closes it normally. A
+connection that closes before that chunk ends the call as a failed gRPC call does.
+
 ## Structured Choices
 
 `ChoiceLookupRequest` resolves values for structured client controls without constructing partial
-NSPL. It carries a semantic target, typed dependent selections, search text, a page size from 1
+Plexus. It carries a semantic target, typed dependent selections, search text, a page size from 1
 through 100, and an optional page cursor. Targets resolve domain pace, placement policy, and a
 domain's internal schemas, each wire-schema format, branches, relays, codecs, VHOSTs, signaling
 protocols, relay fields, codec output fields, resource catalogs, and completed resource versions.
-Ingestor controls additionally ask for a source reference by transport, a decoding codec, relays
-with exact branch declarations, and fields of a selected branch's key schema. Each source target
-requires a domain and returns clients of its transport, except endpoint ingestion, which returns
-endpoints. The ingestor codec target requires a domain and filters out codecs without decoding.
+Ingestor controls additionally ask for a source reference by connector and entity, a decoding
+codec, relays with exact branch declarations, and fields of a selected branch's key schema. Each
+source target requires a domain and returns what its entity reads through: clients of its
+connector, or for `HTTP ENDPOINT` and `WEBSOCKETS ENDPOINT` the endpoints of that `TYPE`. The
+ingestor codec target requires a domain and filters out codecs without decoding.
 An unbranched relay target requires a domain and also supplies ingestor error relay choices, while
 a branched relay target requires a domain then a branch model reference. Branch fields require the
 same pair. Decoded fields and output fields use the existing codec-field and relay-field targets.
@@ -412,7 +454,7 @@ replace the choices for a newer edit or connection.
 
 ## Transaction Binding
 
-An NSPL transaction is replicated control-plane state, but its binding to a live session is
+A Plexus transaction is replicated control-plane state, but its binding to a live session is
 leader-local soft state. A session may bind one transaction, and a transaction may be bound to at
 most one session. The session protocol can attach by transaction id; the authenticated user must
 match the transaction owner. A later attach takes over the binding and the displaced session gets
@@ -439,5 +481,5 @@ client.
 Finished transaction outcomes remain available during tombstone retention. Attach during that
 window reports `COMMITTED`, `FAILED`, `REVERTED`, or `EXPIRED` with the structured final status and
 the transaction's aggregate outcome. After retention, attach reports an unknown transaction id. See
-[Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and [Transactions Over
+[Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions) and [Transactions Over
 The Protocol](./client-session-protocol.md#transactions-over-the-protocol).

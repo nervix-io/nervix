@@ -1,20 +1,25 @@
-//! Encoding an emitter's rows into the records a record sink publishes.
+//! Encoding an emitter's rows into the records a record emitter publishes.
 //!
 //! Layer: data plane.
 //! - **Owns.** Encoding every row a batch still holds with the emitter's codec — one record per row,
 //!   or, when the emitter declares `BATCH`, one batch payload per packed candidate — pairing each
-//!   record with its key, headers and ordering group, rejecting the rows that cannot be encoded or
-//!   do not fit, and handing one write to the record sink: the batch payloads earlier attempts
-//!   retained, unchanged, followed by the ones packed now.
+//!   record with its key, headers and ordering group, preparing its external bytes once, rejecting
+//!   the rows that cannot be encoded or do not fit, and handing one write to the record emitter: the
+//!   payloads earlier attempts retained, unchanged, followed by the ones prepared now.
 //! - **Depends on.** The emitter's compiled codec, its buffered batches, the batch packing, the
 //!   record identities and retained payloads a write is answered through, the connector
-//!   contract's record sink and record value type, and the node's bounded executor, whose extension
+//!   contract's record emitter and record value type, and the node's bounded executor, whose extension
 //!   workers run the encodings a codec's transformations make unbounded.
 //! - **Must not know.** Which external system receives the records, or when the emitter publishes
 //!   them.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use async_trait::async_trait;
-use nervix_connector::{RecordSink, SinkLifecycle, SinkRecord, SinkRecordPosition};
+use nervix_connector::{EmitterLifecycle, EmitterRecordPosition, RecordEmitter};
 use nervix_execution::{Cancellation, Cancelled, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::EmitterBatchPolicy;
 
@@ -57,41 +62,42 @@ struct EncodedBrokerRecord {
 }
 
 impl EncodedBrokerRecord {
-    const fn position(&self) -> SinkRecordPosition {
-        SinkRecordPosition {
+    const fn position(&self) -> EmitterRecordPosition {
+        EmitterRecordPosition {
             batch_index: self.batch_index,
             row_index: self.row_index,
         }
     }
 }
 
-/// A record sink and the codec the host encodes its records with.
-pub(super) struct EncodedRecordSink {
-    pub(super) sink: Box<dyn RecordSink>,
+/// A record emitter and the codec the host encodes its records with.
+pub(super) struct EncodedRecordEmitter {
+    pub(super) connector: Box<dyn RecordEmitter>,
     pub(super) codec: Arc<CompiledCodec>,
-    /// The emitter's `BATCH` clause. With it, each record the sink receives is one batch payload
+    /// The emitter's `BATCH` clause. With it, each record the emitter receives is one batch payload
     /// holding several rows; without it, each record is one row.
     pub(super) batch: Option<EmitterBatchPolicy>,
 }
 
 #[async_trait]
-impl EmitterSink for EncodedRecordSink {
-    fn lifecycle(&self) -> &dyn SinkLifecycle {
-        &*self.sink
+impl EmitterConnector for EncodedRecordEmitter {
+    fn lifecycle(&self) -> &dyn EmitterLifecycle {
+        &*self.connector
     }
 
-    fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
-        &mut *self.sink
+    fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
+        &mut *self.connector
     }
 
-    /// Encodes every row the batches still hold and publishes them in one write.
+    /// Encodes every row no payload carries yet and publishes them in one write.
     ///
-    /// With `BATCH`, the write carries every batch payload the emitter retains: the ones earlier
-    /// attempts prepared and the sink left unanswered, written again exactly as they were first
-    /// written, and the ones packed now from rows no payload carries yet.
+    /// The write carries every payload the emitter retains: the ones earlier attempts prepared and
+    /// the emitter left unanswered, written again exactly as they were first written, and the ones
+    /// prepared now, one per row or, with `BATCH`, one per packed candidate. The emitter prepares a
+    /// new payload's external bytes once, before the emitter retains it.
     async fn publish_batches(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()> {
         let EmitterPublication {
@@ -99,19 +105,47 @@ impl EmitterSink for EncodedRecordSink {
             payloads: prepared,
             ..
         } = publication;
-        let Some(policy) = self.batch else {
-            return self.publish_rows(context, batches).await;
+        let packed = match self.batch {
+            Some(policy) => {
+                pack_batch_records(self.codec.clone(), policy, context, batches).await?
+            }
+            None => {
+                let encoded = encode_broker_records(self.codec.clone(), context, batches).await?;
+                row_payloads(context, batches, encoded).await?
+            }
         };
-        let packed = pack_batch_records(self.codec.clone(), policy, context, batches).await?;
-        for payload in packed {
-            prepared.retain(payload, batches)?;
+        let mut rejected = Vec::new();
+        for mut payload in packed {
+            nervix_primitives::task::consume_budget().await;
+            let bytes = std::mem::take(&mut payload.content.payload);
+            match self.connector.prepare_payload(bytes, payload.occurred_at) {
+                Ok(bytes) => {
+                    payload.content.payload = bytes;
+                    prepared.retain(payload, batches)?;
+                }
+                Err(error) => {
+                    for position in payload.members {
+                        let batch = batches.get(position.batch_index).assured(
+                            "new payload members refer to the source batches that prepared them",
+                        );
+                        let mut member_error = error.clone();
+                        member_error.occurred_at = batch.execution_now();
+                        rejected.push(RejectedEmitterRecord {
+                            position,
+                            reason: String::new(),
+                            structured_error: Some(member_error),
+                        });
+                    }
+                }
+            }
         }
+        finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
         if prepared.is_empty() {
             return Ok(());
         }
         let PreparedWrite { records, payloads } = prepared.next_write();
         let record_count = records.len();
-        let outcome = self.sink.publish(records).await;
+        let outcome = self.connector.publish(records).await;
         let outcome = context.received_outcome(record_count, outcome);
         prepared
             .answers(batches, payloads, outcome)?
@@ -120,28 +154,7 @@ impl EmitterSink for EncodedRecordSink {
     }
 }
 
-impl EncodedRecordSink {
-    /// Encodes one record for every row the batches still hold and publishes them in one write.
-    async fn publish_rows(
-        &mut self,
-        context: &EmitterSinkContext,
-        batches: &mut [EmitterPublishBatch],
-    ) -> EmitterRuntimeResult<()> {
-        let encoded = encode_broker_records(self.codec.clone(), context, batches).await?;
-        let RowWrite { records, rows } = sink_records(context, batches, encoded).await?;
-        if records.is_empty() {
-            return Ok(());
-        }
-        let record_count = records.len();
-        let outcome = self.sink.publish(records).await;
-        let outcome = context.received_outcome(record_count, outcome);
-        rows.answers(outcome)?
-            .apply(context, batches, DeliveredAcknowledgements::Host)
-            .await
-    }
-}
-
-impl EmitterSinkContext {
+impl EmitterConnectorContext {
     /// Run one encoding on the node's extension workers, under a relay charge of `bytes` of input.
     ///
     /// A codec whose transformations run a JAQ program can take any time per row, so its encoding
@@ -217,7 +230,7 @@ impl EmitterRuntimeError {
 /// workers when the codec's transformations require it.
 pub(super) async fn encode_pending_broker_payloads(
     codec: Arc<CompiledCodec>,
-    context: &EmitterSinkContext,
+    context: &EmitterConnectorContext,
     batch: &EmitterPublishBatch,
     pending_rows: Vec<usize>,
 ) -> EmitterRuntimeResult<Vec<PendingRowPayload>> {
@@ -267,7 +280,7 @@ fn encoding_initialization_failure(
 
 async fn encode_broker_records(
     codec: Arc<CompiledCodec>,
-    context: &EmitterSinkContext,
+    context: &EmitterConnectorContext,
     batches: &mut [EmitterPublishBatch],
 ) -> EmitterRuntimeResult<Vec<EncodedBrokerRecord>> {
     let mut encoded = Vec::new();
@@ -300,7 +313,7 @@ async fn encode_broker_records(
                     .attach_printable(format!("emitter batch row {row_index} has no header entry"))
             })?;
             let message_group = batch.ordering_group(row_index)?;
-            let position = SinkRecordPosition {
+            let position = EmitterRecordPosition {
                 batch_index,
                 row_index,
             };
@@ -333,24 +346,17 @@ async fn encode_broker_records(
     Ok(encoded)
 }
 
-/// The records one write hands a sink when each record carries one row, and the row each carries.
-struct RowWrite {
-    records: Vec<SinkRecord>,
-    rows: RowRecords,
-}
-
-/// The records a sink publishes, once every record whose ordering group could not be evaluated
+/// One payload per row, once every record whose ordering group could not be evaluated
 /// has been rejected here.
 ///
-/// A sink that orders records per group receives the group already evaluated for its record, so
+/// A emitter that orders records per group receives the group already evaluated for its record, so
 /// the expression that produced it, and the reason a record has none, both stay with the host.
-async fn sink_records(
-    context: &EmitterSinkContext,
+async fn row_payloads(
+    context: &EmitterConnectorContext,
     batches: &mut [EmitterPublishBatch],
     encoded: Vec<EncodedBrokerRecord>,
-) -> EmitterRuntimeResult<RowWrite> {
-    let mut records = Vec::with_capacity(encoded.len());
-    let mut rows = RowRecords::with_capacity(encoded.len());
+) -> EmitterRuntimeResult<Vec<PreparedPayload<EncodedPayload>>> {
+    let mut payloads = Vec::with_capacity(encoded.len());
     let mut rejected = Vec::new();
     for record in encoded {
         nervix_primitives::task::consume_budget().await;
@@ -366,20 +372,21 @@ async fn sink_records(
                 continue;
             }
         };
-        let sink_record = SinkRecord::new(
-            rows.record(position),
-            record.key,
-            record.payload,
-            record.headers,
-            record.execution_now,
-        );
-        records.push(match message_group {
-            Some(message_group) => sink_record.with_message_group(message_group),
-            None => sink_record,
+        payloads.push(PreparedPayload {
+            members: vec![position],
+            occurred_at: record.execution_now,
+            content: EncodedPayload {
+                envelope: BatchEnvelope {
+                    key: record.key,
+                    headers: record.headers,
+                    message_group,
+                },
+                payload: record.payload,
+            },
         });
     }
     finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
-    Ok(RowWrite { records, rows })
+    Ok(payloads)
 }
 
 /// Packs the rows no payload carries yet across successive Arrow carriers, and pairs each payload
@@ -392,7 +399,7 @@ async fn sink_records(
 async fn pack_batch_records(
     codec: Arc<CompiledCodec>,
     policy: EmitterBatchPolicy,
-    context: &EmitterSinkContext,
+    context: &EmitterConnectorContext,
     batches: &mut [EmitterPublishBatch],
 ) -> EmitterRuntimeResult<Vec<PreparedPayload<EncodedPayload>>> {
     let mut payloads = Vec::new();
@@ -409,7 +416,7 @@ async fn pack_batch_records(
                 rows.push(PackingRow::Seal);
                 continue;
             };
-            let position = SinkRecordPosition {
+            let position = EmitterRecordPosition {
                 batch_index,
                 row_index,
             };
@@ -505,7 +512,7 @@ async fn pack_batch_records(
                 let batch = batches
                     .get(first.batch_index)
                     .assured("packing positions refer to the source batches it received");
-                let shared = container_failure(context, &codec, batch, rows.len(), error);
+                let shared = container_failure(context, &codec, batch, rows.len(), &error);
                 for position in rows {
                     let batch = batches
                         .get(position.batch_index)
@@ -535,13 +542,16 @@ async fn pack_batch_records(
 /// The one error every member of a candidate whose container failed is rejected with.
 ///
 /// It names the emitter, the codec, the cause and the member count, and never a payload value.
+/// The message error is a fixed public outcome, so only the report's typed reason reaches it: the
+/// evaluation failure beneath that reason can quote the payload it evaluated, and is not rendered.
 fn container_failure(
-    context: &EmitterSinkContext,
+    context: &EmitterConnectorContext,
     codec: &CompiledCodec,
     batch: &EmitterPublishBatch,
     member_count: usize,
-    error: BatchContainerError,
+    error: &Report<BatchContainerError>,
 ) -> StructuredMessageError {
+    let error = *error.current_context();
     let code = match error {
         BatchContainerError::NoOutput
         | BatchContainerError::MultipleOutputs
@@ -608,7 +618,7 @@ fn batch_envelope(
 async fn pack_pending_rows(
     codec: Arc<CompiledCodec>,
     policy: EmitterBatchPolicy,
-    context: &EmitterSinkContext,
+    context: &EmitterConnectorContext,
     carriers: Vec<PackingCarrier>,
 ) -> EmitterRuntimeResult<BufferedBatchPacking> {
     let emitter = context.emitter.clone();
@@ -642,69 +652,28 @@ async fn pack_pending_rows(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
-    use std::collections::VecDeque;
-
     use error_stack::{AttachmentKind, FrameKind};
-    use nervix_connector::{PerRecordOutcome, SinkPublishError, SinkRecordId};
+    use nervix_connector_fake::{
+        FakeEmitter, PayloadPreparation, PublishAnswer as Answer, Records,
+    };
     use nervix_models::{
         BatchMessageLimit, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec,
         CreateWireSchema, JsonType, ResolvedCodecWireFormat, WireSchemaField,
     };
-    use nervix_primitives::sync::blocking::Mutex;
 
     use super::*;
     use crate::{
         runtime::test_fixtures::{
-            FilledCpuClass, input_batch_with, input_schema, named, single_worker_executor,
-            sink_context,
+            FilledCpuClass, emitter_context, input_batch_with, input_schema, named,
+            single_worker_executor,
         },
         runtime_schema::{RuntimeSchemaError, compile_codec, test_runtime_row},
     };
-
-    /// How the scripted sink answers one write.
-    enum Answer {
-        /// The sink fails before it answers for any record, as a stalled broker does.
-        Stall,
-        /// The sink confirms every record of the write.
-        ConfirmAll,
-    }
-
-    /// A record sink that keeps every payload it was handed and answers each write from a script.
-    struct ScriptedSink {
-        writes: Arc<Mutex<Vec<Vec<Vec<u8>>>>>,
-        answers: VecDeque<Answer>,
-    }
-
-    impl SinkLifecycle for ScriptedSink {}
-
-    #[async_trait]
-    impl RecordSink for ScriptedSink {
-        async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
-            self.writes.lock().push(
-                records
-                    .iter()
-                    .map(|record| record.payload.clone())
-                    .collect(),
-            );
-            let mut outcome = PerRecordOutcome::with_capacity(records.len());
-            let answer = self
-                .answers
-                .pop_front()
-                .expect("the test scripts an answer for every write it makes");
-            match answer {
-                Answer::Stall => {
-                    outcome.fail(Report::new(SinkPublishError::Publish { sink: "scripted" }));
-                }
-                Answer::ConfirmAll => {
-                    for record in &records {
-                        outcome.deliver(record.id);
-                    }
-                }
-            }
-            outcome
-        }
-    }
 
     fn json_codec() -> Arc<CompiledCodec> {
         let wire = CreateWireSchema {
@@ -730,7 +699,7 @@ mod tests {
 
     #[test]
     fn an_encoding_that_cannot_start_keeps_the_codec_report_beneath_the_emitter() {
-        let context = sink_context();
+        let context = emitter_context();
         let foreign =
             test_runtime_row([("other".to_string(), RuntimeValue::U8(1))]).one_row_batch();
         let error = json_codec()
@@ -785,14 +754,75 @@ mod tests {
     }
 
     #[nervix_primitives::test]
+    async fn row_and_batch_retries_prepare_each_payload_once() {
+        let policy = EmitterBatchPolicy {
+            max_messages: BatchMessageLimit::try_from(2_u32)
+                .assured("the fixture supplies a positive message limit"),
+            max_size: "1KiB"
+                .parse()
+                .assured("the fixture supplies a positive byte limit"),
+        };
+        for batch in [None, Some(policy)] {
+            nervix_primitives::task::consume_budget().await;
+            let context = emitter_context();
+            let mut publisher = FakeEmitter::<Records>::new([Answer::Fail, Answer::ConfirmAll]);
+            publisher.preparation = PayloadPreparation::Numbered;
+            let writes = publisher.observations();
+            let mut connector = EncodedRecordEmitter {
+                connector: Box::new(publisher),
+                codec: json_codec(),
+                batch,
+            };
+            let mut batches = vec![one_row(1)];
+            let mut prepared = PreparedPayloads::default();
+            let Err(stalled) = connector
+                .publish_batches(
+                    &context,
+                    EmitterPublication {
+                        batches: &mut batches,
+                        payloads: &mut prepared,
+                        client_payloads: &mut PreparedPayloads::default(),
+                        requests: &mut PreparedPayloads::default(),
+                        row_requests: &mut PreparedPayloads::default(),
+                    },
+                )
+                .await
+            else {
+                panic!("the first scripted publish must leave its payload unresolved");
+            };
+            assert!(emitter_publish_error_is_retryable(&stalled));
+            batches.push(one_row(2));
+            connector
+                .publish_batches(
+                    &context,
+                    EmitterPublication {
+                        batches: &mut batches,
+                        payloads: &mut prepared,
+                        client_payloads: &mut PreparedPayloads::default(),
+                        requests: &mut PreparedPayloads::default(),
+                        row_requests: &mut PreparedPayloads::default(),
+                    },
+                )
+                .await
+                .assured("the second scripted publish confirms both payloads");
+            let writes = writes.lock().payloads();
+            assert_eq!(writes.len(), 2);
+            assert_eq!(writes[0].len(), 1);
+            assert_eq!(writes[1].len(), 2);
+            assert_eq!(writes[1][0], writes[0][0]);
+            assert!(writes[1][0].starts_with(b"prepared-1:"));
+            assert!(writes[1][1].starts_with(b"prepared-2:"));
+            assert!(prepared.is_empty());
+        }
+    }
+
+    #[nervix_primitives::test]
     async fn a_retry_writes_the_retained_payloads_unchanged_before_packing_new_rows() {
-        let context = sink_context();
-        let writes = Arc::new(Mutex::new(Vec::new()));
-        let mut sink = EncodedRecordSink {
-            sink: Box::new(ScriptedSink {
-                writes: writes.clone(),
-                answers: VecDeque::from([Answer::Stall, Answer::ConfirmAll]),
-            }),
+        let context = emitter_context();
+        let publisher = FakeEmitter::<Records>::new([Answer::Fail, Answer::ConfirmAll]);
+        let writes = publisher.observations();
+        let mut connector = EncodedRecordEmitter {
+            connector: Box::new(publisher),
             codec: json_codec(),
             batch: Some(EmitterBatchPolicy {
                 max_messages: BatchMessageLimit::try_from(2_u32)
@@ -803,7 +833,7 @@ mod tests {
         let mut batches = vec![two_rows(1, 2), one_row(3)];
         let mut prepared = PreparedPayloads::default();
 
-        let stalled = sink
+        let stalled = connector
             .publish_batches(
                 &context,
                 EmitterPublication {
@@ -826,21 +856,22 @@ mod tests {
         // A batch buffered after the stalled write is packed on its own: the retained payload of
         // row 3 is written as it was, not regrouped with row 4.
         batches.push(one_row(4));
-        sink.publish_batches(
-            &context,
-            EmitterPublication {
-                batches: &mut batches,
-                payloads: &mut prepared,
-                client_payloads: &mut PreparedPayloads::default(),
-                requests: &mut PreparedPayloads::default(),
-                row_requests: &mut PreparedPayloads::default(),
-            },
-        )
-        .await
-        .expect("the retry is confirmed");
+        connector
+            .publish_batches(
+                &context,
+                EmitterPublication {
+                    batches: &mut batches,
+                    payloads: &mut prepared,
+                    client_payloads: &mut PreparedPayloads::default(),
+                    requests: &mut PreparedPayloads::default(),
+                    row_requests: &mut PreparedPayloads::default(),
+                },
+            )
+            .await
+            .expect("the retry is confirmed");
 
         assert_eq!(
-            *writes.lock(),
+            writes.lock().payloads(),
             vec![
                 vec![
                     br#"[{"value":1},{"value":2}]"#.to_vec(),
@@ -862,21 +893,19 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn one_record_per_row_is_encoded_again_after_a_stalled_write() {
-        let context = sink_context();
-        let writes = Arc::new(Mutex::new(Vec::new()));
-        let mut sink = EncodedRecordSink {
-            sink: Box::new(ScriptedSink {
-                writes: writes.clone(),
-                answers: VecDeque::from([Answer::Stall, Answer::ConfirmAll]),
-            }),
+    async fn a_retry_writes_retained_row_payloads_unchanged() {
+        let context = emitter_context();
+        let publisher = FakeEmitter::<Records>::new([Answer::Fail, Answer::ConfirmAll]);
+        let writes = publisher.observations();
+        let mut connector = EncodedRecordEmitter {
+            connector: Box::new(publisher),
             codec: json_codec(),
             batch: None,
         };
         let mut batches = vec![two_rows(1, 2)];
         let mut prepared = PreparedPayloads::default();
 
-        let stalled = sink
+        let stalled = connector
             .publish_batches(
                 &context,
                 EmitterPublication {
@@ -890,22 +919,24 @@ mod tests {
             .await
             .expect_err("a stalled write leaves its rows unresolved");
         assert!(emitter_publish_error_is_retryable(&stalled));
-        assert_eq!(batches[0].pending_record_rows(), vec![0, 1]);
-        sink.publish_batches(
-            &context,
-            EmitterPublication {
-                batches: &mut batches,
-                payloads: &mut prepared,
-                client_payloads: &mut PreparedPayloads::default(),
-                requests: &mut PreparedPayloads::default(),
-                row_requests: &mut PreparedPayloads::default(),
-            },
-        )
-        .await
-        .expect("the retry is confirmed");
+        assert_eq!(prepared.next_write().records.len(), 2);
+        assert_eq!(batches[0].resolved_rows(), vec![false, false]);
+        connector
+            .publish_batches(
+                &context,
+                EmitterPublication {
+                    batches: &mut batches,
+                    payloads: &mut prepared,
+                    client_payloads: &mut PreparedPayloads::default(),
+                    requests: &mut PreparedPayloads::default(),
+                    row_requests: &mut PreparedPayloads::default(),
+                },
+            )
+            .await
+            .expect("the retry is confirmed");
 
         let expected = vec![br#"{"value":1}"#.to_vec(), br#"{"value":2}"#.to_vec()];
-        assert_eq!(*writes.lock(), vec![expected.clone(), expected]);
+        assert_eq!(writes.lock().payloads(), vec![expected.clone(), expected]);
         assert!(prepared.is_empty());
         assert_eq!(batches[0].resolved_rows(), vec![true, true]);
     }
@@ -938,10 +969,10 @@ mod tests {
         .expect("the identity program encodes the emitter input schema")
     }
 
-    fn context_with(executor: Executor) -> EmitterSinkContext {
-        EmitterSinkContext {
+    fn context_with(executor: Executor) -> EmitterConnectorContext {
+        EmitterConnectorContext {
             runtime: Runtime::with_executor(executor),
-            ..sink_context()
+            ..emitter_context()
         }
     }
 
@@ -997,12 +1028,10 @@ mod tests {
     async fn transformed_batch_packing_runs_on_the_extension_workers() {
         let executor = Executor::default();
         let context = context_with(executor.clone());
-        let writes = Arc::new(Mutex::new(Vec::new()));
-        let mut sink = EncodedRecordSink {
-            sink: Box::new(ScriptedSink {
-                writes: writes.clone(),
-                answers: VecDeque::from([Answer::ConfirmAll]),
-            }),
+        let publisher = FakeEmitter::<Records>::new([Answer::ConfirmAll]);
+        let writes = publisher.observations();
+        let mut connector = EncodedRecordEmitter {
+            connector: Box::new(publisher),
             codec: jaq_codec(),
             batch: Some(EmitterBatchPolicy {
                 max_messages: BatchMessageLimit::try_from(2_u32)
@@ -1013,20 +1042,21 @@ mod tests {
         let mut batches = vec![two_rows(1, 2)];
         let mut prepared = PreparedPayloads::default();
 
-        sink.publish_batches(
-            &context,
-            EmitterPublication {
-                batches: &mut batches,
-                payloads: &mut prepared,
-                client_payloads: &mut PreparedPayloads::default(),
-                requests: &mut PreparedPayloads::default(),
-                row_requests: &mut PreparedPayloads::default(),
-            },
-        )
-        .await
-        .expect("the packed write is confirmed");
+        connector
+            .publish_batches(
+                &context,
+                EmitterPublication {
+                    batches: &mut batches,
+                    payloads: &mut prepared,
+                    client_payloads: &mut PreparedPayloads::default(),
+                    requests: &mut PreparedPayloads::default(),
+                    row_requests: &mut PreparedPayloads::default(),
+                },
+            )
+            .await
+            .expect("the packed write is confirmed");
 
-        assert_eq!(writes.lock().len(), 1);
+        assert_eq!(writes.lock().writes.len(), 1);
         let snapshot = executor.snapshot();
         assert!(snapshot.extension_cpu.admitted >= 1);
         assert_eq!(

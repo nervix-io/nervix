@@ -20,6 +20,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "the server session adapter owns its permitted parser dependency"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "session, transaction, authentication and resource operations belong to the \
@@ -29,19 +36,28 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    net::SocketAddr,
-    path::PathBuf,
     time::Duration,
 };
 
 use admitted_connection::AdmittingListener;
 use ahash::{HashMap, HashMapExt, HashSet, RandomState};
-use authentication::{BasicAuthCredentials, DEFAULT_USER, user_credentials};
+use authentication::user_credentials;
 use background_task::{
     await_background_task_shutdown, join_public_listeners, request_shutdown_on_completion,
 };
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
-use clap_complete::{Shell, generate};
+use clap::Parser;
+use clap_complete::Shell;
+#[cfg(feature = "deloxide")]
+pub use cli::DiagnosticArgs;
+pub use cli::{
+    Args, CapacityArgs, Command, ConsensusArgs, MembershipArgs, MemoryPressureArgs, NodeArgs,
+    ResourceArgs, RuntimeArgs, SchedulingArgs, SettingOverride, SettingsArgs, ShutdownArgs,
+    TracingArgs, TransactionArgs,
+};
+use cli_completions::print_completions;
+pub use cli_values::{HumanBytes, HumanDuration, InternalTransportMode, RefusedCliValue};
+#[cfg(test)]
+use cli_values::{parse_human_bytes, parse_human_duration, parse_trace_sample_ratio};
 use client_consumers::ClientConsumerRouter;
 use client_producers::ClientProducerRouter;
 use domain_clock::{
@@ -57,9 +73,7 @@ use futures_util::{
 use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_consensus::{ConsensusSettings, RaftRetentionPolicy, TransactionState};
-use nervix_dns::{DnsConfiguration, DnsResolver};
-use nervix_execution::Executor;
+use nervix_consensus::{ConsensusSettings, TransactionState};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
     ApplicationHealthProbe,
@@ -93,20 +107,21 @@ use nervix_interconnect::{
     Transport, TransportIdentity,
 };
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainStatus, DurationTextError, ModelKind, NodeEndpoint,
-    NodeServiceUrl, UserName, parse_duration_text,
+    ClusterNodeName, DomainName, DomainStatus, ModelKind, NodeEndpoint, NodeServiceUrl, UserName,
 };
 use nervix_primitives::{
     collections::DashMap,
     net::TcpListener,
-    sync::{StdArc, broadcast},
+    sync::{StdArc, broadcast, watch},
     time::sleep,
 };
 use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
+#[cfg(feature = "testing")]
+use scheduling::VOTER_OBSERVATION_GRACE;
 use scheduling::{
     KafkaPartitionWatcherKey, KafkaPartitionWatcherTask, LEADER_KAFKA_PARTITION_WATCH_INTERVAL,
-    VOTER_OBSERVATION_GRACE,
+    StartupVoterObservations,
 };
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
@@ -119,11 +134,6 @@ use subscription::{SubscriptionInterests, SubscriptionSampler};
 use tls::{
     HttpsListenerCertificates, InterconnectTlsPaths, load_grpc_tls_server_config,
     load_web_console_tls_server_config, reload_interconnect_tls,
-};
-use transaction::{
-    DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
-    DEFAULT_TRANSACTION_MAX_SOURCE_BYTES, DEFAULT_TRANSACTION_MAX_STATEMENTS,
-    DEFAULT_TRANSACTION_TOMBSTONE_RETENTION,
 };
 use web_console::{serve_web_console_http, serve_web_console_https, web_console_advertise_url};
 
@@ -140,8 +150,12 @@ mod admitted_connection;
 mod authentication;
 mod background_task;
 mod backup;
+mod cli;
+mod cli_completions;
+mod cli_values;
 mod client_consumers;
 mod client_producers;
+mod cluster_description;
 mod cluster_status;
 mod command_execution;
 mod command_result;
@@ -154,13 +168,16 @@ mod entity_gate;
 mod error;
 mod http_endpoint;
 mod interconnect_relay;
+mod join_supervision;
 mod leader_redirect;
 mod model_mutation;
 mod model_validation;
+mod node_identity;
+mod node_settings;
 mod observability_http;
 mod observation;
 mod ownership_handoff;
-mod peer_grpc;
+mod preflight;
 mod relocation;
 mod resource;
 mod restore;
@@ -186,24 +203,37 @@ mod wasm_state_recovery;
 mod wasm_state_reset;
 mod web_console;
 
-pub use command_execution::CommandExecutionPolicy;
+pub use command_execution::{
+    CommandExecutionCapacity, CommandExecutionPolicy, CommandRetryValidity,
+};
+use join_supervision::{JoinOutcome, JoinStanding, JoinSupervision};
 use nervix_primitives::sync::Arc;
+pub use node_identity::NodeIdentity;
+pub use node_settings::NodeSettings;
+use preflight::{Preflight, PreflightOutcome};
+pub use scheduling::{ReplicaCount, SchedulingSettings};
 use service_tasks::ServiceTasks;
 use shutdown::BeforeDeadline;
 pub use shutdown::{
-    ShutdownCoordinator, ShutdownDeadline, ShutdownOutcome, ShutdownPhase, ShutdownPhaseOutcome,
-    ShutdownRequest, ShutdownRequestOutcome,
+    DrainTimeout, ShutdownCoordinator, ShutdownDeadline, ShutdownOutcome, ShutdownPhase,
+    ShutdownPhaseOutcome, ShutdownRequest, ShutdownRequestOutcome, ShutdownSettings,
+    ShutdownSettingsError, ShutdownTimeout,
 };
 use tonic::transport::Server;
 use tracing::{Instrument as _, debug, error, info, warn};
+pub use transaction::{
+    TransactionBounds, TransactionIdleTimeout, TransactionLimits, TransactionMaxOpen,
+    TransactionMaxSourceBytes, TransactionMaxStatements, TransactionTombstoneRetention,
+};
 use typed_builder::TypedBuilder;
 
 use crate::{
     ConfiguredFaultInjection, cluster,
-    memory_pressure::{MemoryPressureConfig, MemoryPressureController},
-    resource::{ResourceStore, ResourceStoreLimits},
+    memory_pressure::MemoryPressureController,
+    resource::ResourceStore,
     runtime::{
-        EntityGateLease, OwnershipHandoffError, OwnershipHandoffResult, Runtime, RuntimeEvent,
+        EntityGateLease, OwnershipHandoffError, OwnershipHandoffResult, Runtime,
+        RuntimeEnvironment, RuntimeEvent,
     },
 };
 
@@ -216,470 +246,30 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 static GLOBAL: alloc_count::AllocCounter<tikv_jemallocator::Jemalloc> =
     alloc_count::AllocCounter(tikv_jemallocator::Jemalloc);
 
-#[derive(Parser, Debug, Clone)]
-#[command(name = "nervix-server")]
-#[command(about = "NSPL gRPC server")]
-pub struct Args {
-    #[arg(long, env = "NERVIX_ADDR", default_value = "127.0.0.1:47391")]
-    pub addr: String,
-    #[arg(long, env = "NERVIX_GRPC_MODE", value_enum, default_value_t = InternalTransportMode::Http)]
-    pub grpc_mode: InternalTransportMode,
-    #[arg(long, env = "NERVIX_GRPC_HTTPS_LISTEN_ADDR")]
-    pub grpc_https_listen_addr: Option<String>,
-    #[arg(long, env = "NERVIX_GRPC_HTTPS_ADVERTISE_ADDR")]
-    pub grpc_https_advertise_addr: Option<String>,
-    #[arg(long, env = "NERVIX_HTTP_LISTEN_ADDR", default_value = "0.0.0.0:8080")]
-    pub http_listen_addr: String,
-    #[arg(long, env = "NERVIX_HTTPS_LISTEN_ADDR", default_value = "0.0.0.0:8443")]
-    pub https_listen_addr: String,
-    #[arg(
-        long,
-        env = "NERVIX_OBSERVABILITY_LISTEN_ADDR",
-        default_value = "0.0.0.0:9090"
-    )]
-    pub observability_listen_addr: String,
-    #[arg(
-        long,
-        env = "NERVIX_WEB_CONSOLE_LISTEN_ADDR",
-        default_value = "0.0.0.0:47420"
-    )]
-    pub web_console_listen_addr: String,
-    #[arg(long, env = "NERVIX_WEB_CONSOLE_ADVERTISE_ADDR")]
-    pub web_console_advertise_addr: Option<String>,
-    #[arg(long, env = "NERVIX_WEB_CONSOLE_HTTPS_LISTEN_ADDR")]
-    pub web_console_https_listen_addr: Option<String>,
-    #[arg(long, env = "NERVIX_WEB_CONSOLE_TLS_CERT")]
-    pub web_console_tls_cert: Option<PathBuf>,
-    #[arg(long, env = "NERVIX_WEB_CONSOLE_TLS_KEY")]
-    pub web_console_tls_key: Option<PathBuf>,
-    #[arg(long, env = "NERVIX_CLUSTER_ID", default_value = "default")]
-    pub cluster_id: String,
-    #[arg(long, env = "NERVIX_NODE_ID")]
-    pub node_id: ClusterNodeName,
-    #[arg(long, env = "NERVIX_GRPC_ADVERTISE_ADDR")]
-    pub grpc_advertise_addr: Option<String>,
-    #[arg(long, env = "NERVIX_INTERCONNECT_LISTEN_ADDR")]
-    pub interconnect_listen_addr: Option<String>,
-    #[arg(long, env = "NERVIX_INTERCONNECT_ADVERTISE_ADDR")]
-    pub interconnect_advertise_addr: Option<String>,
-    #[arg(long, env = "NERVIX_INTERCONNECT_TLS_CA")]
-    pub interconnect_tls_ca: PathBuf,
-    #[arg(long, env = "NERVIX_INTERCONNECT_TLS_CERT")]
-    pub interconnect_tls_cert: PathBuf,
-    #[arg(long, env = "NERVIX_INTERCONNECT_TLS_KEY")]
-    pub interconnect_tls_key: PathBuf,
-    #[arg(long, env = "NERVIX_ALLOW_BOOTSTRAP", default_value_t = false)]
-    pub allow_bootstrap: bool,
-    #[arg(long, env = "NERVIX_DEFAULT_USER", default_value = DEFAULT_USER)]
-    pub default_user: String,
-    #[arg(
-        long,
-        env = "NERVIX_INIT_DEFAULT_USER_PASSWORD",
-        hide_env_values = true
-    )]
-    pub init_default_user_password: Option<String>,
-    #[arg(
-        long,
-        env = "NERVIX_NODE_UNAVAILABILITY_TIMEOUT",
-        default_value = "10s",
-        value_parser = parse_human_duration
-    )]
-    pub node_unavailability_timeout: Duration,
-    #[arg(
-        long,
-        env = "NERVIX_RAFT_HEARTBEAT_INTERVAL",
-        default_value = "250ms",
-        value_parser = parse_human_duration
-    )]
-    pub raft_heartbeat_interval: Duration,
-    #[arg(
-        long,
-        env = "NERVIX_RAFT_ELECTION_TIMEOUT_MIN",
-        default_value = "1500ms",
-        value_parser = parse_human_duration
-    )]
-    pub raft_election_timeout_min: Duration,
-    #[arg(
-        long,
-        env = "NERVIX_RAFT_ELECTION_TIMEOUT_MAX",
-        default_value = "3000ms",
-        value_parser = parse_human_duration
-    )]
-    pub raft_election_timeout_max: Duration,
-    #[arg(
-        long,
-        env = "NERVIX_RAFT_SNAPSHOT_ENTRY_THRESHOLD",
-        default_value = "10000"
-    )]
-    pub raft_snapshot_entry_threshold: u64,
-    #[arg(
-        long,
-        env = "NERVIX_RAFT_SNAPSHOT_BYTE_THRESHOLD",
-        default_value = "64MiB",
-        value_parser = parse_human_bytes,
-    )]
-    pub raft_snapshot_byte_threshold: ubyte::ByteUnit,
-    #[arg(
-        long,
-        env = "NERVIX_RAFT_COVERED_LOG_ENTRIES_RETAINED",
-        default_value = "1000"
-    )]
-    pub raft_covered_log_entries_retained: u64,
-    #[arg(
-        long,
-        env = "NERVIX_RAFT_COVERED_LOG_BYTES_RETAINED",
-        default_value = "64MiB",
-        value_parser = parse_human_bytes,
-    )]
-    pub raft_covered_log_bytes_retained: ubyte::ByteUnit,
-    #[arg(
-        long,
-        env = "NERVIX_RAFT_RETAINED_LOG_CAP",
-        default_value = "1GiB",
-        value_parser = parse_human_bytes,
-    )]
-    pub raft_retained_log_cap: ubyte::ByteUnit,
-    #[arg(
-        long,
-        env = "NERVIX_TRANSACTION_IDLE_TIMEOUT",
-        default_value = "15m",
-        value_parser = parse_human_duration
-    )]
-    pub transaction_idle_timeout: Duration,
-    #[arg(
-        long,
-        env = "NERVIX_TRANSACTION_TOMBSTONE_RETENTION",
-        default_value = "15m",
-        value_parser = parse_human_duration
-    )]
-    pub transaction_tombstone_retention: Duration,
-    #[command(flatten)]
-    pub command_execution: CommandExecutionPolicy,
-    #[arg(
-        long,
-        env = "NERVIX_TRANSACTION_MAX_STATEMENTS",
-        default_value_t = DEFAULT_TRANSACTION_MAX_STATEMENTS
-    )]
-    pub transaction_max_statements: usize,
-    #[arg(
-        long,
-        env = "NERVIX_TRANSACTION_MAX_SOURCE_BYTES",
-        default_value_t = DEFAULT_TRANSACTION_MAX_SOURCE_BYTES
-    )]
-    pub transaction_max_source_bytes: u64,
-    #[arg(
-        long,
-        env = "NERVIX_TRANSACTION_MAX_OPEN",
-        default_value_t = DEFAULT_TRANSACTION_MAX_OPEN
-    )]
-    pub transaction_max_open: usize,
-    #[arg(long, env = "NERVIX_REPLICA_COUNT", default_value_t = 0)]
-    pub replica_count: usize,
-    #[arg(
-        long,
-        env = "NERVIX_STATE_SNAPSHOT_INTERVAL",
-        default_value = "30s",
-        value_parser = parse_human_duration
-    )]
-    pub state_snapshot_interval: Duration,
-    #[arg(
-        long,
-        env = "NERVIX_MEMORY_HIGH_WATERMARK",
-        value_parser = parse_human_bytes,
-        help = "Allocated jemalloc bytes that pause all ingestors"
-    )]
-    pub memory_high_watermark: Option<ubyte::ByteUnit>,
-    #[arg(
-        long,
-        env = "NERVIX_MEMORY_LOW_WATERMARK",
-        value_parser = parse_human_bytes,
-        help = "Allocated jemalloc bytes that allow paused ingestors to resume"
-    )]
-    pub memory_low_watermark: Option<ubyte::ByteUnit>,
-    #[arg(
-        long,
-        env = "NERVIX_MEMORY_PRESSURE_CHECK_INTERVAL",
-        default_value = "500ms",
-        value_parser = parse_human_duration,
-        help = "Interval between jemalloc memory pressure checks"
-    )]
-    pub memory_pressure_check_interval: Duration,
-    #[arg(
-        long,
-        env = "NERVIX_MEMORY_PRESSURE_RESUME_JITTER",
-        default_value = "1s",
-        value_parser = parse_human_duration,
-        help = "Maximum jitter before each paused ingestor resume attempt"
-    )]
-    pub memory_pressure_resume_jitter: Duration,
-    #[arg(
-        long,
-        env = "NERVIX_DRAIN_TIMEOUT",
-        default_value = "30s",
-        value_parser = parse_human_duration,
-        help = "Maximum time to wait for drain operations before continuing"
-    )]
-    pub drain_timeout: Duration,
-    #[arg(
-        long,
-        env = "NERVIX_SHUTDOWN_TIMEOUT",
-        default_value = "50s",
-        value_parser = parse_human_duration,
-        help = "Maximum time from the first stop request until the process exits"
-    )]
-    pub shutdown_timeout: Duration,
-    #[arg(long, env = "NERVIX_CLUSTER_BOOTSTRAP_HOST")]
-    pub cluster_bootstrap_host: Option<String>,
-    #[arg(
-        long,
-        env = "NERVIX_DNS_RESOLVER_CONFIG",
-        default_value = nervix_dns::SYSTEM_RESOLVER_CONFIGURATION,
-        help = "A resolv.conf-format file naming the name servers, search list and options the \
-                node's resolver uses for peers, connectors and sessions"
-    )]
-    pub dns_resolver_config: PathBuf,
-    #[arg(
-        long,
-        env = "NERVIX_DNS_HOSTS_FILE",
-        default_value = nervix_dns::SYSTEM_HOSTS_FILE,
-        help = "A hosts-format file consulted before DNS"
-    )]
-    pub dns_hosts_file: PathBuf,
-    #[arg(
-        long = "dns-name-server",
-        env = "NERVIX_DNS_NAME_SERVERS",
-        value_delimiter = ',',
-        help = "A name server address with its port, replacing the resolver configuration's name \
-                servers; repeatable or comma-separated"
-    )]
-    pub dns_name_servers: Vec<SocketAddr>,
-    #[arg(long, env = "NERVIX_DB_PATH", default_value = "./.nervix-db")]
-    pub db_path: String,
-    #[arg(
-        long,
-        env = "NERVIX_TEMP_DIR",
-        default_value = crate::runtime::DEFAULT_TEMP_DIR,
-        help = "Directory used for local temporary files such as Iceberg emitter staging"
-    )]
-    pub temp_dir: PathBuf,
-    #[arg(
-        long,
-        env = "NERVIX_RESOURCE_MAX_ARCHIVE_BYTES",
-        default_value = "4GiB",
-        value_parser = parse_human_bytes,
-        help = "Maximum staged archive bytes for one resource version"
-    )]
-    pub resource_max_archive_bytes: ubyte::ByteUnit,
-    #[arg(
-        long,
-        env = "NERVIX_RESOURCE_MAX_EXTRACTED_BYTES",
-        default_value = "16GiB",
-        value_parser = parse_human_bytes,
-        help = "Maximum extracted bytes for one resource version"
-    )]
-    pub resource_max_extracted_bytes: ubyte::ByteUnit,
-    #[arg(
-        long,
-        env = "NERVIX_RESOURCE_MAX_FILE_COUNT",
-        default_value_t = 1_000_000,
-        help = "Maximum extracted files for one resource version"
-    )]
-    pub resource_max_file_count: u64,
-    #[arg(
-        long,
-        env = "NERVIX_OTEL_ENABLED",
-        default_value_t = false,
-        help = "Enable optional OpenTelemetry OTLP trace export"
-    )]
-    pub otel_enabled: bool,
-    #[arg(
-        long,
-        env = "NERVIX_OTEL_OTLP_ENDPOINT",
-        default_value = "http://127.0.0.1:4317",
-        help = "OpenTelemetry OTLP gRPC endpoint used when trace export is enabled"
-    )]
-    pub otel_otlp_endpoint: String,
-    #[arg(
-        long,
-        env = "NERVIX_OTEL_SERVICE_NAME",
-        default_value = "nervix",
-        help = "OpenTelemetry service name used when trace export is enabled"
-    )]
-    pub otel_service_name: String,
-    #[arg(
-        long,
-        env = "NERVIX_OTEL_TRACE_SAMPLE_RATIO",
-        default_value_t = 1.0,
-        value_parser = parse_trace_sample_ratio,
-        help = "OpenTelemetry parent-based trace sample ratio used when trace export is enabled"
-    )]
-    pub otel_trace_sample_ratio: f64,
-    #[command(subcommand)]
-    pub subcommand: Option<Command>,
-}
-
-#[derive(Subcommand, Debug, Clone)]
-pub enum Command {
-    /// Generate shell completion scripts
-    Completions {
-        /// Target shell
-        shell: Shell,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-#[clap(rename_all = "lower")]
-pub enum InternalTransportMode {
-    Http,
-    Https,
-}
-
-impl InternalTransportMode {
-    fn scheme(self) -> &'static str {
-        match self {
-            Self::Http => "http",
-            Self::Https => "https",
-        }
-    }
-
-    fn is_tls(self) -> bool {
-        matches!(self, Self::Https)
-    }
-}
-
 /// One live peer whose advertised interconnect endpoint this health round can reach.
 struct ReachablePeer {
     node_id: ClusterNodeName,
     endpoint: NodeEndpoint,
 }
 
+/// One node: who it is and where it is reached, the settings it runs with, and the shutdown it
+/// stops within.
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct Application {
-    pub addr: SocketAddr,
-    #[builder(default = InternalTransportMode::Http)]
-    pub grpc_mode: InternalTransportMode,
+    pub identity: NodeIdentity,
     #[builder(default)]
-    pub grpc_https_listen_addr: Option<SocketAddr>,
-    #[builder(default)]
-    pub grpc_https_advertise_addr: Option<NodeEndpoint>,
-    pub http_listen_addr: SocketAddr,
-    pub https_listen_addr: SocketAddr,
-    pub observability_listen_addr: SocketAddr,
-    #[builder(default = SocketAddr::from(([127, 0, 0, 1], 0)))]
-    pub web_console_listen_addr: SocketAddr,
-    #[builder(default)]
-    pub web_console_advertise_addr: Option<NodeEndpoint>,
-    #[builder(default)]
-    pub web_console_https_listen_addr: Option<SocketAddr>,
-    #[builder(default)]
-    pub web_console_tls_cert: Option<PathBuf>,
-    #[builder(default)]
-    pub web_console_tls_key: Option<PathBuf>,
-    pub cluster_id: String,
-    pub node_id: ClusterNodeName,
-    pub grpc_advertise_addr: NodeEndpoint,
-    pub interconnect_listen_addr: SocketAddr,
-    pub interconnect_advertise_addr: NodeEndpoint,
-    pub interconnect_tls_ca: PathBuf,
-    pub interconnect_tls_cert: PathBuf,
-    pub interconnect_tls_key: PathBuf,
-    pub allow_bootstrap: bool,
-    #[builder(default = DEFAULT_USER.to_string())]
-    pub default_user: String,
-    #[builder(default)]
-    pub init_default_user_password: Option<String>,
-    pub node_unavailability_timeout: Duration,
-    pub raft_heartbeat_interval: Duration,
-    pub raft_election_timeout_min: Duration,
-    pub raft_election_timeout_max: Duration,
-    #[builder(default)]
-    pub raft_retention: RaftRetentionPolicy,
-    #[builder(default = DEFAULT_TRANSACTION_IDLE_TIMEOUT)]
-    pub transaction_idle_timeout: Duration,
-    #[builder(default = DEFAULT_TRANSACTION_TOMBSTONE_RETENTION)]
-    pub transaction_tombstone_retention: Duration,
-    #[builder(default)]
-    pub command_execution: CommandExecutionPolicy,
-    #[builder(default = DEFAULT_TRANSACTION_MAX_STATEMENTS)]
-    pub transaction_max_statements: usize,
-    #[builder(default = DEFAULT_TRANSACTION_MAX_SOURCE_BYTES)]
-    pub transaction_max_source_bytes: u64,
-    #[builder(default = DEFAULT_TRANSACTION_MAX_OPEN)]
-    pub transaction_max_open: usize,
-    #[builder(default = 0)]
-    pub replica_count: usize,
-    #[builder(default = Duration::from_secs(30))]
-    pub state_snapshot_interval: Duration,
-    #[builder(default)]
-    pub memory_pressure: Option<MemoryPressureConfig>,
-    pub cluster_bootstrap_host: Option<String>,
-    #[builder(default = DnsConfiguration::system())]
-    pub dns: DnsConfiguration,
-    pub db_path: PathBuf,
-    #[builder(default = PathBuf::from(crate::runtime::DEFAULT_TEMP_DIR))]
-    pub temp_dir: PathBuf,
-    #[builder(default)]
-    pub resource_store_limits: ResourceStoreLimits,
+    pub settings: NodeSettings,
     #[builder(default)]
     #[doc(hidden)]
     pub fault_injection: ConfiguredFaultInjection,
-    #[builder(default)]
+    /// Bound by the shutdown timeout the settings hold, so the two can never disagree.
+    #[builder(
+        default = ShutdownCoordinator::new(settings.shutdown.shutdown_timeout()),
+        setter(skip)
+    )]
     pub shutdown: ShutdownCoordinator,
     #[builder(default = true)]
     pub graceful_shutdown_drain: bool,
-    #[builder(default = shutdown::DEFAULT_DRAIN_TIMEOUT)]
-    pub drain_timeout: Duration,
-}
-
-#[derive(Debug, thiserror::Error)]
-enum CliValueError {
-    #[error("invalid duration: {source}")]
-    Duration { source: DurationTextError },
-    #[error("invalid byte quantity")]
-    Bytes,
-    #[error("invalid trace sample ratio: {source}")]
-    TraceSampleRatio { source: std::num::ParseFloatError },
-    #[error("trace sample ratio must be between 0.0 and 1.0")]
-    TraceSampleRatioRange,
-}
-
-/// Reads a duration option. Clap prints only the outermost context of a rejected value, so that
-/// context carries the reason the text names no duration.
-fn parse_human_duration(input: &str) -> error_stack::Result<Duration, CliValueError> {
-    match parse_duration_text(input) {
-        Ok(duration) => Ok(duration),
-        Err(report) => {
-            let source = report.current_context().clone();
-            Err(report.change_context(CliValueError::Duration { source }))
-        }
-    }
-}
-
-fn parse_human_bytes(input: &str) -> error_stack::Result<ubyte::ByteUnit, CliValueError> {
-    input
-        .parse::<ubyte::ByteUnit>()
-        .map_err(|_| Report::new(CliValueError::Bytes))
-}
-
-fn parse_trace_sample_ratio(input: &str) -> error_stack::Result<f64, CliValueError> {
-    let ratio = input
-        .parse::<f64>()
-        .map_err(|source| Report::new(CliValueError::TraceSampleRatio { source }))?;
-    if (0.0..=1.0).contains(&ratio) {
-        Ok(ratio)
-    } else {
-        Err(Report::new(CliValueError::TraceSampleRatioRange))
-    }
-}
-
-#[cfg(test)]
-fn encode_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        write!(&mut out, "{byte:02x}").assured("writing a byte into a String cannot fail");
-    }
-    out
 }
 
 /// Runs the server command line with termination signals the caller has already registered, so
@@ -708,117 +298,153 @@ impl Application {
         self,
         tracing: Option<&TracingGuard>,
     ) -> Result<(), Report<AppError>> {
-        let addr = self.addr;
-        let grpc_mode = self.grpc_mode;
+        let addr = self.identity.addr;
+        let grpc_mode = self.identity.grpc_mode;
         let grpc_listen_addr = match grpc_mode {
             InternalTransportMode::Http => addr,
             InternalTransportMode::Https => self
+                .identity
                 .grpc_https_listen_addr
                 .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsListenAddress))?,
         };
-        let http_listen_addr = self.http_listen_addr;
-        let https_listen_addr = self.https_listen_addr;
-        let observability_listen_addr = self.observability_listen_addr;
-        let web_console_listen_addr = self.web_console_listen_addr;
-        let web_console_https_listen_addr = self.web_console_https_listen_addr;
+        let http_listen_addr = self.identity.http_listen_addr;
+        let https_listen_addr = self.identity.https_listen_addr;
+        let observability_listen_addr = self.identity.observability_listen_addr;
+        let web_console_listen_addr = self.identity.web_console_listen_addr;
+        let web_console_https_listen_addr = self.identity.web_console_https_listen_addr;
         let web_console_advertise_url = web_console_advertise_url(
-            self.web_console_advertise_addr,
+            self.identity.web_console_advertise_addr.clone(),
             web_console_listen_addr,
             web_console_https_listen_addr,
         )
         .change_context(AppError::BuildConsoleAdvertiseUrl)?;
         let graceful_shutdown_drain = self.graceful_shutdown_drain;
-        let drain_timeout = self.drain_timeout;
-        let cluster_id = self.cluster_id.clone();
-        let node_id = self.node_id.clone();
+        let drain_timeout = self.settings.shutdown.drain_timeout();
+        let cluster_id = self.identity.cluster_id.clone();
+        let node_id = self.identity.node_id.clone();
         let grpc_advertise_addr = match grpc_mode {
-            InternalTransportMode::Http => self.grpc_advertise_addr,
+            InternalTransportMode::Http => self.identity.grpc_advertise_addr.clone(),
             InternalTransportMode::Https => self
+                .identity
                 .grpc_https_advertise_addr
+                .clone()
                 .ok_or_else(|| Report::new(AppError::MissingGrpcHttpsAdvertiseAddress))?,
         };
         let grpc_advertise_url = NodeServiceUrl::new(grpc_mode.scheme(), &grpc_advertise_addr)
             .change_context(AppError::BuildClientAdvertiseUrl)?;
-        let interconnect_listen_addr = self.interconnect_listen_addr;
-        let interconnect_advertise_addr = self.interconnect_advertise_addr.clone();
+        let interconnect_listen_addr = self.identity.interconnect_listen_addr;
+        let interconnect_advertise_addr = self.identity.interconnect_advertise_addr.clone();
         let interconnect_tls_paths = InterconnectTlsPaths {
-            ca: self.interconnect_tls_ca.clone(),
-            certificate: self.interconnect_tls_cert.clone(),
-            private_key: self.interconnect_tls_key.clone(),
+            ca: self.identity.interconnect_tls_ca.clone(),
+            certificate: self.identity.interconnect_tls_cert.clone(),
+            private_key: self.identity.interconnect_tls_key.clone(),
         };
-        let allow_bootstrap = self.allow_bootstrap;
-        let cluster_bootstrap_host = self.cluster_bootstrap_host.clone();
-        let default_user = self.default_user.clone();
-        let init_default_user_password = self.init_default_user_password.clone();
-        let configured_basic_auth =
-            init_default_user_password
-                .as_ref()
-                .map(|password| BasicAuthCredentials {
-                    username: default_user.clone(),
-                    password: password.clone(),
-                });
-        let node_unavailability_timeout = self.node_unavailability_timeout;
-        let raft_heartbeat_interval = self.raft_heartbeat_interval;
-        let raft_election_timeout_min = self.raft_election_timeout_min;
-        let raft_election_timeout_max = self.raft_election_timeout_max;
-        let raft_retention = self.raft_retention;
-        let transaction_idle_timeout = self.transaction_idle_timeout;
-        let transaction_tombstone_retention = self.transaction_tombstone_retention;
-        let transaction_max_statements = self.transaction_max_statements;
-        let transaction_max_source_bytes = self.transaction_max_source_bytes;
-        let transaction_max_open = self.transaction_max_open;
-        let replica_count = self.replica_count;
-        let state_snapshot_interval = self.state_snapshot_interval;
-        let memory_pressure_controller = self
-            .memory_pressure
-            .map(MemoryPressureController::new)
-            .transpose()
-            .map_err(|error| {
-                error!(?error, "failed to initialize memory pressure monitor");
-                Report::new(AppError::InitMemoryPressureMonitor).attach_printable(error)
-            })?;
-        let db_path = self.db_path.clone();
-        let temp_dir = self.temp_dir.clone();
-        let resource_store_limits = self.resource_store_limits;
+        let allow_bootstrap = self.identity.allow_bootstrap;
+        let cluster_bootstrap_host = self.identity.cluster_bootstrap_host.clone();
+        let default_user = self.identity.default_user.clone();
+        let init_default_user_password = self.identity.init_default_user_password.clone();
+        let settings = self.settings;
+        let node_unavailability_timeout = settings.membership.node_unavailability_timeout();
+        let raft_timings = settings.raft;
+        let raft_retention = settings.raft_retention;
+        let transaction_idle_timeout = settings.transactions.idle_timeout();
+        let transaction_tombstone_retention = settings.transactions.tombstone_retention();
+        let transaction_max_statements = settings.transactions.max_statements();
+        let transaction_max_source_bytes = settings.transactions.max_source_bytes();
+        let transaction_max_open = settings.transactions.max_open();
+        let replica_count = settings.scheduling.replica_count();
+        let runtime_settings = settings.runtime;
+        let state_snapshot_interval = runtime_settings.state_snapshot_interval();
+        let memory_pressure_controller = {
+            let mapping_input = settings
+                .memory_pressure
+                .config()
+                .map(MemoryPressureController::new)
+                .transpose();
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    error!(
+                        error = format!("{error:#}"),
+                        "failed to initialize memory pressure monitor"
+                    );
+                    error.change_context(AppError::InitMemoryPressureMonitor)
+                }),
+            }
+        }?;
+        let db_path = self.identity.db_path.clone();
+        let temp_dir = self.identity.temp_dir.clone();
+        let resource_store_limits = settings.resources.limits();
         let shutdown_coordinator = self.shutdown.clone();
         let shutdown = shutdown_coordinator.drain_support_token();
         let fault_injection = self.fault_injection.clone();
         let grpc_tls_server_config = if grpc_mode.is_tls() {
-            Some(load_grpc_tls_server_config().await.map_err(|error| {
-                error!(?error, "failed to build grpc tls server config");
-                error
-            })?)
+            let config = match load_grpc_tls_server_config().await {
+                Ok(config) => config,
+                Err(error) => {
+                    error!(?error, "failed to build grpc tls server config");
+                    return Err(error);
+                }
+            };
+            Some(config)
         } else {
             None
         };
-        let web_console_tls_server_config =
-            match (&self.web_console_tls_cert, &self.web_console_tls_key) {
-                (Some(cert_path), Some(key_path)) => {
-                    let Some(_) = web_console_https_listen_addr else {
-                        return Err(Report::new(AppError::MissingWebConsoleHttpsListenAddress));
-                    };
-                    Some(
-                        load_web_console_tls_server_config(cert_path, key_path).map_err(
-                            |error| {
-                                error!(?error, "failed to build web console tls server config");
-                                error
-                            },
-                        )?,
-                    )
-                }
-                (Some(_), None) => {
-                    return Err(Report::new(AppError::MissingWebConsoleTlsPrivateKey));
-                }
-                (None, Some(_)) => {
+        let web_console_tls_server_config = match (
+            &self.identity.web_console_tls_cert,
+            &self.identity.web_console_tls_key,
+        ) {
+            (Some(cert_path), Some(key_path)) => {
+                let Some(_) = web_console_https_listen_addr else {
+                    return Err(Report::new(AppError::MissingWebConsoleHttpsListenAddress));
+                };
+                let config = match load_web_console_tls_server_config(cert_path, key_path) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        error!(?error, "failed to build web console tls server config");
+                        return Err(error);
+                    }
+                };
+                Some(config)
+            }
+            (Some(_), None) => {
+                return Err(Report::new(AppError::MissingWebConsoleTlsPrivateKey));
+            }
+            (None, Some(_)) => {
+                return Err(Report::new(AppError::MissingWebConsoleTlsCertificate));
+            }
+            (None, None) => {
+                if web_console_https_listen_addr.is_some() {
                     return Err(Report::new(AppError::MissingWebConsoleTlsCertificate));
                 }
-                (None, None) => {
-                    if web_console_https_listen_addr.is_some() {
-                        return Err(Report::new(AppError::MissingWebConsoleTlsCertificate));
-                    }
-                    None
-                }
-            };
+                None
+            }
+        };
+        let dns_configuration = self.identity.dns.clone();
+        let preflight = Preflight {
+            settings: &settings,
+            db_path: &db_path,
+            temp_dir: &temp_dir,
+            dns: &dns_configuration,
+        }
+        .run()
+        .instrument(tracing::info_span!("startup_preflight", node_id = %node_id))
+        .await;
+        let PreflightOutcome {
+            executor,
+            dns,
+            memory,
+            restore_staging_max_bytes,
+        } = match preflight {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                error!(
+                    error = format!("{error:#}"),
+                    "the startup preflight refused this node"
+                );
+                return Err(error.change_context(AppError::Preflight));
+            }
+        };
         let grpc_listener = TcpListener::bind(grpc_listen_addr)
             .await
             .change_context(AppError::BindGrpcListenAddress)?;
@@ -853,11 +479,6 @@ impl Application {
         let interconnect_tls = interconnect_tls_material
             .tls_bundle()
             .change_context(AppError::LoadInterconnectTls)?;
-        let dns_configuration = self.dns.clone();
-        let dns = DnsResolver::load(dns_configuration.clone())
-            .instrument(tracing::info_span!("load_dns_configuration", node_id = %node_id))
-            .await
-            .change_context(AppError::LoadDnsConfiguration)?;
         if let Some(tracing) = tracing {
             tracing.install_dns(&dns);
         }
@@ -880,9 +501,12 @@ impl Application {
             interconnect_advertise_addr = %interconnect_advertise_addr,
             allow_bootstrap,
             node_unavailability_timeout = ?node_unavailability_timeout,
-            raft_heartbeat_interval = ?raft_heartbeat_interval,
-            raft_election_timeout_min = ?raft_election_timeout_min,
-            raft_election_timeout_max = ?raft_election_timeout_max,
+            raft_heartbeat_interval = ?raft_timings.heartbeat_interval(),
+            raft_election_timeout_min = ?raft_timings.election_timeout_min(),
+            raft_election_timeout_max = ?raft_timings.election_timeout_max(),
+            gossip_interval = ?settings.membership.gossip_interval(),
+            clock_skew_tolerance = ?settings.membership.clock_skew_tolerance(),
+            memory = %memory,
             replica_count,
             state_snapshot_interval = ?state_snapshot_interval,
             cluster_id,
@@ -896,7 +520,6 @@ impl Application {
             "starting nervix server"
         );
 
-        let executor = Executor::default();
         let db = ApplicationStartup::open_node_database(db_path.clone(), &executor).await?;
         let registry = Arc::new(
             match Registry::from_database(db.clone(), Some(db_path.as_path())) {
@@ -907,32 +530,53 @@ impl Application {
                 }
             },
         );
-        let runtime = Runtime::with_persistence_and_temp_dir(
-            executor,
-            Some(dns.clone()),
-            Some(db.clone()),
-            state_snapshot_interval,
-            fault_injection.clone(),
-            temp_dir.clone(),
-        )
-        .map_err(|error| {
-            error!(error = %error, "failed to initialize runtime persistence");
-            Report::new(AppError::OpenRuntimeState)
-        })?;
-        let resource_store = StdArc::new(
-            ResourceStore::open_with_limits(
+        let runtime = {
+            let mapping_input = Runtime::with_environment(
+                RuntimeEnvironment {
+                    executor,
+                    dns: Some(dns.clone()),
+                    db: Some(db.clone()),
+                    restore_staging_max_bytes,
+                    fault_injection: fault_injection.clone(),
+                    temp_dir: temp_dir.clone(),
+                },
+                runtime_settings,
+            );
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    error!(
+                        error = format!("{error:#}"),
+                        "failed to initialize runtime persistence"
+                    );
+                    error.change_context(AppError::OpenRuntimeState)
+                }),
+            }
+        }?;
+        let resource_store = StdArc::new({
+            let mapping_input = ResourceStore::open_with_limits(
                 db_path.join("resources"),
                 runtime.executor().clone(),
                 resource_store_limits,
-            ).map_err(|err| {
-                error!(db_path = db_path.display().to_string(), error = %err, "failed to open resource store");
-                Report::new(AppError::OpenResourceStore)
-            })?,
-        );
-        resource_store.cleanup_abandoned_staging().await.map_err(|err| {
-            error!(db_path = db_path.display().to_string(), error = %err, "failed to clean resource staging paths");
-            Report::new(AppError::OpenResourceStore)
-        })?;
+            );
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(err) => Err({
+                    error!(db_path = db_path.display().to_string(), error = %err, "failed to open resource store");
+                    Report::new(AppError::OpenResourceStore)
+                }),
+            }
+        }?);
+        {
+            let mapping_input = resource_store.cleanup_abandoned_staging().await;
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(err) => Err({
+                    error!(db_path = db_path.display().to_string(), error = %err, "failed to clean resource staging paths");
+                    Report::new(AppError::OpenResourceStore)
+                }),
+            }
+        }?;
         let mut startup = ApplicationStartup {
             db,
             consensus_path: ApplicationStartup::consensus_database_path(&db_path),
@@ -950,33 +594,13 @@ impl Application {
             runtime_state_snapshot_interval = ?startup.runtime.state_snapshot_interval(),
             "initialized runtime persistence"
         );
-        let startup_runtime_changes = match startup.registry.startup_runtime_changes() {
-            Ok(changes) => changes,
-            Err(error) => {
-                let error = Report::new(AppError::ApplyStartupRuntime(error.to_string()));
-                startup.terminate().await;
-                return Err(error);
-            }
-        };
-        for changes in startup_runtime_changes {
-            let revision = match changes.execution_revision() {
-                Ok(revision) => revision,
-                Err(error) => {
-                    let error = Report::new(AppError::ApplyStartupRuntime(format!("{error:#}")));
-                    startup.terminate().await;
-                    return Err(error);
-                }
-            };
-            if let Err(error) = startup
-                .runtime
-                .apply_changes(&changes.domain, revision)
-                .await
-            {
-                error!(error = %error, "failed to apply startup runtime changes");
-                let error = Report::new(AppError::ApplyStartupRuntime(error.to_string()));
-                startup.terminate().await;
-                return Err(error);
-            }
+        if let Err(error) = startup.apply_stored_runtime_changes().await {
+            error!(
+                error = format!("{error:#}"),
+                "failed to apply startup runtime changes"
+            );
+            startup.terminate().await;
+            return Err(error);
         }
         let interconnect_result = Transport::bind(
             interconnect_listen_addr,
@@ -984,6 +608,7 @@ impl Application {
                 cluster_id: cluster_id.clone(),
                 node_id: node_id.clone(),
                 advertised_host: interconnect_advertise_addr.host().to_string(),
+                join_terms: settings.join_terms(),
             },
             interconnect_tls,
             Default::default(),
@@ -1007,9 +632,7 @@ impl Application {
             interconnect_advertise_addr: interconnect_advertise_addr.clone(),
             interconnect: interconnect.clone(),
             executor: startup.runtime.executor().clone(),
-            raft_heartbeat_interval,
-            raft_election_timeout_min,
-            raft_election_timeout_max,
+            raft_timings,
             raft_retention,
         };
         let consensus_result = startup
@@ -1024,6 +647,11 @@ impl Application {
         };
         let recovered_members = consensus.observer().stored_membership_nodes();
         startup.consensus = Some(consensus);
+        let join_standing = if recovered_members.contains_key(&node_id) {
+            JoinStanding::RecoveredMember
+        } else {
+            JoinStanding::Newcomer
+        };
         let mut recovery_endpoints = BTreeSet::new();
         for (member, address) in recovered_members {
             if member == node_id {
@@ -1053,7 +681,8 @@ impl Application {
             bootstrap_host: cluster_bootstrap_host.clone(),
             recovery_endpoints,
             interconnect: interconnect.clone(),
-            node_unavailability_timeout,
+            membership: settings.membership,
+            prerequisites: interconnect.local_prerequisites(),
             fault_injection: fault_injection.clone(),
         })
         .await
@@ -1094,8 +723,12 @@ impl Application {
         let startup = startup
             .require_handler_registration(&cluster, health_handler)
             .await?;
-        let application_revision_handler =
-            completion::register_application_revision_handler(cluster.clone(), &interconnect);
+        let application_revision_handler = completion::register_application_revision_handler(
+            cluster.clone(),
+            &interconnect,
+            #[cfg(feature = "testing")]
+            fault_injection.clone(),
+        );
         let startup = startup
             .require_handler_registration(&cluster, application_revision_handler)
             .await?;
@@ -1110,6 +743,10 @@ impl Application {
         );
         let startup = startup
             .require_handler_registration(&cluster, completion_peers_handler)
+            .await?;
+        let clock_probe_handler = cluster::register_clock_probe_handler(&interconnect);
+        let startup = startup
+            .require_handler_registration(&cluster, clock_probe_handler)
             .await?;
         let ApplicationStartup {
             db,
@@ -1131,6 +768,7 @@ impl Application {
             runtime.executor().clone(),
             interconnect.clone(),
             consensus.observer(),
+            cluster.prerequisites_view(),
         );
         runtime
             .metrics()
@@ -1148,6 +786,8 @@ impl Application {
         let scheduler_mode = runtime.scheduler_mode();
 
         let cluster_for_reconcile = cluster.clone();
+        #[cfg(feature = "testing")]
+        let fault_injection_for_reconcile = fault_injection.clone();
         let consensus_for_reconcile = consensus.proposer();
         let registry_for_reconcile = registry.clone();
         let runtime_for_reconcile = runtime.clone();
@@ -1159,15 +799,45 @@ impl Application {
         let membership_reconcile_shutdown = shutdown.clone();
         let interconnect_tls_transport = interconnect.clone();
         let interconnect_tls_shutdown = shutdown.clone();
+        let interconnect_tls_cluster = cluster.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
             reload_interconnect_tls(
                 interconnect_tls_transport,
+                interconnect_tls_cluster,
                 interconnect_tls_paths,
                 interconnect_tls_fingerprint,
                 interconnect_tls_shutdown,
             )
             .await;
         }));
+        let (join_refusal_sender, join_refusal) = watch::channel(None);
+        if has_bootstrap_candidates {
+            let supervision = JoinSupervision {
+                transport: interconnect.clone(),
+                cluster: cluster.clone(),
+                observer: consensus.observer(),
+                local_node: node_id.clone(),
+                standing: join_standing,
+                clock_skew_tolerance: settings.membership.clock_skew_tolerance(),
+                probe_retry_interval: settings.membership.gossip_interval(),
+            };
+            let join_shutdown = shutdown.clone();
+            let join_coordinator = shutdown_coordinator.clone();
+            background_tasks.push(nervix_primitives::task::spawn(async move {
+                let outcome = supervision.run(join_shutdown).await;
+                let JoinOutcome::Refused(refusal) = outcome else {
+                    return;
+                };
+                error!(refusal = %refusal, "this node was refused at join and stops");
+                join_refusal_sender.send_replace(Some(refusal));
+                match join_coordinator.request_stop() {
+                    ShutdownRequestOutcome::Accepted(_) => {}
+                    ShutdownRequestOutcome::AlreadyRequested(_) => {
+                        debug!("the node was already stopping when its join was refused");
+                    }
+                }
+            }));
+        }
         if let Some(controller) = memory_pressure_controller {
             let memory_runtime = runtime.clone();
             let memory_shutdown = shutdown.clone();
@@ -1252,7 +922,16 @@ impl Application {
         }
         background_tasks.push(nervix_primitives::task::spawn(async move {
             sleep(Duration::from_millis(500)).await;
+            #[cfg(feature = "testing")]
+            {
+                let observation = fault_injection_for_reconcile
+                    .wait_for_initial_voter_heartbeat_if_armed(consensus_for_reconcile.local_node_id());
+                if reconcile_shutdown.run_until_cancelled(observation).await.is_none() {
+                    return;
+                }
+            }
             let reconcile_started = nervix_primitives::time::Instant::now();
+            let mut startup_voter_observations = StartupVoterObservations::default();
             let mut default_user_resolved = false;
             let mut missing_init_default_user_password_warned = false;
             loop {
@@ -1261,6 +940,12 @@ impl Application {
                 // once the peers have stopped. The pass therefore ends with drain support rather
                 // than holding terminal teardown until the grace period aborts the whole task.
                 let reconcile_pass = async {
+                    // Keep process-local live observations through follower passes and leadership
+                    // changes. A dead verdict alone can also mean an initial relayed heartbeat.
+                    startup_voter_observations.observe(
+                        &cluster_for_reconcile.gossip_state().await,
+                        reconcile_started.elapsed(),
+                    );
                     if consensus_for_reconcile.current_leader().await.as_ref()
                         != Some(consensus_for_reconcile.local_node_id())
                     {
@@ -1287,8 +972,7 @@ impl Application {
                                 Ok(()) => {
                                     info!(
                                         domain = domain.as_str(),
-                                        "resumed orphaned ALTER pause after leadership \
-                                         acquisition"
+                                        "resumed orphaned ALTER pause"
                                     );
                                 }
                                 Err(error) => {
@@ -1403,20 +1087,32 @@ impl Application {
                         let topology = automatic_schedule_input.topology();
                         // A leader that has just started cannot yet tell a voter that is still
                         // starting from one that failed, and treating it as failed would move its
-                        // work without the state it holds. Until gossip has heard from or given up
-                        // on every voter, or the observation grace has passed, no automatic
-                        // decision is made.
-                        let unobserved_voters =
-                            scheduling_availability.unobserved_node_ids(topology.voters());
-                        if !unobserved_voters.is_empty()
-                            && reconcile_started.elapsed() < VOTER_OBSERVATION_GRACE
-                        {
+                        // work without the state it holds. Wait for a live observation of every
+                        // voter in this process, bounded by the startup grace. Chitchat's initial
+                        // dead verdict from one relayed sample cannot satisfy that observation.
+                        let observation_elapsed = reconcile_started.elapsed();
+                        startup_voter_observations
+                            .observe(&scheduling_availability, observation_elapsed);
+                        let unobserved_voters = startup_voter_observations
+                            .unobserved_voters(topology.voters(), observation_elapsed);
+                        #[cfg(feature = "testing")]
+                        if observation_elapsed < VOTER_OBSERVATION_GRACE {
+                            fault_injection_for_reconcile
+                                .pause_startup_voter_observation_if_armed(
+                                    consensus_for_reconcile.local_node_id(),
+                                    &scheduling_availability.dead_node_ids,
+                                )
+                                .await;
+                        }
+                        if !unobserved_voters.is_empty() {
                             debug!(
                                 unobserved_voters = unobserved_voters.len(),
                                 "automatic scheduling waits for gossip to observe every voter"
                             );
                             break;
                         }
+                        #[cfg(feature = "testing")]
+                        fault_injection_for_reconcile.end_startup_voter_observation();
                         let live_voters = live_node_ids
                             .into_iter()
                             .filter(|node| topology.voters().contains(node))
@@ -1501,6 +1197,7 @@ impl Application {
                                 &scheduling_availability,
                                 &current_availability,
                                 automatic_schedule_input.topology().voters(),
+                                automatic_schedule_input.topology().cordoned(),
                             ) {
                                 break;
                             }
@@ -1614,6 +1311,7 @@ impl Application {
                                     &scheduling_availability,
                                     &current_availability,
                                     automatic_schedule_input.topology().voters(),
+                                    automatic_schedule_input.topology().cordoned(),
                                 ) {
                                     break;
                                 }
@@ -1647,6 +1345,9 @@ impl Application {
                 let Some(()) = reconcile_shutdown.run_until_cancelled(reconcile_pass).await else {
                     break;
                 };
+                #[cfg(feature = "testing")]
+                fault_injection_for_reconcile
+                    .finish_startup_voter_observation(consensus_for_reconcile.local_node_id());
                 nervix_primitives::select! {
                     _ = reconcile_shutdown.cancelled() => break,
                     _ = sleep(Duration::from_secs(1)) => {}
@@ -1740,11 +1441,25 @@ impl Application {
                             Ok(identity) if &identity == target.identity() => {
                                 cluster::PeerHealthProbeOutcome::Healthy(identity)
                             }
-                            Ok(_) => cluster::PeerHealthProbeOutcome::Failure,
+                            Ok(identity) => {
+                                tracing::debug!(
+                                    ?target,
+                                    ?identity,
+                                    "application health probe returned a different identity"
+                                );
+                                cluster::PeerHealthProbeOutcome::Failure
+                            }
                             Err(error) if error.current_context().is_capacity_exhaustion() => {
                                 cluster::PeerHealthProbeOutcome::CapacityExhausted
                             }
-                            Err(_) => cluster::PeerHealthProbeOutcome::Failure,
+                            Err(error) => {
+                                tracing::debug!(
+                                    ?target,
+                                    error = %format_args!("{error:#}"),
+                                    "application health probe failed"
+                                );
+                                cluster::PeerHealthProbeOutcome::Failure
+                            }
                         };
                         cluster::PeerHealthProbeResult::new(
                             target,
@@ -1814,7 +1529,7 @@ impl Application {
                 shutdown: &schedule_shutdown,
             };
             if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                warn!(error = %error, "failed to apply initial cluster schedule");
+                warn!(error = format!("{error:#}"), "failed to apply initial cluster schedule");
             }
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -1825,7 +1540,7 @@ impl Application {
                             break;
                         }
                         if let Err(error) = apply_current_cluster_runtime_state(application).await {
-                            warn!(error = %error, "failed to apply updated cluster schedule");
+                            warn!(error = format!("{error:#}"), "failed to apply updated cluster schedule");
                         }
                     }
                 }
@@ -1863,7 +1578,6 @@ impl Application {
                     consensus.proposer().local_node_id().clone(),
                 ),
                 service_tasks: ServiceTasks::default(),
-                configured_basic_auth,
                 auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
                 failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
                 transaction_idle_timeout,
@@ -1872,7 +1586,7 @@ impl Application {
                 transaction_max_source_bytes,
                 transaction_max_open,
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
-                command_execution_policy: self.command_execution,
+                command_execution_policy: settings.commands,
                 command_executions: Default::default(),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_recovery: Default::default(),
@@ -1880,6 +1594,8 @@ impl Application {
                 resource_upload_executions: DashMap::with_hasher(RandomState::new()),
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
                 retained_backups: Default::default(),
+                captured_backup_sections: DashMap::with_hasher(RandomState::new()),
+                restored_state_uploads: DashMap::with_hasher(RandomState::new()),
                 restore_archives: Default::default(),
             }),
         };
@@ -1919,6 +1635,9 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
         let resource_replica_service = service.clone();
+        service
+            .register_backup_state_handlers(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
         interconnect
             .register_handler::<PublishResourceReplica, _, _>(move |context, request| {
                 let service = resource_replica_service.clone();
@@ -2034,7 +1753,7 @@ impl Application {
                         }
                         Err(error) => Err(RemoteOperationFailure::failed(
                             RemoteOperationSubject::domain(&request.domain),
-                            error.to_string(),
+                            format!("{error:#}"),
                         )),
                     };
                     RemoteDomainDrainStatusResponse { result }
@@ -2087,6 +1806,7 @@ impl Application {
 
         service.register_wasm_state_reset_service(shutdown.clone())?;
         service.register_wasm_state_recovery_interconnect_handler()?;
+        service.register_stopping_node_drain_handler()?;
         service.register_wasm_state_recovery_coordinator(shutdown.clone());
 
         let entity_drain_service = service.clone();
@@ -2172,13 +1892,18 @@ impl Application {
                         request.name.clone(),
                     );
                     let result = match service.handle_lookup_request(request).await {
-                        Ok(Some(record)) => record
-                            .encode_arrow_ipc(service.inner.runtime.executor())
-                            .await
-                            .map(|body| Some(body.to_vec()))
-                            .map_err(|error| {
-                                RemoteOperationFailure::failed(subject, error.to_string())
-                            }),
+                        Ok(Some(record)) => {
+                            let mapping_input = record
+                                .encode_arrow_ipc(service.inner.runtime.executor())
+                                .await
+                                .map(|body| Some(body.to_vec()));
+                            match mapping_input {
+                                Ok(mapped_value) => Ok(mapped_value),
+                                Err(error) => {
+                                    Err(RemoteOperationFailure::failed(subject, error.to_string()))
+                                }
+                            }
+                        }
                         Ok(None) => Ok(None),
                         Err(failure) => Err(failure),
                     };
@@ -2442,6 +2167,22 @@ impl Application {
             }
         }));
 
+        let restore_maintenance_service = service.clone();
+        let restore_maintenance_shutdown = shutdown.clone();
+        background_tasks.push(nervix_primitives::task::spawn(async move {
+            loop {
+                nervix_primitives::task::consume_budget().await;
+                nervix_primitives::select! {
+                    _ = restore_maintenance_shutdown.cancelled() => break,
+                    _ = restore_maintenance_service.sweep_restore_checkpoint_staging() => {}
+                }
+                nervix_primitives::select! {
+                    _ = restore_maintenance_shutdown.cancelled() => break,
+                    _ = sleep(Duration::from_secs(1)) => {}
+                }
+            }
+        }));
+
         let clock_authority_service = service.clone();
         let clock_authority_shutdown = shutdown.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
@@ -2523,7 +2264,10 @@ impl Application {
         background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domains_rx = domain_apply_service.inner.consensus.subscribe_domains();
             if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
-                warn!(error = %error, "failed to apply cluster schedule after initial domain sync");
+                warn!(
+                    error = format!("{error:#}"),
+                    "failed to apply cluster schedule after initial domain sync"
+                );
             }
 
             loop {
@@ -2535,7 +2279,7 @@ impl Application {
                             break;
                         }
                         if let Err(error) = domain_apply_service.apply_current_cluster_state().await {
-                            warn!(error = %error, "failed to apply cluster schedule after domain sync");
+                            warn!(error = format!("{error:#}"), "failed to apply cluster schedule after domain sync");
                         }
                     }
                 }
@@ -2546,14 +2290,22 @@ impl Application {
         let clock_shutdown = shutdown.clone();
         background_tasks.push(nervix_primitives::task::spawn(async move {
             let mut domain_state_rx = clock_service.inner.runtime.subscribe_domain_state();
+            // The clock owner installs committed authority fences ahead of graph installation and
+            // advertises each runtime revision its domain clocks match, so it follows committed
+            // domain and schedule changes itself.
+            let mut committed_domains_rx = clock_service.inner.consensus.subscribe_domains();
+            let mut committed_schedule_rx = clock_service.inner.consensus.subscribe_schedule();
             let mut tasks: HashMap<DomainName, DomainClockTask> = HashMap::new();
             let mut retirements = DomainClockRetirements::default();
 
             loop {
                 nervix_primitives::task::consume_budget().await;
+                let state = clock_service.inner.consensus.current_runtime_state().await;
+                clock_service.install_committed_domain_clocks(&state).await;
                 reconcile_domain_clock_tasks(
                     &clock_service,
                     &clock_shutdown,
+                    &state,
                     &mut tasks,
                     &mut retirements,
                 )
@@ -2561,6 +2313,16 @@ impl Application {
                 nervix_primitives::select! {
                     _ = clock_shutdown.cancelled() => break,
                     changed = domain_state_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
+                    changed = committed_domains_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                    }
+                    changed = committed_schedule_rx.changed() => {
                         if changed.is_err() {
                             break;
                         }
@@ -2896,7 +2658,7 @@ impl Application {
         // stopping them is what releases those, so each stop runs to completion rather than being
         // abandoned at the deadline. A server process whose deadline passes meanwhile is ended by
         // its deadline supervision.
-        runtime.shutdown().await;
+        runtime.shutdown(deadline.remaining()).await;
         consensus.shutdown().await;
         let cluster_shutdown_result = cluster
             .shutdown()
@@ -2905,12 +2667,18 @@ impl Application {
         interconnect.shutdown().await;
 
         let executor = runtime.executor().clone();
+        #[cfg(feature = "testing")]
+        let stopping_fault_injection = fault_injection.clone();
+        #[cfg(feature = "testing")]
+        let stopping_node = consensus.proposer().local_node_id().clone();
         let database_owner_outcome = ApplicationStartup::close_stores(&executor, move || {
             drop(service);
             drop(runtime);
             drop(consensus);
             drop(cluster);
             drop(interconnect);
+            #[cfg(feature = "testing")]
+            stopping_fault_injection.flush_node_database_if_armed(&stopping_node, &db);
             drop(db);
         })
         .await;
@@ -2924,6 +2692,10 @@ impl Application {
         }
         shutdown_coordinator.finish(terminal_teardown_outcome.unless_deadline_passed(deadline));
 
+        let refused_join = join_refusal.borrow().clone();
+        if let Some(refusal) = refused_join {
+            return Err(Report::new(refusal).change_context(AppError::JoinRefused));
+        }
         listeners.result?;
         cluster_shutdown_result?;
         database_owner_outcome?;
@@ -2938,18 +2710,14 @@ impl Application {
     }
 }
 
-fn print_completions(shell: Shell) {
-    let mut command = Args::command();
-    let bin_name = command.get_name().to_string();
-    generate(shell, &mut command, bin_name, &mut std::io::stdout());
-}
-
 /// What the edges expose. Everything else this module and its submodules declare is
 /// `pub(in crate::application)` or narrower, so the binary and the test harness reach the server
 /// only through the names below.
 pub use error::AppError;
 pub use termination_signals::TerminationSignals;
-pub use tracing_setup::{TracingGuard, init_tracing, init_tracing_to_file};
+pub use tracing_setup::{
+    TraceSampleRatio, TraceSampleRatioError, TracingGuard, init_tracing, init_tracing_to_file,
+};
 pub use transaction::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
 
 #[cfg(test)]

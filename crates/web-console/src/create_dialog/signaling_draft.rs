@@ -6,6 +6,11 @@
 //! - **Depends on.** Current signaling Models and resource binding draft controls.
 //! - **Must not know.** WebSocket transport, peer frames, or resource installation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use nervix_models::{
     CreateSignalingProtocol, RequestedResourceVersion, SignalingProtobufConfig,
@@ -100,10 +105,17 @@ impl SignalingFormatDraft {
                 send_message,
                 wait_message,
             } => {
-                let binding = binding.build().map_err(|error| {
-                    let context = SignalingDraftError::Resource(error.current_context().clone());
-                    error.change_context(context)
-                })?;
+                let binding = {
+                    let mapping_input = binding.build();
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err({
+                            let context =
+                                SignalingDraftError::Resource(error.current_context().clone());
+                            error.change_context(context)
+                        }),
+                    }
+                }?;
                 if send_message.trim().is_empty() || wait_message.trim().is_empty() {
                     return Err(Report::new(SignalingDraftError::ProtobufMessagesRequired));
                 }
@@ -352,12 +364,16 @@ pub(super) enum SignalingDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         CreateStatement, Model, RequestedResourceVersion, ResourceName, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{
         SignalingDraft, SignalingDraftError, SignalingFormatDraft, SignalingFormatKind,
@@ -397,7 +413,7 @@ mod tests {
             )),
             draft.if_not_exists,
         ));
-        let source = statement.to_canonical_nspl().assured("protocol renders");
+        let source = statement.to_canonical_plexus().assured("protocol renders");
         assert_eq!(
             parse_client_statement(&source).assured("canonical protocol parses"),
             ClientStatement::Server(statement),

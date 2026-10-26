@@ -5,7 +5,7 @@ Feature: Integrated client wire qualification
     And cluster peers are addressed by "DNS names"
     And a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA wire_record (tenant STRING, sequence I64);
@@ -16,8 +16,8 @@ Feature: Integrated client wire qualification
       CREATE RELAY wire_records SCHEMA wire_record BRANCHED BY by_tenant;
       CREATE VHOST edge qualified-{{test_id}}.example.com;
       CREATE ENDPOINT wire_ingress ON edge PATH '/records' TYPE HTTP;
-      CREATE INGESTOR wire_source
-        FROM ENDPOINT wire_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR wire_source
+        FROM wire_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wire_record_codec
         TO wire_records INHERIT ALL
         BRANCHED BY by_tenant SET tenant = message.tenant
@@ -29,17 +29,17 @@ Feature: Integrated client wire qualification
     Given client "subscriber" is connected to node "{{old_leader}}" through fixture DNS with cluster seeds
     And client "owner" is connected to node "{{old_leader}}" through fixture DNS with cluster seeds
     Then the DNS fixture eventually receives a question for "native-session.nervix.test"
-    When client "subscriber" executes these NSPL commands
+    When client "subscriber" executes these Plexus commands
       """
       CREATE SUBSCRIPTION wire_seen TO wire_records;
       """
-    And client "owner" executes these NSPL commands
+    And client "owner" executes these Plexus commands
       """
       BEGIN;
       CREATE SCHEMA queued_record (value STRING);
       """
     Then client "owner" transaction id is saved as placeholder "transaction_id"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE TRANSACTION OPERATION 1 FORMAT JSON;
       """
@@ -63,12 +63,12 @@ Feature: Integrated client wire qualification
     Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
     When node "{{old_leader}}" is stopped
     Then within "30s" client "subscriber" observes subscription "wire_seen" interrupted
-    When client "subscriber" executes these NSPL commands
+    When client "subscriber" executes these Plexus commands
       """
       DESCRIBE DOMAIN;
       """
     Then client "subscriber" subscription "wire_seen" is active
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE TRANSACTION '{{transaction_id}}' OPERATION 1 FORMAT JSON;
       """
@@ -91,7 +91,7 @@ Feature: Integrated client wire qualification
       """
     When client "owner" attempts to commit its transaction
     Then client "owner" transaction state is "COMMITTED"
-    When client "owner" executes these NSPL commands
+    When client "owner" executes these Plexus commands
       """
       DESCRIBE TRANSACTION '{{transaction_id}}' OPERATION 1 FORMAT JSON;
       """

@@ -13,6 +13,62 @@ from scripts.typed_ratchet import ROOT, TOOLCHAIN, Runner
 
 
 class CompilerContractTests(unittest.TestCase):
+    def test_fixed_constant_contracts(self) -> None:
+        allowed = self.compile("constant_allowed")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        rejected = self.compile("constant_invalid", "--error-format=json")
+        self.assertNotEqual(rejected.returncode, 0, rejected.stderr)
+        diagnostics = [json.loads(line) for line in rejected.stderr.splitlines() if line.startswith("{")]
+        findings = [item for item in diagnostics if (item.get("code") or {}).get("code") == "nervix::invalid_contract"]
+        self.assertEqual(len(findings), 5, rejected.stderr)
+        self.assertEqual({span["line_start"] for finding in findings for span in finding["spans"] if span["is_primary"]}, {3, 6, 9, 12, 13})
+
+    def test_resolved_arithmetic_and_combinator_contracts(self) -> None:
+        for name, diagnostic in (("api_arithmetic", "nervix::clamped_arithmetic"),
+                                 ("api_combinator", "nervix::combinator_control_flow")):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(diagnostic, result.stderr.replace("-", "_"))
+
+    def test_api_definitions_expectations_and_structured_diagnostics(self) -> None:
+        for name in ("api_allowed", "api_expected"):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+        for name, diagnostic in (("api_aliases", "nervix::clamped_arithmetic"),
+                                 ("api_branch_alias", "nervix::combinator_control_flow"),
+                                 ("api_invalid", "Nervix exceptions require a reason_bearing expect"),
+                                 ("api_unfulfilled", "expectation is unfulfilled"),
+                                 ("api_wide", "covers 2 distinct operations")):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(diagnostic, result.stderr.replace("-", "_"))
+        for name, code, expected in (("api_arithmetic", "nervix::clamped_arithmetic", 2),
+                                     ("api_combinator", "nervix::combinator_control_flow", 2),
+                                     ("api_invalid", "nervix::invalid_contract", 2)):
+            with self.subTest(name=name):
+                result = self.compile(name, "--error-format=json")
+                diagnostics = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
+                findings = [item for item in diagnostics if (item.get("code") or {}).get("code") == code]
+                self.assertEqual(len(findings), expected, result.stderr)
+                source = (ROOT / "tools/nervix-lint/fixtures/tests/semantics" / (name + ".rs")).read_bytes()
+                snippets = set()
+                for finding in findings:
+                    primary = [span for span in finding["spans"] if span["is_primary"]]
+                    self.assertEqual(len(primary), 1)
+                    self.assertTrue(primary[0]["file_name"].endswith(name + ".rs"))
+                    self.assertGreater(primary[0]["byte_end"], primary[0]["byte_start"])
+                    snippets.add(source[primary[0]["byte_start"]:primary[0]["byte_end"]].decode())
+                if name == "api_arithmetic":
+                    self.assertEqual(snippets, {"wrapping_add", "saturating_mul"})
+                elif name == "api_combinator":
+                    self.assertEqual(snippets, {
+                        "Option::unwrap_or(Option::map(value, |item| item + 1), 0)",
+                        "value.map(|item| { let next = item + 1; next })",
+                    })
+
     def test_stable_accepts_gated_contracts_and_expression_expectations(self) -> None:
         source = (ROOT / "tools/nervix-lint/fixtures/tests/semantics/expected_expression.rs").read_text()
         # Stable qualification needs stable metadata, so this syntax probe supplies a plain value.
@@ -45,6 +101,7 @@ class CompilerContractTests(unittest.TestCase):
             "NERVIX_LINT_CONFIGURATION": "compiler-contract",
             "NERVIX_LINT_REPORTS": str(output),
             "NERVIX_LINT_DRIVER": str(runner.driver),
+            "NERVIX_LINT_ADMISSION": runner.admission.encode(),
             "KACHE_KEY_SALT": runner.identity + ":contract:" + name,
         })
         compiler = subprocess.run(["rustup", "which", "--toolchain", TOOLCHAIN, "rustc"],
@@ -73,6 +130,139 @@ class CompilerContractTests(unittest.TestCase):
         result = self.compile("hot_calls_lifecycle")
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn("nervix::lifecycle_call", result.stderr)
+
+    def test_resolved_architecture_and_state_boundaries(self) -> None:
+        for name, diagnostic in (
+            ("architecture_model", "nervix::model_in_data_plane"),
+            ("architecture_language", "nervix::parser_dependency"),
+            ("architecture_cluster", "nervix::cluster_await"),
+            ("architecture_identity", "nervix::node_identity"),
+            ("architecture_state", "nervix::installed_state"),
+        ):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(diagnostic, result.stderr.replace("-", "_"))
+
+    def test_architecture_contracts_cover_indirection_and_review(self) -> None:
+        for name, diagnostic in (
+            ("architecture_cluster_binding", "nervix::cluster_await"),
+            ("architecture_cluster_trait", "nervix::cluster_await"),
+            ("architecture_trait_scope", "nervix::model_in_data_plane"),
+            ("architecture_input", "nervix::model_in_data_plane"),
+            ("architecture_language_method", "nervix::parser_dependency"),
+            ("architecture_language_alias", "nervix::parser_dependency"),
+            ("architecture_identity_input", "nervix::node_identity"),
+            ("architecture_identity_mixed", "nervix::node_identity"),
+            ("architecture_state_review", "nervix::state_contract"),
+            ("architecture_contract_invalid", "nervix::invalid_contract"),
+            ("architecture_unfulfilled", "expectation is unfulfilled"),
+        ):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(diagnostic, result.stderr.replace("-", "_"))
+        for name in ("architecture_allowed", "architecture_expected", "architecture_projection"):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_architecture_metadata_survives_reexports_and_source_moves(self) -> None:
+        target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+        result = self.compile("architecture_metadata", crate_name="callee")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = target / "typed-ratchet/contracts/architecture_metadata/libcallee.rmeta"
+        with tempfile.TemporaryDirectory() as directory:
+            source = pathlib.Path(directory) / "relocated.rs"
+            source.write_text((ROOT / "tools/nervix-lint/fixtures/tests/semantics/architecture_metadata_use.rs").read_text())
+            result = self.compile("architecture_metadata_use", "--extern=callee=" + str(metadata), source=source, source_root=source.parent)
+            self.assertNotEqual(result.returncode, 0, result.stderr)
+            self.assertIn("nervix::model_in_data_plane", result.stderr.replace("-", "_"))
+            self.assertIn("nervix::parser_dependency", result.stderr.replace("-", "_"))
+
+    def test_foreign_items_take_contracts_from_the_module_holding_their_block(self) -> None:
+        target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+        result = self.compile("architecture_foreign", crate_name="callee")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = target / "typed-ratchet/contracts/architecture_foreign/libcallee.rmeta"
+        result = self.compile("architecture_foreign_use", "--extern=callee=" + str(metadata),
+                              "--error-format=json")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        # The wrapper reports denied diagnostics and an internal compiler error with one status.
+        self.assertNotIn("panicked at", result.stderr)
+        source =(ROOT / "tools/nervix-lint/fixtures/tests/semantics/architecture_foreign_use.rs").read_bytes()
+        findings: dict[str, list[str]] = {}
+        for line in result.stderr.splitlines():
+            if not line.startswith("{"):
+                continue
+            diagnostic = json.loads(line)
+            code = (diagnostic.get("code") or {}).get("code") or ""
+            if not code.startswith("nervix::"):
+                continue
+            primary = [span for span in diagnostic["spans"] if span["is_primary"]]
+            self.assertEqual(len(primary), 1, diagnostic)
+            snippet = source[primary[0]["byte_start"]:primary[0]["byte_end"]].decode()
+            findings.setdefault(code, []).append(snippet)
+        # The language module's foreign function is a parser dependency, by its path and by the
+        # type of its call, and the lifecycle module's one is a lifecycle call. The foreign function
+        # of the uncontracted module is neither.
+        self.assertEqual({code: sorted(snippets) for code, snippets in findings.items()}, {
+            "nervix::parser_dependency": ["callee::language::parse_foreign",
+                                          "callee::language::parse_foreign()"],
+            "nervix::lifecycle_call": ["callee::installation::install_foreign()"],
+        }, result.stderr)
+
+    def test_typed_error_and_outcome_diagnostics(self) -> None:
+        for name, diagnostic in (
+            ("error_nested_alias", "nervix::bare_error_signature"),
+            ("error_discarded_named", "nervix::discarded_outcome"),
+            ("error_unwrap_ufcs", "nervix::bare_panic"),
+            ("error_associated", "nervix::bare_error_signature"),
+            ("error_stream", "nervix::bare_error_signature"),
+            ("error_closure", "nervix::bare_error_signature"),
+            ("error_generic", "nervix::bare_error_signature"),
+            ("error_async_block", "nervix::bare_error_signature"),
+            ("error_async_closure", "nervix::bare_error_signature"),
+            ("error_boxed_failure", "nervix::bare_error_signature"),
+            ("error_borrowed_failure", "nervix::bare_error_signature"),
+            ("error_optional_report", "nervix::bare_error_signature"),
+            ("error_discard_qualified", "nervix::discarded_outcome"),
+            ("error_discard_wrapper", "nervix::discarded_outcome"),
+            ("error_discard_box", "nervix::discarded_outcome"),
+            ("error_discard_vec", "nervix::discarded_outcome"),
+            ("error_discard_assignment", "nervix::discarded_outcome"),
+            ("error_nested_contract", "nervix::bare_error_signature"),
+            ("error_discard_partial", "nervix::discarded_outcome"),
+            ("error_panic_deref", "nervix::bare_panic"),
+            ("error_panic_alias", "nervix::bare_panic"),
+            ("error_boundary_malformed", "nervix::invalid_contract"),
+            ("error_boundary_broad", "nervix::invalid_contract"),
+            ("error_expectation_unfulfilled", "expectation is unfulfilled"),
+        ):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn(diagnostic, result.stderr.replace("-", "_"))
+
+        for name in ("error_custom_apis", "error_handled", "error_reported", "error_outcomes", "error_expected", "error_storage_values", "error_resource_lifetimes", "error_return_contract"):
+            with self.subTest(name=name):
+                result = self.compile(name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_error_classifications_cross_crate_metadata(self) -> None:
+        target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+        for callee, caller, accepted in (("error_metadata_callee", "error_metadata_caller", True),
+                                         ("error_metadata_failure", "error_metadata_rejected", False)):
+            with self.subTest(callee=callee):
+                result = self.compile(callee, crate_name="callee")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                metadata = target / "typed-ratchet/contracts" / callee / "libcallee.rmeta"
+                result = self.compile(caller, "--extern=callee=" + str(metadata))
+                if accepted:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                else:
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("nervix::bare_error_signature", result.stderr.replace("-", "_"))
 
     def test_source_contracts_and_narrow_expectations(self) -> None:
         for name in ("lifecycle_lock", "bounded_lock", "expected_lock", "expected_expression", "inherited_override", "contracted_dispatch", "contracted_trait", "bounded_task_body", "lifecycle_task_body"):

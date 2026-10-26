@@ -57,7 +57,7 @@ table Fingerprint {
   bytes: [ubyte] (required);
 }
 
-/// A byte range of the NSPL source text a request carried. Offsets are UTF-8 byte offsets on
+/// A byte range of the Plexus source text a request carried. Offsets are UTF-8 byte offsets on
 /// character boundaries of that text, and `start` is not after `end`.
 struct SourceSpan {
   start: uint;
@@ -133,7 +133,7 @@ table NodeRef {
   name: string (required);
 }
 
-/// The semantic question a structured control asks without manufacturing partial NSPL.
+/// The semantic question a structured control asks without manufacturing partial Plexus.
 enum ChoiceTarget : ubyte {
   DomainPace,
   PlacementPolicy,
@@ -157,7 +157,8 @@ enum ChoiceTarget : ubyte {
   /// Fields of a codec's output schema. Requires a domain and then a codec model reference.
   CodecField,
   /// A source-specific configured client or endpoint in the selected domain.
-  IngestHttpSource,
+  IngestHttpRequestSource,
+  IngestHttpEndpointSource,
   IngestKafkaSource,
   IngestPulsarSource,
   IngestMqttSource,
@@ -167,8 +168,8 @@ enum ChoiceTarget : ubyte {
   IngestPrometheusSource,
   IngestZeroMqSource,
   IngestSqsSource,
-  IngestEndpointSource,
-  IngestWebsocketsSource,
+  IngestWebsocketsConnectionSource,
+  IngestWebsocketsEndpointSource,
   IngestSyslogSource,
   /// Codecs whose wire format can decode an ingestor payload.
   IngestCodec,
@@ -545,7 +546,7 @@ enum ModelChangeAspect : ubyte {
   ReordererMaxTime,
   EmitterInput,
   EmitterInputWhere,
-  EmitterSink,
+  EmitterConnector,
   EmitterClient,
   EmitterCodec,
   EmitterCollectPolicy,
@@ -1256,11 +1257,31 @@ enum BackupResources : ubyte {
   Omitted
 }
 
+/// Consistency boundary of the domain state carried by a backup.
+enum BackupCutKind : ubyte {
+  Quiesced,
+  Live,
+  Stopped,
+  ConfigurationOnly
+}
+
+table BackupCut {
+  kind: BackupCutKind = null;
+  /// Present only for a quiesced cut, in nanoseconds since the Unix epoch.
+  engaged_at: long = null;
+  released_at: long = null;
+  buffered_records: ulong;
+  buffered_bytes: ulong;
+  dropped_records: ulong;
+  rejected_records: ulong;
+}
+
 /// One domain of a completed backup.
 table BackupDomainSummary {
   domain: string (required);
   /// The applied consensus revision the domain's configuration was read at.
   revision: ulong;
+  cut: BackupCut (required);
   /// The sections the archive holds for the domain.
   sections: ulong;
   /// The bytes those sections hold.
@@ -1341,6 +1362,12 @@ table RestoredUsers {
   replaced: ulong;
 }
 
+enum DomainStatus : ubyte {
+  Stopped,
+  Running,
+  Paused
+}
+
 /// One domain a restore recreates.
 table RestoredDomain {
   /// The domain's name in the archive.
@@ -1351,6 +1378,10 @@ table RestoredDomain {
   resource_versions: ulong;
   /// The models applied.
   models: ulong;
+  /// Required; lifecycle after complete publication, or the dry run's planned lifecycle.
+  status: DomainStatus = null;
+  /// Required; the archived start generation.
+  start_version: ulong = null;
   /// For a dry run, the transaction planner's report on the domain's model run. Absent when the
   /// restore applies, and when the domain holds no models.
   planned_models: TransactionImpactReport;
@@ -1379,7 +1410,7 @@ table RestoreReport {
 // Client requests
 // ---------------------------------------------------------------------------------------------
 
-/// Executes NSPL statements.
+/// Executes Plexus statements.
 table CommandRequest {
   query: string (required);
   /// The selected domain. Absent when none is selected.
@@ -1393,7 +1424,7 @@ table CommandRequest {
   expected_preview: TransactionPreviewIdentity;
 }
 
-/// Asks for completions of NSPL source at a cursor.
+/// Asks for completions of Plexus source at a cursor.
 table SuggestRequest {
   input: string (required);
   /// A UTF-8 byte offset into input, on a character boundary.
@@ -1742,11 +1773,7 @@ table ChoiceOutcome {
   page_cursor: string;
 }
 
-enum DomainStatus : ubyte {
-  Stopped,
-  Running,
-  Paused
-}
+
 
 table UnpacedDomain {}
 
@@ -1766,6 +1793,8 @@ table DomainInfo {
   /// Required.
   status: DomainStatus = null;
   pace: DomainPace (required);
+  /// Required lifecycle generation.
+  start_version:ulong = null;
 }
 
 table DomainList {
@@ -2393,7 +2422,9 @@ table DomainClockObserved {
 /// Newest tick accepted for an attached domain's paced clock generation.
 table DomainClockTicked {
   domain: string (required);
+  /// The START generation the tick belongs to. Non-zero.
   generation: ulong;
+  /// One-based within the generation, increasing and possibly skipping ids. Non-zero.
   tick_id: ulong;
   logical_boundary_unix_nanos: long;
   authority_utc_unix_nanos: long;
@@ -2622,7 +2653,7 @@ table RestoreStart {
   request_id: ulong;
   /// The durable identity of the restore across retries, reconnects and leader changes.
   execution_reference: string (required);
-  /// One RESTORE statement, as NSPL.
+  /// One RESTORE statement, as Plexus.
   statement: string (required);
   /// The archive's exact size. Non-zero.
   total_bytes: ulong;

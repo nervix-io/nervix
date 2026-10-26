@@ -1,4 +1,4 @@
-//! Emitters: the sink they publish to, how they publish, and the payload they send.
+//! Emitters: the emitter they publish to, how they publish, and the payload they send.
 
 use std::{
     collections::BTreeSet,
@@ -6,121 +6,39 @@ use std::{
 };
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{
-    BatchMessageLimit, ByteSizeUnit, ClickHouseValueMapping, CreateEmitter, EmitSink,
-    EmitterBatchPolicy, EmitterBatchRequirement, EmitterBody, EmitterPublishingMode, Expression,
-    IcebergCatalog, IcebergStorageBackend, MongoDbConflictAction, MySqlConflictAction,
-    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    PayloadSizeLimit, PostgresConflictAction, SqsFifoGroup,
-};
+use nervix_models::*;
 
 use crate::{Arbitrary, Domain, route::RouteShape};
 
 /// The most items a generated value mapping or conflict target holds.
 const ITEMS: usize = 3;
 
-/// Every variant of [`EmitSink`], so a property reaches each sink as often as any other and a
-/// coverage check can ask for each one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
-pub enum SinkVariant {
-    Client,
-    Http,
-    Kafka,
-    Pulsar,
-    RabbitMq,
-    Redis,
-    Mqtt,
-    Nats,
-    ZeroMq,
-    Sqs,
-    Sentry,
-    Syslog,
-    Otel,
-    ClickHouse,
-    Postgres,
-    MySql,
-    MongoDb,
-    Iceberg,
-}
-
-impl SinkVariant {
-    /// Every variant, in declaration order.
-    pub const ALL: [Self; 18] = [
-        Self::Client,
-        Self::Http,
-        Self::Kafka,
-        Self::Pulsar,
-        Self::RabbitMq,
-        Self::Redis,
-        Self::Mqtt,
-        Self::Nats,
-        Self::ZeroMq,
-        Self::Sqs,
-        Self::Sentry,
-        Self::Syslog,
-        Self::Otel,
-        Self::ClickHouse,
-        Self::Postgres,
-        Self::MySql,
-        Self::MongoDb,
-        Self::Iceberg,
-    ];
-
-    /// The variant `sink` is. The match is exhaustive, so a new sink does not compile until the
-    /// generator is taught to build it.
-    pub fn of(sink: &EmitSink) -> Self {
-        match sink {
-            EmitSink::Client { .. } => Self::Client,
-            EmitSink::Http { .. } => Self::Http,
-            EmitSink::Kafka { .. } => Self::Kafka,
-            EmitSink::Pulsar { .. } => Self::Pulsar,
-            EmitSink::RabbitMq { .. } => Self::RabbitMq,
-            EmitSink::Redis { .. } => Self::Redis,
-            EmitSink::Mqtt { .. } => Self::Mqtt,
-            EmitSink::Nats { .. } => Self::Nats,
-            EmitSink::ZeroMq { .. } => Self::ZeroMq,
-            EmitSink::Sqs { .. } => Self::Sqs,
-            EmitSink::Sentry { .. } => Self::Sentry,
-            EmitSink::Syslog { .. } => Self::Syslog,
-            EmitSink::Otel { .. } => Self::Otel,
-            EmitSink::ClickHouse { .. } => Self::ClickHouse,
-            EmitSink::Postgres { .. } => Self::Postgres,
-            EmitSink::MySql { .. } => Self::MySql,
-            EmitSink::MongoDb { .. } => Self::MongoDb,
-            EmitSink::Iceberg { .. } => Self::Iceberg,
-        }
-    }
-}
-
 impl Arbitrary<'_> {
-    /// An emitter publishing to any sink, in a publishing mode and with a body that sink accepts,
-    /// batching where the sink requires it and optionally where it allows it.
+    /// An emitter publishing to any emitter, in a publishing mode and with a body that emitter accepts,
+    /// batching where the emitter requires it and optionally where it allows it.
     pub fn create_emitter(&mut self) -> CreateEmitter {
-        let count = NonZeroUsize::new(SinkVariant::ALL.len()).assured("there are sinks");
-        let variant = SinkVariant::ALL[self.entropy.index(count)];
-        self.create_emitter_to(variant)
+        let kinds = EmitterEntityKind::all().collect::<Vec<_>>();
+        let count = NonZeroUsize::new(kinds.len()).assured("the vocabulary declares emitters");
+        let kind = kinds[self.entropy.index(count)];
+        self.create_emitter_to(kind)
     }
 
-    /// An emitter publishing to a sink of the requested variant.
-    pub fn create_emitter_to(&mut self, variant: SinkVariant) -> CreateEmitter {
-        let sink = self.emit_sink_of(variant);
-        let body = self.emitter_body(&sink);
+    /// An emitter publishing to an emitter of the requested connector and entity.
+    pub fn create_emitter_to(&mut self, kind: EmitterEntityKind) -> CreateEmitter {
+        let connector = self.emitter_entity_of(kind);
+        let body = self.emitter_body(&connector);
         let construction_shape = match body {
             EmitterBody::Codec { .. } | EmitterBody::Client => RouteShape::Transforming,
             EmitterBody::WithoutBody => RouteShape::FilterAndInvoke,
             EmitterBody::Values => RouteShape::FilterOnly,
         };
-        let publishing_mode = self.accepted_publishing_mode(&sink);
-        // NSPL writes no batching clause for an HTTP emitter, whose requests carry one record
-        // each, even though the vocabulary lets its sink batch.
-        let batch = match (sink.batch_requirement(), &sink) {
-            (EmitterBatchRequirement::Required, _) => Some(self.batch_policy()),
-            (EmitterBatchRequirement::Optional, EmitSink::Http { .. })
-                if self.domain == Domain::Nspl =>
-            {
-                None
-            }
-            (EmitterBatchRequirement::Optional, _) => {
+        // Plexus writes no batching clause where batching is unavailable, as for an HTTP emitter,
+        // whose requests carry one record each. The vocabulary can still hold one, which a stored
+        // form must carry back, so its domain may draw one.
+        let batch = match connector.batch_legality() {
+            EmitterBatchLegality::Required { .. } => Some(self.batch_policy()),
+            EmitterBatchLegality::Unavailable { .. } if self.domain == Domain::Plexus => None,
+            EmitterBatchLegality::Optional { .. } | EmitterBatchLegality::Unavailable { .. } => {
                 if self.entropy.flag() {
                     Some(self.batch_policy())
                 } else {
@@ -132,26 +50,25 @@ impl Arbitrary<'_> {
             name: self.name(),
             from: self.processor_inputs(true),
             body,
-            sink: Box::new(sink),
+            connector: Box::new(connector),
             batch,
             flush_policy: self.flush_policy(),
             error_policies: self.error_policies(),
-            publishing_mode,
             mode: self.ack_mode(),
             construction: self.route_construction(construction_shape),
             materialized_state: self.materialized_state(),
         }
     }
 
-    fn emitter_body(&mut self, sink: &EmitSink) -> EmitterBody {
+    fn emitter_body(&mut self, connector: &EmitterEntity) -> EmitterBody {
         // A client consumer receives native columns built against its schema, never a payload.
-        if let EmitSink::Client { .. } = sink {
+        if let EmitterEntity::Client(_) = connector {
             return EmitterBody::Client;
         }
-        if sink.requires_codec() {
+        if connector.requires_codec() {
             return EmitterBody::Codec { codec: self.name() };
         }
-        if let EmitSink::Http { .. } = sink {
+        if let EmitterEntity::Http(_) = connector {
             return if self.entropy.flag() {
                 EmitterBody::Codec { codec: self.name() }
             } else {
@@ -161,68 +78,21 @@ impl Arbitrary<'_> {
         EmitterBody::Values
     }
 
-    /// A publishing mode the sink accepts, chosen among every mode the vocabulary defines.
-    fn accepted_publishing_mode(&mut self, sink: &EmitSink) -> EmitterPublishingMode {
-        let candidates = [
-            EmitterPublishingMode::NoAck {
-                retry_policy: self.retry_policy(),
-            },
-            EmitterPublishingMode::BrokerAck {
-                window: self.ack_window(),
-                ack_timeout: self.duration(),
-                retry_policy: self.retry_policy(),
-            },
-            EmitterPublishingMode::MqttQos0 {
-                retry_policy: self.retry_policy(),
-            },
-            EmitterPublishingMode::MqttQos1 {
-                window: self.ack_window(),
-                ack_timeout: self.duration(),
-                retry_policy: self.retry_policy(),
-            },
-            EmitterPublishingMode::MqttQos2 {
-                window: self.ack_window(),
-                ack_timeout: self.duration(),
-                retry_policy: self.retry_policy(),
-            },
-            EmitterPublishingMode::NatsJetStream {
-                window: self.ack_window(),
-                ack_timeout: self.duration(),
-                retry_policy: self.retry_policy(),
-            },
-            EmitterPublishingMode::SqsSingle {
-                retry_policy: self.retry_policy(),
-            },
-            EmitterPublishingMode::SqsBatch {
-                retry_policy: self.retry_policy(),
-            },
-            EmitterPublishingMode::RequestAck {
-                retry_policy: self.retry_policy(),
-            },
-            EmitterPublishingMode::ClientAck {
-                window: self.ack_window(),
-                ack_timeout: self.duration(),
-                retry_policy: self.retry_policy(),
-            },
-        ];
-        let mut accepted = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            if sink.accepts_publishing_mode(&candidate) {
-                accepted.push(candidate);
-            }
-        }
-        let count = NonZeroUsize::new(accepted.len())
-            .assured("every sink accepts at least one publishing mode");
-        let chosen = self.entropy.index(count);
-        accepted.swap_remove(chosen)
-    }
-
-    fn batch_policy(&mut self) -> EmitterBatchPolicy {
+    pub(crate) fn batch_policy(&mut self) -> EmitterBatchPolicy {
         let messages = self
             .entropy
             .boundary_biased(1..=u64::from(BatchMessageLimit::MAX));
         let max_messages =
             BatchMessageLimit::try_from(messages).verified("the range above is the limit's range");
+        let max_size = self.payload_size_limit();
+        EmitterBatchPolicy {
+            max_messages,
+            max_size,
+        }
+    }
+
+    /// A size limit in any unit, from one of the unit to the most a 64-bit byte count holds.
+    pub fn payload_size_limit(&mut self) -> PayloadSizeLimit {
         let unit = self.entropy.pick([
             ByteSizeUnit::B,
             ByteSizeUnit::KB,
@@ -236,173 +106,235 @@ impl Arbitrary<'_> {
         ]);
         let most = u64::MAX / unit.bytes();
         let count = self.entropy.boundary_biased(1..=most);
-        let max_size = PayloadSizeLimit::new(
+        PayloadSizeLimit::new(
             NonZeroU64::new(count).verified("the range above starts at one"),
             unit,
         )
-        .verified("the count is at most the largest the unit's byte count allows");
-        EmitterBatchPolicy {
-            max_messages,
-            max_size,
-        }
+        .verified("the count is at most the largest the unit's byte count allows")
     }
 
-    /// A sink of the requested variant, with every clause it declares.
-    pub fn emit_sink_of(&mut self, variant: SinkVariant) -> EmitSink {
-        match variant {
-            SinkVariant::Http => EmitSink::Http {
-                client: self.name(),
-                method: self.expression(),
-                path: self.expression(),
-            },
-            SinkVariant::Kafka => EmitSink::Kafka {
-                client: self.name(),
-                topic: self.name(),
-            },
-            SinkVariant::Pulsar => EmitSink::Pulsar {
-                client: self.name(),
-                topic: self.name(),
-            },
-            SinkVariant::RabbitMq => EmitSink::RabbitMq {
-                client: self.name(),
-                queue: self.name(),
-            },
-            SinkVariant::Redis => EmitSink::Redis {
-                client: self.name(),
-                channel: self.name(),
-            },
-            SinkVariant::Mqtt => EmitSink::Mqtt {
-                client: self.name(),
-                topic: self.name(),
-            },
-            SinkVariant::Nats => EmitSink::Nats {
-                client: self.name(),
-                subject: self.name(),
-            },
-            SinkVariant::ZeroMq => EmitSink::ZeroMq {
-                client: self.name(),
-            },
-            SinkVariant::Sqs => EmitSink::Sqs {
-                client: self.name(),
-                queue: self.sqs_queue(),
-                fifo_group: match self.entropy.byte() % 3 {
-                    0 => None,
-                    1 => Some(SqsFifoGroup::FromBranch),
-                    _ => Some(SqsFifoGroup::Expression(self.expression())),
-                },
-            },
-            SinkVariant::Sentry => EmitSink::Sentry {
-                client: self.name(),
-            },
-            SinkVariant::Syslog => EmitSink::Syslog {
-                client: self.name(),
-            },
-            SinkVariant::Otel => EmitSink::Otel {
-                client: self.name(),
-                signal: self.otel_signal(),
-                values: self.value_mappings(1),
-                attributes: self.value_mappings(0),
-                resource: self.literal_mappings(),
-                scope: if self.entropy.flag() {
-                    Some(OtelScope {
-                        name: self.string(),
-                        version: if self.entropy.flag() {
-                            Some(self.string())
-                        } else {
-                            None
-                        },
-                    })
-                } else {
-                    None
-                },
-            },
-            SinkVariant::ClickHouse => EmitSink::ClickHouse {
-                client: self.name(),
-                table: self.name(),
-                values: self.value_mappings(1),
-            },
-            SinkVariant::Postgres => {
+    /// A emitter of the requested connector and entity, with every clause it declares.
+    ///
+    /// The match is exhaustive, so a new pair does not compile until the generator is taught to
+    /// build it.
+    pub fn emitter_entity_of(&mut self, kind: EmitterEntityKind) -> EmitterEntity {
+        match kind {
+            EmitterEntityKind::Http(HttpEmitterEntity::Request) => {
+                EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
+                    mode: self.http_request_publication(),
+                    client: self.name(),
+                    method: self.expression(),
+                    path: self.expression(),
+                }))
+            }
+            EmitterEntityKind::Kafka(KafkaEmitterEntity::Topic) => {
+                EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
+                    mode: self.kafka_topic_publication(),
+                    client: self.name(),
+                    topic: self.kafka_topic_name(),
+                }))
+            }
+            EmitterEntityKind::Pulsar(PulsarEmitterEntity::Topic) => {
+                EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
+                    mode: self.pulsar_topic_publication(),
+                    client: self.name(),
+                    topic: self.pulsar_topic_name(),
+                }))
+            }
+            EmitterEntityKind::RabbitMq(RabbitMqEmitterEntity::Queue) => {
+                EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
+                    mode: self.rabbitmq_queue_publication(),
+                    client: self.name(),
+                    queue: self.rabbitmq_queue_name(),
+                }))
+            }
+            EmitterEntityKind::Redis(RedisEmitterEntity::PubSub) => {
+                EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
+                    mode: self.redis_pubsub_publication(),
+                    client: self.name(),
+                    channel: self.redis_channel_name(),
+                }))
+            }
+            EmitterEntityKind::Mqtt(MqttEmitterEntity::Topic) => {
+                EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
+                    mode: self.mqtt_topic_publication(),
+                    client: self.name(),
+                    topic: self.mqtt_publication_topic_name(),
+                }))
+            }
+            EmitterEntityKind::Nats(NatsEmitterEntity::Subject) => {
+                EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
+                    mode: self.nats_subject_publication(),
+                    client: self.name(),
+                    subject: self.nats_publication_subject_name(),
+                }))
+            }
+            EmitterEntityKind::ZeroMq(ZeroMqEmitterEntity::Push) => {
+                EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
+                    mode: self.zeromq_push_publication(),
+                    client: self.name(),
+                }))
+            }
+            EmitterEntityKind::Sqs(SqsEmitterEntity::Queue) => {
+                EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+                    mode: self.sqs_queue_publication(),
+                    client: self.name(),
+                    queue: self.sqs_queue_name(),
+                    fifo_group: match self.entropy.byte() % 3 {
+                        0 => None,
+                        1 => Some(SqsFifoGroup::FromBranch),
+                        _ => Some(SqsFifoGroup::Expression(self.expression())),
+                    },
+                }))
+            }
+            EmitterEntityKind::Sentry(SentryEmitterEntity::Event) => {
+                EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
+                    mode: self.sentry_event_publication(),
+                    client: self.name(),
+                }))
+            }
+            EmitterEntityKind::Syslog(SyslogEmitterEntity::Collector) => {
+                EmitterEntity::Syslog(SyslogEmitter::Collector(SyslogCollectorEmitter {
+                    mode: self.syslog_collector_publication(),
+                    client: self.name(),
+                }))
+            }
+            EmitterEntityKind::Otel(OtelEmitterEntity::Logs) => {
+                EmitterEntity::from(OtelLogsEmitter {
+                    mode: self.otel_logs_publication(),
+                    client: self.name(),
+                    mappings: self.otel_mappings(),
+                })
+            }
+            EmitterEntityKind::Otel(OtelEmitterEntity::Traces) => {
+                EmitterEntity::from(OtelTracesEmitter {
+                    mode: self.otel_traces_publication(),
+                    client: self.name(),
+                    mappings: self.otel_mappings(),
+                })
+            }
+            EmitterEntityKind::Otel(OtelEmitterEntity::Metrics) => {
+                EmitterEntity::from(OtelMetricsEmitter {
+                    mode: self.otel_metrics_publication(),
+                    client: self.name(),
+                    metric: self.otel_metric(),
+                    mappings: self.otel_mappings(),
+                })
+            }
+            EmitterEntityKind::ClickHouse(ClickHouseEmitterEntity::Table) => {
+                EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
+                    mode: self.clickhouse_table_publication(),
+                    client: self.name(),
+                    table: self.emitter_table_name(),
+                    values: self.value_mappings(1),
+                }))
+            }
+            EmitterEntityKind::Postgres(PostgresEmitterEntity::Table) => {
                 let client = self.name();
-                let table = self.name();
+                let table = self.emitter_table_name();
                 let values = self.value_mappings(1);
                 let conflict_action = self.postgres_conflict_action(&values);
-                EmitSink::Postgres {
+                EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
+                    mode: self.postgres_table_publication(),
                     client,
                     table,
                     values,
                     conflict_action,
-                }
+                }))
             }
-            SinkVariant::MySql => EmitSink::MySql {
-                client: self.name(),
-                table: self.name(),
-                values: self.value_mappings(1),
-                conflict_action: self.entropy.pick([
-                    MySqlConflictAction::None,
-                    MySqlConflictAction::DoNothing,
-                    MySqlConflictAction::DoUpdate,
-                ]),
-            },
-            SinkVariant::MongoDb => {
+            EmitterEntityKind::MySql(MySqlEmitterEntity::Table) => {
+                EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
+                    mode: self.mysql_table_publication(),
+                    client: self.name(),
+                    table: self.emitter_table_name(),
+                    values: self.value_mappings(1),
+                    conflict_action: self.entropy.pick([
+                        MySqlConflictAction::None,
+                        MySqlConflictAction::DoNothing,
+                        MySqlConflictAction::DoUpdate,
+                    ]),
+                }))
+            }
+            EmitterEntityKind::MongoDb(MongoDbEmitterEntity::Collection) => {
                 let values = self.value_mappings(1);
                 let conflict_action = self.mongodb_conflict_action(&values);
-                EmitSink::MongoDb {
+                EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
+                    mode: self.mongodb_collection_publication(),
                     client: self.name(),
-                    collection: self.name(),
+                    collection: self.emitter_table_name(),
                     values,
                     conflict_action,
-                }
+                }))
             }
-            SinkVariant::Client => EmitSink::Client {
-                schema: self.name(),
-            },
-            SinkVariant::Iceberg => EmitSink::Iceberg {
-                backend: self.entropy.pick([
-                    IcebergStorageBackend::S3,
-                    IcebergStorageBackend::Gcs,
-                    IcebergStorageBackend::AzureBlob,
-                ]),
-                client: self.name(),
-                table: self.name(),
-                values: self.value_mappings(1),
-                location: self.string(),
-                catalog: IcebergCatalog::Rest {
+            EmitterEntityKind::Client(ClientEmitterEntity::Consumer) => {
+                EmitterEntity::Client(ClientEmitter::Consumer(ClientConsumerEmitter {
+                    mode: self.client_consumer_publication(),
+                    schema: self.name(),
+                }))
+            }
+            EmitterEntityKind::Iceberg(IcebergEmitterEntity::Table) => {
+                EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
+                    mode: self.iceberg_table_publication(),
                     client: self.name(),
-                },
-                commit_each: self.duration(),
-                max_commit_size: self.byte_size(),
-            },
+                    table: self.emitter_table_name(),
+                    values: self.value_mappings(1),
+                    location: self.string(),
+                    catalog: IcebergCatalog::Rest {
+                        client: self.name(),
+                    },
+                    commit_each: self.duration(),
+                    max_commit_size: self.byte_size(),
+                }))
+            }
         }
     }
 
-    fn otel_signal(&mut self) -> OtelSignal {
-        match self.entropy.byte() % 3 {
-            0 => OtelSignal::Logs,
-            1 => OtelSignal::Traces,
-            _ => {
-                let temporality = self.entropy.pick([
-                    OtelAggregationTemporality::Delta,
-                    OtelAggregationTemporality::Cumulative,
-                ]);
-                let kind = match self.entropy.byte() % 3 {
-                    0 => OtelMetricKind::Gauge,
-                    1 => OtelMetricKind::Sum {
-                        monotonic: self.entropy.flag(),
-                        temporality,
-                    },
-                    _ => OtelMetricKind::Histogram { temporality },
-                };
-                OtelSignal::Metric(OtelMetric {
-                    name: self.string(),
-                    unit: self.string(),
-                    description: if self.entropy.flag() {
-                        Some(self.string())
-                    } else {
-                        None
-                    },
-                    kind,
-                })
-            }
+    /// The mappings every OTEL signal shares, with an optional instrumentation scope.
+    fn otel_mappings(&mut self) -> OtelMappings {
+        let values = self.value_mappings(1);
+        let attributes = self.value_mappings(0);
+        let resource = self.literal_mappings();
+        let scope = if self.entropy.flag() {
+            let name = self.string();
+            let version = if self.entropy.flag() {
+                Some(self.string())
+            } else {
+                None
+            };
+            Some(OtelScope { name, version })
+        } else {
+            None
+        };
+        OtelMappings {
+            values,
+            attributes,
+            resource,
+            scope,
+        }
+    }
+
+    fn otel_metric(&mut self) -> OtelMetric {
+        let temporality = self.entropy.pick([
+            OtelAggregationTemporality::Delta,
+            OtelAggregationTemporality::Cumulative,
+        ]);
+        let kind = match self.entropy.byte() % 3 {
+            0 => OtelMetricKind::Gauge,
+            1 => OtelMetricKind::Sum {
+                monotonic: self.entropy.flag(),
+                temporality,
+            },
+            _ => OtelMetricKind::Histogram { temporality },
+        };
+        OtelMetric {
+            name: self.string(),
+            unit: self.string(),
+            description: if self.entropy.flag() {
+                Some(self.string())
+            } else {
+                None
+            },
+            kind,
         }
     }
 
@@ -440,30 +372,6 @@ impl Arbitrary<'_> {
         minimum
             .checked_add(self.entropy.count(extra))
             .verified("the extra count is at most the bound minus the minimum")
-    }
-
-    /// An SQS queue as a sink names it: words and whole numbers joined by hyphens, spelled as
-    /// written, optionally a FIFO queue.
-    fn sqs_queue(&mut self) -> String {
-        let parts = self.bounded_count(1);
-        let mut queue = String::new();
-        for part in 0..parts {
-            if part > 0 {
-                queue.push('-');
-            }
-            if self.entropy.flag() {
-                let number = self.entropy.boundary_biased(1..=u64::from(u16::MAX));
-                queue.push_str(&number.to_string());
-            } else if self.entropy.flag() {
-                queue.push_str(&self.name_text().to_ascii_uppercase());
-            } else {
-                queue.push_str(&self.name_text());
-            }
-        }
-        if self.entropy.flag() {
-            queue.push_str(".fifo");
-        }
-        queue
     }
 
     /// A MongoDB conflict action. MongoDB identifies a conflicting document by fields the emitter
@@ -516,7 +424,7 @@ impl Arbitrary<'_> {
     /// A Postgres conflict action. `DO NOTHING` may name no conflict target; `DO UPDATE` needs the
     /// one it updates.
     ///
-    /// NSPL reads a `DO UPDATE` only while a mapped column stays outside its target to be updated,
+    /// Plexus reads a `DO UPDATE` only while a mapped column stays outside its target to be updated,
     /// so there the target leaves the first mapped column out. The vocabulary holds any target.
     fn postgres_conflict_action(
         &mut self,
@@ -529,7 +437,7 @@ impl Arbitrary<'_> {
             },
             _ => {
                 let mut target = self.conflict_target(1);
-                if self.domain == Domain::Nspl {
+                if self.domain == Domain::Plexus {
                     let updated = &values
                         .first()
                         .assured("the VALUES map declares at least one column")
@@ -553,4 +461,38 @@ impl Arbitrary<'_> {
         }
         target
     }
+}
+
+macro_rules! publication_generators {
+    ($($method:ident($arbitrary:ident) -> $Mode:ty = [$($policy:expr),+ $(,)?];)+) => {
+        impl Arbitrary<'_> {
+            $(fn $method(&mut self) -> $Mode {
+                let $arbitrary = self;
+                let policies = [$($policy,)+];
+                $arbitrary.entropy.pick(policies)
+            })+
+        }
+    };
+}
+publication_generators! {
+    client_consumer_publication(arbitrary) -> ClientConsumerPublishingMode = [ClientConsumerPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
+    http_request_publication(arbitrary) -> HttpRequestPublishingMode = [HttpRequestPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
+    kafka_topic_publication(arbitrary) -> KafkaTopicPublishingMode = [KafkaTopicPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, KafkaTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
+    pulsar_topic_publication(arbitrary) -> PulsarTopicPublishingMode = [PulsarTopicPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, PulsarTopicPublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
+    rabbitmq_queue_publication(arbitrary) -> RabbitMqQueuePublishingMode = [RabbitMqQueuePublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, RabbitMqQueuePublishingMode::Ack { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
+    redis_pubsub_publication(arbitrary) -> RedisPubSubPublishingMode = [RedisPubSubPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
+    mqtt_topic_publication(arbitrary) -> MqttTopicPublishingMode = [MqttTopicPublishingMode::Qos0 { retry_policy: arbitrary.retry_policy() }, MqttTopicPublishingMode::Qos1 { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }, MqttTopicPublishingMode::Qos2 { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
+    nats_subject_publication(arbitrary) -> NatsSubjectPublishingMode = [NatsSubjectPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }, NatsSubjectPublishingMode::JetStream { window: arbitrary.ack_window(), ack_timeout: arbitrary.duration(), retry_policy: arbitrary.retry_policy() }];
+    zeromq_push_publication(arbitrary) -> ZeroMqPushPublishingMode = [ZeroMqPushPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
+    sqs_queue_publication(arbitrary) -> SqsQueuePublishingMode = [SqsQueuePublishingMode::Single { retry_policy: arbitrary.retry_policy() }, SqsQueuePublishingMode::Batch { retry_policy: arbitrary.retry_policy() }];
+    sentry_event_publication(arbitrary) -> SentryEventPublishingMode = [SentryEventPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
+    syslog_collector_publication(arbitrary) -> SyslogCollectorPublishingMode = [SyslogCollectorPublishingMode::NoAck { retry_policy: arbitrary.retry_policy() }];
+    otel_logs_publication(arbitrary) -> OtelLogsPublishingMode = [OtelLogsPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
+    otel_traces_publication(arbitrary) -> OtelTracesPublishingMode = [OtelTracesPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
+    otel_metrics_publication(arbitrary) -> OtelMetricsPublishingMode = [OtelMetricsPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
+    clickhouse_table_publication(arbitrary) -> ClickHouseTablePublishingMode = [ClickHouseTablePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
+    postgres_table_publication(arbitrary) -> PostgresTablePublishingMode = [PostgresTablePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
+    mysql_table_publication(arbitrary) -> MySqlTablePublishingMode = [MySqlTablePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
+    mongodb_collection_publication(arbitrary) -> MongoDbCollectionPublishingMode = [MongoDbCollectionPublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
+    iceberg_table_publication(arbitrary) -> IcebergTablePublishingMode = [IcebergTablePublishingMode::Ack { retry_policy: arbitrary.retry_policy() }];
 }

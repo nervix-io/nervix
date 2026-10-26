@@ -2,11 +2,11 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
   Scenario Outline: Membership, ranges and null-safe equality classify every message, including nulls, empty sets, duplicate constants and large sets
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA shipment (
         id STRING,
@@ -48,8 +48,8 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE RELAY shipment_facts SCHEMA shipment_fact UNBRANCHED;
       CREATE VHOST edge membership-{{test_id}}.example.com;
       CREATE ENDPOINT shipment_ingress ON edge PATH '/shipments' TYPE HTTP;
-      CREATE INGESTOR shipment_source
-        FROM ENDPOINT shipment_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR shipment_source
+        FROM shipment_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shipment_batch_codec
         TO shipments
           INHERIT ALL
@@ -111,11 +111,11 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
   Scenario Outline: Membership, range and null-safe predicates filter ingested messages, source inputs, routes and read-only session subscriptions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA parcel (
         id STRING,
@@ -132,8 +132,8 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE RELAY routed_parcels SCHEMA parcel UNBRANCHED;
       CREATE VHOST edge parcel-filters-{{test_id}}.example.com;
       CREATE ENDPOINT parcel_ingress ON edge PATH '/parcels' TYPE HTTP;
-      CREATE INGESTOR parcel_source
-        FROM ENDPOINT parcel_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR parcel_source
+        FROM parcel_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parcel_batch_codec
         FILTER WHERE input.id NOT IN ('heartbeat', 'ping')
           AND input.id NOT BETWEEN 'probe-000' AND 'probe-999'
@@ -180,11 +180,11 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
   Scenario Outline: Greatest, least and clamp skip nulls, order NaN above every value, keep sensitivity and fail only messages with invalid clamp bounds
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA meter (
         id STRING,
@@ -229,8 +229,8 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE RELAY meter_errors SCHEMA meter_error UNBRANCHED;
       CREATE VHOST edge extrema-{{test_id}}.example.com;
       CREATE ENDPOINT meter_ingress ON edge PATH '/meters' TYPE HTTP;
-      CREATE INGESTOR meter_source
-        FROM ENDPOINT meter_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR meter_source
+        FROM meter_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING meter_batch_codec
         TO meters
           INHERIT ALL
@@ -298,11 +298,11 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
         "tiers.jsonl": "{\"tier\":\"gold\",\"discount\":20.0}\n{\"tier\":\"domestic\",\"discount\":5.0}\n{\"tier\":\"standard\",\"discount\":0.0}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE tiers_data;
       UPLOAD RESOURCE tiers_data VERSION '{{tiers_dir}}';
@@ -311,7 +311,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       """
       uploaded resource version 1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA order_line (
         id STRING,
@@ -346,8 +346,8 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
         DECODE USING tier_codec;
       CREATE VHOST edge tiers-{{test_id}}.example.com;
       CREATE ENDPOINT order_ingress ON edge PATH '/orders' TYPE HTTP;
-      CREATE INGESTOR order_source
-        FROM ENDPOINT order_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR order_source
+        FROM order_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_line_batch_codec
         TO order_lines
           INHERIT ALL
@@ -395,16 +395,16 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has ONNX fixture resource directory "onnx_model"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE inference;
       UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA banded_value (
         band STRING,
@@ -422,8 +422,8 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE RELAY inference_results SCHEMA inference_result UNBRANCHED;
       CREATE VHOST edge infer-membership-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/values' TYPE HTTP;
-      CREATE INGESTOR banded_value_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR banded_value_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING banded_value_batch_codec
         TO banded_values
           INHERIT ALL
@@ -469,11 +469,11 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
 
   Scenario Outline: Membership, ranges, null-safe equality and extrema reject operands outside their signatures and nondeterministic materialized-state defaults when the statement is applied
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA sample (
         id STRING,
@@ -494,7 +494,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE RELAY verdicts SCHEMA verdict UNBRANCHED;
       CREATE RELAY latest_verdicts SCHEMA verdict UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       """
-    When these NSPL commands fail with "IN set element 1 has type Int64, but the operand has type Int32"
+    When these Plexus commands fail with "IN set element 1 has type Int64, but the operand has type Int32"
       """
       CREATE JUNCTION untyped_priorities
         FROM samples
@@ -506,7 +506,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "IN set element 2 is NULL"
+    And these Plexus commands fail with "IN set element 2 is NULL"
       """
       CREATE JUNCTION null_member
         FROM samples
@@ -518,7 +518,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "IN set element 2 is not a constant"
+    And these Plexus commands fail with "IN set element 2 is not a constant"
       """
       CREATE JUNCTION field_member
         FROM samples
@@ -530,7 +530,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "IN set element 2 cannot be evaluated: cannot cast value to UInt8"
+    And these Plexus commands fail with "IN set element 2 cannot be evaluated: cannot cast value to UInt8"
       """
       CREATE JUNCTION oversized_member
         FROM samples
@@ -542,7 +542,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "BETWEEN is not valid for Boolean"
+    And these Plexus commands fail with "BETWEEN is not valid for Boolean"
       """
       CREATE JUNCTION boolean_range
         FROM samples
@@ -554,7 +554,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "BETWEEN requires the operand and both bounds to have one exact type, found Float64, Int64 and Int64"
+    And these Plexus commands fail with "BETWEEN requires the operand and both bounds to have one exact type, found Float64, Int64 and Int64"
       """
       CREATE JUNCTION untyped_range
         FROM samples
@@ -566,7 +566,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "binary operator IsDistinctFrom requires matching operand types, found Utf8 and Int64"
+    And these Plexus commands fail with "binary operator IsDistinctFrom requires matching operand types, found Utf8 and Int64"
       """
       CREATE JUNCTION mismatched_distinct
         FROM samples
@@ -578,7 +578,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'greatest' requires matching operand types, found Float64 and Int32"
+    And these Plexus commands fail with "function 'greatest' requires matching operand types, found Float64 and Int32"
       """
       CREATE JUNCTION mismatched_extremum
         FROM samples
@@ -590,7 +590,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "function 'clamp' requires numeric, STRING or DATETIME input, found Boolean"
+    And these Plexus commands fail with "function 'clamp' requires numeric, STRING or DATETIME input, found Boolean"
       """
       CREATE JUNCTION boolean_clamp
         FROM samples
@@ -602,7 +602,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "SET field 'amount' would store sensitive data in a non-sensitive output field"
+    And these Plexus commands fail with "SET field 'amount' would store sensitive data in a non-sensitive output field"
       """
       CREATE JUNCTION leaked_clamp
         FROM samples
@@ -614,7 +614,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "SET field 'flag' would store sensitive data in a non-sensitive output field"
+    And these Plexus commands fail with "SET field 'flag' would store sensitive data in a non-sensitive output field"
       """
       CREATE JUNCTION leaked_membership
         FROM samples
@@ -626,7 +626,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "materialized-state DEFAULT for 'latest_verdicts' must use deterministic side-effect-free expressions"
+    And these Plexus commands fail with "materialized-state DEFAULT for 'latest_verdicts' must use deterministic side-effect-free expressions"
       """
       CREATE JUNCTION generated_default_member
         FROM samples
@@ -643,7 +643,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "materialized-state DEFAULT for 'latest_verdicts' must use deterministic side-effect-free expressions"
+    And these Plexus commands fail with "materialized-state DEFAULT for 'latest_verdicts' must use deterministic side-effect-free expressions"
       """
       CREATE JUNCTION clock_default_bound
         FROM samples

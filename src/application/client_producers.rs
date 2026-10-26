@@ -8,7 +8,7 @@
 //!   events a forwarded producer receives, which mirror those of a local one.
 //! - **Depends on.** The runtime's client ingestor endpoints, the interconnect's ordered duplex
 //!   streams, and the client producer vocabulary.
-//! - **Must not know.** Sessions, the session wire, NSPL, or how a batch is decoded or admitted.
+//! - **Must not know.** Sessions, the session wire, Plexus, or how a batch is decoded or admitted.
 //!
 //! A local producer is attached to this node's endpoint directly. A forwarded one is attached by
 //! the owning node on behalf of this one, which counts the producer's granted bytes against the
@@ -16,6 +16,11 @@
 //! the same events: one outcome per batch, admission changes, and at most one end, after which the
 //! events close. Losing a link ends every producer forwarded over it with `OwnerLost`, after its
 //! batches the owning node cannot have admitted are answered as not admitted.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
 
 mod link;
 

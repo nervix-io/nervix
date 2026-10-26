@@ -13,6 +13,14 @@
 //! generation, its applied index, and its membership is published afterwards in one durable batch,
 //! and only a published generation is ever read.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,

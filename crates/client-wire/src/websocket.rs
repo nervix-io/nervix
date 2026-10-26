@@ -4,6 +4,12 @@
 //! frames or part of one. A text message is a protocol violation. Ping, pong and close messages
 //! belong to the WebSocket connection and never carry a frame. The codec knows no WebSocket
 //! library, so the browser and the server share it.
+//!
+//! The console listener serves three WebSockets, each carrying one kind of call: the session at
+//! [`CONSOLE_SESSION_PATH`], one backup download at [`CONSOLE_BACKUP_DOWNLOAD_PATH`], and one
+//! restore stream at [`CONSOLE_RESTORE_PATH`]. A download and a restore carry exactly the frames
+//! their gRPC calls carry. A WebSocket cannot half-close, so a restore stream ends with the chunk
+//! that completes the size its start declares, and the connection stays open for the reply.
 
 use std::{fmt, marker::PhantomData};
 
@@ -12,9 +18,23 @@ use error_stack::Report;
 use thiserror::Error;
 
 use crate::{
-    frame::{ClientFrame, EncodedFrame, FrameError, FrameRoot, ServerFrame, VerifiedFrame},
+    frame::{
+        BackupDownloadFrame, BackupDownloadRequestFrame, ClientFrame, EncodedFrame, FrameError,
+        FrameRoot, RestoreFrame, RestoreReplyFrame, ServerFrame, VerifiedFrame,
+    },
     limits::SessionLimits,
 };
+
+/// The path of the console's session WebSocket.
+pub const CONSOLE_SESSION_PATH: &str = "/console/ws";
+
+/// The path of the console WebSocket that carries one backup download: the download request the
+/// console sends, then the frames that answer it.
+pub const CONSOLE_BACKUP_DOWNLOAD_PATH: &str = "/console/backups/download";
+
+/// The path of the console WebSocket that carries one restore stream: the restore start and the
+/// archive's chunks the console sends, then the reply that answers them.
+pub const CONSOLE_RESTORE_PATH: &str = "/console/backups/restore";
 
 /// The close code for a message the protocol does not accept, such as a text message.
 const CLOSE_UNSUPPORTED_DATA: u16 = 1003;
@@ -65,6 +85,23 @@ pub type ClientWebSocketCodec = WebSocketCodec<ClientFrame, ServerFrame>;
 
 /// The codec of the server: it sends server frames and receives client frames.
 pub type ServerWebSocketCodec = WebSocketCodec<ServerFrame, ClientFrame>;
+
+/// The codec of a browser downloading a backup: it sends the download request and receives the
+/// download frames.
+pub type ClientBackupDownloadWebSocketCodec =
+    WebSocketCodec<BackupDownloadRequestFrame, BackupDownloadFrame>;
+
+/// The codec of the server answering a download: it sends download frames and receives the
+/// download request.
+pub type ServerBackupDownloadWebSocketCodec =
+    WebSocketCodec<BackupDownloadFrame, BackupDownloadRequestFrame>;
+
+/// The codec of a browser streaming a restore: it sends restore frames and receives the reply.
+pub type ClientRestoreWebSocketCodec = WebSocketCodec<RestoreFrame, RestoreReplyFrame>;
+
+/// The codec of the server reading a restore stream: it sends the reply and receives restore
+/// frames.
+pub type ServerRestoreWebSocketCodec = WebSocketCodec<RestoreReplyFrame, RestoreFrame>;
 
 impl<Outbound: FrameRoot, Inbound: FrameRoot> WebSocketCodec<Outbound, Inbound> {
     pub fn new(limits: SessionLimits) -> Self {

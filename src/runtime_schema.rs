@@ -10,6 +10,14 @@
 //! - **Must not know.** Relays, branches, schedules or the registry. A codec converts a payload and
 //!   answers; it decides nothing about where the result goes.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     cell::Cell,
     fmt, io,
@@ -77,15 +85,31 @@ use simd_json::{BorrowedValue, KnownKey, prelude::*};
 use thiserror::Error;
 
 mod arrow_body;
+#[cfg(test)]
+mod arrow_body_properties;
 mod batch_container;
+#[cfg(test)]
+mod bounded_encoding_properties;
 mod client_batch;
+#[cfg(test)]
+pub(crate) mod codec_properties;
+#[cfg(test)]
+pub(crate) mod crafted_streams;
+#[cfg(test)]
+pub(crate) mod generated_batches;
+mod ipc_stream;
 mod jaq_unfold;
 mod syslog;
+#[cfg(test)]
+mod transforming_codec_properties;
 
+pub(crate) use arrow_body::ArrowBodyError;
 pub(crate) use batch_container::{
     BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding,
 };
 pub use client_batch::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
+pub use ipc_stream::UnsupportedFieldKind;
+pub(crate) use ipc_stream::{IpcMessages, IpcStreamError, StreamEnding};
 pub use jaq_unfold::UnfoldPosition;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,7 +147,7 @@ enum CompiledWireSchema {
     Avro(CompiledAvroWireSchema),
     JaqNative(CompiledJaqNativeCodec),
     Protobuf(CompiledProtobufCodec),
-    Syslog,
+    Syslog(syslog::CompiledSyslogSchema),
 }
 
 impl CompiledWireSchema {
@@ -135,7 +159,7 @@ impl CompiledWireSchema {
             Self::Avro(_) => "AVRO",
             Self::JaqNative(native) => native.format.name(),
             Self::Protobuf(_) => "PROTOBUF",
-            Self::Syslog => "SYSLOG",
+            Self::Syslog(_) => "SYSLOG",
         }
     }
 }
@@ -262,11 +286,16 @@ impl ProtobufDescriptorPool {
     pub fn from_file_descriptor_set(
         file_descriptor_set: prost_types::FileDescriptorSet,
     ) -> error_stack::Result<Self, RuntimeSchemaError> {
-        DescriptorPool::from_file_descriptor_set(file_descriptor_set)
-            .map(|pool| Self { pool })
-            .map_err(|source| {
-                Report::new(RuntimeSchemaError::InvalidProtobufDescriptorSet { source })
-            })
+        {
+            let mapping_input = DescriptorPool::from_file_descriptor_set(file_descriptor_set)
+                .map(|pool| Self { pool });
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(source) => Err(Report::new(
+                    RuntimeSchemaError::InvalidProtobufDescriptorSet { source },
+                )),
+            }
+        }
     }
 
     pub fn message(
@@ -365,6 +394,27 @@ pub enum RuntimeValue {
     F64(OrderedFloat<f64>),
     Array(Vec<RuntimeValue>),
     Vec(Vec<RuntimeValue>),
+}
+
+/// Why a value in the remote form a peer's frame or a stored checkpoint carries is not a runtime
+/// value. The variant names the defect without the value, which may be sensitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum RemoteRuntimeValueError {
+    #[error("a remote datetime value is not RFC 3339 text")]
+    Datetime,
+}
+
+/// Why a runtime value is not a value of a declared type. Neither variant carries the value, which
+/// may be sensitive. A list element names the element type it was held to.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum RuntimeValueTypeError {
+    #[error("expected {expected}, found {actual}")]
+    Type {
+        expected: ParseAsType,
+        actual: RuntimeValueKind,
+    },
+    #[error("expected a fixed array of {expected} elements, found {actual}")]
+    ArrayLength { expected: u32, actual: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -519,6 +569,43 @@ pub enum CodecError {
     ParseField { codec: String, field: String },
     #[error("codec '{codec}' failed to encode field '{field}'")]
     EncodeField { codec: String, field: String },
+}
+
+impl CodecError {
+    /// The field this context names at fault. An unfolding's context names none itself: the report
+    /// of the message it failed in, which it keeps, names that message's field.
+    pub(crate) fn field(&self) -> Option<&str> {
+        match self {
+            Self::MissingField { field, .. }
+            | Self::UnexpectedField { field, .. }
+            | Self::ParseField { field, .. }
+            | Self::EncodeField { field, .. } => Some(field),
+            Self::InvalidCodec { .. }
+            | Self::JsonDecode { .. }
+            | Self::JsonEncode { .. }
+            | Self::ColumnarJsonEncode { .. }
+            | Self::CborDecode { .. }
+            | Self::CborEncode { .. }
+            | Self::AvroDecode { .. }
+            | Self::AvroEncode { .. }
+            | Self::JaqNativeDecode { .. }
+            | Self::JaqNativeEncode { .. }
+            | Self::PayloadWrite { .. }
+            | Self::ProtobufDecode { .. }
+            | Self::ProtobufJaqInput { .. }
+            | Self::ProtobufEncode { .. }
+            | Self::SyslogDecode { .. }
+            | Self::SyslogEncode { .. }
+            | Self::ExpectedObject { .. }
+            | Self::InvalidJaqTransformation { .. }
+            | Self::ProtobufBatchMessageUndeclared { .. }
+            | Self::ProtobufBatchMessageShape { .. }
+            | Self::JaqTransform { .. }
+            | Self::JaqIngestionEvaluation { .. }
+            | Self::Unfold { .. }
+            | Self::UnfoldLimit { .. } => None,
+        }
+    }
 }
 
 /// A rule of a codec's wire format that its declaration, or a use of it, breaks.
@@ -917,7 +1004,7 @@ impl CompiledCodec {
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => false,
+            | CompiledWireSchema::Syslog(_) => false,
         }
     }
 
@@ -956,7 +1043,7 @@ impl CompiledCodec {
             CompiledWireSchema::Json(_)
             | CompiledWireSchema::Cbor(_)
             | CompiledWireSchema::Avro(_)
-            | CompiledWireSchema::Syslog => false,
+            | CompiledWireSchema::Syslog(_) => false,
         }
     }
 
@@ -1120,7 +1207,7 @@ impl CompiledCodecBatchEncoder<'_> {
                     })?;
                 write_payload(codec, output, &encoded)?;
             }
-            CompiledWireSchema::Syslog => syslog::encode_row(&row, output)?,
+            CompiledWireSchema::Syslog(_) => syslog::encode_row(&row, output)?,
         }
         Ok(())
     }
@@ -1182,6 +1269,11 @@ impl fmt::Display for PayloadLimitExceeded {
 /// decoder allocated instead, which for a string column runs many times the data it carries, so a
 /// limit expressed in payload bytes must never be enforced with it.
 pub(crate) fn batch_payload_bytes(batch: &RecordBatch) -> u64 {
+    let add_bytes = nervix_primitives::expect_lint!(
+        nervix::clamped_arithmetic,
+        "overflow or an unmeasurable column must remain above every payload limit",
+        u64::saturating_add
+    );
     batch
         .columns()
         .iter()
@@ -1191,7 +1283,7 @@ pub(crate) fn batch_payload_bytes(batch: &RecordBatch) -> u64 {
             };
             bytes.arch_into()
         })
-        .fold(0_u64, u64::saturating_add)
+        .fold(0_u64, add_bytes)
 }
 
 impl RuntimeRecordBatch {
@@ -2306,7 +2398,7 @@ pub enum ProtobufJsonOperation {
 /// A schema, Arrow record, or scalar projection that cannot satisfy its exact runtime contract.
 #[derive(Debug, Error)]
 pub enum RuntimeSchemaError {
-    #[error("invalid protobuf descriptor set: {source}")]
+    #[error("invalid protobuf descriptor set")]
     InvalidProtobufDescriptorSet {
         #[source]
         source: prost_reflect::DescriptorError,
@@ -2340,7 +2432,7 @@ pub enum RuntimeSchemaError {
     EmptyTestSequence { kind: RuntimeValueKind },
     #[error("test ARRAY length {length} exceeds the Arrow i32 length range")]
     TestArrayLengthOutOfRange { length: usize },
-    #[error("failed to {operation}: {source}")]
+    #[error("failed to {operation}")]
     ArrowOperation {
         operation: RuntimeSchemaOperation,
         #[source]
@@ -2457,7 +2549,7 @@ pub enum RuntimeSchemaError {
     NotSequence { field: String, found: ParseAsType },
     #[error("field '{field}' list contains null at index {index}")]
     NullListElement { field: String, index: usize },
-    #[error("runtime DATETIME is not valid RFC 3339: {source}")]
+    #[error("runtime DATETIME is not valid RFC 3339")]
     InvalidRuntimeDatetime {
         #[source]
         source: chrono::ParseError,
@@ -2493,8 +2585,6 @@ pub enum RuntimeSchemaError {
     },
     #[error("SYSLOG Arrow builder expected column {expected}, received {found}")]
     SyslogBuilderColumnOrder { expected: usize, found: usize },
-    #[error("unsupported SYSLOG schema field '{field}'")]
-    UnsupportedSyslogField { field: String },
     #[error("SYSLOG timestamp is outside the Arrow nanosecond range")]
     SyslogTimestampOutOfRange,
     #[error("runtime record materialization does not support Arrow type {data_type}")]
@@ -2616,6 +2706,52 @@ impl RuntimeValue {
         }
     }
 
+    /// Checks that this value is exactly a value of `expected`: the same scalar type, or a list
+    /// whose every element is a value of the declared element type and which, for an `ARRAY`,
+    /// holds exactly the declared number of elements. No value converts to another type here.
+    pub(crate) fn conform_to(
+        &self,
+        expected: &ParseAsType,
+    ) -> error_stack::Result<(), RuntimeValueTypeError> {
+        let (elements, element) = match (self, expected) {
+            (Self::U8(_), ParseAsType::U8)
+            | (Self::I8(_), ParseAsType::I8)
+            | (Self::U16(_), ParseAsType::U16)
+            | (Self::I16(_), ParseAsType::I16)
+            | (Self::U32(_), ParseAsType::U32)
+            | (Self::I32(_), ParseAsType::I32)
+            | (Self::U64(_), ParseAsType::U64)
+            | (Self::I64(_), ParseAsType::I64)
+            | (Self::F32(_), ParseAsType::F32)
+            | (Self::F64(_), ParseAsType::F64)
+            | (Self::Bool(_), ParseAsType::Bool)
+            | (Self::String(_), ParseAsType::String)
+            | (Self::Datetime(_), ParseAsType::Datetime) => return Ok(()),
+            (Self::Array(elements), ParseAsType::Array { element, len }) => {
+                let length = usize::try_from(len.get())
+                    .assured("a u32 fixed-list length fits every supported target");
+                if elements.len() != length {
+                    return Err(Report::new(RuntimeValueTypeError::ArrayLength {
+                        expected: len.get(),
+                        actual: elements.len(),
+                    }));
+                }
+                (elements, element.as_ref())
+            }
+            (Self::Vec(elements), ParseAsType::Vec { element }) => (elements, element.as_ref()),
+            (value, expected) => {
+                return Err(Report::new(RuntimeValueTypeError::Type {
+                    expected: expected.clone(),
+                    actual: value.kind(),
+                }));
+            }
+        };
+        for value in elements {
+            value.conform_to(element)?;
+        }
+        Ok(())
+    }
+
     pub fn to_remote(&self) -> RemoteRuntimeValue {
         match self {
             Self::U8(v) => RemoteRuntimeValue::U8(*v),
@@ -2640,8 +2776,14 @@ impl RuntimeValue {
         }
     }
 
-    pub fn from_remote(value: RemoteRuntimeValue) -> Self {
-        match value {
+    /// The typed value a peer's frame or a stored checkpoint carries in its remote form.
+    ///
+    /// A remote datetime is RFC 3339 text, which this node reads back rather than trusts: text
+    /// that does not read as a datetime fails here instead of reaching any owner of the value.
+    pub fn from_remote(
+        value: RemoteRuntimeValue,
+    ) -> error_stack::Result<Self, RemoteRuntimeValueError> {
+        let value = match value {
             RemoteRuntimeValue::U8(v) => Self::U8(v),
             RemoteRuntimeValue::I8(v) => Self::I8(v),
             RemoteRuntimeValue::U16(v) => Self::U16(v),
@@ -2652,19 +2794,32 @@ impl RuntimeValue {
             RemoteRuntimeValue::I64(v) => Self::I64(v),
             RemoteRuntimeValue::Bool(v) => Self::Bool(v),
             RemoteRuntimeValue::String(v) => Self::String(v),
-            RemoteRuntimeValue::Datetime(v) => Self::Datetime(
-                DateTime::parse_from_rfc3339(&v)
-                    .assured("the peer renders these with to_rfc3339, which this parser accepts"),
-            ),
+            RemoteRuntimeValue::Datetime(v) => Self::Datetime(Self::remote_datetime(&v)?),
             RemoteRuntimeValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeValue::F64(v) => Self::F64(OrderedFloat(v)),
-            RemoteRuntimeValue::Array(v) => {
-                Self::Array(v.into_iter().map(Self::from_remote_element).collect())
-            }
-            RemoteRuntimeValue::Vec(v) => {
-                Self::Vec(v.into_iter().map(Self::from_remote_element).collect())
-            }
+            RemoteRuntimeValue::Array(v) => Self::Array(Self::from_remote_elements(v)?),
+            RemoteRuntimeValue::Vec(v) => Self::Vec(Self::from_remote_elements(v)?),
+        };
+        Ok(value)
+    }
+
+    /// The datetime a remote value spells as RFC 3339 text.
+    fn remote_datetime(
+        text: &str,
+    ) -> error_stack::Result<DateTime<FixedOffset>, RemoteRuntimeValueError> {
+        DateTime::parse_from_rfc3339(text)
+            .map_err(|error| Report::new(RemoteRuntimeValueError::Datetime).attach_printable(error))
+    }
+
+    /// The elements of a remote array or list, in their order.
+    fn from_remote_elements(
+        values: Vec<RemoteRuntimeElementValue>,
+    ) -> error_stack::Result<Vec<Self>, RemoteRuntimeValueError> {
+        let mut elements = Vec::with_capacity(values.len());
+        for value in values {
+            elements.push(Self::from_remote_element(value)?);
         }
+        Ok(elements)
     }
 
     fn to_remote_element(&self) -> RemoteRuntimeElementValue {
@@ -2691,8 +2846,10 @@ impl RuntimeValue {
         }
     }
 
-    fn from_remote_element(value: RemoteRuntimeElementValue) -> Self {
-        match value {
+    fn from_remote_element(
+        value: RemoteRuntimeElementValue,
+    ) -> error_stack::Result<Self, RemoteRuntimeValueError> {
+        let value = match value {
             RemoteRuntimeElementValue::U8(v) => Self::U8(v),
             RemoteRuntimeElementValue::I8(v) => Self::I8(v),
             RemoteRuntimeElementValue::U16(v) => Self::U16(v),
@@ -2703,19 +2860,17 @@ impl RuntimeValue {
             RemoteRuntimeElementValue::I64(v) => Self::I64(v),
             RemoteRuntimeElementValue::Bool(v) => Self::Bool(v),
             RemoteRuntimeElementValue::String(v) => Self::String(v),
-            RemoteRuntimeElementValue::Datetime(v) => Self::Datetime(
-                DateTime::parse_from_rfc3339(&v)
-                    .assured("the peer renders these with to_rfc3339, which this parser accepts"),
-            ),
+            RemoteRuntimeElementValue::Datetime(v) => Self::Datetime(Self::remote_datetime(&v)?),
             RemoteRuntimeElementValue::F32(v) => Self::F32(OrderedFloat(v)),
             RemoteRuntimeElementValue::F64(v) => Self::F64(OrderedFloat(v)),
             RemoteRuntimeElementValue::Array(values) => {
-                Self::Array(values.into_iter().map(Self::from_remote_element).collect())
+                Self::Array(Self::from_remote_elements(values)?)
             }
             RemoteRuntimeElementValue::Vec(values) => {
-                Self::Vec(values.into_iter().map(Self::from_remote_element).collect())
+                Self::Vec(Self::from_remote_elements(values)?)
             }
-        }
+        };
+        Ok(value)
     }
 
     pub(crate) fn to_key_fragment(&self) -> String {
@@ -2724,6 +2879,46 @@ impl RuntimeValue {
             Self::Datetime(v) => v.to_rfc3339(),
             other => other.to_json_value().to_string(),
         }
+    }
+
+    /// Whether every float this value holds, at any depth, is finite.
+    pub(crate) fn holds_only_finite_floats(&self) -> bool {
+        match self {
+            Self::F32(v) => v.into_inner().is_finite(),
+            Self::F64(v) => v.into_inner().is_finite(),
+            Self::Array(values) | Self::Vec(values) => {
+                values.iter().all(RuntimeValue::holds_only_finite_floats)
+            }
+            Self::U8(_)
+            | Self::I8(_)
+            | Self::U16(_)
+            | Self::I16(_)
+            | Self::U32(_)
+            | Self::I32(_)
+            | Self::U64(_)
+            | Self::I64(_)
+            | Self::Bool(_)
+            | Self::String(_)
+            | Self::Datetime(_) => true,
+        }
+    }
+
+    /// A float as JSON: its number, or, for a non-finite float JSON has no number for, the string
+    /// a proto3 JSON reader reads it from. A non-finite float reaches a record from a payload whose
+    /// number rounds past the type's range, an Avro or CBOR float, or a client's Arrow batch; only
+    /// a float the VM computes is refused when it is not finite.
+    fn json_float(value: f64) -> JsonValue {
+        if let Some(number) = JsonNumber::from_f64(value) {
+            return JsonValue::Number(number);
+        }
+        let name = if value.is_nan() {
+            "NaN"
+        } else if value.is_sign_negative() {
+            "-Infinity"
+        } else {
+            "Infinity"
+        };
+        JsonValue::String(name.to_string())
     }
 
     pub(crate) fn to_json_value(&self) -> JsonValue {
@@ -2739,16 +2934,8 @@ impl RuntimeValue {
             Self::Bool(v) => JsonValue::Bool(*v),
             Self::String(v) => JsonValue::String(v.clone()),
             Self::Datetime(v) => JsonValue::String(v.to_rfc3339()),
-            Self::F32(v) => {
-                JsonValue::Number(JsonNumber::from_f64(f64::from(v.into_inner())).verified(
-                    "the VM turns a non-finite float result into a row error, so a stored float \
-                     is finite",
-                ))
-            }
-            Self::F64(v) => JsonValue::Number(JsonNumber::from_f64(v.into_inner()).verified(
-                "the VM turns a non-finite float result into a row error, so a stored float is \
-                 finite",
-            )),
+            Self::F32(v) => Self::json_float(f64::from(v.into_inner())),
+            Self::F64(v) => Self::json_float(v.into_inner()),
             Self::Array(values) | Self::Vec(values) => {
                 JsonValue::Array(values.iter().map(RuntimeValue::to_json_value).collect())
             }
@@ -2771,7 +2958,9 @@ impl<'de> Deserialize<'de> for RuntimeValue {
         D: Deserializer<'de>,
     {
         let value = SerializableRuntimeValue::deserialize(deserializer)?;
-        Self::try_from(value).map_err(serde::de::Error::custom)
+        // A value that does not convert keeps its parser's error beneath the context, so the
+        // message is the whole chain.
+        Self::try_from(value).map_err(|report| serde::de::Error::custom(format!("{report:#}")))
     }
 }
 
@@ -2812,11 +3001,15 @@ impl TryFrom<SerializableRuntimeValue> for RuntimeValue {
             SerializableRuntimeValue::I64(v) => Ok(Self::I64(v)),
             SerializableRuntimeValue::Bool(v) => Ok(Self::Bool(v)),
             SerializableRuntimeValue::String(v) => Ok(Self::String(v)),
-            SerializableRuntimeValue::Datetime(v) => DateTime::parse_from_rfc3339(&v)
-                .map(Self::Datetime)
-                .map_err(|source| {
-                    Report::new(RuntimeSchemaError::InvalidRuntimeDatetime { source })
-                }),
+            SerializableRuntimeValue::Datetime(v) => {
+                let mapping_input = DateTime::parse_from_rfc3339(&v).map(Self::Datetime);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(source) => Err(Report::new(RuntimeSchemaError::InvalidRuntimeDatetime {
+                        source,
+                    })),
+                }
+            }
             SerializableRuntimeValue::F32(v) => Ok(Self::F32(OrderedFloat(v))),
             SerializableRuntimeValue::F64(v) => Ok(Self::F64(OrderedFloat(v))),
             SerializableRuntimeValue::Array(values) => Ok(Self::Array(
@@ -2947,10 +3140,9 @@ pub(crate) fn compile_codec_spec_with_protobuf(
                 )?,
             })
         }
-        ResolvedCodecWireFormat::Syslog => {
-            syslog::validate_compiled_schema(name, encoding_rules, &schema)?;
-            CompiledWireSchema::Syslog
-        }
+        ResolvedCodecWireFormat::Syslog => CompiledWireSchema::Syslog(
+            syslog::CompiledSyslogSchema::compile(name, encoding_rules, &schema)?,
+        ),
     };
 
     Ok(Arc::new(CompiledCodec {
@@ -3027,7 +3219,7 @@ pub(crate) fn decode_with_codec(
         }
         CompiledWireSchema::Cbor(wire_schema) => decode_cbor(codec, wire_schema, payload, builder),
         CompiledWireSchema::Avro(wire_schema) => decode_avro(codec, wire_schema, payload, builder),
-        CompiledWireSchema::Syslog => syslog::decode(codec, payload, builder),
+        CompiledWireSchema::Syslog(syslog) => syslog.decode(codec, payload, builder),
         CompiledWireSchema::JaqNative(_) | CompiledWireSchema::Protobuf(_) => {
             let unfolded = codec.unfold_on_ingestion(Bytes::copy_from_slice(payload))?;
             return unfolded.append_to(codec, builder);
@@ -3203,7 +3395,7 @@ impl<'a> ArrowCodecValue<'a> {
             ParseAsType::Array { element, len } => {
                 let array = self.typed::<FixedSizeListArray>()?;
                 let expected_length = i32::try_from(len.get())
-                    .assured("an NSPL ARRAY length is bounded by Arrow's signed i32 length");
+                    .assured("a Plexus ARRAY length is bounded by Arrow's signed i32 length");
                 if array.value_length() != expected_length {
                     return Err(Report::new(RuntimeSchemaError::ArrowArrayLengthMismatch {
                         field: self.field.to_string(),
@@ -3883,7 +4075,8 @@ fn append_json_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(incompatible)?;
+            let parsed = $parsed;
+            let parsed = parsed.ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
@@ -3941,9 +4134,7 @@ fn append_json_value_to_arrow(
                 None
             }
         ),
-        ParseAsType::F32 => {
-            append_primitive!(Float32Builder, value.as_f64().map(ApproxInto::approx_into))
-        }
+        ParseAsType::F32 => append_primitive!(Float32Builder, value.as_f64().map(json_number_f32)),
         ParseAsType::F64 => append_primitive!(Float64Builder, value.as_f64()),
         ParseAsType::Array { element, len } => {
             let values = value.as_array().ok_or_else(incompatible)?;
@@ -3990,18 +4181,54 @@ fn append_json_value_to_arrow(
                     parent: location,
                     index,
                 };
-                append_json_value_to_arrow(
+                if let Err(error) = append_json_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     element_expected,
                     value,
                     &element_location,
-                )?;
+                ) {
+                    close_partial_list(builder);
+                    return Err(error);
+                }
             }
             builder.append(true);
             Ok(())
         }
     }
+}
+
+/// The `F32` a JSON number names, given the `f64` a JSON reader parsed it as.
+///
+/// Narrowing the `f64` rounds a second time, which names the nearest `F32` except where the `f64`
+/// lies exactly halfway between two `F32` values: the decimal lay just beside that midpoint, and
+/// rounding half to even can name the neighbour of the value it was written for. `7.038531e-26`
+/// is one such decimal. A writer spells an `F32` with its shortest decimal, so at a midpoint the
+/// number names the `F32` whose shortest decimal reads as the same `f64`; every other number names
+/// the nearest `F32`.
+fn json_number_f32(wide: f64) -> f32 {
+    let nearest: f32 = wide.approx_into();
+    let nearest_wide = f64::from(nearest);
+    if !nearest.is_finite() || nearest_wide == wide {
+        return nearest;
+    }
+    let other = if nearest_wide < wide {
+        nearest.next_up()
+    } else {
+        nearest.next_down()
+    };
+    // Two adjacent `F32` values widen exactly, and so does the point halfway between them.
+    let midpoint = (nearest_wide + f64::from(other)) / 2.0;
+    if midpoint != wide {
+        return nearest;
+    }
+    let mut digits = ryu::Buffer::new();
+    let other_reads_as_wide = digits.format(other).parse::<f64>() == Ok(wide);
+    let nearest_reads_as_wide = digits.format(nearest).parse::<f64>() == Ok(wide);
+    if other_reads_as_wide && !nearest_reads_as_wide {
+        return other;
+    }
+    nearest
 }
 
 fn append_borrowed_json_value_to_arrow(
@@ -4021,7 +4248,8 @@ fn append_borrowed_json_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(incompatible)?;
+            let parsed = $parsed;
+            let parsed = parsed.ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
@@ -4070,10 +4298,9 @@ fn append_borrowed_json_value_to_arrow(
                 .append_value(value);
             Ok(())
         }
-        ParseAsType::F32 => append_primitive!(
-            Float32Builder,
-            value.cast_f64().map(ApproxInto::approx_into)
-        ),
+        ParseAsType::F32 => {
+            append_primitive!(Float32Builder, value.cast_f64().map(json_number_f32))
+        }
         ParseAsType::F64 => append_primitive!(Float64Builder, value.cast_f64()),
         ParseAsType::Array { element, len } => {
             let values = value.as_array().ok_or_else(incompatible)?;
@@ -4120,13 +4347,16 @@ fn append_borrowed_json_value_to_arrow(
                     parent: location,
                     index,
                 };
-                append_borrowed_json_value_to_arrow(
+                if let Err(error) = append_borrowed_json_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     element_expected,
                     value,
                     &element_location,
-                )?;
+                ) {
+                    close_partial_list(builder);
+                    return Err(error);
+                }
             }
             builder.append(true);
             Ok(())
@@ -4193,7 +4423,8 @@ fn append_avro_value_to_arrow(
 
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
-            let parsed = ($parsed).ok_or_else(incompatible)?;
+            let parsed = $parsed;
+            let parsed = parsed.ok_or_else(incompatible)?;
             typed_arrow_builder::<$builder>(builder, &ty.arrow_data_type(), location)?
                 .append_value(parsed);
             Ok(())
@@ -4329,12 +4560,15 @@ fn append_avro_value_to_arrow(
                     parent: location,
                     index,
                 };
-                append_avro_value_to_arrow(
+                if let Err(error) = append_avro_value_to_arrow(
                     builder.values().as_mut(),
                     element,
                     value,
                     &element_location,
-                )?;
+                ) {
+                    close_partial_list(builder);
+                    return Err(error);
+                }
             }
             builder.append(true);
             Ok(())
@@ -4375,6 +4609,15 @@ fn avro_value_payload(value: &AvroValue) -> &AvroValue {
 
 fn avro_value_is_null(value: &AvroValue) -> bool {
     matches!(avro_value_payload(value), AvroValue::Null)
+}
+
+/// Closes the list value a failed element append left open.
+///
+/// The elements written before the failure stay in the child builder, so the list that holds them
+/// must be closed now: left open, they would become the first elements of the next row's list
+/// value. The row they belong to is abandoned and dropped, so its list never reaches a batch.
+fn close_partial_list(builder: &mut ListBuilder<Box<dyn ArrayBuilder>>) {
+    builder.append(true);
 }
 
 /// Closes the fixed-size list value an element append failed part-way through.
@@ -4762,7 +5005,7 @@ pub(crate) fn runtime_value_from_arrow_array(
         ParseAsType::Array { element, len } => {
             let array = typed_arrow_array::<FixedSizeListArray>(array, ty, field)?;
             let expected_length = i32::try_from(len.get())
-                .assured("an NSPL ARRAY length is bounded by Arrow's signed i32 length");
+                .assured("a Plexus ARRAY length is bounded by Arrow's signed i32 length");
             if array.value_length() != expected_length {
                 return Err(Report::new(RuntimeSchemaError::ArrowArrayLengthMismatch {
                     field: field.to_string(),
@@ -5037,6 +5280,62 @@ mod tests {
         for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
     {
         N::try_from(raw).expect("valid name")
+    }
+
+    #[test]
+    fn a_runtime_datetime_that_is_not_rfc3339_names_the_parser_error_once() {
+        let parse_cause = DateTime::parse_from_rfc3339("yesterday")
+            .expect_err("the text is not RFC 3339")
+            .to_string();
+        let converted =
+            RuntimeValue::try_from(SerializableRuntimeValue::Datetime("yesterday".to_string()))
+                .expect_err("the text is not RFC 3339");
+        let deserialized = serde_json::from_value::<RuntimeValue>(serde_json::json!({
+            "type": "Datetime",
+            "value": "yesterday",
+        }))
+        .expect_err("the text is not RFC 3339");
+
+        assert_eq!(
+            format!("{converted:#}"),
+            format!("runtime DATETIME is not valid RFC 3339: {parse_cause}")
+        );
+        assert_eq!(
+            deserialized.to_string(),
+            format!("runtime DATETIME is not valid RFC 3339: {parse_cause}")
+        );
+    }
+
+    #[test]
+    fn an_inconsistent_descriptor_set_names_the_descriptor_error_once() {
+        let file = prost_types::FileDescriptorProto {
+            name: Some("broken.proto".to_string()),
+            package: Some("nervix.test".to_string()),
+            message_type: vec![prost_types::DescriptorProto {
+                name: Some("Event".to_string()),
+                field: vec![prost_types::FieldDescriptorProto {
+                    name: Some("missing".to_string()),
+                    number: Some(1),
+                    r#type: Some(prost_types::field_descriptor_proto::Type::Message.into()),
+                    type_name: Some(".nervix.test.Missing".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            syntax: Some("proto3".to_string()),
+            ..Default::default()
+        };
+        let set = prost_types::FileDescriptorSet { file: vec![file] };
+        let descriptor_cause = prost_reflect::DescriptorPool::from_file_descriptor_set(set.clone())
+            .expect_err("the field names a message the set does not define")
+            .to_string();
+        let error = ProtobufDescriptorPool::from_file_descriptor_set(set)
+            .expect_err("the field names a message the set does not define");
+
+        assert_eq!(
+            format!("{error:#}"),
+            format!("invalid protobuf descriptor set: {descriptor_cause}")
+        );
     }
 
     fn schema() -> CreateSchema {
@@ -7244,6 +7543,43 @@ mod tests {
             Some(RuntimeValue::String(
                 "[example@32473 note=\"line\tvalue\"]".to_string()
             ))
+        );
+    }
+
+    #[rstest]
+    #[case::u8_column(0, "facility")]
+    #[case::datetime_column(2, "timestamp")]
+    #[case::string_column(3, "hostname")]
+    fn a_syslog_column_of_another_arrow_type_fails_naming_its_field(
+        #[case] column: usize,
+        #[case] field: &str,
+    ) {
+        let codec = compiled_syslog_codec();
+        let mut schema = syslog_schema();
+        schema.fields[column].ty = ParseAsType::I64;
+        let mut builder = compile_schema(&schema).batch_builder(1);
+        let mut decoder = JsonDecoder::default();
+        let payload = b"<34>1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 - order accepted";
+
+        let error = decode_with_codec(&codec, payload, &mut decoder, &mut builder)
+            .expect_err("the builder's column is not the Arrow type the SYSLOG field appends");
+
+        assert!(
+            matches!(
+                error.current_context(),
+                CodecError::SyslogDecode { codec } if codec == "syslog_codec"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            matches!(
+                error.downcast_ref::<RuntimeSchemaError>(),
+                Some(RuntimeSchemaError::ExactTypeMismatch {
+                    location: RuntimeValueLocation::CodecField { field: mismatched, .. },
+                    ..
+                }) if mismatched == field
+            ),
+            "{error:?}"
         );
     }
 
@@ -9673,5 +10009,125 @@ mod tests {
             error.current_context(),
             CodecError::InvalidCodec { .. }
         ));
+    }
+
+    /// JSON has no number for a non-finite float, so the JSON a materialized report, a hash map
+    /// answer or a hash map key is rendered from spells one as the string a proto3 JSON reader
+    /// takes for it, and keeps every finite float a number.
+    #[test]
+    fn non_finite_floats_render_as_their_json_names() {
+        for (value, expected) in [
+            (
+                RuntimeValue::F32(OrderedFloat(f32::INFINITY)),
+                serde_json::json!("Infinity"),
+            ),
+            (
+                RuntimeValue::F32(OrderedFloat(f32::NEG_INFINITY)),
+                serde_json::json!("-Infinity"),
+            ),
+            (
+                RuntimeValue::F32(OrderedFloat(f32::NAN)),
+                serde_json::json!("NaN"),
+            ),
+            (
+                RuntimeValue::F64(OrderedFloat(f64::INFINITY)),
+                serde_json::json!("Infinity"),
+            ),
+            (
+                RuntimeValue::F64(OrderedFloat(f64::NEG_INFINITY)),
+                serde_json::json!("-Infinity"),
+            ),
+            (
+                RuntimeValue::F64(OrderedFloat(-f64::NAN)),
+                serde_json::json!("NaN"),
+            ),
+            (RuntimeValue::F64(OrderedFloat(0.5)), serde_json::json!(0.5)),
+            (
+                RuntimeValue::Vec(vec![
+                    RuntimeValue::F32(OrderedFloat(1.5)),
+                    RuntimeValue::F32(OrderedFloat(f32::NAN)),
+                ]),
+                serde_json::json!([1.5, "NaN"]),
+            ),
+        ] {
+            assert_eq!(value.to_json_value(), expected);
+        }
+        assert_eq!(
+            RuntimeValue::F64(OrderedFloat(f64::INFINITY)).to_key_fragment(),
+            "\"Infinity\""
+        );
+    }
+
+    /// A value conforms only to its own exact type, and a list conforms when every element
+    /// conforms to the declared element type and an `ARRAY` holds exactly its declared length.
+    #[test]
+    fn a_runtime_value_conforms_only_to_its_exact_declared_type() {
+        let pair = ParseAsType::Array {
+            element: Box::new(ParseAsType::Vec {
+                element: Box::new(ParseAsType::I32),
+            }),
+            len: nonzero!(2u32),
+        };
+        let conforming = RuntimeValue::Array(vec![
+            RuntimeValue::Vec(vec![RuntimeValue::I32(1), RuntimeValue::I32(2)]),
+            RuntimeValue::Vec(Vec::new()),
+        ]);
+        conforming
+            .conform_to(&pair)
+            .assured("every element is a list of I32 and the array has its declared length");
+        RuntimeValue::String("north".to_string())
+            .conform_to(&ParseAsType::String)
+            .assured("a string conforms to STRING");
+
+        let narrower = RuntimeValue::I32(7)
+            .conform_to(&ParseAsType::I64)
+            .expect_err("an I32 is not widened to I64");
+        assert_eq!(
+            narrower.current_context(),
+            &RuntimeValueTypeError::Type {
+                expected: ParseAsType::I64,
+                actual: RuntimeValueKind::I32,
+            }
+        );
+        assert_eq!(
+            narrower.current_context().to_string(),
+            "expected I64, found I32"
+        );
+
+        let short = RuntimeValue::Array(vec![RuntimeValue::Vec(Vec::new())])
+            .conform_to(&pair)
+            .expect_err("an array of one element is not an array of two");
+        assert_eq!(
+            short.current_context(),
+            &RuntimeValueTypeError::ArrayLength {
+                expected: 2,
+                actual: 1,
+            }
+        );
+
+        let element = RuntimeValue::Array(vec![
+            RuntimeValue::Vec(vec![RuntimeValue::I32(1)]),
+            RuntimeValue::Vec(vec![RuntimeValue::String("2".to_string())]),
+        ])
+        .conform_to(&pair)
+        .expect_err("a nested element of another type does not conform");
+        assert_eq!(
+            element.current_context(),
+            &RuntimeValueTypeError::Type {
+                expected: ParseAsType::I32,
+                actual: RuntimeValueKind::String,
+            }
+        );
+
+        let list = RuntimeValue::Vec(vec![RuntimeValue::I32(1)])
+            .conform_to(&pair)
+            .expect_err("a VEC is not an ARRAY");
+        assert_eq!(
+            list.current_context(),
+            &RuntimeValueTypeError::Type {
+                expected: pair.clone(),
+                actual: RuntimeValueKind::Vec,
+            }
+        );
     }
 }

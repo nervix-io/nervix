@@ -3,11 +3,11 @@ Feature: Altering ingestors
   Scenario Outline: ALTER INGESTOR applies ordered operations and SHOW CREATE renders the result
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -18,16 +18,16 @@ Feature: Altering ingestors
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-roundtrip.example.com;
       CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
       CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH EACH 30s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      ALTER INGESTOR event_source
-        SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB,
+      ALTER HTTP ENDPOINT INGESTOR event_source
+        SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB,
         SET DECODE USING event_codec_v2,
         SET TIMESTAMP NOW,
         SET FILTER WHERE input.seq > 0,
@@ -40,8 +40,8 @@ Feature: Altering ingestors
       """
     Then the last command output contains
       """
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB
         DECODE USING event_codec_v2
         TIMESTAMP NOW
         FILTER WHERE input.seq > 0
@@ -68,11 +68,11 @@ Feature: Altering ingestors
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
@@ -81,8 +81,8 @@ Feature: Altering ingestors
       CREATE VHOST edge http-{{test_id}}-alter-ingestor-swap.example.com;
       CREATE ENDPOINT ingress_a ON edge PATH '/a' TYPE HTTP;
       CREATE ENDPOINT ingress_b ON edge PATH '/b' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress_a MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress_a MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO outgoing INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
@@ -98,10 +98,10 @@ Feature: Altering ingestors
       """
       "seq":1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
-      ALTER INGESTOR event_source
-        SET FROM ENDPOINT ingress_b MODE NO_ACK SEQUENTIAL ON QUIESCE BUFFER MAX SIZE 1MiB;
+      ALTER HTTP ENDPOINT INGESTOR event_source
+        SET FROM ingress_b MODE NO ACK ON QUIESCE BUFFER MAX SIZE 1MiB;
       """
     Then the last command output contains
       """
@@ -126,13 +126,13 @@ Feature: Altering ingestors
     Given entity gate deadline is configured as "30s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
     And the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA buffered_event ( seq I64 );
       CREATE WIRE JSON SCHEMA buffered_event_wire MODE STRICT ( seq integer );
@@ -143,17 +143,17 @@ Feature: Altering ingestors
       CREATE RELAY buffered_events SCHEMA buffered_event UNBRANCHED CAPACITY 2;
       CREATE VHOST buffered_edge http-{{test_id}}-buffered-alter.example.com;
       CREATE ENDPOINT buffered_ingress ON buffered_edge PATH '/buffered-alter' TYPE HTTP;
-      CREATE CLIENT buffered_sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT buffered_sink CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
-      CREATE INGESTOR buffered_source
-        FROM ENDPOINT buffered_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR buffered_source
+        FROM buffered_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING buffered_event_codec
         TO buffered_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER buffered_out FROM buffered_events
-        TO ZEROMQ buffered_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      CREATE ZEROMQ PUSH EMITTER buffered_out FROM buffered_events
+        TO buffered_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
         ENCODE USING buffered_event_codec INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
@@ -162,9 +162,9 @@ Feature: Altering ingestors
       """
       {"seq":1}
       """
-    And these NSPL commands begin executing in the background
+    And these Plexus commands begin executing in the background
       """
-      ALTER INGESTOR buffered_source SET DECODE USING buffered_event_codec_v2;
+      ALTER HTTP ENDPOINT INGESTOR buffered_source SET DECODE USING buffered_event_codec_v2;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     Then within "5s" node "node-1" eventually reports describe ingestor "buffered_source" as "status: quiesced"
@@ -179,7 +179,7 @@ Feature: Altering ingestors
       """
     Then within "5s" node "node-1" eventually reports describe ingestor "buffered_source" as "nervix_ingestor_quiesce_buffered_records: 2"
     When the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And within "5s" the observed broker receives payloads
       """
       "seq":1
@@ -196,11 +196,11 @@ Feature: Altering ingestors
   Scenario Outline: SET QUIESCE changes only to a mode supported by the current source
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA quiesce_event ( seq I64 );
       CREATE WIRE JSON SCHEMA quiesce_event_wire MODE STRICT ( seq integer );
@@ -209,19 +209,19 @@ Feature: Altering ingestors
       CREATE RELAY quiesce_events SCHEMA quiesce_event UNBRANCHED;
       CREATE VHOST quiesce_edge http-{{test_id}}-set-quiesce.example.com;
       CREATE ENDPOINT quiesce_ingress ON quiesce_edge PATH '/set-quiesce' TYPE HTTP;
-      CREATE INGESTOR quiesce_source
-        FROM ENDPOINT quiesce_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR quiesce_source
+        FROM quiesce_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING quiesce_event_codec
         TO quiesce_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
-      ALTER INGESTOR quiesce_source SET QUIESCE REJECT RETRY AFTER 7s;
+      ALTER HTTP ENDPOINT INGESTOR quiesce_source SET QUIESCE REJECT RETRY AFTER 7s;
       """
     Then the last command output contains
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR quiesce_source;
       """
@@ -229,9 +229,9 @@ Feature: Altering ingestors
       """
       ON QUIESCE REJECT RETRY AFTER 7s
       """
-    When these NSPL commands fail with "ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
+    When these Plexus commands fail with "HTTP ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
       """
-      ALTER INGESTOR quiesce_source SET QUIESCE SUSPEND;
+      ALTER HTTP ENDPOINT INGESTOR quiesce_source SET QUIESCE SUSPEND;
       """
 
     Examples:
@@ -243,12 +243,12 @@ Feature: Altering ingestors
   Scenario Outline: A paced domain rejects dropping an ingestor timestamp source
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100000h;
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 1.0;
 
@@ -259,8 +259,7 @@ Feature: Altering ingestors
         TO SCHEMA paced_event;
       CREATE RELAY paced_events SCHEMA paced_event UNBRANCHED;
 
-      CREATE CLIENT paced_sink
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT paced_sink
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -269,17 +268,17 @@ Feature: Altering ingestors
       CREATE VHOST paced_edge http-{{test_id}}-paced-alter.example.com;
       CREATE ENDPOINT paced_ingress ON paced_edge PATH '/paced-alter' TYPE HTTP;
 
-      CREATE INGESTOR paced_source
-        FROM ENDPOINT paced_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR paced_source
+        FROM paced_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING paced_event_codec
         TIMESTAMP NOW
         TO paced_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER paced_out
+      CREATE ZEROMQ PUSH EMITTER paced_out
         FROM paced_events
-        TO ZEROMQ paced_sink MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING paced_event_codec
+        TO paced_sink MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING paced_event_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -293,11 +292,11 @@ Feature: Altering ingestors
       """
       "seq":1
       """
-    When these NSPL commands fail with "requires ingestor 'paced_source' to declare TIMESTAMP NOW"
+    When these Plexus commands fail with "requires ingestor 'paced_source' to declare TIMESTAMP NOW"
       """
-      ALTER INGESTOR paced_source DROP TIMESTAMP;
+      ALTER HTTP ENDPOINT INGESTOR paced_source DROP TIMESTAMP;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CREATE INGESTOR paced_source;
       """

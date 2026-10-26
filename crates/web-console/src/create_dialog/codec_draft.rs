@@ -6,6 +6,11 @@
 //! - **Depends on.** Current codec Models and the create dialog's selected references.
 //! - **Must not know.** Codec compilation, registry contents, or resource installation.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::collections::BTreeSet;
 
 use error_stack::Report;
@@ -206,10 +211,17 @@ impl CodecFormatDraft {
                 batch_message,
                 transformations,
             } => {
-                let binding = binding.build().map_err(|error| {
-                    let context = CodecDraftError::Resource(error.current_context().clone());
-                    error.change_context(context)
-                })?;
+                let binding = {
+                    let mapping_input = binding.build();
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(error) => Err({
+                            let context =
+                                CodecDraftError::Resource(error.current_context().clone());
+                            error.change_context(context)
+                        }),
+                    }
+                }?;
                 if message.trim().is_empty() {
                     return Err(Report::new(CodecDraftError::MessageRequired));
                 }
@@ -427,12 +439,16 @@ pub(super) enum CodecDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         CreateStatement, Model, ModelKind, ModelName, NodeRef, RequestedResourceVersion, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{
         CodecDraft, CodecDraftError, CodecFormatDraft, CodecFormatKind, EncodingRuleDraft,
@@ -462,7 +478,7 @@ mod tests {
             draft.if_not_exists,
         ));
         let source = statement
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .assured("the completed codec renders");
         assert_eq!(
             parse_client_statement(&source).assured("canonical codec must parse"),

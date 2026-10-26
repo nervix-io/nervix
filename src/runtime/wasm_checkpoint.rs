@@ -6,8 +6,13 @@
 //!   reached its boundary, and the branch's transition when it does not.
 //! - **Depends on.** Replicated WASM guest state, the runtime's checkpoint stages, the processor's
 //!   error policies and reporting, and acknowledgement sets.
-//! - **Must not know.** NSPL parsing, placement policy, connector clients, or how stable storage
+//! - **Must not know.** Plexus parsing, placement policy, connector clients, or how stable storage
 //!   and replicas are reached.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use error_stack::ResultExt as _;
 use nervix_wasm::WasmGuestReportExt as _;
@@ -16,7 +21,7 @@ use super::*;
 
 /// How long one checkpoint may take to reach its boundary, from the guest's save to the
 /// confirmation of its last replica. A checkpoint still short of its boundary then fails.
-pub(super) const WASM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(10);
+pub(super) const WASM_CHECKPOINT_DEADLINE: Duration = Duration::from_secs(90);
 
 /// The success acknowledgements guest callbacks decided, held back until the checkpoint that covers
 /// those callbacks reaches its boundary.
@@ -49,6 +54,16 @@ impl WasmCheckpointHolds {
     }
 }
 
+/// A checkpoint in progress is progress of the inputs it holds: their source must not time them
+/// out and send them again while the checkpoint is still on its way to its boundary.
+impl AcknowledgementKeepalive for WasmCheckpointHolds {
+    fn keep_alive(&self) {
+        for held in &self.held {
+            held.ack_alive();
+        }
+    }
+}
+
 /// What a WASM guest callback reports its failures through.
 #[derive(Clone, Copy)]
 pub(super) struct WasmCallbackReporting<'a> {
@@ -63,11 +78,11 @@ impl WasmCallbackReporting<'_> {
     /// Apply the processor's general error policy to every input the branch holds, because a
     /// callback failed without reporting lineage for any of them. A success the policy grants is
     /// held back until the checkpoint that completes the callback.
-    pub(super) fn fail_held_inputs(
+    pub(super) fn fail_held_inputs<C: error_stack::Context>(
         self,
         ack_map: &mut WasmAckMap,
         holds: &mut WasmCheckpointHolds,
-        reason: String,
+        error: &Report<C>,
     ) {
         let held = std::mem::take(ack_map);
         for context in held.values() {
@@ -79,7 +94,7 @@ impl WasmCallbackReporting<'_> {
             self.processor,
             self.error_policies,
             held.values().map(|context| &context.acks),
-            reason,
+            error,
         );
     }
 
@@ -101,7 +116,7 @@ impl WasmCallbackReporting<'_> {
             .verified("a guest callback only runs on a branch that holds an instance")
             .module;
         let reported = module.guest_failure(failure, None);
-        self.fail_held_inputs(ack_map, holds, format!("{reported:#}"));
+        self.fail_held_inputs(ack_map, holds, &reported);
         if resource_limit_exceeded {
             *instance = None;
         }
@@ -132,8 +147,14 @@ impl WasmCallbackReporting<'_> {
             holds.release();
             return;
         };
-        let checkpoint =
-            checkpoint_wasm_instance(self.runtime, replicated_state, live, execution_now).await;
+        let checkpoint = holds
+            .keep_alive_while(checkpoint_wasm_instance(
+                self.runtime,
+                replicated_state,
+                live,
+                execution_now,
+            ))
+            .await;
         match checkpoint {
             Ok(()) => holds.release(),
             Err(failure) => {
@@ -147,7 +168,7 @@ impl WasmCallbackReporting<'_> {
                     self.processor,
                     self.error_policies,
                     withheld,
-                    format!("{failure:#}"),
+                    &failure,
                 );
                 *instance = None;
             }
@@ -166,6 +187,7 @@ pub(super) async fn checkpoint_wasm_instance(
     live: &mut WasmLiveInstance,
     execution_now: Timestamp,
 ) -> error_stack::Result<(), WasmInstanceError> {
+    let _publication = runtime.backup_publication(&state.placement.domain);
     #[cfg(feature = "testing")]
     hold_checkpoint_at(runtime, state, crate::WasmCheckpointWindow::BeforeCapture).await;
     let deadline = Instant::now()
@@ -300,11 +322,15 @@ pub(super) fn wasm_callback_decided_tokens(outputs: &[WasmMaterializedOutput]) -
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_primitives::time::timeout;
 
     use super::*;
-    use crate::runtime_ack::AckOutcome;
+    use crate::runtime_ack::{AckOutcome, AckProgress};
 
     /// A held input stays unresolved after every other share of it succeeded, and resolves only
     /// when the hold is released.
@@ -326,6 +352,41 @@ mod tests {
             .await
             .expect("releasing the hold resolves the input")
             .expect("the completion task must not panic");
+        assert_eq!(outcome, AckOutcome::Ack);
+    }
+
+    /// A checkpoint still under way reports the inputs it holds alive to their source, so the
+    /// source's `ACK TIMEOUT` does not send them again, and leaves them unresolved until it ends.
+    #[nervix_primitives::test]
+    async fn a_checkpoint_under_way_keeps_its_held_inputs_alive() {
+        let (acks, mut completion) = AckSet::root();
+        let mut holds = WasmCheckpointHolds::default();
+        holds.hold(&acks);
+        acks.ack_success();
+        let (finish_checkpoint, checkpoint_finished) =
+            nervix_primitives::sync::oneshot::channel::<()>();
+
+        {
+            let checkpoint = holds.keep_alive_while(checkpoint_finished);
+            let mut checkpoint = std::pin::pin!(checkpoint);
+            let progress = nervix_primitives::select! {
+                biased;
+                _ = &mut checkpoint => panic!("the checkpoint has not finished"),
+                progress = completion.wait_for_progress() => progress,
+            };
+            assert_eq!(progress, AckProgress::Alive);
+
+            finish_checkpoint
+                .send(())
+                .assured("the checkpoint future is still awaited above");
+            checkpoint
+                .await
+                .assured("the checkpoint finished through its sender above");
+        }
+        holds.release();
+        let outcome = timeout(Duration::from_secs(1), completion.wait())
+            .await
+            .expect("releasing the hold resolves the input");
         assert_eq!(outcome, AckOutcome::Ack);
     }
 

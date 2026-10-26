@@ -18,8 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DOCS_DIR = ROOT / "docs"
 OUTPUT_DIR = DOCS_DIR / "book"
-# The rendered theme and the PDF's in-document links both depend on this exact
-# release, so local builds and CI must agree on it. CI reads this constant.
+# CI pins this release for reproducible builds. Local builds accept stable patch
+# releases in the same major/minor series. CI reads this constant.
 MDBOOK_VERSION = "0.5.3"
 MDBOOK_LLMS_COMMAND = ROOT / "scripts" / "mdbook_llms.py"
 # Chapters reference images as `images/<name>`, and mdBook copies non-Markdown
@@ -33,6 +33,8 @@ IMAGES_DIR_NAME = "images"
 SCREENSHOTS_DIR = Path(os.environ.get("CARGO_TARGET_DIR") or ROOT / "target") / "docs-screenshots"
 CLI_REFERENCE_NAME = "nervix-cli-reference.md"
 CLI_PACKAGE = "nervix-cli"
+SERVER_REFERENCE_NAME = "nervix-server-reference.md"
+SERVER_PACKAGE = "nervix-server"
 # Pin the variables clap consults for width and colour. They are inert while the
 # `wrap_help` and `color` features are off, and keep the rendered chapter from
 # varying with the shell the book was built from once either is enabled.
@@ -223,7 +225,7 @@ to the [JAQ v{version} release]({release_url}). This page only summarizes the Ne
   JAQ command-line options and file loading are not part of the codec contract.
 
 See [JAQ transformations](schemas-and-codecs.md#jaq-transformations) for directionality, supported
-formats, exact output rules, and NSPL syntax, and
+formats, exact output rules, and syntax in Plexus, the Nervix graph definition language, and
 [Unfolding Payloads](schemas-and-codecs.md#unfolding-payloads) for how one payload becomes several
 messages.
 
@@ -288,6 +290,7 @@ def stage_book(staging_dir: Path) -> Path:
     shutil.copytree(DOCS_DIR / "src", source_dir)
     generate_upstream_references(source_dir)
     generate_cli_reference(source_dir)
+    generate_server_reference(source_dir)
     stage_screenshots(source_dir)
     return staging_dir
 
@@ -308,10 +311,31 @@ def stage_screenshots(source_dir: Path) -> None:
 
 def capture_cli_help(arguments: list[str]) -> str:
     """Run `nervix-cli [arguments] --help` and return exactly what it printed."""
+    return capture_help(CLI_PACKAGE, arguments)
+
+
+def capture_server_help(arguments: list[str]) -> str:
+    """Run `nervix-server [arguments] --help` and return exactly what it printed."""
+    return capture_help(SERVER_PACKAGE, arguments)
+
+
+def capture_help(package: str, arguments: list[str]) -> str:
+    """Run the binary of `package` with `[arguments] --help` and return exactly what it printed."""
     env = os.environ.copy()
     env["COLUMNS"] = CLI_HELP_COLUMNS
     env["NO_COLOR"] = "1"
-    invocation = ["cargo", "run", "--quiet", "--package", CLI_PACKAGE, "--", *arguments, "--help"]
+    invocation = [
+        "cargo",
+        "run",
+        "--quiet",
+        "--package",
+        package,
+        "--bin",
+        package,
+        "--",
+        *arguments,
+        "--help",
+    ]
     try:
         completed = subprocess.run(
             invocation,
@@ -322,16 +346,16 @@ def capture_cli_help(arguments: list[str]) -> str:
             env=env,
         )
     except FileNotFoundError as error:
-        raise SystemExit(f"cargo is required to render the {CLI_PACKAGE} reference: {error}") from error
+        raise SystemExit(f"cargo is required to render the {package} reference: {error}") from error
     if completed.returncode != 0:
         raise SystemExit(
-            f"`{CLI_PACKAGE} {' '.join([*arguments, '--help'])}` failed with exit code "
+            f"`{package} {' '.join([*arguments, '--help'])}` failed with exit code "
             f"{completed.returncode}: {completed.stderr.strip()}"
         )
     return completed.stdout.strip("\n")
 
 
-def cli_subcommands(root_help: str) -> list[str]:
+def cli_subcommands(root_help: str, package: str = CLI_PACKAGE) -> list[str]:
     """Read the subcommand names out of the top-level help.
 
     Enumerating them rather than listing them here is what keeps a newly added
@@ -339,7 +363,7 @@ def cli_subcommands(root_help: str) -> list[str]:
     """
     heading = CLI_COMMANDS_HEADING.search(root_help)
     if heading is None:
-        raise SystemExit(f"`{CLI_PACKAGE} --help` no longer prints a Commands section")
+        raise SystemExit(f"`{package} --help` no longer prints a Commands section")
     names = []
     for line in root_help[heading.end() :].splitlines():
         if line.strip() == "":
@@ -351,7 +375,7 @@ def cli_subcommands(root_help: str) -> list[str]:
         if entry is not None and entry.group("name") != "help":
             names.append(entry.group("name"))
     if not names:
-        raise SystemExit(f"`{CLI_PACKAGE} --help` listed no subcommands")
+        raise SystemExit(f"`{package} --help` listed no subcommands")
     return names
 
 
@@ -375,7 +399,33 @@ def generate_cli_reference(source_dir: Path) -> None:
     (source_dir / CLI_REFERENCE_NAME).write_text(render_cli_reference(), encoding="utf-8")
 
 
+def render_server_reference() -> str:
+    root_help = capture_server_help([])
+    sections = [f"## nervix-server\n\n```text\n{root_help}\n```"]
+    for name in cli_subcommands(root_help, SERVER_PACKAGE):
+        sections.append(
+            f"## nervix-server {name}\n\n```text\n{capture_server_help([name])}\n```"
+        )
+    body = "\n\n".join(sections)
+    return f"""# nervix-server Reference
+
+Every option, default, and environment variable `nervix-server` accepts, printed by the binary
+itself while this book was built, so it describes exactly the release you are reading about. The
+options are grouped by area: the node's identity, addresses and paths, which are not settings, and
+then one group per area of settings. [Node Settings](node-settings.md) explains the class of each
+setting and how its default and validation are owned, and
+[Running Nervix](quickstart-running.md) shows how to start a node with them.
+
+{body}
+"""
+
+
+def generate_server_reference(source_dir: Path) -> None:
+    (source_dir / SERVER_REFERENCE_NAME).write_text(render_server_reference(), encoding="utf-8")
+
+
 def verify_mdbook_version() -> None:
+    supported_minor = MDBOOK_VERSION.rsplit(".", maxsplit=1)[0]
     try:
         reported = subprocess.run(
             ["mdbook", "--version"],
@@ -384,15 +434,15 @@ def verify_mdbook_version() -> None:
             text=True,
         ).stdout
     except OSError as error:
-        raise SystemExit(f"mdBook {MDBOOK_VERSION} is required but could not be run: {error}")
+        raise SystemExit(f"mdBook {supported_minor}.x is required but could not be run: {error}")
     except subprocess.CalledProcessError as error:
         raise SystemExit(f"mdbook --version failed: {error}")
 
     installed = reported.strip().removeprefix("mdbook").strip().removeprefix("v")
-    if installed != MDBOOK_VERSION:
+    if re.fullmatch(rf"{re.escape(supported_minor)}\.[0-9]+", installed) is None:
         raise SystemExit(
-            f"mdBook {MDBOOK_VERSION} is required, found {installed or 'nothing'}. "
-            "The rendered theme and the PDF's in-document links depend on this exact release."
+            f"mdBook {supported_minor}.x is required, found {installed or 'nothing'}. "
+            "The rendered theme and the PDF's in-document links depend on this release series."
         )
 
 
@@ -445,11 +495,16 @@ def rewrite_external_assets(book_dir: Path) -> None:
 def remove_generated_edit_links(book_dir: Path) -> None:
     """Drop "Suggest an edit" from chapters that have no file to edit.
 
-    The upstream references and the nervix-cli reference are rendered at build
-    time, so their source never exists in the repository and mdBook's edit link
-    would resolve to nothing.
+    The upstream references and the nervix-cli and nervix-server references are
+    rendered at build time, so their source never exists in the repository and
+    mdBook's edit link would resolve to nothing.
     """
-    for reference_name in (ROTO_REFERENCE_NAME, JAQ_REFERENCE_NAME, CLI_REFERENCE_NAME):
+    for reference_name in (
+        ROTO_REFERENCE_NAME,
+        JAQ_REFERENCE_NAME,
+        CLI_REFERENCE_NAME,
+        SERVER_REFERENCE_NAME,
+    ):
         page = book_dir / f"{Path(reference_name).stem}.html"
         if not page.is_file():
             raise SystemExit(f"mdBook did not render the generated chapter {page.name}")

@@ -8,6 +8,7 @@
 
 use std::{env, io, path::PathBuf, time::Duration};
 
+use error_stack::ResultExt as _;
 use nervix_primitives::net::TcpStream;
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt as _, ReuseDirective,
@@ -16,6 +17,8 @@ use testcontainers::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use uuid::Uuid;
+
+use crate::ContainerTeardownError;
 
 pub(crate) const SESSION_LABEL: &str = "com.nervix.testcontainers.reaper-session";
 
@@ -85,7 +88,10 @@ impl ResourceReaper {
         Ok(())
     }
 
-    pub(crate) async fn shutdown(&mut self, teardown_succeeded: bool) -> io::Result<()> {
+    pub(crate) async fn shutdown(
+        &mut self,
+        teardown_succeeded: bool,
+    ) -> error_stack::Result<(), ContainerTeardownError> {
         let state = std::mem::replace(&mut self.state, ReaperState::Disabled);
         let ReaperState::Running { guard, .. } = state else {
             return Ok(());
@@ -195,15 +201,16 @@ impl RyukGuard {
         Ok(connection)
     }
 
-    async fn remove(self) -> io::Result<()> {
+    async fn remove(self) -> error_stack::Result<(), ContainerTeardownError> {
         let Self {
             connection,
             container,
         } = self;
         let id = container.id().to_string();
-        let result = container.rm().await.map_err(|error| {
-            io::Error::other(format!("failed to remove Ryuk container {id}: {error}"))
-        });
+        let result = container
+            .rm()
+            .await
+            .change_context(ContainerTeardownError::RemoveReaper { container: id });
         drop(connection);
         result
     }

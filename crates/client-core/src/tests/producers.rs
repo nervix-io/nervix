@@ -106,7 +106,7 @@ async fn open(loopback: &mut Loopback, batches: u32) -> Producer {
         .await
         .generation
         .clone();
-    loopback.client.inner.events.sinks.producers.opened(
+    loopback.client.inner.events.emitters.producers.opened(
         &generation,
         ProducerId::opened_by(request.request_id),
         ClientProducerAdmission::Open,
@@ -197,7 +197,7 @@ async fn an_inconsistent_open_reply_releases_its_server_attachment() {
         .await
         .generation
         .clone();
-    loopback.client.inner.events.sinks.producers.opened(
+    loopback.client.inner.events.emitters.producers.opened(
         &generation,
         ProducerId::opened_by(request.request_id),
         ClientProducerAdmission::Open,
@@ -404,7 +404,7 @@ async fn a_lost_exchange_leaves_sent_batches_unknown_and_restores_the_producer()
         .await
         .generation
         .clone();
-    loopback.client.inner.events.sinks.producers.opened(
+    loopback.client.inner.events.emitters.producers.opened(
         &generation,
         ProducerId::opened_by(restore.request_id),
         ClientProducerAdmission::Open,
@@ -455,7 +455,7 @@ async fn a_batch_waiting_for_admission_when_the_session_ends_is_definitely_unsen
         .await
         .generation
         .clone();
-    loopback.client.inner.events.sinks.producers.admission(
+    loopback.client.inner.events.emitters.producers.admission(
         &generation,
         ProducerAdmissionChanged {
             producer: producer.id(),
@@ -500,7 +500,7 @@ async fn a_new_domain_generation_requires_a_new_producer_open() {
         .await
         .generation
         .clone();
-    loopback.client.inner.events.sinks.producers.opened(
+    loopback.client.inner.events.emitters.producers.opened(
         &generation,
         ProducerId::opened_by(restore.request_id),
         ClientProducerAdmission::Open,
@@ -632,7 +632,7 @@ async fn closing_a_producer_during_restoration_releases_its_late_open() {
         .await
         .generation
         .clone();
-    loopback.client.inner.events.sinks.producers.opened(
+    loopback.client.inner.events.emitters.producers.opened(
         &generation,
         ProducerId::opened_by(restore.request_id),
         ClientProducerAdmission::Open,

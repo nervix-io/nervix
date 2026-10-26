@@ -5,6 +5,11 @@
 //! - **Depends on.** Integer arithmetic and portable SIMD selection.
 //! - **Must not know.** Arrow, datetime units, validity or a caller's error classification.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(primitives, reason = "owns the primitives boundary declared above")
+)]
+
 use std::num::NonZeroU64;
 
 use meticulous::{OptionExt as _, ResultExt as _};

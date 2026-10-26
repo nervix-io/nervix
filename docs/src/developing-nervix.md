@@ -1,5 +1,7 @@
 # Developing Nervix
 
+*Plexus, the Nervix graph definition language.*
+
 This section is for working on Nervix itself. Everything here assumes a clone of the Nervix
 repository and uses its `just` recipes; none of it is required to use Nervix.
 
@@ -15,11 +17,84 @@ cd nervix
 Nervix is developed on Linux x86_64, Linux aarch64, and macOS arm64. The `just` recipes fetch an
 ONNX Runtime build for the host and stop on any other.
 
+The server uses `ort` 2.0.0-rc.13 with its highest supported C API level, 28. The downloader pins
+ONNX Runtime 1.30.0 and installs it under `.nervix-deps/onnxruntime`. Download the CPU package or,
+on Linux x86_64, the CUDA 13 package:
+
+```bash
+just download-onnxruntime
+just download-onnxruntime gpu_cuda13
+```
+
+The optional second argument selects an upstream platform: `host` (the default), `linux-x64`,
+`linux-aarch64`, or `osx-arm64`. For example, `just download-onnxruntime cpu linux-aarch64`
+downloads for Linux ARM64 from another supported development host. CUDA packages are available
+only for `linux-x64`. Version and destination are fixed; update the runtime pin together with the
+selected `ort` API level.
+
 Install:
 
 - Rust via `rustup`
 - `just` (latest release)
 - `zellij`
+
+`just build-web-console` builds the console the server embeds. trunk uses a `wasm-bindgen` CLI
+from `PATH` when its version equals the one `Cargo.lock` locks, and otherwise downloads it from
+GitHub without retrying. So the build installs that exact version with `cargo install --locked`
+into `target/tools/wasm-bindgen-<version>`, through the configured compiler wrapper, puts it first
+on `PATH` and runs `trunk build --offline`. Cargo checks the crate against the registry index and
+retries its own transient network failures. Offline, trunk stops at once when the CLI is missing or
+reports another version. The image's `builder` stage runs the same installer,
+`python3 scripts/wasm_bindgen.py install`, before its own offline trunk build.
+
+## Build Container Images
+
+```bash
+just docker-build-debian
+just docker-build-cuda
+```
+
+Both recipes require the repository's remote compiler-cache configuration: `KACHE_S3_BUCKET`,
+`KACHE_S3_REGION`, `KACHE_S3_ENDPOINT`, `KACHE_S3_ACCESS_KEY`, and `KACHE_S3_SECRET_KEY`. They build
+and load a local image by default; the existing tag, platform, push, and BuildKit cache arguments
+are available for publishing builds.
+
+The `builder` stage installs its build tools at the exact versions that `ARG`s in
+`Dockerfile.debian` pin, and every image build runs that step. kache and trunk come from their
+projects' release archives for the build architecture, fetched from the release download URL with
+no GitHub API call, and each archive is checked against its pinned SHA-256 before anything is taken
+out of it. Both projects build their releases with fat LTO in one codegen unit, which would take
+minutes to compile. cargo-auditable and cargo-sonic compile with `cargo install --locked` against
+the lockfile each crate published, so a later compatible release of one of their dependencies can
+neither change them nor stop them compiling. Moving a tool to another version changes its version
+pin and, for an archive, the checksum of each build architecture; an archive that does not match
+its checksum fails the build. The kache pin is the `KACHE_VERSION` that CI's kache-backed jobs
+install, which the recipes pass to the build.
+
+`Dockerfile.debian` has two complete image targets: `cpu` (the default) and `cuda`. The recipes
+select them with `--target cpu` and `--target cuda`, respectively. Both targets copy the same
+binaries and Sonic bundle from the shared `builder` stage using `COPY --link`, so those artifact
+layers are shared across the images. Each target has its own runtime base and ONNX Runtime
+download stage; building the CPU target requires only the CPU stages.
+
+Both images pin their builder, downloader, and runtime base to `debian:trixie-20260918-slim`,
+with its multi-platform digest fixed in `Dockerfile.debian`. The Debian image contains the CPU
+runtime and supports AMD64 and ARM64. The CUDA image is AMD64 only. It installs pinned CUDA
+13.2.2 and cuDNN 9.25.1 packages from NVIDIA's Debian 13 repository in one filesystem layer
+directly above the Debian base. The next layer runs `apt-get update` and `apt-get upgrade` before
+installing Nervix's dependencies. CUDA packages are held at their pinned versions during that
+upgrade. Nervix's user, ONNX Runtime libraries, and binaries follow, so application changes reuse
+the large CUDA layer. Both images obtain ONNX Runtime through the same pinned downloader.
+
+The CPU layer order is Debian → Debian updates → Nervix; the GPU layer order is
+Debian → CUDA/cuDNN → Debian updates → Nervix. The CUDA layer is built by Nervix and reused
+across its image builds.
+
+`just test-onnxruntime` checks package selection and recipe targets. `just test-onnxruntime-docker`
+builds both final targets with fixture binaries replacing the compiler stage. It verifies shared
+binary layers, Debian upgrades immediately after the selected base, preserved CUDA pins, and
+runtime shared-library dependencies without requiring remote compiler-cache credentials. The
+host NVIDIA driver is provided at container startup by the NVIDIA Container Toolkit.
 
 ## Start The Server
 
@@ -34,9 +109,9 @@ Fresh clusters require an initial password for the `default` user. Set
 `NERVIX_INIT_DEFAULT_USER_PASSWORD` or pass `--init-default-user-password <password>` on the first
 startup. The leader stores the `default` user's Argon2 password hash in the strongly consistent
 control plane only when that user does not already exist. After the default user has been created,
-remove the environment variable or flag from normal startup. Later users can be created through NSPL:
+remove the environment variable or flag from normal startup. Later users can be created through Plexus:
 
-```nspl
+```plexus
 CREATE USER my_username WITH PASSWORD 'my_secure_password';
 ```
 
@@ -135,7 +210,7 @@ including Kafka, Pulsar, RabbitMQ, Redis, MQTT, ClickHouse, Postgres, MySQL, Mon
 Prometheus, Quickwit, Jaeger, and a Sentry-compatible Bugsink service.
 
 The local Sentry-compatible service is available at `http://127.0.0.1:18090`. Sign in with
-`admin@example.org` / `admin`, create a project, and copy its DSN into a `TYPE SENTRY` client used
+`admin@example.org` / `admin`, create a project, and copy its DSN into a `SENTRY CLIENT` used
 by a Sentry emitter. These credentials and the Compose `SECRET_KEY` are development-only.
 
 RustFS provides the local Rust-written S3-compatible target for Iceberg emitters:
@@ -172,14 +247,14 @@ Start Nervix with `--otel-enabled` and keep the default OTLP endpoint when `just
 ## Connector Crates
 
 [Connector Crates And The Connector Contract](./connector-contract.md) is the architecture
-reference for ownership, source and sink lifecycle, and the cross-layer checklist for adding an
+reference for ownership, ingestor and emitter lifecycle, and the cross-layer checklist for adding an
 integration. The notes here identify the repository locations and validation commands.
 
 The shared contract is in `crates/connector`, and each external integration is in
 `crates/connectors/<name>`. The server's `src/runtime/ingestors` and emitter modules compose the
 typed plans with those crates. Keep driver dependencies in their integration crates; the server
 test harness may name a driver in `[dev-dependencies]` to provision or inspect an external system.
-The node's own endpoint source lives in `src/runtime/ingestors/endpoint.rs` because it has no
+The node's own endpoint ingestor lives in `src/runtime/ingestors/endpoint.rs` because it has no
 external driver. Follow the architecture chapter's [integration checklist](./connector-contract.md#adding-an-integration)
 when extending this layout.
 
@@ -190,6 +265,15 @@ For repository-wide validation:
 ```bash
 just validate
 ```
+
+The `checks`, `tests`, and `scenarios` CI jobs install the Go formatters through
+`scripts/install_go_ci_tool.py`: dockerfmt is pinned to v0.5.4 and ghokin to v3.9.0. The installer
+uses Go 1.26 in each job, keeps the public Go checksum database enabled, and disallows an implicit
+toolchain download. It retries only a transport failure while reading that database, at most three
+attempts within eight minutes. A checksum mismatch, compiler failure, or invalid module version
+fails on the first attempt. Each attempt is retained in the job's
+`go-tool-bootstrap-<job>` artifact. Run `just test-go-ci-tool` to exercise the classifier and
+workflow wiring without network access.
 
 CI installs the latest `just` release. `just validate`, `just validate-ci`, `just lint` and
 `just cargo-clippy` default to four concurrent recipe bodies across the `[parallel]` groups.
@@ -202,19 +286,22 @@ The `[parallel]` groups map package lists onto that recipe, including the packag
 `--all-features` and the compiler tooling packages. Feature, target, profile and compiler selections
 stay separate, so mutually exclusive execution modes never share a Cargo invocation.
 
-Clippy uses `clippy/<package>/<configuration_hash>` beneath `CARGO_TARGET_DIR`, or the repository's
-`target` directory when that variable is unset. The hash includes the Cargo arguments and compiler,
-so each configuration has its own build directory lock. `just cargo-clippy-package <package>
-[arguments ...]` runs a focused check of all targets through the same recipe. The compiler driver
-builds keep their separate `typed-ratchet/driver` directory. All builds retain the configured kache
-wrapper. Cargo's compiler job limit applies separately within each invocation. On CI, where nothing
-reads a build directory after its lint and the runner's disk cannot hold every configuration's at
-once, a target that passed deletes its own; a failed target keeps its directory, and a local run
-keeps them all for the next one.
+Clippy builds in four directories, `clippy/0` to `clippy/3` beneath `CARGO_TARGET_DIR`, or the
+repository's `target` directory when that variable is unset. The SHA-256 of a configuration's
+package, Cargo arguments and toolchain, modulo four, selects its directory, so each run of a
+configuration returns to the directory that holds its artifacts. The configurations in a directory
+share the dependencies they build, build scripts included, and Cargo keeps the artifacts of
+different features, profiles, targets and flags, and of the stable and nightly compilers, apart
+there. Configurations in the same directory take turns on its build directory lock, so two of them
+selected at once run one after the other. Nothing deletes these directories, locally or on CI: the
+four of them bound what a lint leaves on disk. `just cargo-clippy-package <package> [arguments ...]`
+runs a focused check of all targets through the same recipe. The compiler driver builds keep their
+separate `typed-ratchet/driver` directory. All builds retain the configured kache wrapper. Cargo's
+compiler job limit applies separately within each invocation.
 
-`just validate-nspl-docs` scans `docs/src` and parses every exact `nspl` code fence directly with
-the parser crate. Use `nspl,ignore` only for loose grammar synopses and statement fragments that
-are intentionally not complete NSPL scripts; the fence remains identified as NSPL in the rendered
+`just validate-plexus-docs` scans `docs/src` and parses every exact `plexus` code fence directly with
+the parser crate. Use `plexus,ignore` only for loose grammar synopses and statement fragments that
+are intentionally not complete Plexus scripts; the fence remains identified as Plexus in the rendered
 documentation.
 
 For test runs:
@@ -229,9 +316,9 @@ For representation properties and sanitizer fuzzing, see
 `just fuzz <target> [duration]`. These commands and the dedicated Bolero workflow own target
 discovery; repository validation does not run Bolero checks. `just help` lists the recipes.
 
-Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Bolero and
-extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker points to
-`scripts/ci_linker.sh`, which selects Wild independently of `RUSTFLAGS` and
+Native CI builds for validation, unit tests, scenarios, client conformance, Turmoil, Shuttle,
+Loom, Bolero and extra checks use Clang 23 with Wild. Cargo's `x86_64-unknown-linux-gnu` linker
+points to `scripts/ci_linker.sh`, which selects Wild independently of `RUSTFLAGS` and
 `CARGO_ENCODED_RUSTFLAGS` supplied by coverage, simulation or sanitizer tooling. Browser targets
 use their own linker. `just validate-workflows` checks the Actions workflow definitions.
 
@@ -243,12 +330,16 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
-### Compiler synchronization gate
+### Compiler architecture gate
 
 `just ratchet`, `just validate` and `just validate-ci` run the same source-driven compiler
-synchronization gate in the isolated `tools/nervix-lint` workspace. Product builds
+architecture gate in the isolated `tools/nervix-lint` workspace. Product builds
 remain stable. Tooling, analysis and product artifacts occupy separate target directories.
-Prepare the ordinary server build prerequisites, including `just build-web-console`.
+Install the declared toolchains with `just toolchains-install`, including the pinned analysis
+compiler's `wasm32-unknown-unknown` standard library for browser analysis. Prepare the ordinary
+server build prerequisites, including `just build-web-console`.
+When compiler reports need reanalysis, cleanup selects the configuration's target as well as its
+isolated build directory, so browser artifacts cannot remain fresh without their current reports.
 
 ```bash
 just ratchet
@@ -257,7 +348,28 @@ just typed-ratchet --configuration shuttle --inventory
 just test-typed-ratchet
 just test-typed-ratchet-docs
 just qualify-typed-ratchet-cache
+just lint-audit
 ```
+
+`just lint-audit` reads the same complete evidence and reports review candidates for code shaped
+around an inaccurate lint, each attributed to the commits and debt counts that introduced it.
+[Architecture Rules And The Debt Ratchet](architecture-enforcement.md#auditing-lint-workarounds)
+states the candidates, the attribution and the review contract.
+
+The complexity verdict is the ratchet's `functions_over_complexity_30` count: the functions that
+the pinned cargo-crap scores above cyclomatic complexity 30. `just ratchet` builds that version
+first with `just install-cargo-crap`, into `target/tools/cargo-crap-<version>/` through the
+configured wrapper, and refuses a binary of another version. A new function above 30 raises the
+count and fails `just validate` and CI's `checks` job, which name it among the listed sites:
+
+```bash
+just install-cargo-crap
+just ratchet --show functions_over_complexity_30
+```
+
+Decompose the function rather than moving the number. The
+[function complexity](architecture-enforcement.md#function-complexity) section states the
+analyzer's scope, its limits and every failure that refuses an incomplete analysis.
 
 Declare `#[cfg_attr(nervix_lint, nervix::context(...))]` at the source's owning execution boundary.
 Choose recurring, lifecycle, observer, outside or bounded; every kind requires a reason, and
@@ -268,6 +380,17 @@ invalid annotations and recurring acquisitions produce ordinary Rust diagnostics
 An expectation covering multiple operations or no operation fails. See
 [Data-Plane Concurrency](data-plane-concurrency.md#source-contracts) for the complete authoring
 contract, inheritance, supported call effects and limitations.
+
+The same gate checks contextual failure contracts, explicit outcome handling and canonical panic
+APIs through `nervix::bare_error_signature`, `nervix::discarded_outcome` and `nervix::bare_panic`.
+Aliases, associated outputs, generic calls, inferred closures and boxed future/stream returns
+are resolved by the compiler. Ordinary values and custom same-named methods keep their own
+contracts. Classify a semantic outcome or modeled library contract with a reason-bearing
+`nervix::error_boundary(outcome|library, reason = "...")` on its exact error type or return
+contract. These classifications do not inherit module defaults. Standard-error hooks retain a
+complete report carrier. [Errors And Diagnostics](errors-and-diagnostics.md) owns the classification
+rules and the current carriers. `just validate-typed-errors` separately guards textual
+`Result<_, String>` source, including inactive forms.
 
 The JSON output records resolved APIs, spans, owner variants, expansions, source contracts,
 compiled configurations and generated/external exclusions. It is generated evidence under
@@ -283,16 +406,51 @@ using `KACHE_KEY_SALT` and rebuild only isolated authored artifacts. `--fresh` r
 
 Cache qualification exercises fresh and Cargo-fresh analysis, an actual kache dependency hit,
 changed source/annotation/rule/dependency/configuration inputs, missing and interrupted output,
-fixture doctests twice, and cross-worktree rejection in two isolated worktrees. Kache 0.28 runs
-workspace-wrapper chains directly while caching ordinary dependencies; complete evidence is
-validated independently of that detail. Compiler semantic fixtures qualify resolved lints and
-cross-crate metadata.
+fixture doctests twice, and cross-worktree rejection in two isolated worktrees. Kache runs
+workspace-wrapper chains other than Clippy's directly while caching ordinary dependencies; complete
+evidence is validated independently of that detail. Compiler semantic fixtures qualify resolved
+lints and cross-crate metadata.
+
+The same gate enforces source-owned architectural layers, configuration Model consumption,
+language references, awaited cluster access and declared identity/installation state. Declare
+`nervix::layer` at documented ownership boundaries, `nervix::input(plans, ...)` on connector engines,
+and exact `value`, `identity` and `state` roles at their semantic owners. The
+[architecture contracts](./data-plane-concurrency.md#resolved-architecture-boundaries) and
+[typed-state contracts](./typed-states.md#source-owned-identity-and-installation-contracts) state the
+supported scope. `just test-typed-ratchet-contracts <unittest selector...>` runs focused pass/fail
+compiler fixtures after preparing `just test-typed-ratchet-compiler`. `just test-ratchet-units`
+also qualifies language provenance before resolution; `python3 -m scripts.check_layer_provenance`
+prints current source/manifest violations. Calibration logs and complete matrix/coverage outputs
+belong on the owning task, not in the source tree. Compilation under a modeled mode qualifies
+recognition and supplies no concurrency execution evidence.
+
+### Typed errors and reports
+
+`just validate` rejects a `Result<_, String>` in product code and a signature that returns a Nervix
+failure without an `error-stack` report. Run the distinct source check, the complete compiler gate,
+its semantic fixtures and the structural scanner tests with:
+
+```bash
+just validate-typed-errors
+just ratchet
+just test-typed-ratchet-contracts
+just test-ratchet-units
+```
+
+[Errors And Diagnostics](./errors-and-diagnostics.md#adding-a-fallible-operation) holds the
+checklist for a new fallible operation: which layer owns the failure, what its context carries,
+where the report ends, how it is rendered and which evidence holds it.
 
 ### Capability doctests
 
+[Execution Primitives](./execution-primitives.md#verification-contracts) distinguishes API
+doctests, Cargo graph and target probes, compiler fixtures, adapter conformance and actual
+production-owner model execution. Keep each verdict with the configuration and claim it checks.
+
 `just test-capability-docs` checks runtime state handles, logical and physical deadlines,
-subscription predicates, and the UDF execution context with `compile_fail` doctests beside their
-APIs. Paired compiling examples check that the imports and current signatures remain valid. These
+subscription and VM predicates, the UDF execution context, consensus capabilities, DNS error
+carriers, recovery outcomes and SIMD byte classes with `compile_fail` doctests beside their APIs.
+Paired compiling examples check that the imports and current signatures remain valid. These
 checks cover the specific rejected operations in each snippet. They run in `just test` and CI;
 the runtime examples require the `testing` feature, which the recipe enables.
 
@@ -306,12 +464,14 @@ just test-shuttle
 ```
 
 Each check runs in its own process under the exploration it declares, then again under the
-uncontrolled-nondeterminism detector. `crates/model-harness/shuttle-inventory.toml` registers every
-check by package and test name, and the run fails when a registered check is missing, ignored or did
-not complete its exploration, and when a `shuttle_` test is not registered; add a new check to its
-package's list, and rename a renamed one there, in the same change. The command reports how many
-checks it discovered, selected, executed and saw complete. A substring selects a focused check or
-protocol family in every package, and a substring that selects nothing fails:
+uncontrolled-nondeterminism detector. Checks run beside each other, one per CPU the command may use,
+so restrict its CPUs, for example with `taskset -c 0-3 just test-shuttle`, to share a busy machine.
+`crates/model-harness/shuttle-inventory.toml` registers every check by package and test name, and
+the run fails when a registered check is missing, ignored or did not complete its exploration, and
+when a `shuttle_` test is not registered; add a new check to its package's list, and rename a
+renamed one there, in the same change. The command reports how many checks it discovered, selected,
+executed and saw complete. A substring selects a focused check or protocol family in every package,
+and a substring that selects nothing fails:
 
 ```bash
 just test-shuttle force_flush
@@ -333,6 +493,9 @@ fresh process. Use `SHUTTLE_REPORT_STEPS=1` to inspect the highest explored step
 a check's iteration and step budgets. [Data-Plane Concurrency](./data-plane-concurrency.md) defines
 what these checks model, their limits, and the invariant held by each protocol.
 
+CI runs the checks and the replay check only for a pull request labeled `shuttle`. Label a pull
+request that changes a protocol a Shuttle check holds.
+
 ### Memory-ordering models
 
 Explore every registered Loom model of a production owner to exhaustion, each in its own process:
@@ -351,14 +514,27 @@ just test-loom cancellation.publication
 The run fails when a registered invariant is missing, ignored or did not complete its exploration,
 and when a `loom_*` test is not registered in `crates/model-harness/loom-inventory.toml`. A failed
 model leaves its Loom checkpoint, output and `metadata.json` below
-`target/loom-failures/<package>/<test>/`; replay it with location tracking and tracing enabled:
+`target/loom-failures/<package>/<invariant>/`; replay it with location tracking and tracing enabled:
 
 ```bash
-just test-loom-replay target/loom-failures/<package>/<test>
+just test-loom-replay target/loom-failures/<package>/<invariant>
 ```
 
 `just test-loom-qualification` applies each registered weakening to a copy of the working tree and
-requires its model to fail.
+requires its model to fail. The copy lives below `target/loom-qualification-build/` and builds into a
+target directory of its own there, so a weakened build never stands in for the working tree's.
+Every file the copy takes or restores gets a fresh modification time, so each weakening rebuilds only
+what it changed, and qualifications that register the same weakening share one weakened build. The
+server's models embed the built web console, which the copy links rather than copies; the Loom
+recipes build it first. The copied sources are removed when the qualification ends, and the target
+directory stays, so a later run reuses the dependencies it built. The copy compiles incrementally,
+because its weakened builds serve that run alone, so a weakening recompiles what it changed rather
+than the whole crate. `just test-loom-qualification NUMBER/COUNT` qualifies one shard of the distinct
+weakenings, the ones at the inventory positions that leave `NUMBER - 1` when divided by `COUNT`; the
+default, `1/1`, qualifies them all.
+
+CI runs the models and their qualification only for a pull request labeled `loom`. Label a pull
+request that changes an ordering a Loom model holds.
 
 ### Primitive boundary and execution modes
 
@@ -368,9 +544,11 @@ origin, permissions, manifests, global cfgs, the analysis cfg and release binari
 authored source including the isolated analysis workspace,
 `just validate-execution-mode-dependencies` for the ordinary and portable dependency graphs of the
 workspace and of every package, and `just validate-execution-mode-conflicts` for the diagnostics of
-combined modes, of a mode or the native capability requested for the browser's target, and of a
-modeled product binary. `just lint` lints each mode in its own build, including the Shuttle builds
-and checks in `just cargo-clippy-shuttle` and the Loom builds in `just cargo-clippy-loom`.
+combined modes, of a mode or the native capability requested for the browser's target, of the
+diagnostic mode requested without the native capability, and of a product binary built in a mode it
+does not declare. `just lint` lints each mode in its own build, including the Shuttle builds and
+checks in `just cargo-clippy-shuttle`, the Loom builds in `just cargo-clippy-loom` and the
+diagnostic builds in `just cargo-clippy-deloxide`.
 
 `just test-primitives` builds `nervix-primitives` once per execution mode and runs its conformance
 checks: which backend each mode selects, the same contract scripts of every family against the
@@ -378,19 +556,126 @@ ordinary libraries and against the Shuttle adapters, the Shuttle checks that a p
 a read and a waiter's registration is reached, and the check that a Loom build takes the ordinary
 libraries for the families Loom does not model. The timer checks measure every timer on a paused
 clock in ordinary execution and show that Shuttle's timers are scheduling points whose timeouts a
-check triggers, and the Turmoil check shows that sockets, name lookup, timers and admitted CPU jobs
-belong to the simulated host that uses them. Run it after changing an adapter or the families a
-mode provides:
+check triggers, the Turmoil check shows that sockets, name lookup, timers and admitted CPU jobs
+belong to the simulated host that uses them, and the Deloxide checks show that the tracked locks keep
+the contracts of the locks they replace, including their non-blocking `Debug` and the exact count of
+waiters a notification wakes. Run it after changing an adapter or the families a mode provides:
 
 ```bash
 just test-primitives
 ```
 
 It runs `just test-primitives-ordinary`, the checks in ordinary native execution, then
-`just test-primitives-modeled`, the checks under each model checker's backend, then
+`just test-primitives-modeled`, the checks under each other mode's backend, then
 `just test-primitives-compile`, the checks that compile rather than run; each also runs alone.
 [Data-Plane Concurrency](./data-plane-concurrency.md) defines the primitive boundary, what each
 mode observes, and every model's claim.
+
+#### Integrated primitive qualification
+
+At a release candidate revision, run the ordinary suite and the complete primitive, Shuttle,
+Loom and Turmoil inventories. Keep the replay and weakening checks separate from successful model
+exploration: they show that recorded failures reproduce and that the asserted ordering matters.
+Run the applicable public Cucumber scenarios at the same revision. An empty selection, incomplete
+inventory or timed-out exploration is a failed qualification, even if another mode passed.
+
+The external smoke and soak suites use a fresh ordinary image built from that revision. The suite
+resolves the image once and gives every scenario the same image identity; its `suite.json` and each
+run's manifest prove which image, fault action, accepted events and recovery outcome were observed.
+For pull-request CI, select both `chaos` and `chaos-soak` when qualifying the complete matrix; the
+labels run the suites against that pull request's own image. A nightly run of a different commit
+does not qualify the candidate. A recorded replay reproduces the external action plan, not the
+operating system's thread schedule.
+
+Measure the ordinary, uninstrumented build on the same host and profile as its baseline:
+
+```bash
+just bench-primitives
+just bench-relay-interaction
+just bench-admitted-work
+just bench-task-handles
+```
+
+`bench-primitives` times atomic access, publication loads and stores, an uncontended blocking
+lock, and shared-reference cloning. The relay and admitted-work suites include their production
+owners; `bench-task-handles` retains raw timing and allocation samples. Record the revisions,
+host/load, toolchain, exact commands, raw results and comparison on the ClickUp task. Keep model
+evidence, real-process Chaos evidence and performance measurements distinct; none establishes the
+claim of another method. Generated qualification reports and logs belong on the task rather than
+in the repository. A pull request labeled `benchmark` runs the product comparison and the ordinary
+primitive probe on its benchmark worker and retains the probe output with the benchmark artifacts.
+
+### Deadlock diagnostics
+
+Diagnostic builds select `deloxide` for active cycles, `deloxide-order` for active and historical
+order analysis, or `deloxide-stress` for active cycles under Deloxide's bounded scheduling
+disturbance, which delays one in twenty of the acquisitions a thread makes while it holds a tracked
+lock by 20µs to 200µs. Build and run one with an existing local evidence
+directory:
+
+```bash
+just build-diagnostic-server deloxide-order
+target/deloxide/debug/nervix-server --deadlock-evidence /var/tmp/nervix-deadlocks ...
+```
+
+The order build's `--deadlock-active-only` option disables checking at runtime but keeps compiled
+instrumentation and its cost. Ordinary product performance is measured separately. An active cycle
+exits `3`; a potential cycle retains evidence and continues; lost evidence or failed diagnostics
+exit `4`.
+
+Run every selection of the diagnostic lane after any change that adds or alters thread-blocking
+synchronization, the order of tracked acquisitions, or a shutdown, drain, restore, cancellation,
+handoff or other lifecycle path that uses tracked locks:
+
+```bash
+just test-deloxide
+just test-deloxide-order
+just test-deloxide-stress
+just test-deloxide-stress-restore
+just deadlock-report inspect target/deloxide/test-deloxide/deloxide-order/run.XXXX/evidence/scenarios/deadlock-PID-TIME.rkyv --source potential
+```
+
+The lane runs every workload `tests/deloxide-inventory.toml` registers for its selection: the
+disposable-process probes, the tracked locks' conformance checks, the diagnostic owner tests and the
+tagged one- and three-node scenarios, without retries. The two stress selections compile one
+build: `deloxide-stress` runs the probes, conformance checks, owner tests, lifecycle scenarios and
+paced-driver scenarios under the disturbance, and `deloxide-stress-restore` its capture, restore
+and checkpoint-transfer scenarios, one at a time in a lane of their own. A scenario that joins the
+active-only selection also joins the stress selection of its family, tagged `@deloxide_stress` or
+`@deloxide_stress_restore`, under a `stress.` identity. It fails when a registered workload is
+missing or ignored, when a probe, conformance check, owner test or tagged scenario is not
+registered, when a process deadlocks, fails its diagnostics, is killed by a signal, outlives its
+bound or leaves a process behind, and when evidence is missing, partly written or does not qualify.
+An active deadlock exits `3`, a diagnostic failure `4`, a timeout or the expired budget `124`, and
+every other failure `1`. A potential cycle fails the lane until its order is corrected; the lane
+keeps no list of approved cycles.
+
+Each run keeps a fresh attempt under `target/deloxide/test-deloxide/<selection>/` with every log,
+probe artifact, evidence file and finding description, and `lane.json` with the exact command,
+environment, bound and ending of every launch. Replay one recorded launch in a fresh attempt, and
+prove the lane's supervision on deliberately failing processes:
+
+```bash
+just test-deloxide-replay target/deloxide/test-deloxide/deloxide/run.XXXX/lane.json scenarios
+just test-deloxide-qualification deloxide-order
+```
+
+A new probe, conformance check, owner test or tagged scenario joins the inventory with a stable
+identity, the invariant it owns, its selections and the coverage it declares; a renamed one is
+renamed there in the same change. A source file that starts acquiring tracked blocking locks needs
+an `[[owner]]` record naming the workloads that reach them or the path the lane does not reach and
+why: `just validate-deloxide-applicability`, part of `just validate`, holds the records to the
+compiler's acquisition catalog. For a pull request labeled `deloxide`, which every change the
+Deloxide rule applies to carries, CI's `deloxide` job runs every selection through the native
+coverage collector, as `just coverage-native-extras test-deloxide test-deloxide-order
+test-deloxide-stress test-deloxide-stress-restore` does locally,
+and keeps their attempts, completion records and diagnostic coverage reports as artifacts. The
+ordinary report tool also exports selected artifacts, records explicit proofs in reviewed copies and
+qualifies whole-process evidence. `just coverage-deadlock` measures the diagnostic implementation
+and the ordinary report command in separate instrumented builds through the native collector.
+[Data-Plane Concurrency](./data-plane-concurrency.md#diagnostic-deadlock-detection) has the lane's
+classes, its record, proof requirements, current graph limits and the paths detection does not
+cover, and [Integration Test Lifecycle](./integration-test-lifecycle.md#diagnostic-lane) its bounds.
 
 ### Deterministic network simulation
 
@@ -426,92 +711,92 @@ proves the record and replay path end to end. [Deterministic Interconnect
 Simulation](./interconnect-simulation.md) defines what the simulation controls, its fault model and
 limits, the scenario matrix, and how to investigate a failure.
 
-### Source coverage of the native extra checks
+CI runs the suite and the replay check only for a pull request labeled `turmoil`. Label a pull
+request that changes the interconnect or a seam the simulation plugs into.
 
-The extra checks that execute Nervix code natively in ordinary mode, the compiler synchronization
-fixtures, benchmark bodies, primitive boundary conformance and NSPL completion walk, also measure which source
-lines they execute. Run them the way CI does:
+### External cluster chaos
 
-```bash
-just coverage-native-extras
-```
-
-Name producers to run only those, one or more of `test-typed-ratchet`, `bench-smoke`, `test-primitives` and
-`nspl-completion-walk`:
+`just chaos` runs black-box cluster scenarios against an already built Nervix image through Docker
+Compose, Pumba and the image's packaged CLI. It compiles nothing and needs no Rust toolchain. Two
+suites run selections of those scenarios, each as its own `just chaos run` command:
 
 ```bash
-just coverage-native-extras nspl-completion-walk
+just chaos suite list
+just chaos suite smoke --image ghcr.io/nervix-io/nervix@sha256:<digest>
+just chaos suite soak --image ghcr.io/nervix-io/nervix@sha256:<digest>
 ```
 
-A producer runs its check exactly as `just <producer>` does and fails when the check fails.
-`rust-toolchain.toml` includes the `llvm-tools` component because only the compiler's own LLVM
-tools read its profiles. What the check needs first, such as the web console the server benches
-link, is built normally. The recipe
-that executes Nervix code then runs in the environment `cargo llvm-cov show-env --sh
---no-rustc-wrapper` describes: every crate is compiled with source coverage instrumentation into
-`target/native-coverage-build`, and the configured kache wrapper stays in place. The parts of a
-check that only compile, target the browser or run under a model checker stay uninstrumented, and
-Miri, mutation testing and the Loom weakening qualification never run under this command.
+The smoke suite runs a baseline, a leader crash with its restart and a partition with its recovery;
+the soak suite runs every delivered scenario with fixed and rotating mixed-instability seeds. CI
+runs the smoke suite against a pull request's own images only for a pull request labeled `chaos`,
+and the soak suite for one labeled `chaos-soak`. The nightly build of `main` runs the soak suite,
+and a manual run of the `Chaos` workflow takes a suite, an immutable image digest and its kind.
+Label a pull request that changes the chaos runner, or the membership, failover, recovery or
+delivery behavior its scenarios verify, with `chaos`.
 
-Every run collects into a directory of its own,
-`target/native-coverage/<producer>/<mode>/<toolchain>/<attempt>/`. The attempt is the GitHub
-Actions run and attempt in CI, and the time and process locally. No run reuses, reads or cleans
-another run's directory, so no run can count another's counters. The directory holds:
-
-| Entry | Content |
-| --- | --- |
-| `lcov.info` | The LCOV report of the repository's sources, with the absolute paths `llvm-cov` writes |
-| `completion.json` | The completion record: the verdict and everything it covers |
-| `executions.jsonl` | Every executable Cargo ran, with its arguments and build ID |
-| `export.log` | The diagnostics of `llvm-profdata` and `llvm-cov`, each bounded |
-| `profiles/` and `merged.profdata` | The raw counters and their merge; they stay on the machine |
-
-Cargo runs each instrumented executable through the collector as its runner, which records the
-execution and points the counters of the executable, and of every process it starts, at `profiles/`,
-one file per process and module. Build scripts and procedural macros execute only when a crate is
-compiled rather than served from the cache, so their ordinary build-time counters are discarded.
-The compiler fixture is itself an executed check: its loaded procedural macro objects are retained
-by build ID, including those in nested Cargo output directories. The producer uses its pinned
-compiler's LLVM tools. The report is exported with the toolchain's own
-`llvm-profdata` and `llvm-cov` from exactly the executables that ran and the children they started.
-It keeps the files inside the repository and leaves out dependencies, harness code below a `tests`,
-`examples` or `benches` directory, and code generated below a Cargo target directory.
-
-`completion.json` names the producer and mode, the tested commit and whether the working tree was
-modified, the CI run and attempt, the compiler and its LLVM version, the instrumentation flags, the
-recipes that make up the check, the executions and child executables selected, the profile files
-with the binary IDs they name, the warnings `llvm-cov` printed, and the executable and covered lines
-of each package. Its `verdict` reads `running` from the moment the directory exists. It becomes
-`complete` only once the whole check passed and the report was written, and `failed` or
-`interrupted` otherwise, with a `failure` naming the stage, `prepare`, `instrument`, `run`, `export`
-or `finish`, and what went wrong. A collection fails when the recipe ran no executable, when an
-executable it ran is gone or was rebuilt before the export, when one wrote no profile, or when a
-profile is unreadable or names an executable that is no longer there. Every attempt keeps its
-profiles, so a failed one keeps its evidence; remove `target/native-coverage` when the collections
-are no longer needed.
-
-Every profile is matched to the executable that wrote it before the export, so a warning from
-`llvm-cov` never means a stale profile. When several executables share a function that only some of
-them run, such as an inlined dependency function, the copies that never ran can carry a different
-hash, and `llvm-cov` warns that they have mismatched data and reads the function from the
-executables that ran it.
-
-CI's extra-tests job runs the four checks through this command and uploads the `lcov.info`,
-`completion.json`, `executions.jsonl` and `export.log` of every collection as the
-`coverage-native-extras` artifact, whatever the verdict. The benchmark bodies run instrumented, so
-their Criterion test mode shows that each body executes and measures nothing. The collector itself,
-including real instrumented runs of a fixture crate and its refusal of every incomplete collection,
-is tested with:
+Each suite runs twice on CI: against the release image and against the Deloxide diagnostic image
+of the same revision, which `just docker-build-diagnostic` builds and whose label makes every run
+judge the deadlock evidence of its nodes. Locally, `just build-chaos-diagnostic-image` overlays a
+release-mode diagnostic server of this checkout on an available image:
 
 ```bash
-just test-native-coverage
+just build-chaos-diagnostic-image nervix:diagnostic-local ghcr.io/nervix-io/nervix:debian-latest deloxide-order
+just chaos suite smoke --image nervix:diagnostic-local --image-kind deloxide-order
 ```
 
-The unit and scenario coverage recipes export `lcov-workspace.info` with every workspace package
-selected. CI merges those reports with the native extra reports, checks complexity against that
-complete report, and uploads it to Codecov. The separate `lcov.info` report selects the server,
-CLI and console for focused inspection; it does not replace the workspace export.
-Run the same complexity check locally with `just check-coverage <merged-workspace-report>`.
+[External Cluster Chaos](./cluster-chaos.md) describes the runner, every scenario and its verdicts,
+the suites, diagnostic images, their budgets and artifacts, and how to reproduce or replay a failed
+run.
+
+### Release evidence
+
+`tests/release-evidence.toml` declares the evidence a revision needs before it qualifies for
+release: the checks every pull request runs, the release images, and each label-gated method with
+its label and checks, Bolero's sanitizer fuzzing, Loom and its weakening qualification, Shuttle,
+Turmoil, every Deloxide lane selection, client conformance, and the smoke and soak suites
+against both the release image and the diagnostic image of the revision.
+
+```bash
+just release-evidence <pull-request>
+```
+
+The gate reads the pull request's head revision, its labels and every check run GitHub recorded on
+that revision. It refuses the revision when a method's label is missing, so CI never ran it; when
+the latest run of a required check, or of any shard of a sharded one, is missing, still running,
+skipped, cancelled, timed out or failed. The register also lists every gap an owner of tracked
+locks declares in `tests/deloxide-inventory.toml`, the path the diagnostic lane does not reach and
+why. A declared gap is a reviewed declaration the Deloxide rule permits, so it does not refuse the
+revision: `just validate-deloxide-applicability`, part of the required `checks` job, holds the
+records to the compiler's acquisition catalog, and the register shows each declared limit of the
+diagnostic evidence to whoever qualifies the release. A rerun of a failed job supersedes the run it
+repeats; a passing rerun of a nondeterministic failure still needs the failure's own investigation,
+which the gate cannot see. The register of every check's
+verdict, run and time goes to `target/release-evidence/<revision>/` and belongs on the task that
+qualifies the revision, not in the repository. `just test-release-evidence` exercises the gate on
+recorded check runs and reads the Deloxide lane and release image matrices from the workflows, so
+it fails when one of their jobs is missing from the inventory. A renamed CI job, or a value added to
+the matrix of one the inventory names, is updated in the inventory in the same change.
+
+### SIMD kernel development
+
+[SIMD Kernels](./simd-kernels.md) owns the typed-buffer admission rule, caller catalog, dispatch
+and build-target matrix, result guarantees, and recorded performance evidence. New kernels need
+generated-instruction inspection, complete scalar/level differential checks including forced
+fallback, and a measured caller. Use its [qualification recipes](./simd-kernels.md#qualification)
+and [measurement recipes](./simd-kernels.md#measurement-and-recorded-evidence), retaining kache.
+Ordinary registered Bolero properties run on PRs; sanitizer CI requires the `fuzz` label, and a
+skip supplies no execution or coverage evidence. API-rejection checks use paired current
+`compile_fail` and compiling doctests. Publish new benchmark and validation artifacts on the
+corresponding ClickUp task; keep durable architectural conclusions in the chapter.
+
+### Coverage reports and complexity
+
+[Coverage Reports And The Complexity Gate](./coverage-reports.md) owns the ordinary producer
+catalog, native collection, source mapping, report integrity, advisory patch coverage and CRAP,
+the full workspace union, and their relationship to the deterministic complexity ratchet. Start
+with its
+[local reproduction commands](./coverage-reports.md#the-ordinary-workspace-report) or
+[native collection commands](./coverage-reports.md#native-collection).
 
 ### The scenario suite's execution budget
 
@@ -547,12 +832,12 @@ phases a scenario reports, and how each failure reaches CI output.
 `just book <version>` renders this book, and `just book-pdf <version>` additionally produces
 `nervix.pdf` through pandoc and XeLaTeX.
 
-Both recipes require the exact mdBook release pinned by `MDBOOK_VERSION` in
-`scripts/build_book.py`, and they fail with that version in the message when a different one is
-installed. CI resolves the same constant, so a local build always matches what is published. The
-pin is exact because the rendered theme targets mdBook's internal element IDs and because the PDF
-relies on mdBook rewriting print-page links into in-document anchors — on an older release every
-cross-chapter link in the PDF would point back at the website instead.
+Both recipes accept stable mdBook patch releases in the major/minor series selected by
+`MDBOOK_VERSION` in `scripts/build_book.py`: the current `0.5.3` pin accepts `0.5.x`, including
+`0.5.4`. A different major or minor version, or a malformed version, fails with the supported series
+in the message. CI installs the exact pinned release for reproducible publication. The series
+requirement protects the theme's element IDs and mdBook's rewriting of print-page links into
+in-document anchors, which the PDF uses for cross-chapter links.
 
 Install the pinned release with:
 

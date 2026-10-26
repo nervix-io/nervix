@@ -1,7 +1,7 @@
 //! The public Nervix backup archive.
 //!
 //! An archive is one tar file written manifest first, so it can be read as a stream without
-//! seeking. Every section it holds is canonical NSPL text, the original bytes of a resource version,
+//! seeking. Every section it holds is canonical Plexus text, the original bytes of a resource version,
 //! or a record this crate owns, encoded with rkyv behind a header of its own: a magic, a record kind
 //! and a format version, checked before bytecheck validates a single field of the payload. The
 //! manifest names every section with its length and BLAKE3 digest, so a reader verifies each section
@@ -17,33 +17,91 @@
 //!   The records are shaped by the archive's contract rather than by any internal store, and the
 //!   conversions into them are the only place an internal shape reaches the format.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATIONS: alloc_count::AllocCounter = alloc_count::AllocCounter(std::alloc::System);
+
+mod branch_state;
 mod describe;
 mod error;
 mod layout;
 mod manifest;
+mod materialized;
 mod path;
 mod reader;
 mod records;
 mod section;
+mod state;
+mod stream;
 mod wire;
 
+pub use branch_state::{
+    BRANCH_STATE_GROUP_BYTES, DEDUPLICATOR_SEEN_AT_COLUMN, DeduplicatorStateDescriptor,
+    DelayedHistogramRemoval, WindowAccumulatorRecord, WindowStateDescriptor,
+    deduplicator_key_column,
+};
 pub use describe::{
-    ArchiveContents, ArchiveDescription, DescribedDomain, DescribedResourceVersion,
-    DescribedSection, describe_archive, read_archive_contents,
+    ArchiveContents, ArchiveDescription, DescribedDomain, DescribedMaterializedGroup,
+    DescribedResourceVersion, DescribedRuntimeState, DescribedSection, DescribedWindowGroup,
+    SkippedStateReason, SkippedStateSection, describe_archive, read_archive_contents,
 };
 pub use error::{ArchiveReadError, ArchiveWriteError};
-pub use layout::{ArchiveLayout, ArchivePiece, SectionSink};
+pub use layout::{ArchiveLayout, ArchivePiece, SectionRecordWriter};
 pub use manifest::{
     ARCHIVE_FORMAT_MAJOR, ArchiveScope, BackupManifest, DomainCapture, RaftLogPosition,
     SectionContent, SectionDigest, SectionEntry,
 };
+pub use materialized::{
+    MATERIALIZED_COLUMNS_BYTES, MATERIALIZED_IDENTITIES_BYTES, MaterializedIdentitiesRecord,
+    MaterializedRecordIdentity, MaterializedRelayDescriptor,
+};
 pub use path::SectionPath;
-pub use reader::{SectionReader, SectionVisitor, read_archive};
+pub use reader::{
+    ManifestHeader, SectionReader, SectionVisitor, read_archive, read_manifest_header,
+};
 pub use records::{
     DeclaredResource, DomainRecord, PublishedResourceVersion, ResourceVersionRecord,
     ResourceVersionState, UserRecord, UsersRecord,
 };
-pub use section::{ArchiveRecord, RecordKind, SectionDigester};
+pub use section::{ArchiveRecord, MAX_RECORD_BYTES, RecordKind, SectionDigester};
+pub use state::{
+    BranchLifecycleEntry, BranchLifecycleRecord, KafkaOffsetsRecord, KafkaPartitionOffset,
+    WasmStateDescriptor,
+};
+pub use stream::{StreamedBranchLifecycle, StreamedKafkaOffsets};
+pub use wire::{StateField, StateValue};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod wasm_properties;
+
+#[cfg(test)]
+mod archive_values;
+
+#[cfg(test)]
+mod materialized_values;
+
+#[cfg(test)]
+mod materialized_faults;
+
+#[cfg(test)]
+mod branch_state_values;
+
+#[cfg(test)]
+mod branch_state_faults;
+
+#[cfg(test)]
+mod archive_properties;
+
+#[cfg(test)]
+mod malformed_properties;

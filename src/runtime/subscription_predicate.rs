@@ -9,6 +9,13 @@
 //! - **Must not know.** Subscription lifecycle, sampling, delivery, branch values, materialized
 //!   state, output construction, or side effects.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
+use error_stack::ResultExt as _;
+
 use super::*;
 
 /// A compiled subscription predicate whose general VM program cannot be observed or replaced.
@@ -39,12 +46,24 @@ impl<'a> SubscriptionPredicateCompileContext<'a> {
     }
 }
 
+/// Why a session subscription's predicate did not compile. The VM's own failure is beneath.
+#[derive(Debug, Error)]
+pub(crate) enum SubscriptionPredicateCompileError {
+    #[error("the predicate of subscription '{subscription}' is invalid")]
+    Lower { subscription: SubscriptionName },
+    #[error("the predicate of subscription '{subscription}' did not compile")]
+    Compile { subscription: SubscriptionName },
+}
+
 #[derive(Debug, Error)]
 pub(crate) enum SubscriptionPredicateExecutionError {
-    #[error("failed to project the subscribed record into predicate inputs: {reason}")]
-    InputProjection { reason: String },
-    #[error("predicate VM execution failed: {reason}")]
-    VmExecution { reason: String },
+    /// The record could not be projected into the predicate's inputs; the projection's report is
+    /// beneath.
+    #[error("failed to project the subscribed record into predicate inputs")]
+    InputProjection,
+    /// The predicate's program failed; the VM's report is beneath.
+    #[error("predicate VM execution failed")]
+    VmExecution,
     #[error("predicate evaluation error {}: {reason} at {span}", reason.code().as_str())]
     Evaluation {
         reason: nervix_vm::SideErrorReason,
@@ -53,24 +72,16 @@ pub(crate) enum SubscriptionPredicateExecutionError {
 }
 
 pub(crate) fn compile_subscription_predicate(
-    domain: &DomainName,
     subscription: &SubscriptionName,
     expression: &nervix_models::Expression,
     context: SubscriptionPredicateCompileContext<'_>,
-) -> Result<CompiledSubscriptionPredicate, Report<RuntimeError>> {
+) -> error_stack::Result<CompiledSubscriptionPredicate, SubscriptionPredicateCompileError> {
     let expression = nervix_vm::lower_expression(
         expression,
         nervix_vm::SemanticScopePolicy::read_only("input"),
     )
-    .map_err(|error| {
-        let reason = format!(
-            "subscription predicate for '{}' is invalid: {error}",
-            subscription.as_str()
-        );
-        error.change_context(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason,
-        })
+    .change_context_lazy(|| SubscriptionPredicateCompileError::Lower {
+        subscription: subscription.clone(),
     })?;
     let bindings = [
         VmCompileBinding::readonly("input", context.input_schema.clone())
@@ -84,16 +95,8 @@ pub(crate) fn compile_subscription_predicate(
         options.injector = Some(Arc::new(Box::new(udfs.clone())));
     }
     let predicate = compile_vm_predicate_with_options_for_bindings(&expression, bindings, options)
-        .map_err(|error| {
-            let reason = format!(
-                "subscription predicate compile failed for '{}': {}",
-                subscription.as_str(),
-                error.current_context().message
-            );
-            error.change_context(RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason,
-            })
+        .change_context_lazy(|| SubscriptionPredicateCompileError::Compile {
+            subscription: subscription.clone(),
         })?;
     Ok(CompiledSubscriptionPredicate { predicate })
 }
@@ -124,18 +127,12 @@ pub(crate) async fn execute_subscription_predicate_on_record(
         },
         None,
     )
-    .map_err(|error| {
-        let reason = error.current_context().to_string();
-        error.change_context(SubscriptionPredicateExecutionError::InputProjection { reason })
-    })?;
+    .change_context(SubscriptionPredicateExecutionError::InputProjection)?;
     let execution_context = VmExecutionContext::new(execution_now);
     let result =
         execute_vm_predicate_in_context(executor, &predicate.predicate, &input, &execution_context)
             .await
-            .map_err(|error| {
-                let reason = error.current_context().to_string();
-                error.change_context(SubscriptionPredicateExecutionError::VmExecution { reason })
-            })?;
+            .change_context(SubscriptionPredicateExecutionError::VmExecution)?;
     if let Some(error) = result.errors().first() {
         return Err(Report::new(
             SubscriptionPredicateExecutionError::Evaluation {
@@ -148,17 +145,19 @@ pub(crate) async fn execute_subscription_predicate_on_record(
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
     use crate::runtime::test_fixtures::{expression, named, test_schema};
 
     #[test]
     fn invalid_predicate_keeps_subscription_and_vm_compile_context() {
-        let domain: DomainName = named("test_domain");
         let subscription: SubscriptionName = named("filtered_view");
         let schema = test_schema(&[("value", ParseAsType::I64)]);
         let report = compile_subscription_predicate(
-            &domain,
             &subscription,
             &expression("input.missing > 0"),
             SubscriptionPredicateCompileContext::new(
@@ -170,21 +169,18 @@ mod tests {
         .expect_err("a predicate cannot read an undeclared input field");
         assert!(matches!(
             report.current_context(),
-            RuntimeError::BuildDomainExecution { domain, reason }
-                if domain == "test_domain"
-                    && reason.contains("filtered_view")
-                    && reason.contains("missing")
+            SubscriptionPredicateCompileError::Compile { subscription: failed }
+                if failed == &subscription
         ));
         assert!(report.contains::<nervix_vm::CompileError>());
+        assert!(format!("{report:#}").contains("missing"), "{report:#}");
     }
 
     #[nervix_primitives::test]
     async fn missing_record_field_keeps_projection_report() {
-        let domain: DomainName = named("test_domain");
         let subscription: SubscriptionName = named("filtered_view");
         let schema = test_schema(&[("value", ParseAsType::I64)]);
         let predicate = compile_subscription_predicate(
-            &domain,
             &subscription,
             &expression("input.value > 0"),
             SubscriptionPredicateCompileContext::new(
@@ -206,9 +202,19 @@ mod tests {
         .expect_err("the record lacks the predicate's required input field");
         assert!(matches!(
             report.current_context(),
-            SubscriptionPredicateExecutionError::InputProjection { reason }
-                if reason.contains("value")
+            SubscriptionPredicateExecutionError::InputProjection
         ));
         assert!(report.contains::<RuntimeSchemaError>());
+        let rendered = format!("{report:#}");
+        let projection = report
+            .downcast_ref::<RuntimeSchemaError>()
+            .expect("the projection's own failure is beneath the predicate's context")
+            .to_string();
+        assert!(
+            rendered.starts_with("failed to project the subscribed record into predicate inputs: "),
+            "{rendered}"
+        );
+        assert!(projection.contains("value"), "{projection}");
+        assert_eq!(rendered.matches(&projection).count(), 1, "{rendered}");
     }
 }

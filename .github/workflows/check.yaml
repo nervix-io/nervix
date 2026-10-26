@@ -2,11 +2,16 @@ name: Check
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 env:
-  KACHE_VERSION: "0.28.1"
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  # Kache sizes its local store from the cache volume (5%, rounded and bounded).
+  # Keep the default so a runner disk change also changes its cache budget.
+  KACHE_VERSION: "1.2.1"
   KACHE_REMOTE_KEY_LISTING: "false"
+  # Kache disables free-space recovery in CI unless a decimal-byte floor is explicit: 64 GiB.
+  KACHE_AUTO_RECOVER_MIN_FREE_BYTES: "68719476736"
   TINYGO_VERSION: "0.41.1"
 
 permissions:
@@ -17,6 +22,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Decide from the exact tested diff before starting any ordinary producer. A validation-only
+  # rerun retains this decision; cancellation is never interpreted as completed test evidence.
+  test-selection:
+    name: test-selection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tests-required: ${{ steps.selection.outputs.tests-required }}
+      bolero-required: ${{ steps.selection.outputs.bolero-required }}
+    steps:
+      - name: Checkout tested merge
+        uses: actions/checkout@v4
+        with:
+          # The tested merge and its parents. Selection fetches the tested base's commit history with
+          # these credentials only when GitHub merged into a base that advanced past the event's.
+          fetch-depth: 2
+          persist-credentials: true
+
+      - name: Select required suites from the tested diff
+        id: selection
+        run: python3 scripts/ci_test_selection.py --record target/ci-test-selection.json
+
+      - name: Retain the source selection
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-test-selection
+          path: target/ci-test-selection.json
+          if-no-files-found: error
+
+  bolero:
+    needs: [test-selection]
+    if: needs.test-selection.outputs.bolero-required == 'true'
+    uses: ./.github/workflows/bolero.yaml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      tested-sha: ${{ github.sha }}
+      event-name: ${{ github.event_name }}
+      labels-json: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+
   conventional-pr-title:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -39,9 +85,16 @@ jobs:
     # Cold validation includes Clippy and the complete compiler matrix.
     timeout-minutes: 120
     steps:
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
+          fetch-depth: 2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
@@ -52,7 +105,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,toml-cli,trunk,wild-linker
+          tool: cargo-hack,typos-cli,cargo-audit,cargo-mutants,taplo-cli,just@latest,cargo-autoinherit,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -81,17 +134,15 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
       - name: Install dockerfmt
-        run: |
-          go install github.com/reteps/dockerfmt@latest
+        run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install ghokin
-        run: |
-          go install github.com/antham/ghokin/v3@v3.9.0
+        run: python3 scripts/install_go_ci_tool.py ghokin "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install apt deps and current GitHub CLI
         run: |
@@ -113,39 +164,28 @@ jobs:
         with:
           version: "25.12.19"
 
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
-          max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      - name: Runner diagnostics before Validate
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: validate
 
       - name: Validate
         run: |
@@ -154,9 +194,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
       - name: Publish kache report
         if: always()
-        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
 
       - name: Upload kache report
         if: always()
@@ -166,26 +223,162 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-  tests:
-    name: tests
+      - name: Upload Go tool bootstrap logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tool-bootstrap-${{ github.job }}
+          path: ${{ runner.temp }}/go-tool-bootstrap
+          if-no-files-found: ignore
+
+  # Diagnostic coverage is a distinct execution mode and never contributes to native cost counts.
+  diagnostic-evidence:
+    name: diagnostic-evidence
+    needs: [test-selection]
+    if: needs.test-selection.outputs.tests-required == 'true'
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: llvm-tools
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,cargo-llvm-cov,wild-linker
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
+          EOF
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          cache-executables: "true"
+          pr-comment: "false"
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
+      - name: Runner diagnostics before Check diagnostic evidence and report tool coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: check-diagnostic-evidence-and-report-tool-coverage
+
+      - name: Check diagnostic evidence and report tool coverage
+        run: just coverage-deadlock
+        env:
+          NERVIX_DEADLOCK_PROBE_ARTIFACTS: target/diagnostic-evidence/probes
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-diagnostic-evidence
+
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-evidence
+          path: |
+            target/deadlock.lcov
+            target/diagnostic-evidence
+            target/native-coverage/test-deadlock-*/**/completion.json
+            target/native-coverage/test-deadlock-*/**/lcov.info
+            target/native-coverage/test-deadlock-*/**/executions.jsonl
+            target/native-coverage/test-deadlock-*/**/export.log
+          if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
+  # The Deloxide diagnostic lane, only for a pull request labeled `deloxide`: every workload
+  # tests/deloxide-inventory.toml registers, each selection on a runner of its own in the
+  # instrumented build of the feature it compiles under the native coverage collector, then the
+  # qualification of the lane's supervision on deliberately failing processes. Each selection keeps
+  # its own budget, so the stressed restore scenarios, which share the stress selection's build,
+  # run beside it rather than after it. Diagnostic coverage stays in this job's artifact, apart
+  # from ordinary coverage and its CRAP report.
+  deloxide:
+    name: deloxide (${{ matrix.selection }})
+    if: contains(github.event.pull_request.labels.*.name, 'deloxide')
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 60
+    # Setup, then at most the lane's bound, the qualification's bound and the reserve the uploads
+    # and the kache report keep after them.
+    timeout-minutes: 200
+    strategy:
+      # Each selection's verdict and evidence stand on their own.
+      fail-fast: false
+      matrix:
+        selection: [deloxide, deloxide-order, deloxide-stress, deloxide-stress-restore]
     permissions:
       contents: read
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
+      SELECTION: ${{ matrix.selection }}
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -214,17 +407,9 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
-
-      - name: Install dockerfmt
-        run: |
-          go install github.com/reteps/dockerfmt@latest
-
-      - name: Install playwright
-        run: |
-          npm install -g playwright
 
       - name: Install apt deps
         run: |
@@ -243,39 +428,204 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Configure kache daemon remote
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          cache-executables: "true"
+          pr-comment: "false"
+
+      - name: Start kache remote
         env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
           KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
           KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
           KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
           KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
           KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      # The bound covers prerequisites, the inventory's separate build and workload budgets,
+      # and the coverage export. At its end the collector and the lane each
+      # record their attempt as interrupted and end every process they started.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
+      - name: Runner diagnostics before Diagnostic lane
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: diagnostic-lane
+
+      - name: Diagnostic lane
         run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+          just toolchains-install
+          timeout --signal=TERM --kill-after=60 175m just coverage-native-extras "test-${SELECTION}"
+
+      - name: Runner diagnostics before Supervision qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: supervision-qualification
+
+      - name: Supervision qualification
+        run: timeout --signal=TERM --kill-after=60 10m just test-deloxide-qualification "${SELECTION}"
+
+      # Every attempt's record, logs, evidence and finding descriptions, whatever its verdict: a
+      # failed lane is investigated and replayed from what it kept. The raw profiles stay here.
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-deloxide-${{ matrix.selection }}
+
+      - name: Upload diagnostic lane evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deloxide-${{ matrix.selection }}
+          path: |
+            target/native-coverage/test-${{ matrix.selection }}/**/completion.json
+            target/native-coverage/test-${{ matrix.selection }}/**/lcov.info
+            target/native-coverage/test-${{ matrix.selection }}/**/executions.jsonl
+            target/native-coverage/test-${{ matrix.selection }}/**/export.log
+            target/native-coverage/test-${{ matrix.selection }}/**/lane.json
+            target/native-coverage-build-deloxide*/test-deloxide/${{ matrix.selection }}/
+            target/deloxide/test-deloxide/
+          if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ matrix.selection }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+  tests:
+    name: tests
+    needs: [test-selection]
+    if: needs.test-selection.outputs.tests-required == 'true'
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      - name: Install dockerfmt
+        run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
+
+      - name: Install playwright
+        run: |
+          npm install -g playwright
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
 
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
-          max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Start runner load recorder
         run: |
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+      - name: Runner diagnostics before Tests coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: tests-coverage
 
       - name: Tests coverage
         run: |
@@ -289,7 +639,7 @@ jobs:
           name: coverage-tests
           path: |
             lcov-workspace.info
-            lcov.info
+            coverage-source-root.txt
           if-no-files-found: warn
 
       - name: Publish runner load
@@ -297,7 +647,7 @@ jobs:
         run: |
           if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
             kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
-            for attempt in {1..10}; do
+            for _ in {1..10}; do
               [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
               sleep 1
             done
@@ -317,9 +667,26 @@ jobs:
             ${{ runner.temp }}/runner-load.log
           if-no-files-found: warn
 
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
       - name: Publish kache report
         if: always()
-        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
 
       - name: Upload kache report
         if: always()
@@ -328,6 +695,14 @@ jobs:
           name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
+
+      - name: Upload Go tool bootstrap logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tool-bootstrap-${{ github.job }}
+          path: ${{ runner.temp }}/go-tool-bootstrap
+          if-no-files-found: ignore
 
       - name: Upload test logs
         if: always()
@@ -339,26 +714,37 @@ jobs:
 
   scenarios:
     name: scenarios
+    needs: [test-selection]
+    if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # The harness watchdog derives its budget from this limit and leaves time for logs and reports.
-    timeout-minutes: 60
+    # The harness derives 75 minutes of scenarios from this limit, with 30 for setup/builds and
+    # 15 for cleanup/export/uploads. Keep tests/common/suite_watchdog.rs in step.
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      NERVIX_TEST_CONCURRENCY_FACTOR: "2"
+      # Keep the qualified 48-slot load. Recent slow runs need more time at this concurrency:
+      # 39656928785 used 117,587 slot-seconds with 833 attempts still active after 41 minutes.
+      NERVIX_TEST_CONCURRENCY_FACTOR: "3"
     steps:
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
+          fetch-depth: 2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,cargo-llvm-cov,trunk,wild-linker
+          tool: just@latest,cargo-llvm-cov,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -377,7 +763,7 @@ jobs:
       - name: Setup Go environment
         uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26"
 
       - name: Install TinyGo
         run: |
@@ -387,13 +773,12 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
       - name: Install dockerfmt
-        run: |
-          go install github.com/reteps/dockerfmt@latest
+        run: python3 scripts/install_go_ci_tool.py dockerfmt "${RUNNER_TEMP}/go-tool-bootstrap"
 
       - name: Install playwright
         run: |
@@ -411,44 +796,36 @@ jobs:
         with:
           version: "25.12.19"
 
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
-          max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       - name: Start runner load recorder
         run: |
           python3 scripts/record_runner_load.py "${RUNNER_TEMP}/runner-load.csv" "${RUNNER_TEMP}/runner-load.md" > "${RUNNER_TEMP}/runner-load.log" 2>&1 &
           echo "$!" > "${RUNNER_TEMP}/runner-load.pid"
+
+      - name: Setup uv for Python driver coverage
+        uses: astral-sh/setup-uv@v6
+
+      - name: Runner diagnostics before Scenario coverage
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: scenario-coverage
 
       - name: Scenario coverage
         run: |
@@ -463,7 +840,8 @@ jobs:
           overwrite: true
           path: |
             lcov-workspace.info
-            lcov.info
+            coverage-source-root.txt
+            target/paced-simulation/python.lcov
           if-no-files-found: warn
 
       - name: Publish runner load
@@ -471,7 +849,7 @@ jobs:
         run: |
           if [[ -f "${RUNNER_TEMP}/runner-load.pid" ]]; then
             kill -TERM "$(cat "${RUNNER_TEMP}/runner-load.pid")" || true
-            for attempt in {1..10}; do
+            for _ in {1..10}; do
               [[ -f "${RUNNER_TEMP}/runner-load.md" ]] && break
               sleep 1
             done
@@ -499,9 +877,26 @@ jobs:
             cat tests/logs/suite-summary.md >> "${GITHUB_STEP_SUMMARY}"
           fi
 
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
       - name: Publish kache report
         if: always()
-        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
 
       - name: Upload kache report
         if: always()
@@ -511,6 +906,14 @@ jobs:
           overwrite: true
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
+
+      - name: Upload Go tool bootstrap logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-tool-bootstrap-${{ github.job }}
+          path: ${{ runner.temp }}/go-tool-bootstrap
+          if-no-files-found: ignore
 
       - name: Upload scenario logs
         if: always()
@@ -528,23 +931,49 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      id-token: write
+      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
 
-      - name: Install CRAP and LCOV
+      - name: Install just
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-crap,just,toml-cli
+          tool: just
 
-      - name: Install LCOV
-        run: sudo apt-get update && sudo apt-get install -y lcov
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          cache-executables: "true"
+          pr-comment: "false"
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      # The CRAP report runs the cargo-crap version scripts/cargo_crap.py pins, built through kache.
+      - name: Runner diagnostics before Install the pinned complexity analyzer
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: install-the-pinned-complexity-analyzer
+
+      - name: Install the pinned complexity analyzer
+        run: just install-cargo-crap
 
       - name: Download tests coverage
         uses: actions/download-artifact@v4
@@ -564,44 +993,193 @@ jobs:
           name: coverage-native-extras
           path: coverage-inputs/native-extras
 
-      - name: Merge coverage and check CRAP
-        run: |
-          lcov --add-tracefile coverage-inputs/tests/lcov-workspace.info \
-            --add-tracefile coverage-inputs/scenarios/lcov-workspace.info \
-            --output-file lcov-workspace.info
-          lcov --add-tracefile coverage-inputs/tests/lcov.info \
-            --add-tracefile coverage-inputs/scenarios/lcov.info \
-            --output-file lcov.info
-          while IFS= read -r report; do
-            lcov --add-tracefile lcov-workspace.info --add-tracefile "$report" --output-file lcov-workspace.info
-            lcov --add-tracefile lcov.info --add-tracefile "$report" --output-file lcov.info
-          done < <(find coverage-inputs/native-extras -name lcov.info -o -name python.lcov)
-          just check-coverage
+      # One repository-relative report of the ordinary producers, which every step below reads. The
+      # merge leaves out the collections of other modes the native extras artifact holds, and fails
+      # rather than publish an incomplete report.
+      - name: Merge coverage
+        run: just coverage-merge coverage-inputs/tests coverage-inputs/scenarios coverage-inputs/native-extras
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          disable_search: true
-          fail_ci_if_error: true
-          files: ./lcov-workspace.info
-          use_oidc: true
+      # The pinned cargo-crap scores the repository's Rust sources against the merged report. No score
+      # fails the step: it fails only when the analysis cannot describe the report, and it writes its
+      # JSON and Markdown reports either way.
+      - name: Report CRAP
+        run: just check-coverage
+
+      # The comment carries the CRAP section for the files the pull request changes, or the CRAP
+      # step's failure, or that its report is missing.
+      - name: Report patch line coverage
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          just coverage-patch "$BASE_SHA" lcov-workspace.info \
+            --crap target/crap-report/crap.json \
+            --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA"
 
       - name: Upload merged coverage
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-merged
+          overwrite: true
           path: |
             lcov-workspace.info
-            lcov.info
+            target/coverage-merge/record.json
+            target/patch-coverage.md
+            target/crap-report/crap.json
+            target/crap-report/crap.md
+          if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
+      - name: Publish kache report
+        if: always()
+        run: |
+          if [[ -f scripts/publish_kache_report.py ]]; then
+            python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache report unavailable because checkout did not provide its script"
+          fi
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+  # The workspace line-coverage union of every producer this run's event and labels select: the
+  # ordinary report, the modeled and diagnostic native collections, and the live fuzz campaigns a
+  # pull request carrying `fuzz` requests. It waits for every producer job, including a skipped or
+  # failed one, so a producer that did not succeed fails the union instead of hiding behind a skip.
+  # It downloads the exported reports and records and rebuilds nothing. The ordinary report, its
+  # CRAP report and its patch coverage stay with the coverage job.
+  coverage-full:
+    name: coverage-full
+    needs: [test-selection, bolero, coverage, extra-tests, diagnostic-evidence, shuttle, loom, turmoil, deloxide]
+    if: ${{ !cancelled() && (needs.test-selection.result != 'success' || needs.test-selection.outputs.tests-required == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The justfile reads the repository toolchain with Python's TOML parser when it loads.
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Record the event, labels and producer results
+        env:
+          EVENT: ${{ github.event_name }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          TESTS_REQUIRED: ${{ needs.test-selection.outputs.tests-required }}
+          BOLERO_REQUIRED: ${{ needs.test-selection.outputs.bolero-required }}
+          JOBS: ${{ toJSON(needs) }}
+        run: |
+          just coverage-full-select --event "$EVENT" --labels "$LABELS" \
+            --tests-required "$TESTS_REQUIRED" --bolero-required "$BOLERO_REQUIRED" --jobs "$JOBS"
+
+      - name: Download ordinary coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-merged
+          path: coverage-full-inputs
+
+      - name: Download native extra coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-native-extras
+          path: coverage-full-inputs
+
+      - name: Download diagnostic evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: diagnostic-evidence
+          path: coverage-full-inputs
+
+      # The artifacts of label-enabled producers and of the Bolero call. A pattern that matches no
+      # artifact downloads nothing; the union then names what the selection required and lacks.
+      - name: Download Shuttle coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-shuttle
+          path: coverage-full-inputs
+
+      - name: Download Loom coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-loom
+          path: coverage-full-inputs
+
+      - name: Download Turmoil coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-turmoil
+          path: coverage-full-inputs
+
+      - name: Download Deloxide lane coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deloxide-*
+          path: coverage-full-inputs
+
+      - name: Download combined fuzz coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-bolero-fuzz
+          path: coverage-full-inputs
+
+      - name: Download Bolero selection
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bolero-selection
+          path: coverage-full-inputs
+
+      - name: Combine coverage
+        if: ${{ !cancelled() }}
+        run: just coverage-full coverage-full-inputs/*
+
+      - name: Upload full coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-full
+          path: |
+            target/coverage-full/lcov-full.info
+            target/coverage-full/beyond-ordinary.info
+            target/coverage-full/record.json
+            target/coverage-full/selection.json
+            target/coverage-full/summary.md
           if-no-files-found: warn
 
   # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
   # and independent Go and TypeScript implementations on Node.js and Bun. They need toolchains the
   # suite job does not install and run a feature of their own, so they are a job of their own
-  # beside the suite rather than minutes added to its critical path.
+  # beside the suite rather than minutes added to its critical path. They run only for a pull
+  # request labeled `client-conformance`.
   client-conformance:
     name: client-conformance
+    if: contains(github.event.pull_request.labels.*.name, 'client-conformance')
     runs-on: blacksmith-8vcpu-ubuntu-2404
     # The suite budget below is derived from this limit: builds before the scenarios, then at most
     # the budget, then the reserve the harness keeps for its own cleanup and the log upload.
@@ -618,14 +1196,15 @@ jobs:
       NERVIX_TEST_SUITE_BUDGET: "15m"
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -656,7 +1235,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -695,39 +1274,57 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
-          max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
+      - name: Runner diagnostics before Client conformance
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: client-conformance
 
       - name: Client conformance
         run: |
           just toolchains-install
           just test-client-conformance
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-client-conformance
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -750,15 +1347,17 @@ jobs:
           if-no-files-found: ignore
 
   # The checks that answer for the workspace rather than for the scenario suite: undefined
-  # behaviour, mutation coverage, benchmark bodies, modeled concurrency and completion
+  # behaviour, mutation coverage, benchmark bodies, primitive boundary conformance and completion
   # reachability. None of them reads the suite's result, so they run beside it instead of queueing
   # behind it, and a slow one no longer pushes the suite's job toward its own timeout. The checks
   # that execute Nervix code natively in ordinary mode run instrumented and publish their source
   # coverage from that same run.
   extra-tests:
     name: extra-tests
+    needs: [test-selection]
+    if: needs.test-selection.outputs.tests-required == 'true'
     # Half the suite job's cores saves capacity. Budget cold ordinary instrumentation,
-    # compiler checks and modeled primitive and Loom builds.
+    # compiler checks and modeled primitive builds.
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 120
     permissions:
@@ -769,8 +1368,9 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Setup Rust nightly
@@ -781,7 +1381,7 @@ jobs:
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov,cargo-mutants,just@latest,toml-cli,trunk,wild-linker
+          tool: cargo-llvm-cov,cargo-mutants,just@latest,trunk,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -812,7 +1412,7 @@ jobs:
             amd64|arm64) ;;
             *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
           esac
-          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          curl --retry 3 --retry-delay 2 --retry-max-time 120 --connect-timeout 20 --max-time 120 -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
           sudo dpkg -i /tmp/tinygo.deb
           tinygo version
 
@@ -833,91 +1433,181 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
-          max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       # Cheapest first, so a workspace that does not build at all is named in seconds rather than
       # after the heavier compilations have run.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
+      - name: Runner diagnostics before Capability doctests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: capability-doctests
+
       - name: Capability doctests
         run: |
           just toolchains-install
           just test-capability-docs
 
+      - name: Runner diagnostics before Expiry map Miri
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: expiry-map-miri
+
       - name: Expiry map Miri
         run: just test-expiry-map-miri
+
+      - name: Runner diagnostics before Expiry map mutation tests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: expiry-map-mutation-tests
 
       - name: Expiry map mutation tests
         run: just test-expiry-map-mutants
 
+      - name: Setup uv for runner coverage
+        uses: astral-sh/setup-uv@v6
+
+      - name: Patch coverage reporter
+        run: |
+          just coverage-patch-runner
+          pwd > target/coverage-source-root.txt
+
+      - name: Ordinary coverage merge
+        run: just coverage-merge-runner
+
+      - name: CRAP report
+        run: just coverage-crap-report-runner
+
+      - name: Full coverage union
+        run: just coverage-full-runner
+
+      - name: Paced simulation Python open policy
+        run: just coverage-paced-simulation-python
+
+      - name: Release evidence gate
+        run: just coverage-release-evidence
+
+      - name: Kubernetes deployment controller
+        run: just coverage-operator-deployment
+
+      - name: Kache remote contract
+        run: just coverage-kache-ci
+
+      - name: Plexus connector matrix renderer
+        run: just coverage-connector-matrix
+
       # The collector that the steps below run their checks through, including its refusal of
       # every incomplete collection.
       - name: Native coverage collector
-        run: just test-native-coverage
+        run: just coverage-model-runner
+
+      - name: Runner diagnostics before Source contracts, compiler diagnostics and paired API doctests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: source-contracts-compiler-diagnostics-and-paired-api-doctests
 
       - name: Source contracts, compiler diagnostics and paired API doctests
         run: just coverage-native-extras test-typed-ratchet
 
-      - name: Setup uv for compiler runner coverage
-        uses: astral-sh/setup-uv@v6
+      - name: Runner diagnostics before Compiler cache changes, interruption and runner qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: compiler-cache-changes-interruption-and-runner-qualification
 
       - name: Compiler cache changes, interruption and runner qualification
         run: |
           just qualify-typed-ratchet-cache
           just coverage-typed-ratchet-python
 
+      - name: Primitive source and thread owner validation coverage
+        run: just coverage-primitive-boundary
+
+      # The completed doctests no longer need their compiled outputs. Keep their evidence while
+      # making room for the separately instrumented benchmark build.
+      - name: Reclaim completed documentation builds
+        run: just clean-ci-docs
+
       # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
       # without treating noisy shared-runner timings as a performance regression signal. The run is
       # instrumented for source coverage, so its timings are not a measurement either.
+      - name: Runner diagnostics before Benchmark smoke tests
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: benchmark-smoke-tests
+
       - name: Benchmark smoke tests
         run: just coverage-native-extras bench-smoke
 
-      # The primitive boundary's conformance in every execution mode, the ordinary one collected
-      # for coverage, then every registered Loom model of a production owner explored to
-      # exhaustion, then the proof that each model fails under the ordering weakening it exists to
-      # detect.
+      # The collector has exported its report and recorded completion before this runs. Release
+      # the benchmark's dev-profile build outputs while retaining every coverage record.
+      - name: Reclaim completed benchmark builds
+        run: just clean-ci-benchmarks
+
+      # The primitive boundary's native conformance collected separately in every execution mode.
+      - name: Runner diagnostics before Primitive boundary conformance
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: primitive-boundary-conformance
+
       - name: Primitive boundary conformance
         run: just coverage-native-extras test-primitives
 
-      - name: Loom memory-ordering models
-        run: just test-loom
+      - name: Runner diagnostics before Primitive boundary compile and browser checks
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: primitive-boundary-compile-and-browser-checks
 
-      - name: Loom ordering qualification
-        run: just test-loom-qualification
+      - name: Primitive boundary compile and browser checks
+        run: just test-primitives-compile
 
       # The walk saturates every core, and its failures are about completion reachability rather
       # than about any one test.
-      - name: NSPL completion walk
-        run: just coverage-native-extras nspl-completion-walk
+      - name: Runner diagnostics before Plexus completion walk
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: plexus-completion-walk
+
+      - name: Plexus completion walk
+        run: just coverage-native-extras plexus-completion-walk
+
+      - name: Runner diagnostics before Plexus connector declaration export
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: plexus-connector-declaration-export
+
+      - name: Plexus connector declaration export
+        run: just coverage-native-extras validate-connector-matrix
 
       # Each collection's report, completion record, executions and export diagnostics, whatever
       # its verdict: a failed or interrupted record is the evidence of what the collection saw. The
       # raw profiles stay on the runner.
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-extra-tests
+
       - name: Upload native extra coverage
         if: always()
         uses: actions/upload-artifact@v4
@@ -929,8 +1619,32 @@ jobs:
             target/native-coverage/**/executions.jsonl
             target/native-coverage/**/export.log
             target/typed-ratchet/python.lcov
+            target/model-coverage/python.lcov
+            target/primitive-boundary/python.lcov
+            target/patch-coverage/python.lcov
+            target/coverage-merge/python.lcov
+            target/crap-report/python.lcov
+            target/coverage-full/python.lcov
+            target/paced-simulation/python.lcov
+            target/release-evidence-coverage/python.lcov
+            target/operator-deployment-coverage/python.lcov
+            target/kache-ci/python.lcov
+            target/connector-matrix/python.lcov
+            target/coverage-source-root.txt
             target/typed-ratchet/cache-qualification/**/qualification.json
           if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -944,25 +1658,14 @@ jobs:
           path: ${{ runner.temp }}/kache-report
           if-no-files-found: warn
 
-      # A failed Loom model is only reproducible from the checkpoint of the execution that failed,
-      # and a failed qualification from its weakened run; this job is the only witness of either.
-      - name: Upload Loom failure evidence
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: loom-failures
-          path: |
-            target/loom-failures
-            target/loom-qualification/*/*.log
-            target/loom-qualification/*/*.json
-          if-no-files-found: ignore
-
   # Shuttle's in-process scheduling checks and uncontrolled-nondeterminism rechecks run
-  # independently of the native coverage collectors and other extra tests.
+  # in their own coverage collection job beside the other extra tests, and only for a pull
+  # request labeled `shuttle`.
   shuttle:
     name: shuttle
+    if: contains(github.event.pull_request.labels.*.name, 'shuttle')
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: read
     env:
@@ -971,14 +1674,15 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,trunk,wild-linker
+          tool: just@latest,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
@@ -1028,44 +1732,80 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
-
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
-          max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
 
       # Every registered Shuttle check under its exploration and under the nondeterminism detector,
       # each in its own process, then the proof that a failing schedule persists and replays.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
+      - name: Runner diagnostics before Shuttle concurrency checks
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: shuttle-concurrency-checks
+
       - name: Shuttle concurrency checks
         run: |
           just toolchains-install
-          just test-shuttle
+          just coverage-native-extras test-shuttle
+
+      - name: Runner diagnostics before Shuttle schedule replay
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: shuttle-schedule-replay
 
       - name: Shuttle schedule replay
         run: just test-shuttle-replay-check
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-shuttle
+
+      - name: Upload Shuttle coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-shuttle
+          path: |
+            target/native-coverage/**/completion.json
+            target/native-coverage/**/lcov.info
+            target/native-coverage/**/executions.jsonl
+            target/native-coverage/**/export.log
+            target/native-coverage/**/models.json
+          if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1081,27 +1821,31 @@ jobs:
 
       # A modeled concurrency failure is only reproducible from the schedule that produced it,
       # and this job is the only witness of that schedule.
+      - name: Archive Shuttle failure traces
+        if: failure()
+        run: |
+          if [ -d target/native-coverage-build-shuttle/shuttle-failures ]; then
+            tar -czf target/shuttle-failures.tar.gz \
+              -C target/native-coverage-build-shuttle shuttle-failures
+          fi
+
       - name: Upload Shuttle failure traces
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: shuttle-failures
-          path: target/shuttle-failures
+          path: target/shuttle-failures.tar.gz
           if-no-files-found: ignore
 
-  # Turmoil's seeded network simulations of the interconnect: every scenario over its committed
-  # regression seeds, then a fresh-process replay of an injected failure. A job of its own beside
-  # the default suite and the Shuttle checks, because its build enables the `turmoil` feature and
-  # `tokio_unstable` and so shares no compilation with either, and because a failed scenario's
-  # record is this job's artifact.
-  turmoil:
-    name: turmoil
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    # The emergency guard around the build, the tests and the upload. The tests end themselves
-    # first: every run has its own real-time bound, and `just test-turmoil` gives all of them
-    # together an 8-minute budget, which ends a wedged run with status 124 and leaves the record
-    # upload its time.
-    timeout-minutes: 30
+  # Loom's memory-ordering models run in their own coverage collection job beside the other extra
+  # tests, and only for a pull request labeled `loom`.
+  loom:
+    name: loom
+    if: contains(github.event.pull_request.labels.*.name, 'loom')
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # The models took 10 to 11 minutes on a warm cache. The limit leaves room for a cold
+    # instrumented build and for the models the inventory adds.
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
@@ -1110,20 +1854,338 @@ jobs:
       RUST_LOG_STYLE: never
     steps:
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@1.99
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.99"
           targets: wasm32-unknown-unknown
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: just@latest,toml-cli,wild-linker
+          tool: just@latest,trunk,wild-linker,cargo-llvm-cov
 
       - name: Install Latest LLVM
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
+          EOF
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          cache-executables: "true"
+          pr-comment: "false"
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      # Every registered Loom model of a production owner explored to exhaustion. The proof that
+      # each model fails under the ordering weakening it exists to detect runs in the
+      # loom-qualification jobs.
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
+      - name: Runner diagnostics before Loom memory-ordering models
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: loom-memory-ordering-models
+
+      - name: Loom memory-ordering models
+        run: |
+          just toolchains-install
+          just coverage-native-extras test-loom
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-loom
+
+      - name: Upload Loom coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-loom
+          path: |
+            target/native-coverage/**/completion.json
+            target/native-coverage/**/lcov.info
+            target/native-coverage/**/executions.jsonl
+            target/native-coverage/**/export.log
+            target/native-coverage/**/models.json
+          if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+      # A failed Loom model is only reproducible from the checkpoint of the execution that failed;
+      # this job is the only witness of it.
+      - name: Upload Loom failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loom-failures
+          path: target/native-coverage-build-loom/loom-failures
+          if-no-files-found: ignore
+
+  # The proof that each Loom model fails under the ordering weakening it exists to detect. Jobs of
+  # their own because every qualification that weakens the server rebuilds the server library in
+  # Loom's test mode with its one weakening applied, which outlasts the other extra tests; the
+  # shards split those rebuilds. Like the `loom` job, they run only for a pull request labeled
+  # `loom`.
+  loom-qualification:
+    name: loom-qualification (${{ matrix.shard }} of ${{ strategy.job-total }})
+    if: contains(github.event.pull_request.labels.*.name, 'loom')
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "${GITHUB_WORKSPACE}/scripts/ci_linker.sh"
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          cache-executables: "true"
+          pr-comment: "false"
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
+      - name: Runner diagnostics before Loom ordering qualification
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: loom-ordering-qualification
+
+      - name: Loom ordering qualification
+        run: |
+          just toolchains-install
+          just test-loom-qualification ${{ matrix.shard }}/${{ strategy.job-total }}
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-loom-qualification-${{ matrix.shard }}
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
+
+      - name: Publish kache report
+        if: always()
+        run: python3 scripts/publish_kache_report.py "${RUNNER_TEMP}/kache-report"
+
+      - name: Upload kache report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kache-${{ github.job }}-${{ matrix.shard }}-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/kache-report
+          if-no-files-found: warn
+
+      # Each successful negative control retains its counterexample and checkpoint replay too.
+      # The isolated weakened source copy is gone by the time these records are uploaded.
+      - name: Upload Loom qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loom-qualification-evidence-${{ matrix.shard }}
+          path: |
+            target/loom-qualification/*/*.log
+            target/loom-qualification/*/*.json
+          if-no-files-found: ignore
+
+  # Turmoil's seeded network simulations of the interconnect: every scenario over its committed
+  # regression seeds, then a fresh-process replay of an injected failure. A job of its own beside
+  # the default suite and the Shuttle checks, because its build enables the `turmoil` feature and
+  # `tokio_unstable` and so shares no compilation with either, and because a failed scenario's
+  # record is this job's artifact. It runs only for a pull request labeled `turmoil`.
+  turmoil:
+    name: turmoil
+    if: contains(github.event.pull_request.labels.*.name, 'turmoil')
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # The emergency guard around the build, the tests and the upload. The tests end themselves
+    # first: every run has its own real-time bound, and `just test-turmoil` gives all of them
+    # together an 8-minute budget, which ends a wedged run with status 124 and leaves the record
+    # upload its time.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just@latest,wild-linker,cargo-llvm-cov
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      # The interconnect's wire properties take their vocabulary values from the generator crate,
+      # whose WASM protocol bindings are generated when it is built.
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
 
       # The same toolchain and flags the other jobs build with, so the dependencies this build
       # shares with them compile identically.
@@ -1138,44 +2200,95 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
-
-      - name: Configure kache daemon remote
-        env:
-          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
-          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
-          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
-        run: |
-          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
-          bash scripts/configure_kache_remote.sh "${config}"
-          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+          fetch-depth: 0
 
       - name: Setup kache
         uses: kunobi-ninja/kache-action@v1
         with:
           version: ${{ env.KACHE_VERSION }}
           github-cache: "false"
-          sync: "false"
           cache-executables: "true"
-          max-size: "1TiB"
-          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
           pr-comment: "false"
-          s3-bucket: ${{ vars.KACHE_BUCKET }}
-          s3-prefix: "artifacts"
-          s3-region: ${{ vars.KACHE_BUCKET_REGION }}
-          s3-endpoint: ${{ vars.KACHE_BUCKET_ENDPOINT }}
-          s3-access-key-id: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
-          s3-secret-access-key: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+
+      - name: Start kache remote
+        env:
+          KACHE_MANIFEST_KEY: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          KACHE_S3_BUCKET: ${{ vars.KACHE_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_BUCKET_REGION }}
+          KACHE_S3_ENDPOINT: ${{ vars.KACHE_BUCKET_ENDPOINT }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.KACHE_BUCKET_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.KACHE_BUCKET_SECRET_ACCESS_KEY }}
+        run: python3 scripts/kache_remote.py start
+
+      - name: Start recording runner load
+        uses: ./.github/actions/runner-load
+        with:
+          phase: start
+
+      - name: Runner diagnostics before Turmoil simulations
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: turmoil-simulations
 
       - name: Turmoil simulations
         run: |
           just toolchains-install
-          just test-turmoil
+          just coverage-native-extras test-turmoil --output target/turmoil.lcov
+
+      - name: Runner diagnostics before Turmoil failure replay
+        uses: ./.github/actions/runner-diagnostics
+        with:
+          label: turmoil-failure-replay
 
       - name: Turmoil failure replay
         run: just test-turmoil-replay-check
+
+      - name: Report Turmoil patch line coverage
+        if: success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          just coverage-patch "$BASE_SHA" target/turmoil.lcov --scope turmoil \
+            --repo "$GH_REPO" --pr "$PR_NUMBER" --pr-head "$PR_HEAD_SHA" \
+            --output target/turmoil-patch-coverage.md
+
+      - name: Publish runner load
+        if: always()
+        uses: ./.github/actions/runner-load
+        with:
+          phase: finish
+          artifact-name: runner-load-turmoil
+
+      - name: Upload Turmoil coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-turmoil
+          path: |
+            target/native-coverage/test-turmoil/**/lcov.info
+            target/native-coverage/test-turmoil/**/completion.json
+            target/native-coverage/test-turmoil/**/executions.jsonl
+            target/native-coverage/test-turmoil/**/export.log
+            target/turmoil.lcov
+            target/turmoil-patch-coverage.md
+          if-no-files-found: warn
+
+      - name: Publish kache cache
+        if: always()
+        timeout-minutes: 4
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [[ -f scripts/kache_remote.py ]]; then
+            python3 scripts/kache_remote.py publish --job-status "${JOB_STATUS}" "${RUNNER_TEMP}/kache-report"
+          else
+            echo "::notice::Kache publication did not run because checkout did not provide its script"
+          fi
 
       - name: Publish kache report
         if: always()
@@ -1200,4 +2313,6 @@ jobs:
           path: |
             target/turmoil-failures
             target/turmoil-suite
+            target/native-coverage-build-turmoil/turmoil-failures
+            target/native-coverage-build-turmoil/turmoil-suite
           if-no-files-found: ignore

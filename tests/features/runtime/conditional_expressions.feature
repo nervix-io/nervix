@@ -2,11 +2,11 @@ Feature: Conditional expressions
   Scenario Outline: CASE observes errors only from the selected result
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA calculation (
         id STRING,
@@ -30,8 +30,8 @@ Feature: Conditional expressions
       CREATE RELAY calculation_errors SCHEMA calculation_error UNBRANCHED;
       CREATE VHOST edge conditional-expression-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/calculations' TYPE HTTP;
-      CREATE INGESTOR calculation_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR calculation_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING calculation_codec
         TO calculations
         INHERIT ALL
@@ -79,11 +79,11 @@ Feature: Conditional expressions
   Scenario Outline: CASE composes with window aggregate expressions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA conditional_sample (
         value I64
@@ -101,8 +101,8 @@ Feature: Conditional expressions
       CREATE RELAY conditional_summaries SCHEMA conditional_summary UNBRANCHED;
       CREATE VHOST edge conditional-window-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/conditional-window' TYPE HTTP;
-      CREATE INGESTOR conditional_sample_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR conditional_sample_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conditional_sample_codec
         TO conditional_samples
         INHERIT ALL
@@ -145,11 +145,11 @@ Feature: Conditional expressions
   Scenario Outline: Conditional forms preserve order nulls and composition
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA conditional_input (
         id STRING,
@@ -180,8 +180,8 @@ Feature: Conditional expressions
       CREATE RELAY conditional_outputs SCHEMA conditional_output UNBRANCHED;
       CREATE VHOST edge conditional-forms-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/conditional-forms' TYPE HTTP;
-      CREATE INGESTOR conditional_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR conditional_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING conditional_input_codec
         TO conditional_inputs
         INHERIT ALL
@@ -237,11 +237,11 @@ Feature: Conditional expressions
   Scenario Outline: Nested conditions evaluate conversions and patterns only for the messages that select them
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA routed_text (
         id STRING,
@@ -274,8 +274,8 @@ Feature: Conditional expressions
       CREATE RELAY routed_text_errors SCHEMA routed_text_error UNBRANCHED;
       CREATE VHOST edge nested-arms-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/routed-texts' TYPE HTTP;
-      CREATE INGESTOR routed_text_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR routed_text_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_text_codec
         TO routed_texts
           INHERIT ALL
@@ -344,11 +344,11 @@ Feature: Conditional expressions
   Scenario Outline: A CASE arm invokes an eligible UDF only for the messages that select it
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UDF supported
         WITH ROTO_0_13
@@ -399,8 +399,8 @@ Feature: Conditional expressions
       CREATE RELAY support_decisions SCHEMA support_decision UNBRANCHED;
       CREATE VHOST edge guarded-udf-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/support-requests' TYPE HTTP;
-      CREATE INGESTOR support_request_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR support_request_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING support_request_codec
         TO support_requests
           INHERIT ALL
@@ -445,11 +445,11 @@ Feature: Conditional expressions
   Scenario Outline: A CASE arm reads ingestion headers only for the messages that select it and a read outside it answers every message
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA tagged_note (
         id STRING,
@@ -471,8 +471,8 @@ Feature: Conditional expressions
       CREATE RELAY routed_notes SCHEMA routed_note UNBRANCHED;
       CREATE VHOST edge header-arms-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/notes' TYPE HTTP;
-      CREATE INGESTOR note_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR note_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING tagged_note_codec
         TO routed_notes
           SET id = input.id,

@@ -1,6 +1,8 @@
 use error_stack::ResultExt as _;
+use nervix_models::SchemaField;
 
 use super::*;
+use crate::runtime_schema::RuntimeValueTypeError;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct BranchKeyInner {
@@ -22,6 +24,25 @@ pub(crate) enum BranchKeyError {
     NoFields,
     #[error("remote branch key field '{field}' is not a valid field name")]
     RemoteFieldName { field: String },
+    #[error("remote branch key field '{field}' holds a value that is not a runtime value")]
+    RemoteFieldValue { field: FieldName },
+    #[error("branch key field '{field}' holds a non-finite float")]
+    NonFiniteFloat { field: FieldName },
+}
+
+/// Why a concrete branch key is not a key of a declared branch schema. No variant carries a field
+/// value, which the schema may declare sensitive.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum BranchKeyShapeError {
+    #[error("the key has no field '{field}'")]
+    MissingField { field: FieldName },
+    #[error("the key has field '{field}', which its branch schema does not declare")]
+    UndeclaredField { field: FieldName },
+    #[error("field '{field}' does not hold a value of its declared type")]
+    FieldValue {
+        field: FieldName,
+        mismatch: RuntimeValueTypeError,
+    },
 }
 
 impl std::fmt::Debug for BranchKey {
@@ -42,6 +63,50 @@ impl BranchKey {
         self.0.fields.len()
     }
 
+    /// Checks that this key is a key of the branch schema that declares `fields`: it holds every
+    /// declared field and no other, each with a value of exactly the field's declared type.
+    ///
+    /// A key keeps its fields in name order, its canonical order, so a declared field is found by
+    /// its name whatever order the schema declares the fields in.
+    pub(crate) fn conform_to(
+        &self,
+        fields: &[SchemaField],
+    ) -> error_stack::Result<(), BranchKeyShapeError> {
+        for field in fields {
+            let Some(value) = self.field_value(field.name.as_str()) else {
+                return Err(Report::new(BranchKeyShapeError::MissingField {
+                    field: field.name.clone(),
+                }));
+            };
+            if let Err(mismatch) = value.conform_to(&field.ty) {
+                let context = BranchKeyShapeError::FieldValue {
+                    field: field.name.clone(),
+                    mismatch: mismatch.current_context().clone(),
+                };
+                return Err(mismatch.change_context(context));
+            }
+        }
+        if self.field_count() == fields.len() {
+            return Ok(());
+        }
+        // Every declared field is present, so the key holds another field. The declared names are
+        // collected only on this failure, which keeps the conforming case free of allocation.
+        let declared = fields
+            .iter()
+            .map(|field| &field.name)
+            .collect::<BTreeSet<_>>();
+        for name in self.0.fields.keys() {
+            if !declared.contains(name) {
+                return Err(Report::new(BranchKeyShapeError::UndeclaredField {
+                    field: name.clone(),
+                }));
+            }
+        }
+        // A schema that declared one name twice leaves nothing undeclared: the key holds exactly
+        // the fields it names.
+        Ok(())
+    }
+
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(reason = "the caller supplies an iterator of typed branch fields")
@@ -52,6 +117,16 @@ impl BranchKey {
         let fields = fields.into_iter().collect::<BTreeMap<_, _>>();
         if fields.is_empty() {
             return Err(Report::new(BranchKeyError::NoFields));
+        }
+        // The VM turns a non-finite float result into a row error, so a branch is keyed only by
+        // finite values; a non-finite float also has no canonical text to key a branch by. Only a
+        // damaged checkpoint or a malformed peer frame names one, and it is refused here.
+        for (field, value) in &fields {
+            if !value.holds_only_finite_floats() {
+                return Err(Report::new(BranchKeyError::NonFiniteFloat {
+                    field: field.clone(),
+                }));
+            }
         }
         let mut object = serde_json::Map::new();
         for (field, value) in &fields {
@@ -74,13 +149,18 @@ impl BranchKey {
                     field: field.name.clone(),
                 }
             })?;
-            values.insert(name, RuntimeValue::from_remote(field.value));
+            let value = RuntimeValue::from_remote(field.value).change_context_lazy(|| {
+                BranchKeyError::RemoteFieldValue {
+                    field: name.clone(),
+                }
+            })?;
+            values.insert(name, value);
         }
         let key = Self::from_fields(values)?;
         Ok(Some(key))
     }
 
-    pub(in crate::runtime) fn to_remote_key(key: &Option<Self>) -> Option<Vec<RemoteRuntimeField>> {
+    pub(crate) fn to_remote_key(key: &Option<Self>) -> Option<Vec<RemoteRuntimeField>> {
         key.as_ref().map(|key| {
             key.0
                 .fields
@@ -101,24 +181,244 @@ impl BranchKey {
     pub(crate) fn fingerprint(&self) -> BranchKeyFingerprint {
         BranchKeyFingerprint::of_canonical_text(self.as_str())
     }
-}
 
-pub(super) fn branch_key_display(key: &Option<BranchKey>) -> &str {
-    match key {
-        Some(key) => key.as_str(),
-        None => "none",
-    }
-}
-
-impl std::fmt::Display for BranchKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+    /// Orders two branch scopes by their canonical key text, the unbranched execution first, so
+    /// that reports and published generations list their branches in one stable order.
+    pub(crate) fn canonical_order(left: &Option<Self>, right: &Option<Self>) -> std::cmp::Ordering {
+        match (left, right) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(left), Some(right)) => left.as_str().cmp(right.as_str()),
+        }
     }
 }
 
 #[cfg(test)]
+impl BranchKey {
+    /// A concrete branch key of one to three fields, each holding a runtime value of any kind a
+    /// branch field reaches, for generated storage and wire properties.
+    pub(in crate::runtime) fn generated(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>) -> Self {
+        use meticulous::ResultExt as _;
+
+        let mut fields = BTreeMap::new();
+        let count = arbitrary.entropy().between(1..=3);
+        for _ in 0..count {
+            let name = arbitrary.rule_name::<FieldName>();
+            let value = Self::generated_value(arbitrary, 2);
+            fields.insert(name, value);
+        }
+        Self::from_fields(fields).assured("at least one field was drawn above")
+    }
+
+    /// A concrete branch key, or the absent key of unbranched execution.
+    pub(in crate::runtime) fn generated_scope(
+        arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,
+    ) -> Option<Self> {
+        if arbitrary.entropy().flag() {
+            Some(Self::generated(arbitrary))
+        } else {
+            None
+        }
+    }
+
+    /// A runtime value of any kind a branch field holds: integers of every width, booleans, text, a
+    /// datetime anywhere a timestamp reaches with a whole-minute offset as RFC 3339 writes one,
+    /// finite floats of any bit pattern, signed zeros and subnormals included, and arrays and lists
+    /// nested `depth` levels at most. The VM turns a non-finite float result into a row error, so
+    /// no branch is keyed by one.
+    fn generated_value(arbitrary: &mut nervix_arbitrary::Arbitrary<'_>, depth: u8) -> RuntimeValue {
+        use meticulous::{OptionExt as _, ResultExt as _};
+
+        let kinds = if depth == 0 { 13 } else { 15 };
+        match arbitrary.entropy().byte() % kinds {
+            0 => RuntimeValue::String(arbitrary.string()),
+            1 => RuntimeValue::Bool(arbitrary.entropy().flag()),
+            2 => RuntimeValue::U8(arbitrary.entropy().byte()),
+            3 => {
+                let bits = u8::try_from(arbitrary.entropy().up_to(u64::from(u8::MAX)))
+                    .verified("the draw ends at u8::MAX");
+                RuntimeValue::I8(bits.cast_signed())
+            }
+            4 => RuntimeValue::U16(
+                u16::try_from(arbitrary.entropy().up_to(u64::from(u16::MAX)))
+                    .verified("the draw ends at u16::MAX"),
+            ),
+            5 => {
+                let bits = u16::try_from(arbitrary.entropy().up_to(u64::from(u16::MAX)))
+                    .verified("the draw ends at u16::MAX");
+                RuntimeValue::I16(bits.cast_signed())
+            }
+            6 => RuntimeValue::U32(
+                u32::try_from(arbitrary.entropy().up_to(u64::from(u32::MAX)))
+                    .verified("the draw ends at u32::MAX"),
+            ),
+            7 => {
+                let bits = u32::try_from(arbitrary.entropy().up_to(u64::from(u32::MAX)))
+                    .verified("the draw ends at u32::MAX");
+                RuntimeValue::I32(bits.cast_signed())
+            }
+            8 => RuntimeValue::U64(arbitrary.entropy().any_u64()),
+            9 => RuntimeValue::I64(arbitrary.entropy().any_i64()),
+            10 => {
+                let instant = chrono::DateTime::from_timestamp_nanos(arbitrary.entropy().any_i64());
+                let minutes = arbitrary.entropy().up_to(2 * 1439);
+                let minutes = i32::try_from(minutes).verified("the draw ends below i32::MAX");
+                let minutes = minutes
+                    .checked_sub(1439)
+                    .verified("the draw stays within a day either side of zero");
+                let offset_seconds = minutes
+                    .checked_mul(60)
+                    .verified("a whole-minute offset within a day fits in i32");
+                let offset = chrono::FixedOffset::east_opt(offset_seconds)
+                    .assured("an offset of less than a day is a valid fixed offset");
+                RuntimeValue::Datetime(instant.with_timezone(&offset))
+            }
+            11 => {
+                let bits = u32::try_from(arbitrary.entropy().up_to(u64::from(u32::MAX)))
+                    .verified("the draw ends at u32::MAX");
+                let value = f32::from_bits(bits);
+                let value = if value.is_finite() { value } else { -0.0 };
+                RuntimeValue::F32(OrderedFloat(value))
+            }
+            12 => {
+                let value = f64::from_bits(arbitrary.entropy().any_u64());
+                let value = if value.is_finite() {
+                    value
+                } else {
+                    f64::MIN_POSITIVE
+                };
+                RuntimeValue::F64(OrderedFloat(value))
+            }
+            13 => {
+                let next = depth
+                    .checked_sub(1)
+                    .verified("a nested kind is drawn above depth zero");
+                let elements =
+                    arbitrary.records(|arbitrary| Self::generated_value(arbitrary, next));
+                RuntimeValue::Array(elements)
+            }
+            _ => {
+                let next = depth
+                    .checked_sub(1)
+                    .verified("a nested kind is drawn above depth zero");
+                let elements =
+                    arbitrary.records(|arbitrary| Self::generated_value(arbitrary, next));
+                RuntimeValue::Vec(elements)
+            }
+        }
+    }
+}
+
+/// The execution a branch scope selects, as errors, runtime events, negative acknowledgements and
+/// logs name it: a concrete branch by the fingerprint of its key, or the unbranched execution.
+///
+/// A branch schema may declare its key fields `SENSITIVE`, and these texts reach sessions as server
+/// notices and logs as they are, so a branch is never named by its key's field values. It reads as
+/// `branch <fingerprint>`, with the lowercase hexadecimal fingerprint `DESCRIBE` and backup
+/// inspection print for the same branch, or as `unbranched`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BranchScope(Option<BranchKeyFingerprint>);
+
+impl From<&Option<BranchKey>> for BranchScope {
+    fn from(key: &Option<BranchKey>) -> Self {
+        match key {
+            Some(key) => Self(Some(key.fingerprint())),
+            None => Self(None),
+        }
+    }
+}
+
+impl std::fmt::Display for BranchScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(fingerprint) => write!(formatter, "branch {fingerprint}"),
+            None => formatter.write_str("unbranched"),
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
+    use crate::runtime::{branch_runtime::BranchEntrypointError, test_fixtures::string_branch_key};
+
+    /// How every diagnostic names the branch keyed by tenant `acme-secret`.
+    const SECRET_TENANT_BRANCH: &str =
+        "branch 3525112b62a3c2262596c624543a4333a324f9e7bc945c6031936604e166af12";
+
+    /// A branch is named by the lowercase hexadecimal fingerprint of its key, the text `DESCRIBE`
+    /// prints for the same branch, and never by the key's values, which a branch schema may declare
+    /// `SENSITIVE`. Unbranched execution has no key to name.
+    #[test]
+    fn a_branch_scope_names_a_concrete_branch_by_the_fingerprint_of_its_key() {
+        let secret = string_branch_key("tenant", "acme-secret");
+
+        assert_eq!(BranchScope::from(&secret).to_string(), SECRET_TENANT_BRANCH);
+        assert_eq!(BranchScope::from(&None).to_string(), "unbranched");
+    }
+
+    /// Every error a branch-local failure is reported with names its branch through its scope, so
+    /// a key value never reaches the runtime events, negative acknowledgements and logs the failure
+    /// is rendered into.
+    #[test]
+    fn every_branch_local_failure_names_its_branch_by_fingerprint() {
+        let branch = BranchScope::from(&string_branch_key("tenant", "acme-secret"));
+        let processor = ModelName::parse("orders")
+            .assured("the fixed test literal satisfies the model name grammar");
+        let failures = [
+            ProcessorBranchTaskError::Instantiate { branch }.to_string(),
+            ProcessorBranchTaskError::InitializeWindow { branch }.to_string(),
+            ProcessorBranchTaskError::AcceptedInputClock { branch }.to_string(),
+            ProcessorBranchTaskError::Unavailable { branch }.to_string(),
+            ProcessorBranchTaskError::HandedOffLifetimeAfterLifecycle {
+                branch,
+                incarnation: 7,
+                lsm: 3,
+            }
+            .to_string(),
+            ProcessorMaterializedError::DomainRouting { branch }.to_string(),
+            ProcessorMaterializedError::Resolve { branch }.to_string(),
+            ProcessorMaterializedError::EvictedRequiredSkip { branch }.to_string(),
+            ProcessorMaterializedError::EvictedRequiredWait { branch }.to_string(),
+            ProcessorLiveStateError { branch }.to_string(),
+            ProcessorTemplateError::ReplicatedState {
+                kind: ModelKind::Deduplicator,
+                processor: processor.clone(),
+                branch,
+            }
+            .to_string(),
+            ProcessorTemplateError::WindowRestore { processor, branch }.to_string(),
+            CorrelatorError::MixedBranchKeys {
+                left: branch,
+                right: BranchScope::from(&None),
+            }
+            .to_string(),
+            BranchEntrypointError::Instantiate { branch }.to_string(),
+            BranchEntrypointError::DispatchTask { branch }.to_string(),
+        ];
+
+        for failure in failures {
+            assert!(failure.contains(SECRET_TENANT_BRANCH), "{failure}");
+            assert!(!failure.contains("acme-secret"), "{failure}");
+        }
+    }
+
+    /// Reports list branches by their canonical key text, with unbranched execution first.
+    #[test]
+    fn branch_scopes_order_by_canonical_key_text_with_unbranched_execution_first() {
+        let acme = string_branch_key("tenant", "acme");
+        let beta = string_branch_key("tenant", "beta");
+        let mut scopes = [beta.clone(), None, acme.clone(), beta.clone()];
+
+        scopes.sort_by(BranchKey::canonical_order);
+
+        assert_eq!(scopes, [None, acme, beta.clone(), beta]);
+    }
 
     #[test]
     fn branch_key_rejects_empty_fields() {
@@ -161,6 +461,51 @@ mod tests {
         );
     }
 
+    /// Stored and peer branch keys carry floats as bits, so a non-finite float, which no branch is
+    /// keyed by and whose canonical text cannot be written, fails the key's typed validation
+    /// instead of stopping the node that reads it.
+    #[test]
+    fn a_remote_key_rejects_a_non_finite_float() {
+        for value in [
+            nervix_models::RemoteRuntimeValue::F64(f64::NAN),
+            nervix_models::RemoteRuntimeValue::F64(f64::NEG_INFINITY),
+            nervix_models::RemoteRuntimeValue::F32(f32::INFINITY),
+        ] {
+            let malformed = BranchKey::from_remote_key(Some(vec![RemoteRuntimeField {
+                name: "reading".to_string(),
+                value,
+            }]));
+
+            let error = malformed.expect_err("a non-finite float must not form a branch key");
+            assert_eq!(
+                error.current_context(),
+                &BranchKeyError::NonFiniteFloat {
+                    field: FieldName::parse("reading")
+                        .assured("the fixed test literal satisfies the field name grammar"),
+                }
+            );
+        }
+    }
+
+    /// Stored and peer branch keys carry a datetime as text, so text that is not RFC 3339 fails
+    /// the key's typed validation instead of stopping the node that reads it.
+    #[test]
+    fn a_remote_key_rejects_datetime_text_it_cannot_read() {
+        let malformed = BranchKey::from_remote_key(Some(vec![RemoteRuntimeField {
+            name: "seen_at".to_string(),
+            value: nervix_models::RemoteRuntimeValue::Datetime("2026-13-40T25:61:61Z".to_string()),
+        }]))
+        .expect_err("a datetime field whose text is not RFC 3339 must not form a branch key");
+
+        assert_eq!(
+            malformed.current_context(),
+            &BranchKeyError::RemoteFieldValue {
+                field: FieldName::parse("seen_at")
+                    .assured("the fixed test literal satisfies the field name grammar"),
+            }
+        );
+    }
+
     /// A stored key carries only a branch's canonical text, and the control plane names the branch
     /// by the fingerprint of its typed key, so both must identify the same branch.
     #[test]
@@ -180,6 +525,106 @@ mod tests {
             BranchKeyFingerprint::of_canonical_text(acme.as_str())
         );
         assert_ne!(acme.fingerprint(), tenant("beta").fingerprint());
+    }
+
+    fn declared(name: &str, ty: ParseAsType) -> SchemaField {
+        SchemaField {
+            name: FieldName::parse(name)
+                .assured("the fixed test literal satisfies the field name grammar"),
+            ty,
+            optional: false,
+            sensitive: false,
+        }
+    }
+
+    fn tenant_shard_key(fields: &[(&str, RuntimeValue)]) -> BranchKey {
+        let fields = fields.iter().map(|(name, value)| {
+            (
+                FieldName::parse(name)
+                    .assured("the fixed test literal satisfies the field name grammar"),
+                value.clone(),
+            )
+        });
+        BranchKey::from_fields(fields).assured("every test key names at least one field")
+    }
+
+    /// A key conforms to its branch schema when it holds exactly the declared fields, found by
+    /// name whatever order the schema declares them in, each with a value of the declared type.
+    #[test]
+    fn a_branch_key_conforms_only_to_a_schema_of_exactly_its_fields_and_types() {
+        let schema = [
+            declared("tenant", ParseAsType::String),
+            declared("shard", ParseAsType::I32),
+        ];
+        let field = |name: &str| {
+            FieldName::parse(name)
+                .assured("the fixed test literal satisfies the field name grammar")
+        };
+
+        tenant_shard_key(&[
+            ("shard", RuntimeValue::I32(4)),
+            ("tenant", RuntimeValue::String("north".to_string())),
+        ])
+        .conform_to(&schema)
+        .assured("the key holds exactly the declared fields with their declared types");
+
+        let missing = tenant_shard_key(&[("tenant", RuntimeValue::String("north".to_string()))])
+            .conform_to(&schema)
+            .expect_err("a key without a declared field does not conform");
+        assert_eq!(
+            missing.current_context(),
+            &BranchKeyShapeError::MissingField {
+                field: field("shard"),
+            }
+        );
+
+        let renamed = tenant_shard_key(&[
+            ("tenant", RuntimeValue::String("north".to_string())),
+            ("zone", RuntimeValue::I32(4)),
+        ])
+        .conform_to(&schema)
+        .expect_err("a key whose field has another name does not conform");
+        assert_eq!(
+            renamed.current_context(),
+            &BranchKeyShapeError::MissingField {
+                field: field("shard"),
+            }
+        );
+
+        let extra = tenant_shard_key(&[
+            ("region", RuntimeValue::String("west".to_string())),
+            ("shard", RuntimeValue::I32(4)),
+            ("tenant", RuntimeValue::String("north".to_string())),
+        ])
+        .conform_to(&schema)
+        .expect_err("a key with an undeclared field does not conform");
+        assert_eq!(
+            extra.current_context(),
+            &BranchKeyShapeError::UndeclaredField {
+                field: field("region"),
+            }
+        );
+
+        let retyped = tenant_shard_key(&[
+            ("shard", RuntimeValue::String("4".to_string())),
+            ("tenant", RuntimeValue::String("north".to_string())),
+        ])
+        .conform_to(&schema)
+        .expect_err("a key whose field holds another type does not conform");
+        assert_eq!(
+            retyped.current_context(),
+            &BranchKeyShapeError::FieldValue {
+                field: field("shard"),
+                mismatch: RuntimeValueTypeError::Type {
+                    expected: ParseAsType::I32,
+                    actual: crate::runtime_schema::RuntimeValueKind::String,
+                },
+            }
+        );
+        assert_eq!(
+            format!("{retyped:#}"),
+            "field 'shard' does not hold a value of its declared type: expected I32, found STRING"
+        );
     }
 
     #[test]

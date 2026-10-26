@@ -77,6 +77,10 @@ fn bolero_domain_clock_values_round_trip_through_every_representation() {
                 .parse::<DomainTimeRate>()
                 .expect("a rate's text reads back");
             assert_eq!(reread.get().to_bits(), value.to_bits(), "{text}");
+            let json = serde_json::to_string(&rate).expect("a rate has a JSON form");
+            let from_json = serde_json::from_str::<DomainTimeRate>(&json)
+                .expect("a rate's JSON form reads back");
+            assert_eq!(from_json.get().to_bits(), value.to_bits(), "{json}");
             let restored = crate::archive_round_trip!(&rate, DomainTimeRate);
             assert_eq!(restored.get().to_bits(), value.to_bits());
         });

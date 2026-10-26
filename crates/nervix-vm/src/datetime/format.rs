@@ -16,6 +16,14 @@
 //! as it is and read only where it appears exactly. Month and weekday names are English and never
 //! depend on a locale.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeMap, fmt};
 
 use meticulous::{OptionExt as _, ResultExt as _};

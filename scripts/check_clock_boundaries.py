@@ -4,6 +4,8 @@
 import re
 from pathlib import Path
 
+from scripts.rust_source import RustFile, _end_of_block, blank
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,10 +60,15 @@ def product_sources() -> list[Path]:
 
 def product_source(path: Path) -> str:
     source = path.read_text(encoding="utf-8")
-    for marker in ("#[cfg(test)]\nmod tests", "#[cfg(test)]\r\nmod tests"):
-        if marker in source:
-            return source.split(marker, 1)[0]
-    return source
+    file = RustFile(str(path), source)
+    modules = re.compile(
+        r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*"
+        r"(?:#\s*\[[^\]]*\]\s*)*"
+        r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{"
+    )
+    spans = [(match.start(), _end_of_block(file.code, match.end() - 1))
+             for match in modules.finditer(file.code)]
+    return blank(source, spans)
 
 
 def reject(violations: list[str], path: Path, source: str, needle: str, reason: str) -> None:
@@ -80,10 +87,16 @@ def main() -> int:
         ROOT / "crates/models/src/timestamp.rs",
         ROOT / "src/application/domain_clock.rs",
         ROOT / "src/cluster.rs",
+        # A joining node bounds its clock's skew to each peer it handshakes with.
+        ROOT / "src/cluster/prerequisites.rs",
         ROOT / "src/metrics.rs",
         ROOT / PHYSICAL_TIME_OWNER,
         ROOT / "src/runtime_schema/syslog.rs",
         ROOT / "crates/web-console/src/clock_display.rs",
+        # A diagnostic process's deadlock evidence: when the detector reported a cycle and when the
+        # run started, operational times an operator correlates with the process's logs.
+        ROOT / "crates/primitives/src/deadlock/detector.rs",
+        ROOT / "crates/deadlock/src/run.rs",
     }
     wall_time_needles = (
         "Timestamp::now(",
@@ -124,25 +137,24 @@ def main() -> int:
     runtime_root = ROOT / "src/runtime"
     actual_utc_owner = ROOT / PHYSICAL_TIME_OWNER
     actual_utc_consumers = {
-        ROOT / "crates/connectors/http/src/lib.rs",
-        ROOT / "crates/connectors/http/src/sink.rs",
-        ROOT / "crates/connectors/iceberg/src/lib.rs",
-        ROOT / "crates/connectors/otel/src/lib.rs",
-        ROOT / "crates/connectors/prometheus/src/lib.rs",
-        ROOT / "crates/connectors/sentry/src/lib.rs",
+        ROOT / "crates/connectors/http/src/request/mod.rs",
+        ROOT / "crates/connectors/http/src/request/emitter.rs",
+        ROOT / "crates/connectors/iceberg/src/table/mod.rs",
+        ROOT / "crates/connectors/otel/src/otlp/mod.rs",
+        ROOT / "crates/connectors/prometheus/src/query/mod.rs",
+        ROOT / "crates/connectors/sentry/src/event/mod.rs",
         runtime_root / "client_ingestor.rs",
         runtime_root / "domain_clock.rs",
         runtime_root / "emitter_task.rs",
         runtime_root / "endpoint.rs",
         runtime_root / "ingestors/kafka.rs",
-        runtime_root / "ingestors/source.rs",
+        runtime_root / "ingestors/connector.rs",
         runtime_root / "ingestors/syslog.rs",
         runtime_root / "ingestors/websockets.rs",
     }
     physical_capability_owners = {
         runtime_root / "branch_buffering.rs",
         runtime_root / "domain_clock.rs",
-        runtime_root / "emitter_publishing.rs",
         runtime_root / "emitter_retry.rs",
         actual_utc_owner,
     }
@@ -152,11 +164,11 @@ def main() -> int:
         ROOT / "crates/nervix-roto/src/lib.rs",
         ROOT / "crates/nervix-vm/src/runtime.rs",
         ROOT / "crates/nervix-wasm/src/lib.rs",
-        ROOT / "crates/nspl/src/domain/mod.rs",
-        ROOT / "crates/nspl/src/generator/mod.rs",
-        ROOT / "crates/nspl/src/ingestor/mod.rs",
-        ROOT / "crates/nspl/src/parser_support.rs",
-        ROOT / "crates/nspl/src/statement.rs",
+        ROOT / "crates/plexus/src/domain/mod.rs",
+        ROOT / "crates/plexus/src/generator/mod.rs",
+        ROOT / "crates/plexus/src/ingestor/mod.rs",
+        ROOT / "crates/plexus/src/parser_support.rs",
+        ROOT / "crates/plexus/src/statement.rs",
         ROOT / "src/application/domain_clock.rs",
         ROOT / "src/runtime/domain_clock.rs",
         ROOT / "src/runtime/ingestion_time.rs",

@@ -9,6 +9,10 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "domain execution creation and routing publication install retained branch \
@@ -16,6 +20,8 @@
     )
 )]
 
+use error_stack::ResultExt as _;
+use imbl::{GenericHashMap, shared_ptr::DefaultSharedPtr};
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
 use super::{domain_rebuild::ActivatedDomainSurfaces, *};
@@ -50,6 +56,9 @@ pub(crate) struct DomainRoutingSnapshot {
     pub(super) udfs: UdfExecutor,
     pub(super) relay_branchings: HashMap<RelayName, ResolvedBranching>,
     pub(super) materialized_stream_specs: HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    pub(super) materialized_stream_reads:
+        HashMap<RelayName, state_replication::routing::MaterializedRelayPublication>,
+    pub(super) relay_state_epoch: Arc<AtomicU64>,
     pub(super) materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
     pub(super) signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
@@ -58,6 +67,57 @@ pub(crate) struct DomainRoutingSnapshot {
 
 pub(crate) type SharedDomainRouting = StdArc<ArcSwap<DomainRoutingSnapshot>>;
 pub(crate) type DomainRoutingCache = Cache<SharedDomainRouting, StdArc<DomainRoutingSnapshot>>;
+
+type RoutingPublications =
+    GenericHashMap<DomainName, SharedDomainRouting, RandomState, DefaultSharedPtr>;
+
+/// The node publishes its domain handles only when domains are installed. A fresh request may
+/// select a domain from this immutable table; an executing task retains the selected publication.
+pub(super) struct DomainRoutings {
+    published: ArcSwap<RoutingPublications>,
+}
+
+impl Default for DomainRoutings {
+    fn default() -> Self {
+        Self {
+            published: ArcSwap::from_pointee(RoutingPublications::default()),
+        }
+    }
+}
+
+impl DomainRoutings {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "intake and branch owners read an immutable table of domain publications"
+        )
+    )]
+    pub(super) fn get(&self, domain: &DomainName) -> Option<SharedDomainRouting> {
+        self.published.load().get(domain).cloned()
+    }
+
+    pub(super) fn remove(&self, domain: &DomainName) {
+        self.published.rcu(|current| {
+            let mut next = (**current).clone();
+            next.remove(domain);
+            next
+        });
+    }
+
+    pub(super) fn clear(&self) {
+        self.published
+            .store(StdArc::new(RoutingPublications::default()));
+    }
+
+    pub(super) fn insert(&self, domain: DomainName, routing: SharedDomainRouting) {
+        self.published.rcu(|current| {
+            let mut next = (**current).clone();
+            next.insert(domain.clone(), routing.clone());
+            next
+        });
+    }
+}
 
 /// Lifecycle-owned staging and publication for one domain's routing state.
 ///
@@ -94,6 +154,12 @@ impl DomainRouting {
     /// mutated.
     pub(super) fn staged(&self) -> StdArc<DomainRoutingSnapshot> {
         self.current.clone()
+    }
+
+    pub(super) fn activate(&mut self, runtime: &Runtime, domain: &DomainName) {
+        if !self.current.passive_only {
+            self.current.message_error_plans.activate(runtime, domain);
+        }
     }
 
     pub(super) fn publish(&mut self) {
@@ -201,15 +267,43 @@ pub(super) struct RuntimeDomainState {
     pub(super) status: nervix_models::DomainStatus,
     pub(super) start_version: u64,
     pub(super) last_start: nervix_models::DomainStartPoint,
+    /// The committed paced mapping of the installed generation; absent while it has none.
+    pub(super) mapping: Option<nervix_models::DomainClockState>,
     pub(super) clock_authority: DomainClockAuthority,
+    /// The committed runtime revision whose lifecycle this entry holds. Graph installation and
+    /// the domain clock owner each install only a newer revision's lifecycle, so whichever
+    /// finishes second never restores what the other superseded.
+    pub(super) lifecycle_revision: u64,
     pub(super) clock: DomainClockLifecycle,
     pub(super) progress: watch::Sender<Option<ObservedDomainTick>>,
 }
 
+impl RuntimeDomainState {
+    /// Whether this installed lifecycle is the committed `state` in everything but the authority
+    /// fence.
+    fn holds_lifecycle_of(&self, state: &DomainState) -> bool {
+        self.config == state.config
+            && self.status == state.status
+            && self.start_version == state.start_version
+            && self.last_start == state.last_start
+            && self.mapping == state.clock
+    }
+}
+
+/// Whether every domain clock a node holds is the committed one of a runtime revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommittedClockInstallation {
+    /// Every committed domain clock, authority fence included, is installed on this node.
+    Complete,
+    /// A domain's generation, status, configuration, start point or mapping changed, or a domain
+    /// was added or removed, and only graph installation installs that change.
+    AwaitingGraphInstallation,
+}
+
 impl Runtime {
     /// Resolves the stable publication handle for a domain. Data-plane tasks call this once when
-    /// they are created and retain a `DomainRoutingCache`; lifecycle and observability callers may
-    /// resolve it directly because they are not batch paths.
+    /// they are created and retain a `DomainRoutingCache`. Fresh request collectors, lifecycle
+    /// and observability callers select it through the immutable domain publication.
     #[cfg_attr(
         nervix_lint,
         nervix::context(
@@ -219,13 +313,7 @@ impl Runtime {
         )
     )]
     pub(crate) fn domain_routing(&self, domain: &DomainName) -> Option<SharedDomainRouting> {
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain domain routing on the \
-             execution owner",
-            self.inner.domain_routings.get(domain)
-        )
-        .map(|routing| routing.value().clone())
+        self.inner.domain_routings.get(domain)
     }
 
     pub(super) fn stage_domain_routing(
@@ -242,9 +330,8 @@ impl Runtime {
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            lifecycle,
-            reason = "this operation installs, snapshots or retires retained execution state at \
-                      an explicit lifetime boundary"
+            recurring,
+            reason = "intake and branch owners retain a cache of the domain routing publication"
         )
     )]
     pub(crate) fn domain_routing_cache(&self, domain: &DomainName) -> Option<DomainRoutingCache> {
@@ -297,11 +384,37 @@ impl Runtime {
             .keys()
             .map(|domain| (domain.clone(), authority.clone()))
             .collect::<BTreeMap<_, _>>();
-        self.sync_committed_domains(domains, &authorities);
+        let revision = self.next_test_lifecycle_revision();
+        self.sync_committed_domains(revision, domains, &authorities);
     }
 
+    /// The committed revision a test installation stands for: newer than every lifecycle this
+    /// runtime holds, as each revision a node installs is newer than the ones it installed before.
+    #[cfg(test)]
+    fn next_test_lifecycle_revision(&self) -> u64 {
+        let newest = self
+            .inner
+            .domains
+            .iter()
+            .map(|entry| entry.lifecycle_revision)
+            .max();
+        let Some(newest) = newest else {
+            return 1;
+        };
+        newest
+            .checked_add(1)
+            .assured("a test installs far fewer than u64::MAX revisions")
+    }
+
+    /// Installs the committed domain lifecycles of runtime `revision`, as graph installation does
+    /// before it installs that revision's work.
+    ///
+    /// A domain whose lifecycle this node holds from a newer committed revision keeps it: the
+    /// domain clock owner installs a reassigned authority fence ahead of graph installation, which
+    /// may still be applying an older revision.
     pub(super) fn sync_committed_domains(
         &self,
+        revision: u64,
         domains: &BTreeMap<DomainName, DomainState>,
         authorities: &BTreeMap<DomainName, DomainClockAuthority>,
     ) {
@@ -312,22 +425,30 @@ impl Runtime {
             .map(|entry| entry.key().clone())
             .collect::<Vec<_>>()
         {
-            if !domains.contains_key(&domain) {
-                if let Some((_, removed)) = self.inner.domains.remove(&domain) {
-                    removed.clock.mark_missing();
-                }
-                self.inner.domain_instantiation_errors.remove(&domain);
-                self.inner.in_flight_by_domain.remove(&domain);
-                self.inner
-                    .frozen_ownership_handoff_entities
-                    .retain(|key, _| key.domain != domain);
-                self.inner
-                    .in_flight_by_ingestor
-                    .retain(|key, _| key.domain != domain);
-                self.inner.generator_activity_by_domain.remove(&domain);
-                if let Some((_, force_flush)) = self.inner.force_flush_by_domain.remove(&domain) {
-                    force_flush.close();
-                }
+            if domains.contains_key(&domain) {
+                continue;
+            }
+            // A newer committed revision still holds a domain whose lifecycle comes from it.
+            let Some((_, removed)) = self
+                .inner
+                .domains
+                .remove_if(&domain, |_, state| state.lifecycle_revision < revision)
+            else {
+                continue;
+            };
+            removed.clock.mark_missing();
+            self.inner.domain_routings.remove(&domain);
+            self.inner.domain_instantiation_errors.remove(&domain);
+            self.inner.in_flight_by_domain.remove(&domain);
+            self.inner
+                .frozen_ownership_handoff_entities
+                .retain(|key, _| key.domain != domain);
+            self.inner
+                .in_flight_by_ingestor
+                .retain(|key, _| key.domain != domain);
+            self.inner.generator_activity_by_domain.remove(&domain);
+            if let Some((_, force_flush)) = self.inner.force_flush_by_domain.remove(&domain) {
+                force_flush.close();
             }
         }
 
@@ -344,17 +465,24 @@ impl Runtime {
                     status: state.status.clone(),
                     start_version: state.start_version,
                     last_start: state.last_start.clone(),
+                    mapping: state.clock.clone(),
                     clock_authority: authority.clone(),
+                    lifecycle_revision: revision,
                     clock,
                     progress: watch::channel(None).0,
                 }
             });
+            if entry.lifecycle_revision > revision {
+                continue;
+            }
             let generation_changed = entry.start_version != state.start_version;
             entry.config = state.config.clone();
             entry.status = state.status.clone();
             entry.start_version = state.start_version;
             entry.last_start = state.last_start.clone();
+            entry.mapping = state.clock.clone();
             entry.clock_authority = authority.clone();
+            entry.lifecycle_revision = revision;
             entry.clock.synchronize(state, &authority);
             if generation_changed || matches!(state.status, nervix_models::DomainStatus::Stopped) {
                 entry.progress.send_replace(None);
@@ -367,14 +495,74 @@ impl Runtime {
         });
     }
 
+    /// Installs the authority fences committed runtime `revision` assigns, ahead of this node's
+    /// graph installation of that revision.
+    ///
+    /// Reassigning an authority keeps the generation and mapping, so the replacement can produce
+    /// progress and every receiver can accept it as soon as the reassignment commits, even while
+    /// graph installation here waits on a node that left. A domain whose generation, status,
+    /// configuration, start point or mapping differs from the committed one, a committed domain
+    /// this node does not hold yet, and a domain the revision removed all wait for graph
+    /// installation, which installs a revision's lifecycles before its work.
+    pub(crate) fn install_committed_clock_authorities(
+        &self,
+        revision: u64,
+        domains: &BTreeMap<DomainName, DomainState>,
+        authorities: &BTreeMap<DomainName, DomainClockAuthority>,
+    ) -> CommittedClockInstallation {
+        let mut installation = CommittedClockInstallation::Complete;
+        let mut fences_changed = false;
+        for (domain, state) in domains {
+            let Some(mut entry) = self.inner.domains.get_mut(domain) else {
+                installation = CommittedClockInstallation::AwaitingGraphInstallation;
+                continue;
+            };
+            if entry.lifecycle_revision >= revision {
+                continue;
+            }
+            if !entry.holds_lifecycle_of(state) {
+                installation = CommittedClockInstallation::AwaitingGraphInstallation;
+                continue;
+            }
+            let authority = authorities
+                .get(domain)
+                .cloned()
+                .unwrap_or_else(DomainClockAuthority::initial);
+            if entry.clock_authority != authority {
+                entry.clock_authority = authority.clone();
+                entry.clock.synchronize(state, &authority);
+                fences_changed = true;
+            }
+            entry.lifecycle_revision = revision;
+        }
+        let removed_domain_installed = self
+            .inner
+            .domains
+            .iter()
+            .any(|entry| !domains.contains_key(entry.key()));
+        if removed_domain_installed {
+            installation = CommittedClockInstallation::AwaitingGraphInstallation;
+        }
+        if fences_changed {
+            self.inner.domain_status_changed.send_modify(|version| {
+                *version = version
+                    .checked_add(1)
+                    .assured("a node cannot apply 2^64 domain status changes");
+            });
+        }
+        installation
+    }
+
     pub(in crate::runtime) async fn rebuild_domain_execution(
         &self,
         domain: &DomainName,
         revision: Option<Arc<ExecutionRevision>>,
-    ) -> Result<(), RuntimeError> {
+    ) -> error_stack::Result<(), RuntimeError> {
+        let build = || RuntimeError::build_domain_execution(domain);
         if let Some((_, mut existing)) = self.inner.executions.remove(domain) {
             existing.routing.deactivate();
-            self.stop_domain_execution(domain, existing).await;
+            self.stop_domain_execution(domain, existing, self.emitter_finish_deadline())
+                .await;
         }
 
         let Some(revision) = revision else {
@@ -391,12 +579,10 @@ impl Runtime {
             self.clear_relay_branch_presences_for_domain(domain);
             return Ok(());
         }
-        let domain_clock =
-            self.bind_domain_clock(domain)
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: error.to_string(),
-                })?;
+        let domain_clock = self
+            .bind_domain_clock(domain)
+            .change_context(ExecutionBuildError::BindDomainClock)
+            .change_context_lazy(build)?;
         self.install_state_identities_from_unplaced_revision(domain, &revision);
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
@@ -417,10 +603,8 @@ impl Runtime {
         let udf_executor = self
             .compile_domain_udfs(domain, resource_plans.udfs.clone())
             .await
-            .map_err(|error| RuntimeError::CompileDomainUdfs {
-                domain: domain.as_str().to_string(),
-                report: error,
-            })?;
+            .change_context(ExecutionBuildError::CompileUdfs)
+            .change_context_lazy(build)?;
         let entrypoints = &revision.entrypoints;
         let emitter_plans = &revision.emitters;
         let branch_relays = branch_relays_from_plans(branched_specs, entrypoints);
@@ -437,10 +621,10 @@ impl Runtime {
             // this execution; any other relay starts from a presence of its own.
             let branch_presence = if branch_relays.contains(&relay.name) {
                 self.relay_branch_presence(domain, &relay.name)
-                    .map_err(|error| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: error.to_string(),
-                    })?
+                    .change_context_lazy(|| ExecutionBuildError::RelayBranchPresence {
+                        relay: relay.name.clone(),
+                    })
+                    .change_context_lazy(build)?
             } else {
                 Arc::new(BranchPresence::new())
             };
@@ -479,18 +663,19 @@ impl Runtime {
 
         for lookup in resource_plans.lookups.values() {
             let Some(codec) = codecs.get(&lookup.codec).cloned() else {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("missing compiled codec '{}'", lookup.codec),
-                });
+                return Err(Report::new(ExecutionBuildError::MissingLookupCodec {
+                    lookup: lookup.name.clone(),
+                    codec: lookup.codec.clone(),
+                })
+                .change_context(build()));
             };
             let runtime = self
                 .load_lookup_runtime(lookup.clone(), codec)
                 .await
-                .map_err(|error| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: error.to_string(),
-                })?;
+                .change_context_lazy(|| ExecutionBuildError::LoadLookup {
+                    lookup: lookup.name.clone(),
+                })
+                .change_context_lazy(build)?;
             lookup_specs.push((lookup.name.clone(), Arc::new(runtime)));
         }
 
@@ -498,10 +683,11 @@ impl Runtime {
             let mut inputs = Vec::with_capacity(emitter.inputs.len());
             for input in &emitter.inputs {
                 let Some(relay) = relay_builders.get_mut(&input.relay) else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!("missing emitter input relay '{}'", input.relay),
-                    });
+                    return Err(Report::new(ExecutionBuildError::MissingInputRelay {
+                        node: NodeRef::new(ModelKind::Emitter, ModelName::from(&emitter.name)),
+                        relay: input.relay.clone(),
+                    })
+                    .change_context(build()));
                 };
                 inputs.push((
                     input.relay.clone(),
@@ -531,15 +717,11 @@ impl Runtime {
             let mut inputs = Vec::new();
             for input_relay in &node_spec.spec.input_relays {
                 let Some(relay) = relay_builders.get_mut(input_relay) else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing {} '{}' input relay '{}'",
-                            node_spec.spec.kind.as_str(),
-                            node_spec.spec.processor.as_str(),
-                            input_relay.as_str()
-                        ),
-                    });
+                    return Err(Report::new(ExecutionBuildError::MissingInputRelay {
+                        node: NodeRef::new(node_spec.spec.kind, node_spec.spec.processor.clone()),
+                        relay: input_relay.clone(),
+                    })
+                    .change_context(build()));
                 };
                 inputs.push((
                     input_relay.clone(),
@@ -561,6 +743,7 @@ impl Runtime {
                         relay.remote_runtime_consumers,
                         None,
                         relay.branch_presence,
+                        self.domain_ack_root_tracker(domain),
                     )),
                 )
             })
@@ -601,10 +784,8 @@ impl Runtime {
             },
         )
         .await
-        .map_err(|reason| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!("failed to bind published processor plans: {reason:#}"),
-        })?;
+        .change_context(ExecutionBuildError::BindProcessorPlans)
+        .change_context_lazy(build)?;
         let message_error_plans = Arc::new(
             BoundMessageErrorRoutes::bind(
                 revision.message_errors.clone(),
@@ -615,10 +796,8 @@ impl Runtime {
                     udfs: &udf_executor,
                 },
             )
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("failed to bind message-error routes: {reason:#}"),
-            })?,
+            .change_context(ExecutionBuildError::BindMessageErrorRoutes)
+            .change_context_lazy(build)?,
         );
 
         for (node_spec, inputs) in processor_input_specs {
@@ -655,14 +834,12 @@ impl Runtime {
 
         for generator in resource_plans.generators.values() {
             let spec = GeneratorTaskSpec::bind(domain, generator, &relay_services, &udf_executor)
-                .map_err(|report| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("generator binding failed: {report:#}"),
-            })?;
+                .change_context_lazy(build)?;
             let entity = NodeRef::new(ModelKind::Generator, &generator.name);
             generator_tasks.insert(
                 entity,
-                self.spawn_generator_task(domain, &shutdown_tx, spec)?,
+                self.spawn_generator_task(domain, &shutdown_tx, spec)
+                    .change_context_lazy(build)?,
             );
         }
 
@@ -678,11 +855,14 @@ impl Runtime {
                         domain,
                         shutdown_tx: &shutdown_tx,
                         codecs: &codecs,
-                        deps: self.emitter_task_deps(execution_build_deps, &emitter)?,
+                        deps: self
+                            .emitter_task_deps(execution_build_deps, &emitter)
+                            .change_context_lazy(build)?,
                     },
                     emitter,
                     inputs,
-                )?,
+                )
+                .change_context_lazy(build)?,
             );
         }
 
@@ -698,7 +878,8 @@ impl Runtime {
                 },
                 reingestor_inputs,
             )
-            .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
+            .change_context(ExecutionBuildError::StartReingestors)
+            .change_context_lazy(build)?;
 
         let start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
@@ -721,6 +902,9 @@ impl Runtime {
                         lookups: lookup_runtimes,
                         udfs: udf_executor,
                         relay_branchings,
+                        materialized_stream_reads: self
+                            .materialized_relay_publications(domain, &materialized_stream_specs),
+                        relay_state_epoch: self.relay_state_epoch(domain),
                         materialized_stream_specs,
                         materialized_stream_owner_nodes,
                         codecs,
@@ -750,18 +934,22 @@ impl Runtime {
 mod shuttle_tests;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::collections::BTreeMap;
 
     use nervix_models::{
-        AckMode, BranchSelection, CodecWireFormat, CreateBranch, CreateCodec, CreateEndpoint,
-        CreateGenerator, CreateLookup, CreateReingestor, CreateRelay, CreateSchema,
-        CreateSignalingProtocol, CreateVhost, CreateWireSchema, DomainClockState, DomainConfig,
-        DomainPace, DomainState, DomainStatus, DomainTick, DomainTimeRate, EndpointType,
-        FlushPolicy, JsonType, MaterializedRelayState, MessageErrorPolicy, Model, OutputBranch,
-        ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs, RelayBranching,
-        SchemaField, SchemaFingerprint, SignalingProtocolOnConnect, SignalingWireFormat, Timestamp,
-        WireSchemaField,
+        AckMode, BranchSelection, ClusterNodeIdentity, ClusterNodeIncarnation, CodecWireFormat,
+        CreateBranch, CreateCodec, CreateEndpoint, CreateGenerator, CreateLookup, CreateReingestor,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWireSchema,
+        DomainClockState, DomainConfig, DomainPace, DomainState, DomainStatus, DomainTick,
+        DomainTimeRate, EndpointType, FlushPolicy, JsonType, MaterializedRelayState,
+        MessageErrorPolicy, Model, OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutput,
+        ProcessorOutputs, RelayBranching, SchemaField, SchemaFingerprint,
+        SignalingProtocolOnConnect, SignalingWireFormat, Timestamp, WireSchemaField,
     };
     use nonzero_ext::nonzero;
 
@@ -817,11 +1005,112 @@ mod tests {
             (&mut installed).now_or_never().is_none(),
             "a node that has installed nothing waits"
         );
-        runtime.sync_committed_domains(&BTreeMap::new(), &BTreeMap::new());
+        runtime.sync_committed_domains(1, &BTreeMap::new(), &BTreeMap::new());
         assert!(
             installed.now_or_never().is_some(),
             "installing the committed state releases the wait, even when it holds no domain"
         );
+    }
+
+    fn installed_paced_generation() -> DomainState {
+        let mut state = paced_domain_state("paced");
+        state.start_version = 1;
+        state.clock = Some(DomainClockState::new(
+            Timestamp::now(),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        ));
+        state
+    }
+
+    fn replacement_of(lost: &DomainClockAuthority) -> DomainClockAuthority {
+        lost.checked_reassign(Some(ClusterNodeIdentity::new(
+            named::<ClusterNodeName>("replacement"),
+            ClusterNodeIncarnation::new(1),
+        )))
+        .assured("the fixture authority revision is far below its bound")
+    }
+
+    #[test]
+    fn a_reassigned_authority_installs_ahead_of_graph_installation_and_stays_installed() {
+        let runtime = Runtime::new();
+        let clock_domain = domain("paced");
+        let domains = BTreeMap::from([(clock_domain.clone(), installed_paced_generation())]);
+        let lost = test_domain_clock_authority();
+        let replacement = replacement_of(&lost);
+        let lost_authorities = BTreeMap::from([(clock_domain.clone(), lost.clone())]);
+        runtime.sync_committed_domains(1, &domains, &lost_authorities);
+
+        let installation = runtime.install_committed_clock_authorities(
+            3,
+            &domains,
+            &BTreeMap::from([(clock_domain.clone(), replacement.clone())]),
+        );
+
+        assert_eq!(installation, CommittedClockInstallation::Complete);
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &replacement));
+        // A graph installation of an older revision neither restores the superseded authority nor
+        // removes a domain the newer revision holds.
+        runtime.sync_committed_domains(2, &domains, &lost_authorities);
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &replacement));
+        runtime.sync_committed_domains(2, &BTreeMap::new(), &BTreeMap::new());
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &replacement));
+        // A newer graph installation replaces it as usual.
+        runtime.sync_committed_domains(4, &domains, &lost_authorities);
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &lost));
+    }
+
+    #[test]
+    fn lifecycle_changes_beside_a_reassignment_wait_for_graph_installation() {
+        let runtime = Runtime::new();
+        let clock_domain = domain("paced");
+        let installed = installed_paced_generation();
+        let lost = test_domain_clock_authority();
+        let replacement = replacement_of(&lost);
+        let replacements = BTreeMap::from([(clock_domain.clone(), replacement.clone())]);
+        runtime.sync_committed_domains(
+            1,
+            &BTreeMap::from([(clock_domain.clone(), installed.clone())]),
+            &BTreeMap::from([(clock_domain.clone(), lost.clone())]),
+        );
+
+        // A new generation is installed with the graph that executes under it.
+        let mut restarted = installed.clone();
+        restarted.start_version = 2;
+        let installation = runtime.install_committed_clock_authorities(
+            2,
+            &BTreeMap::from([(clock_domain.clone(), restarted)]),
+            &replacements,
+        );
+        assert_eq!(
+            installation,
+            CommittedClockInstallation::AwaitingGraphInstallation
+        );
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &lost));
+
+        // So is a domain this node does not hold yet, while the domain it holds still takes its
+        // replacement fence.
+        let added = domain("added");
+        let with_added = BTreeMap::from([
+            (clock_domain.clone(), installed.clone()),
+            (added.clone(), paced_domain_state("added")),
+        ]);
+        let installation =
+            runtime.install_committed_clock_authorities(3, &with_added, &replacements);
+        assert_eq!(
+            installation,
+            CommittedClockInstallation::AwaitingGraphInstallation
+        );
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &replacement));
+
+        // And so is the removal of a domain it holds.
+        let installation =
+            runtime.install_committed_clock_authorities(4, &BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(
+            installation,
+            CommittedClockInstallation::AwaitingGraphInstallation
+        );
+        assert!(runtime.has_domain_clock_authority(&clock_domain, 1, &replacement));
     }
 
     #[test]
@@ -965,13 +1254,20 @@ mod tests {
         let Err(report) = result else {
             panic!("execution must reject a paced domain without an installed mapping");
         };
-        let RuntimeError::BuildDomainExecution { domain, reason } = report.current_context() else {
+        let RuntimeError::BuildDomainExecution { domain } = report.current_context() else {
             panic!("clock binding must report the failed domain execution");
         };
-        assert_eq!(domain, clock_domain.as_str());
+        assert_eq!(domain, &clock_domain);
         assert!(
-            reason.contains("not installed"),
-            "unexpected error: {reason}"
+            matches!(
+                report.downcast_ref::<ExecutionBuildError>(),
+                Some(ExecutionBuildError::BindDomainClock)
+            ),
+            "{report:?}"
+        );
+        assert!(
+            format!("{report:#}").contains("not installed"),
+            "unexpected error: {report:#}"
         );
     }
 
@@ -987,6 +1283,7 @@ mod tests {
             DomainTimeRate::ONE,
         ));
         runtime.sync_committed_domains(
+            1,
             &BTreeMap::from([(clock_domain.clone(), state)]),
             &BTreeMap::new(),
         );
@@ -999,13 +1296,20 @@ mod tests {
         let Err(report) = result else {
             panic!("execution must reject a paced clock without its committed authority");
         };
-        let RuntimeError::BuildDomainExecution { domain, reason } = report.current_context() else {
+        let RuntimeError::BuildDomainExecution { domain } = report.current_context() else {
             panic!("clock binding must report the failed domain execution");
         };
-        assert_eq!(domain, clock_domain.as_str());
+        assert_eq!(domain, &clock_domain);
         assert!(
-            reason.contains("not installed"),
-            "unexpected error: {reason}"
+            matches!(
+                report.downcast_ref::<ExecutionBuildError>(),
+                Some(ExecutionBuildError::BindDomainClock)
+            ),
+            "{report:?}"
+        );
+        assert!(
+            format!("{report:#}").contains("not installed"),
+            "unexpected error: {report:#}"
         );
     }
 
@@ -1112,6 +1416,7 @@ mod tests {
         assert!(execution.codecs.contains_key("payload_codec"));
         assert!(execution.relay_schemas.contains_key("events"));
         assert!(execution.materialized_stream_specs.contains_key("events"));
+        assert!(execution.materialized_stream_reads.contains_key("events"));
         assert!(execution.signaling_protocols.contains_key("handshake"));
         assert_eq!(
             execution.endpoint_routes["receive"].hostnames,
@@ -1258,10 +1563,10 @@ mod tests {
             each: "100ms".parse().assured("the fixture cadence is positive"),
             output_routes: ProcessorOutputs::new(vec![ProcessorOutput {
                 relay: named("generated"),
-                construction: nervix_nspl::parse_route_construction(
+                construction: nervix_plexus::parse_route_construction(
                     "SET tenant = relay_state.notifications.tenant",
                 )
-                .assured("the fixture route is valid NSPL"),
+                .assured("the fixture route is valid Plexus"),
                 flush_policy: Some(FlushPolicy::Immediate),
                 message_error_policy: MessageErrorPolicy::Log,
                 branch: None,
@@ -1361,7 +1666,17 @@ mod tests {
             )
             .await
             .expect_err("a lookup cannot load before its resource store is attached");
-        assert!(error.to_string().contains("resource store is not attached"));
+        assert!(
+            matches!(
+                error.downcast_ref::<ExecutionBuildError>(),
+                Some(ExecutionBuildError::LoadLookup { lookup }) if lookup.as_str() == "tenants"
+            ),
+            "{error:?}"
+        );
+        assert!(
+            format!("{error:#}").contains("resource store is not attached"),
+            "{error:#}"
+        );
         assert!(!runtime.inner.executions.contains_key(&domain));
     }
 

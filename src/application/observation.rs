@@ -8,6 +8,14 @@
 //!   the interconnect to reach the node that owns each answer.
 //! - **Must not know.** How the reported state came to be.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeSet, num::NonZeroU64, time::Duration};
 
 use arch_into::ArchInto;
@@ -258,7 +266,7 @@ impl SessionServiceImpl {
             {
                 Ok(local_exists) => exists |= local_exists,
                 Err(error) => {
-                    return command_error(error.to_string());
+                    return command_error(format!("{error:#}"));
                 }
             }
         }
@@ -369,10 +377,17 @@ impl SessionServiceImpl {
             .describe_local_stream_exists(&request.domain, &request.relay, &key)
         {
             Ok(exists) => Ok(exists),
-            Err(crate::runtime::RuntimeError::RelayNotInstantiated { .. }) => Ok(false),
+            Err(error)
+                if matches!(
+                    error.current_context(),
+                    crate::runtime::RuntimeError::RelayNotInstantiated { .. }
+                ) =>
+            {
+                Ok(false)
+            }
             Err(error) => Err(RemoteOperationFailure::Failed {
                 subject,
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             }),
         }
     }
@@ -388,7 +403,17 @@ impl SessionServiceImpl {
         let mut lines = vec![
             format!("domain: {}", domain.as_str()),
             format!("status: {:?}", domain_state.status).to_ascii_lowercase(),
+            format!("start version: {}", domain_state.start_version),
+            format!("start point: {:?}", domain_state.last_start),
         ];
+        if let Some(mapping) = &domain_state.clock {
+            lines.push(format!(
+                "clock mapping: UTC anchor {}, logical origin {}, time rate {}",
+                mapping.wall_started_at(),
+                mapping.logical_start(),
+                mapping.time_rate()
+            ));
+        }
         lines.extend(self.inner.runtime.describe_domain_statistics(domain));
         lines.push("placement:".to_string());
         lines.push(format!(
@@ -497,7 +522,7 @@ impl SessionServiceImpl {
             .registry
             .get::<CreatePlacement>(domain, &describe.name)
         {
-            Ok(Some(placement)) => placement.to_canonical_nspl().ok(),
+            Ok(Some(placement)) => placement.to_canonical_plexus().ok(),
             Ok(None) => None,
             Err(error) => return command_error(error.to_string()),
         };
@@ -616,7 +641,7 @@ impl SessionServiceImpl {
 
     /// What the node that executes an ingestor reports about it, and its metrics. An ingestor no
     /// node executes reports as stopped.
-    async fn ingestor_summary(
+    pub(in crate::application) async fn ingestor_summary(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
@@ -644,6 +669,10 @@ impl SessionServiceImpl {
                 ready: false,
                 quiesce_state: None,
                 quiesce_counters: Default::default(),
+                transport_redeliveries_total: 0,
+                decode_rejections_total: 0,
+                last_decode_rejection: None,
+                oversized_payloads_total: 0,
                 memory_backpressure_paused: self
                     .inner
                     .runtime
@@ -2635,11 +2664,11 @@ mod tests {
                             placement_output SCHEMA placement_event UNBRANCHED; CREATE JUNCTION \
                             corridor_source FROM placement_input UNBRANCHED TO placement_middle \
                             INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG; CREATE JUNCTION \
-                            corridor_sink FROM placement_middle UNBRANCHED TO placement_output \
+                            corridor_emitter FROM placement_middle UNBRANCHED TO placement_output \
                             INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG; CREATE PLACEMENT \
-                            weak_glue FROM corridor_source TO corridor_sink REQUIRE COLOCATION \
+                            weak_glue FROM corridor_source TO corridor_emitter REQUIRE COLOCATION \
                             RANK 2; CREATE PLACEMENT strong_cut FROM corridor_source TO \
-                            corridor_sink NEUTRAL RANK 1; COMMIT;"
+                            corridor_emitter NEUTRAL RANK 1; COMMIT;"
                         .to_string(),
                     domain: Some(named("default")),
                     execution_reference: test_execution_reference(),

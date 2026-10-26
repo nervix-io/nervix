@@ -12,16 +12,21 @@
 //! The report goes to standard output and progress to standard error, only when standard error is
 //! a terminal. Every restore that did not complete ends the process with a nonzero status.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::io::{IsTerminal as _, Write as _};
 
-use error_stack::Report as StackReport;
+use error_stack::{Report as StackReport, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_client_core::{
     Client, CommandOutcome, ConnectOptions, ExistingUserPolicy, Restore, RestoreMode,
     RestoreReport, RestoreScope, RestoreStepOutcome,
 };
-use nervix_models::{DomainName, Statement};
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+use nervix_models::{DomainName, RestoreLifecycle, RestoreState, Statement};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
 use nervix_primitives::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -74,6 +79,9 @@ pub(super) struct RestoreRequest {
     pub(super) input: String,
     pub(super) existing_users: Option<CliExistingUsers>,
     pub(super) dry_run: bool,
+    pub(super) resume: bool,
+    pub(super) without_state: bool,
+    pub(super) without_source_offsets: bool,
     pub(super) format: CliReportFormat,
 }
 
@@ -109,10 +117,23 @@ impl RestoreRequest {
         } else {
             RestoreMode::Apply
         };
+        let state = if self.without_state {
+            RestoreState::ConfigurationOnly
+        } else if self.without_source_offsets {
+            RestoreState::WithoutSourceOffsets
+        } else {
+            RestoreState::All
+        };
         Ok(Restore {
             scope,
             source: self.input.clone(),
             mode,
+            state,
+            lifecycle: if self.resume {
+                RestoreLifecycle::Resume
+            } else {
+                RestoreLifecycle::Stopped
+            },
         })
     }
 }
@@ -137,8 +158,8 @@ pub(super) async fn run_restore(request: RestoreRequest) -> Result<(), StackRepo
     {
         Ok(client) => client,
         Err(error) => {
-            report_failure(format, "CONNECTION_FAILED", &error.to_string(), None);
-            return Err(StackReport::new(ClientError::from(error)));
+            report_failure(format, "CONNECTION_FAILED", &format!("{error:#}"), None);
+            return Err(error.change_context(ClientError::Connect));
         }
     };
     let progress = ProgressLine::start(&restore.source);
@@ -147,8 +168,8 @@ pub(super) async fn run_restore(request: RestoreRequest) -> Result<(), StackRepo
     let outcome = match restored {
         Ok(outcome) => outcome,
         Err(error) => {
-            report_failure(format, "RESTORE_FAILED", &error_chain(&error), None);
-            return Err(StackReport::new(ClientError::from(error)));
+            report_failure(format, "RESTORE_FAILED", &format!("{error:#}"), None);
+            return Err(error.change_context(ClientError::Request));
         }
     };
     if !outcome.succeeded() {
@@ -196,7 +217,7 @@ pub(super) async fn execute_restore_and_print(
     let progress = ProgressLine::start(&restore.source);
     let restored = client.restore(restore, progress.counter()).await;
     progress.finish().await;
-    let outcome = restored.map_err(|error| StackReport::new(ClientError::from(error)))?;
+    let outcome = restored.change_context(ClientError::Request)?;
     if outcome.succeeded() {
         println!("{}", report_text(&outcome));
     } else {
@@ -278,12 +299,25 @@ fn report_text(outcome: &CommandOutcome) -> String {
     let Some(report) = outcome.restore.as_deref() else {
         return text;
     };
+    for domain in &report.domains {
+        text.push_str(&format!(
+            "\n- domain={} status={} start_version={}",
+            domain.domain,
+            domain.status.as_ref(),
+            domain.start_version
+        ));
+    }
     for step in &report.steps {
         text.push_str(&format!(
             "\n- {}: {}",
             step_outcome_label(step.outcome),
             step.step
         ));
+    }
+    for diagnostic in &outcome.diagnostics {
+        if diagnostic.message.starts_with("warning:") {
+            text.push_str(&format!("\n- {}", diagnostic.message));
+        }
     }
     text
 }
@@ -295,18 +329,6 @@ fn step_outcome_label(outcome: RestoreStepOutcome) -> &'static str {
         RestoreStepOutcome::Failed => "failed",
         RestoreStepOutcome::NotAttempted => "not attempted",
     }
-}
-
-/// The error and every cause behind it, as one line.
-fn error_chain(error: &nervix_client_core::ClientError) -> String {
-    let mut message = error.to_string();
-    let mut cause = std::error::Error::source(error);
-    while let Some(current) = cause {
-        message.push_str(": ");
-        message.push_str(&current.to_string());
-        cause = current.source();
-    }
-    message
 }
 
 /// Prints a failure: an error line, or a JSON error document that carries the report of a
@@ -350,6 +372,8 @@ fn report_json(restore: &Restore, outcome: &CommandOutcome, report: &RestoreRepo
             "domain": domain.domain.as_str(),
             "resource_versions": domain.resource_versions,
             "models": domain.models,
+            "status": domain.status.as_ref(),
+            "start_version": domain.start_version,
             "planned_models": planned_models,
         }));
     }
@@ -371,10 +395,18 @@ fn report_json(restore: &Restore, outcome: &CommandOutcome, report: &RestoreRepo
         "users": users,
         "domains": domains,
         "steps": steps,
+        "warnings": outcome.diagnostics.iter()
+            .filter(|diagnostic| diagnostic.message.starts_with("warning:"))
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>(),
     })
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::OptionExt as _;
 
@@ -395,6 +427,9 @@ mod tests {
             input: "cluster.nvxb".to_string(),
             existing_users: None,
             dry_run: false,
+            resume: false,
+            without_state: false,
+            without_source_offsets: false,
             format: CliReportFormat::Json,
         }
     }
@@ -444,9 +479,38 @@ mod tests {
             }
         );
         assert_eq!(
-            restore.to_canonical_nspl(),
+            restore.to_canonical_plexus(),
             "RESTORE DOMAIN payments AS payments_copy FROM 'cluster.nvxb';"
         );
+    }
+
+    #[test]
+    fn resume_reports_its_requested_lifecycle_in_both_restore_scopes() {
+        for scope in [CliRestoreScope::Cluster, CliRestoreScope::Domain] {
+            let mut requested = request(scope);
+            if matches!(scope, CliRestoreScope::Domain) {
+                requested.domain = Some(domain("payments"));
+            }
+            assert_eq!(
+                requested
+                    .restore()
+                    .assured("default restore is valid")
+                    .lifecycle,
+                RestoreLifecycle::Stopped
+            );
+            requested.resume = true;
+            requested.dry_run = true;
+            requested.without_source_offsets = true;
+            let restore = requested.restore().assured("resume dry run is valid");
+            assert_eq!(restore.lifecycle, RestoreLifecycle::Resume);
+            assert_eq!(restore.mode, RestoreMode::DryRun);
+            assert_eq!(restore.state, RestoreState::WithoutSourceOffsets);
+            assert!(
+                restore
+                    .to_canonical_plexus()
+                    .contains(" RESUME DRY RUN WITHOUT SOURCE OFFSETS;")
+            );
+        }
     }
 
     #[test]

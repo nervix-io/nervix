@@ -8,6 +8,14 @@
 //! - **Depends on.** The `resolv.conf` grammar and Hickory's configuration types.
 //! - **Must not know.** Who resolves through the result, or what they connect to.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     fs,
     net::{IpAddr, SocketAddr},

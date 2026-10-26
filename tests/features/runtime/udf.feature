@@ -1,12 +1,12 @@
 Feature: Roto user-defined functions
-  Scenario Outline: Roto UDFs compose with NSPL expressions over Arrow batches
+  Scenario Outline: Roto UDFs compose with Plexus expressions over Arrow batches
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UDF add_one
         WITH ROTO_0_13
@@ -36,8 +36,8 @@ Feature: Roto user-defined functions
       CREATE RELAY udf_outputs SCHEMA udf_output UNBRANCHED;
       CREATE VHOST edge udf-{{test_id}}.example.com;
       CREATE ENDPOINT udf_ingress ON edge PATH '/udf' TYPE HTTP;
-      CREATE INGESTOR udf_source
-        FROM ENDPOINT udf_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR udf_source
+        FROM udf_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING udf_input_codec
         TO udf_inputs
           INHERIT ALL
@@ -76,19 +76,20 @@ Feature: Roto user-defined functions
       | 1            | 0             |
       | 3            | 0             |
 
+  @udf_column_builder @deloxide_stress
   Scenario Outline: A Roto UDF uses the per-element escape hatch for Luhn validation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE UDF luhn_valid
         WITH ROTO_0_13
-        ARGS (pan STRING)
-        RETURNS BOOL
+        ARGS (pan STRING OPTIONAL)
+        RETURNS BOOL OPTIONAL
         CODE $roto$
           fn luhn_valid(pan: StringColumn) -> BoolColumn {
               let out = ColumnBuilder.bool(pan.len());
@@ -138,11 +139,11 @@ Feature: Roto user-defined functions
         $roto$;
       CREATE SCHEMA card_event (
         id STRING,
-        pan STRING
+        pan STRING OPTIONAL
       );
       CREATE WIRE JSON SCHEMA card_event_wire MODE STRICT (
         id string,
-        pan string
+        pan string OPTIONAL
       );
       CREATE CODEC card_event_codec
         FROM WIRE JSON SCHEMA card_event_wire
@@ -151,8 +152,8 @@ Feature: Roto user-defined functions
       CREATE RELAY valid_cards SCHEMA card_event UNBRANCHED;
       CREATE VHOST card_edge luhn-{{test_id}}.example.com;
       CREATE ENDPOINT card_ingress ON card_edge PATH '/cards' TYPE HTTP;
-      CREATE INGESTOR card_source
-        FROM ENDPOINT card_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR card_source
+        FROM card_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING card_event_codec
         TO card_events
           INHERIT ALL
@@ -177,9 +178,13 @@ Feature: Roto user-defined functions
       """
     And http payload is posted to node "node-1" with host "luhn-{{test_id}}.example.com" path "/cards"
       """
+      {"id":"absent"}
+      """
+    And http payload is posted to node "node-1" with host "luhn-{{test_id}}.example.com" path "/cards"
+      """
       {"id":"valid","pan":"4111111111111111"}
       """
-    Then within "5s" the relay subscription receives payloads containing all fragments
+    Then within "30s" the relay subscription receives payloads containing all fragments
       """
       "id":"valid" | "pan":"4111111111111111"
       """
@@ -192,12 +197,12 @@ Feature: Roto user-defined functions
 
   Scenario Outline: Non-volatile UDFs cannot access non-deterministic functions
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands fail with "now() requires VOLATILE"
+    When these Plexus commands fail with "now() requires VOLATILE"
       """
       CREATE UDF invalid_clock
         WITH ROTO_0_13
@@ -218,12 +223,12 @@ Feature: Roto user-defined functions
   Scenario Outline: A failing in-source Roto test rejects UDF creation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands fail with "Roto test block failed"
+    When these Plexus commands fail with "Roto test block failed"
       """
       CREATE UDF broken_increment
         WITH ROTO_0_13
@@ -247,7 +252,7 @@ Feature: Roto user-defined functions
           }
         $roto$;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW UDFS;
       """

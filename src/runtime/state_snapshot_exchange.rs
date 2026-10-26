@@ -16,6 +16,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         lifecycle,
         reason = "sealed snapshot transfer installs a state generation during recovery or \
@@ -27,8 +34,6 @@ use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
 use futures_util::stream;
-use meticulous::ResultExt as _;
-use nervix_execution::ChargedBytes;
 use nervix_interconnect::{
     RemoteOperationFailure, RemoteOperationSubject, StreamHandlerError, StreamingResponse,
 };
@@ -150,15 +155,26 @@ impl Runtime {
         after_revision: Option<u64>,
     ) -> Result<DescribedStateSnapshot, RemoteOperationFailure> {
         let subject = RemoteOperationSubject::state(&placement.to_remote());
-        let state = self
-            .inner
-            .replicated_materialized_stream_states
-            .get(placement)
-            .map(|state| super::ReplicatedMaterializedRelayState::read(state.value()));
+        let state = match self.inner.state_replication_routing.resolve(placement) {
+            Some(route) => match route.state().as_deref() {
+                Some(super::state_replication::routing::ReplicatedState::MaterializedRelay(
+                    state,
+                )) => Some(super::ReplicatedMaterializedRelayState::read(state)),
+                _ => None,
+            },
+            None => None,
+        };
         let Some(state) = state else {
             return Err(RemoteOperationFailure::unavailable(subject));
         };
-        match state.seal_after(&self.inner.executor, after_revision).await {
+        match state
+            .seal_after(
+                &self.inner.executor,
+                &self.inner.snapshot_staging,
+                after_revision,
+            )
+            .await
+        {
             Ok(Some(sealed)) => Ok(DescribedStateSnapshot::Sealed(SealedSnapshotEnvelope {
                 length: sealed.descriptor.length,
                 digest: sealed.descriptor.digest,
@@ -181,11 +197,15 @@ impl Runtime {
     ) -> Result<StreamingResponse, Report<StreamHandlerError>> {
         let placement = RuntimeStatePlacement::from_remote(request.placement)
             .map_err(StreamHandlerError::with_cause)?;
-        let state = self
-            .inner
-            .replicated_materialized_stream_states
-            .get(&placement)
-            .map(|state| super::ReplicatedMaterializedRelayState::read(state.value()));
+        let state = match self.inner.state_replication_routing.resolve(&placement) {
+            Some(route) => match route.state().as_deref() {
+                Some(super::state_replication::routing::ReplicatedState::MaterializedRelay(
+                    state,
+                )) => Some(super::ReplicatedMaterializedRelayState::read(state)),
+                _ => None,
+            },
+            None => None,
+        };
         let Some(state) = state else {
             return Err(Report::new(StreamHandlerError::new(format!(
                 "this node is not currently assigned materialized state for {} '{}'",
@@ -202,13 +222,20 @@ impl Runtime {
         };
         let chunk_bytes = self.inner.executor.limits().bulk_chunk_bytes.as_u64();
         let length = sealed.descriptor.length;
-        let chunks = stream::unfold(
-            SealedChunks {
-                bytes: sealed.bytes,
-                offset: 0,
-                chunk_bytes,
+        let reader = sealed
+            .artifact
+            .open_reader()
+            .await
+            .map_err(StreamHandlerError::with_cause)?;
+        let chunks = stream::try_unfold(
+            (sealed.artifact, reader),
+            move |(artifact, mut reader)| async move {
+                let chunk = reader
+                    .next_chunk(chunk_bytes)
+                    .await
+                    .map_err(StreamHandlerError::with_cause)?;
+                Ok::<_, Report<StreamHandlerError>>(chunk.map(|chunk| (chunk, (artifact, reader))))
             },
-            |mut chunks| async move { chunks.next().map(|chunk| (chunk, chunks)) },
         );
         Ok(StreamingResponse::new(length, chunks))
     }
@@ -233,6 +260,33 @@ impl Runtime {
         after_revision: Option<u64>,
     ) -> error_stack::Result<Option<RestoredMaterializedSnapshot>, MaterializedSnapshotExchangeError>
     {
+        let Some(envelope) = self
+            .describe_materialized_snapshot_from(target_node_id, placement, after_revision)
+            .await?
+        else {
+            return Ok(None);
+        };
+        self.fetch_described_materialized_snapshot(target_node_id, placement, schema, envelope)
+            .await
+            .map(Some)
+    }
+
+    /// Describe the selected owner's exact sealed generation before deciding whether bytes are
+    /// needed. Readers that retain contents compare the complete envelope, not only its revision.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "materialized readers describe the selected owner before each read"
+        )
+    )]
+    pub(in crate::runtime) async fn describe_materialized_snapshot_from(
+        &self,
+        target_node_id: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+        after_revision: Option<u64>,
+    ) -> error_stack::Result<Option<SealedSnapshotEnvelope>, MaterializedSnapshotExchangeError>
+    {
         let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
             return Err(Report::new(
                 MaterializedSnapshotExchangeError::DispatcherUnavailable {
@@ -251,12 +305,9 @@ impl Runtime {
                 DESCRIBE_TIMEOUT,
             )
             .await
-            .map_err(|reason| {
-                Report::new(MaterializedSnapshotExchangeError::Describe {
-                    target: target_node_id.clone(),
-                    placement: placement.clone(),
-                })
-                .attach_printable(reason)
+            .change_context_lazy(|| MaterializedSnapshotExchangeError::Describe {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
             })?
             .map_err(|failure| {
                 Report::new(MaterializedSnapshotExchangeError::RemoteFailure {
@@ -265,9 +316,35 @@ impl Runtime {
                     failure,
                 })
             })?;
-        let envelope = match described {
-            DescribedStateSnapshot::Current => return Ok(None),
-            DescribedStateSnapshot::Sealed(envelope) => envelope,
+        Ok(match described {
+            DescribedStateSnapshot::Current => None,
+            DescribedStateSnapshot::Sealed(envelope) => Some(envelope),
+        })
+    }
+
+    /// Receive and verify exactly the generation the owner described. A replaced generation is
+    /// refused by the owner or fails verification; no other contents can satisfy this envelope.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            recurring,
+            reason = "materialized readers fetch a changed sealed generation"
+        )
+    )]
+    pub(in crate::runtime) async fn fetch_described_materialized_snapshot(
+        &self,
+        target_node_id: &ClusterNodeName,
+        placement: &RuntimeStatePlacement,
+        schema: &nervix_primitives::sync::StdArc<arrow_schema::Schema>,
+        envelope: SealedSnapshotEnvelope,
+    ) -> error_stack::Result<RestoredMaterializedSnapshot, MaterializedSnapshotExchangeError> {
+        let Some(dispatcher) = self.inner.remote_dispatcher.load_full() else {
+            return Err(Report::new(
+                MaterializedSnapshotExchangeError::DispatcherUnavailable {
+                    target: target_node_id.clone(),
+                    placement: placement.clone(),
+                },
+            ));
         };
         let mut body = dispatcher
             .request_stream(
@@ -278,12 +355,9 @@ impl Runtime {
                 },
             )
             .await
-            .map_err(|reason| {
-                Report::new(MaterializedSnapshotExchangeError::OpenTransfer {
-                    target: target_node_id.clone(),
-                    placement: placement.clone(),
-                })
-                .attach_printable(reason)
+            .change_context_lazy(|| MaterializedSnapshotExchangeError::OpenTransfer {
+                target: target_node_id.clone(),
+                placement: placement.clone(),
             })?;
         if body.content_length() != envelope.length {
             return Err(Report::new(
@@ -320,19 +394,21 @@ impl Runtime {
                 },
             )?;
         }
+        // EOF ends transport ownership. File verification and Arrow materialization are local
+        // work and must not retain a shared Snapshot request or connection-stream permit.
+        drop(body);
         let staged = staged.finish(envelope.digest).await.change_context(
             MaterializedSnapshotExchangeError::Verify {
                 target: target_node_id.clone(),
                 placement: placement.clone(),
             },
         )?;
-        RestoredMaterializedSnapshot::open(
+        RestoredMaterializedSnapshot::open_relay(
             &self.inner.executor,
             schema,
             SealedSource::staged(staged),
         )
         .await
-        .map(Some)
         .change_context(MaterializedSnapshotExchangeError::OpenSnapshot {
             target: target_node_id.clone(),
             placement: placement.clone(),
@@ -360,51 +436,23 @@ impl Runtime {
             return Ok(None);
         };
         let revision = restored.revision;
-        installer.install(restored).map_err(|error| {
-            Report::new(MaterializedSnapshotExchangeError::Install {
+        installer.install(restored).change_context_lazy(|| {
+            MaterializedSnapshotExchangeError::Install {
                 target: target_node_id.clone(),
                 placement: state.placement().clone(),
-            })
-            .attach_printable(error)
+            }
         })?;
         Ok(Some(revision))
     }
 }
 
-/// One sealed generation being handed to the transport a bounded chunk at a time. Each chunk is a
-/// window onto the same charged allocation, so the stream copies nothing.
-struct SealedChunks {
-    bytes: ChargedBytes,
-    offset: usize,
-    chunk_bytes: u64,
-}
-
-impl SealedChunks {
-    fn next(&mut self) -> Option<Result<ChargedBytes, Report<StreamHandlerError>>> {
-        if self.offset >= self.bytes.len() {
-            return None;
-        }
-        let wanted = usize::try_from(self.chunk_bytes).verified(
-            "the configured bulk chunk is validated against a memory budget counted in permits",
-        );
-        let end = self
-            .offset
-            .checked_add(wanted)
-            .unwrap_or(self.bytes.len())
-            .min(self.bytes.len());
-        let Some(chunk) = self.bytes.slice(self.offset, end) else {
-            return Some(Err(Report::new(StreamHandlerError::new(
-                "the sealed snapshot ended before the chunk it declared",
-            ))));
-        };
-        self.offset = end;
-        Some(Ok(chunk))
-    }
-}
-
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{DomainName, ModelKind, ModelName, SchemaFingerprint};
 
     use super::*;

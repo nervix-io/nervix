@@ -6,23 +6,51 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     BackupResources, ClusterNodeName, DomainClockPeriod, DomainClockSkew, DomainClockState,
-    DomainName, DomainPace, DomainStartPoint, DomainStatus, DomainTimeRate, PlacementPolicy,
-    ResourceName, Timestamp, UserName,
+    DomainName, DomainPace, DomainStartPoint, DomainStatus, DomainTimeRate, ModelName,
+    PlacementPolicy, ResourceName, SchemaFingerprint, Timestamp, UserName, WasmStateGeneration,
 };
 
 use crate::{
     ARCHIVE_FORMAT_MAJOR, ArchiveLayout, ArchivePiece, ArchiveReadError, ArchiveRecord,
     ArchiveScope, ArchiveWriteError, BackupManifest, DeclaredResource, DomainCapture, DomainRecord,
-    PublishedResourceVersion, RaftLogPosition, RecordKind, ResourceVersionRecord,
+    MAX_RECORD_BYTES, PublishedResourceVersion, RaftLogPosition, RecordKind, ResourceVersionRecord,
     ResourceVersionState, SectionContent, SectionDigester, SectionEntry, SectionPath,
-    SectionReader, SectionVisitor, UserRecord, UsersRecord, describe_archive, read_archive,
-    read_archive_contents,
+    SectionReader, SectionVisitor, SkippedStateReason, StateField, StateValue, UserRecord,
+    UsersRecord, describe_archive, read_archive, read_archive_contents, read_manifest_header,
     section::{RECORD_HEADER_BYTES, RECORD_MAGIC, decode_record, encode_record},
+    state::{KafkaOffsetsRecord, WasmStateDescriptor},
     wire::{
         DeclaredResourceWire, DomainWire, ManifestWire, PaceWire, PlacementWire, StartPointWire,
         StatusWire,
     },
 };
+
+#[test]
+fn bolero_runtime_state_records_round_trip() {
+    bolero::check!()
+        .with_iterations(256)
+        .with_max_len(4096)
+        .for_each(|bytes| {
+            let mut values = crate::archive_values::Values::new(bytes);
+            let domain = values.0.name();
+            crate::archive_properties::assert_record(&values.offsets(domain));
+            let domain = values.0.name();
+            crate::archive_properties::assert_record(&values.lifecycle(domain));
+            for shape in 0..3 {
+                let domain = values.0.name();
+                let value = values.materialized(&domain, shape);
+                crate::archive_properties::assert_record(&value.descriptor);
+                for group in &value.groups {
+                    crate::archive_properties::assert_record(&group.identities);
+                }
+            }
+            for branched in [false, true] {
+                let descriptor =
+                    crate::wasm_properties::Descriptors(values.0.clone()).descriptor(branched);
+                crate::archive_properties::assert_record(&descriptor);
+            }
+        });
+}
 
 fn domain(name: &str) -> DomainName {
     DomainName::parse(name).assured("the test domain is valid")
@@ -293,8 +321,10 @@ fn a_manifest_of_another_major_version_is_refused() {
     let manifest = manifest_of(ArchiveScope::Cluster, Vec::new());
     let mut wire = ManifestWire::from(&manifest);
     wire.format_major = ARCHIVE_FORMAT_MAJOR + 1;
-    let section = encode_record(RecordKind::Manifest, 1, &wire).assured("the wire encodes");
-    let error = BackupManifest::decode("manifest.rkyv", &section).expect_err("major 2 is unknown");
+    let section = encode_record(RecordKind::Manifest, BackupManifest::VERSION, &wire)
+        .assured("the wire encodes");
+    let error = BackupManifest::decode("manifest.rkyv", &section)
+        .expect_err("the unsupported major is refused");
     assert_eq!(
         error.current_context(),
         &ArchiveReadError::UnsupportedArchiveFormat {
@@ -302,8 +332,13 @@ fn a_manifest_of_another_major_version_is_refused() {
             supported: ARCHIVE_FORMAT_MAJOR,
         }
     );
-    let decoded: ManifestWire = decode_record("manifest.rkyv", RecordKind::Manifest, 1, &section)
-        .assured("the wire shape itself is valid");
+    let decoded: ManifestWire = decode_record(
+        "manifest.rkyv",
+        RecordKind::Manifest,
+        BackupManifest::VERSION,
+        &section,
+    )
+    .assured("the wire shape itself is valid");
     assert_eq!(decoded.format_major, ARCHIVE_FORMAT_MAJOR + 1);
 }
 
@@ -339,17 +374,20 @@ fn manifest_of(scope: ArchiveScope, sections: Vec<SectionEntry>) -> BackupManife
                 domain: domain("prod"),
                 revision: 42,
                 raft_log: RaftLogPosition { term: 3, index: 42 },
+                cut: nervix_models::BackupCut::ConfigurationOnly,
             },
             DomainCapture {
                 domain: domain("staging"),
                 revision: 42,
                 raft_log: RaftLogPosition { term: 3, index: 42 },
+                cut: nervix_models::BackupCut::ConfigurationOnly,
             },
         ],
         ArchiveScope::Domain(name) => vec![DomainCapture {
             domain: name.clone(),
             revision: 7,
             raft_log: RaftLogPosition { term: 1, index: 7 },
+            cut: nervix_models::BackupCut::ConfigurationOnly,
         }],
     };
     BackupManifest {
@@ -375,7 +413,7 @@ fn cluster_sections(resources: BackupResources) -> Vec<TestSection> {
         ),
         bytes_section(
             SectionPath::domain_models(&domain(long_domain)),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             b"CREATE SCHEMA order_event (\n  id U64\n);\n".to_vec(),
         ),
     ];
@@ -410,7 +448,7 @@ fn cluster_sections(resources: BackupResources) -> Vec<TestSection> {
     ));
     sections.push(bytes_section(
         SectionPath::domain_models(&domain("staging")),
-        SectionContent::Nspl,
+        SectionContent::Plexus,
         Vec::new(),
     ));
     sections
@@ -421,12 +459,12 @@ fn write_archive(manifest: BackupManifest, sections: &[TestSection]) -> (Archive
     let mut bytes = Vec::new();
     let mut remaining = sections.iter();
     layout
-        .write_to(&mut bytes, |entry, sink| {
+        .write_to(&mut bytes, |entry, connector| {
             let section = remaining
                 .next()
                 .assured("the layout asks for the sections in manifest order");
             assert_eq!(&section.entry, entry);
-            std::io::Write::write_all(sink, &section.bytes)
+            std::io::Write::write_all(connector, &section.bytes)
         })
         .assured("the test archive writes");
     (layout, bytes)
@@ -443,6 +481,151 @@ fn cluster_archive(resources: BackupResources) -> (ArchiveLayout, Vec<u8>) {
     );
     manifest.resources = resources;
     write_archive(manifest, &sections)
+}
+
+fn materialized_sections(groups: u32) -> Vec<TestSection> {
+    let domain = domain("prod");
+    let entity = ModelName::parse("state").assured("relay name is valid");
+    let descriptor = crate::MaterializedRelayDescriptor {
+        domain: domain.clone(),
+        entity: entity.clone(),
+        schema: SchemaFingerprint::from_digest([9; 32]),
+        revision: 17,
+        fence: 23,
+        branch_generation: 7,
+        record_count: u64::from(groups),
+        groups,
+    };
+    let mut sections = vec![
+        record_section(SectionPath::domain_record(&domain), &unpaced_domain("prod")),
+        bytes_section(
+            SectionPath::domain_models(&domain),
+            SectionContent::Plexus,
+            Vec::new(),
+        ),
+        record_section(
+            SectionPath::materialized_descriptor(&domain, &entity),
+            &descriptor,
+        ),
+    ];
+    for group in 0..groups {
+        let identity = crate::MaterializedIdentitiesRecord {
+            domain: domain.clone(),
+            entity: entity.clone(),
+            group,
+            identities: vec![crate::MaterializedRecordIdentity {
+                branch: Some(vec![StateField {
+                    name: "tenant".into(),
+                    value: StateValue::U32(group),
+                }]),
+                watermarks: nervix_models::RemoteRuntimeRecordMetadata {
+                    ingested_at_low_watermark: Timestamp::from_unix_nanos(100),
+                    ingested_at_high_watermark: Timestamp::from_unix_nanos(200),
+                },
+            }],
+        };
+        // The archive owns opaque column sections. The restore boundary validates their IPC schema.
+        sections.push(bytes_section(
+            SectionPath::materialized_columns(&domain, &entity, group),
+            SectionContent::MaterializedColumns,
+            vec![1, 3, 5, 7],
+        ));
+        sections.push(record_section(
+            SectionPath::materialized_identities(&domain, &entity, group),
+            &identity,
+        ));
+    }
+    sections
+}
+
+fn describe_materialized_sections(
+    sections: &[TestSection],
+) -> Result<crate::ArchiveDescription, Report<ArchiveReadError>> {
+    let manifest = manifest_of(
+        ArchiveScope::Domain(domain("prod")),
+        sections
+            .iter()
+            .map(|section| section.entry.clone())
+            .collect(),
+    );
+    let (_, bytes) = write_archive(manifest, sections);
+    describe_archive(bytes.as_slice())
+}
+
+#[test]
+fn materialized_groups_are_described_in_row_order_with_columns_in_either_section_order() {
+    for reverse in [false, true] {
+        let mut sections = materialized_sections(2);
+        if reverse {
+            sections[3..].reverse();
+        }
+        let described =
+            describe_materialized_sections(&sections).assured("independent sections assemble");
+        let crate::DescribedRuntimeState::Materialized {
+            descriptor,
+            record,
+            groups,
+        } = &described.domains[0].state[0]
+        else {
+            panic!("the relay has a materialized descriptor");
+        };
+        assert_eq!(descriptor.revision, 17);
+        assert_eq!(descriptor.fence, 23);
+        assert_eq!(descriptor.branch_generation, 7);
+        assert_eq!(descriptor.schema, SchemaFingerprint::from_digest([9; 32]));
+        assert_eq!(descriptor.record_count, 2);
+        assert_eq!(
+            record.path,
+            SectionPath::materialized_descriptor(&domain("prod"), &descriptor.entity)
+        );
+        for (index, group) in groups.iter().enumerate() {
+            let index = u32::try_from(index).assured("bounded index fits");
+            assert_eq!(
+                group.identities.path,
+                SectionPath::materialized_identities(&domain("prod"), &descriptor.entity, index)
+            );
+            assert_eq!(
+                group.columns.path,
+                SectionPath::materialized_columns(&domain("prod"), &descriptor.entity, index)
+            );
+            assert_eq!(group.record_count, 1);
+            assert_eq!(group.columns.length, 4);
+            assert_eq!(
+                group.columns.digest,
+                SectionDigester::digest_of(&[1, 3, 5, 7])
+            );
+        }
+    }
+}
+
+#[test]
+fn an_empty_materialized_generation_has_a_descriptor_and_no_groups() {
+    let described = describe_materialized_sections(&materialized_sections(0))
+        .assured("empty generation assembles");
+    let crate::DescribedRuntimeState::Materialized {
+        descriptor, groups, ..
+    } = &described.domains[0].state[0]
+    else {
+        panic!("empty relay has a descriptor");
+    };
+    assert_eq!(descriptor.record_count, 0);
+    assert_eq!(descriptor.groups, 0);
+    assert!(groups.is_empty());
+}
+
+#[test]
+fn a_materialized_archive_requires_all_identities_and_columns() {
+    for missing in [3, 4] {
+        let mut sections = materialized_sections(1);
+        sections.remove(missing);
+        let error = describe_materialized_sections(&sections)
+            .err()
+            .assured("an incomplete group is refused");
+        assert!(matches!(
+            error.current_context(),
+            ArchiveReadError::IncompleteDomain { .. }
+        ));
+    }
 }
 
 #[test]
@@ -526,7 +709,7 @@ fn a_domain_archive_holds_no_users() {
         record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
         bytes_section(
             SectionPath::domain_models(&prod),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             b"CREATE SCHEMA s (id U64);".to_vec(),
         ),
     ];
@@ -542,6 +725,240 @@ fn a_domain_archive_holds_no_users() {
     assert_eq!(description.users, None);
     assert_eq!(description.domains.len(), 1);
     assert_eq!(description.manifest.scope, ArchiveScope::Domain(prod));
+}
+
+#[test]
+fn unsupported_state_record_headers_are_verified_and_reported_as_skipped() {
+    let prod = domain("prod");
+    let entity = ModelName::parse("source").assured("the test entity is valid");
+    let path = SectionPath::kafka_offsets(&prod, &entity);
+    let record = KafkaOffsetsRecord {
+        domain: prod.clone(),
+        entity,
+        schema: SchemaFingerprint::from_digest([3; 32]),
+        revision: 3,
+        applied_start_generation: None,
+        offsets: Vec::new(),
+    };
+    for (kind, version, expected) in [
+        (
+            999_u16,
+            KafkaOffsetsRecord::VERSION,
+            SkippedStateReason::UnknownKind { found: 999 },
+        ),
+        (
+            RecordKind::KafkaOffsets.tag(),
+            999_u16,
+            SkippedStateReason::UnsupportedVersion {
+                found: 999,
+                supported: KafkaOffsetsRecord::VERSION,
+            },
+        ),
+    ] {
+        let mut bytes = record.encode().assured("the state record encodes");
+        bytes[8..10].copy_from_slice(&kind.to_le_bytes());
+        bytes[10..12].copy_from_slice(&version.to_le_bytes());
+        assert!(
+            KafkaOffsetsRecord::decode(path.as_str(), &bytes).is_err(),
+            "the typed record decoder stays strict"
+        );
+        let sections = vec![
+            record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
+            bytes_section(
+                SectionPath::domain_models(&prod),
+                SectionContent::Plexus,
+                Vec::new(),
+            ),
+            bytes_section(
+                path.clone(),
+                SectionContent::Record(RecordKind::KafkaOffsets),
+                bytes,
+            ),
+        ];
+        let mut manifest = manifest_of(
+            ArchiveScope::Domain(prod.clone()),
+            sections
+                .iter()
+                .map(|section| section.entry.clone())
+                .collect(),
+        );
+        manifest.domains[0].cut = nervix_models::BackupCut::Stopped;
+        let (_, archive) = write_archive(manifest, &sections);
+        let description = describe_archive(archive.as_slice())
+            .assured("unsupported state leaves the verified archive readable");
+        assert!(description.domains[0].state.is_empty());
+        assert_eq!(description.domains[0].skipped_state.len(), 1);
+        assert_eq!(description.domains[0].skipped_state[0].path, path);
+        assert_eq!(description.domains[0].skipped_state[0].reason, expected);
+    }
+}
+
+#[test]
+fn an_unsupported_wasm_descriptor_skips_its_guest_blob_together() {
+    let prod = domain("prod");
+    let entity = ModelName::parse("filter").assured("the test entity is valid");
+    let descriptor = WasmStateDescriptor {
+        domain: prod.clone(),
+        entity: entity.clone(),
+        schema: SchemaFingerprint::from_digest([3; 32]),
+        branch_fingerprint: None,
+        branch: None,
+        generation: WasmStateGeneration::FIRST,
+        revision: 4,
+    };
+    let mut descriptor_bytes = descriptor.encode().assured("the descriptor encodes");
+    descriptor_bytes[10..12].copy_from_slice(&999_u16.to_le_bytes());
+    let descriptor_path = SectionPath::wasm_state_descriptor(&prod, &entity, None);
+    let sections = vec![
+        record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
+        bytes_section(
+            SectionPath::domain_models(&prod),
+            SectionContent::Plexus,
+            Vec::new(),
+        ),
+        bytes_section(
+            descriptor_path.clone(),
+            SectionContent::Record(RecordKind::WasmStateDescriptor),
+            descriptor_bytes,
+        ),
+        bytes_section(
+            SectionPath::wasm_guest_blob(&prod, &entity, None),
+            SectionContent::WasmGuestBlob,
+            vec![7; 32],
+        ),
+    ];
+    let mut manifest = manifest_of(
+        ArchiveScope::Domain(prod),
+        sections
+            .iter()
+            .map(|section| section.entry.clone())
+            .collect(),
+    );
+    manifest.domains[0].cut = nervix_models::BackupCut::Stopped;
+    let (_, archive) = write_archive(manifest, &sections);
+    let description = describe_archive(archive.as_slice())
+        .assured("an unsupported WASM descriptor and its guest blob are skipped");
+    assert!(description.domains[0].state.is_empty());
+    assert_eq!(description.domains[0].skipped_state.len(), 1);
+    assert_eq!(
+        description.domains[0].skipped_state[0].path,
+        descriptor_path
+    );
+    assert_eq!(
+        description.domains[0].skipped_state[0].reason,
+        SkippedStateReason::UnsupportedVersion {
+            found: 999,
+            supported: WasmStateDescriptor::VERSION,
+        }
+    );
+}
+
+#[test]
+fn unsupported_deduplicator_and_window_descriptors_skip_their_groups_together() {
+    let prod = domain("prod");
+    let deduplicator = ModelName::parse("unique_payments").assured("the test entity is valid");
+    let window = ModelName::parse("latency_window").assured("the test entity is valid");
+    let keyspace = crate::DeduplicatorStateDescriptor {
+        domain: prod.clone(),
+        entity: deduplicator.clone(),
+        schema: SchemaFingerprint::from_digest([3; 32]),
+        branch_fingerprint: None,
+        branch: None,
+        revision: 5,
+        keys: 1,
+        groups: 1,
+    };
+    let rows = crate::WindowStateDescriptor {
+        domain: prod.clone(),
+        entity: window.clone(),
+        schema: SchemaFingerprint::from_digest([4; 32]),
+        model: nervix_models::WindowModelDigest::from_digest([5; 32]),
+        branch_fingerprint: None,
+        branch: None,
+        revision: 6,
+        incarnation: 1,
+        first_sequence: Some(0),
+        next_sequence: 1,
+        rows: vec![nervix_models::RemoteRuntimeRecordMetadata {
+            ingested_at_low_watermark: Timestamp::from_unix_nanos(1),
+            ingested_at_high_watermark: Timestamp::from_unix_nanos(2),
+        }],
+        groups: 1,
+        accumulators: vec![crate::WindowAccumulatorRecord::Retained],
+    };
+    let mut keyspace_bytes = keyspace.encode().assured("the descriptor encodes");
+    keyspace_bytes[10..12].copy_from_slice(&999_u16.to_le_bytes());
+    let mut rows_bytes = rows.encode().assured("the descriptor encodes");
+    rows_bytes[10..12].copy_from_slice(&999_u16.to_le_bytes());
+    let keyspace_path = SectionPath::deduplicator_descriptor(&prod, &deduplicator, None);
+    let rows_path = SectionPath::window_descriptor(&prod, &window, None);
+    let sections = vec![
+        record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
+        bytes_section(
+            SectionPath::domain_models(&prod),
+            SectionContent::Plexus,
+            Vec::new(),
+        ),
+        bytes_section(
+            keyspace_path.clone(),
+            SectionContent::Record(RecordKind::DeduplicatorStateDescriptor),
+            keyspace_bytes,
+        ),
+        bytes_section(
+            SectionPath::deduplicator_keys(&prod, &deduplicator, None, 0),
+            SectionContent::DeduplicatorKeys,
+            vec![7; 32],
+        ),
+        bytes_section(
+            rows_path.clone(),
+            SectionContent::Record(RecordKind::WindowStateDescriptor),
+            rows_bytes,
+        ),
+        bytes_section(
+            SectionPath::window_input_rows(&prod, &window, None, 0),
+            SectionContent::WindowInputRows,
+            vec![8; 32],
+        ),
+        bytes_section(
+            SectionPath::window_argument_columns(&prod, &window, None, 0),
+            SectionContent::WindowArgumentColumns,
+            vec![9; 32],
+        ),
+    ];
+    let mut manifest = manifest_of(
+        ArchiveScope::Domain(prod),
+        sections
+            .iter()
+            .map(|section| section.entry.clone())
+            .collect(),
+    );
+    manifest.domains[0].cut = nervix_models::BackupCut::Stopped;
+    let (_, archive) = write_archive(manifest, &sections);
+    let description = describe_archive(archive.as_slice())
+        .assured("unsupported descriptors and their Arrow groups are skipped together");
+    assert!(description.domains[0].state.is_empty());
+    let skipped = &description.domains[0].skipped_state;
+    assert_eq!(
+        skipped.len(),
+        2,
+        "each descriptor is reported once: {skipped:?}"
+    );
+    assert_eq!(skipped[0].path, keyspace_path);
+    assert_eq!(
+        skipped[0].reason,
+        SkippedStateReason::UnsupportedVersion {
+            found: 999,
+            supported: crate::DeduplicatorStateDescriptor::VERSION,
+        }
+    );
+    assert_eq!(skipped[1].path, rows_path);
+    assert_eq!(
+        skipped[1].reason,
+        SkippedStateReason::UnsupportedVersion {
+            found: 999,
+            supported: crate::WindowStateDescriptor::VERSION,
+        }
+    );
 }
 
 #[test]
@@ -563,7 +980,7 @@ fn a_long_path_travels_in_a_gnu_long_name_entry() {
         ),
         bytes_section(
             SectionPath::domain_models(&long_domain),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             b"".to_vec(),
         ),
         record_section(
@@ -653,7 +1070,7 @@ fn a_long_named_section_names_the_place_of_its_bytes() {
         ),
         bytes_section(
             SectionPath::domain_models(&long_domain),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             Vec::new(),
         ),
         record_section(
@@ -708,7 +1125,7 @@ fn models_that_are_not_utf8_are_refused() {
         record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
         bytes_section(
             SectionPath::domain_models(&prod),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             vec![0xff, 0xfe, b';'],
         ),
     ];
@@ -720,11 +1137,11 @@ fn models_that_are_not_utf8_are_refused() {
             .collect(),
     );
     let (_, bytes) = write_archive(manifest, &sections);
-    let error = read_archive_contents(bytes.as_slice()).expect_err("the NSPL is not text");
+    let error = read_archive_contents(bytes.as_slice()).expect_err("the Plexus is not text");
     assert_eq!(
         error.current_context(),
         &ArchiveReadError::InvalidText {
-            path: "domains/prod/models.nspl".to_string(),
+            path: "domains/prod/models.plexus".to_string(),
         }
     );
 }
@@ -732,13 +1149,13 @@ fn models_that_are_not_utf8_are_refused() {
 #[test]
 fn the_contents_reader_refuses_what_the_description_refuses() {
     let (_, mut bytes) = cluster_archive(BackupResources::Included);
-    let range = section_range(&bytes, "domains/prod/models.nspl");
+    let range = section_range(&bytes, "domains/prod/models.plexus");
     bytes[range.start] ^= 0x20;
     let error = read_archive_contents(bytes.as_slice()).expect_err("a changed byte is refused");
     assert_eq!(
         error.current_context(),
         &ArchiveReadError::DigestMismatch {
-            path: "domains/prod/models.nspl".to_string(),
+            path: "domains/prod/models.plexus".to_string(),
         }
     );
 }
@@ -764,13 +1181,13 @@ fn section_range(bytes: &[u8], path: &str) -> std::ops::Range<usize> {
 #[test]
 fn a_changed_byte_is_refused_at_the_section_it_changed() {
     let (_, mut bytes) = cluster_archive(BackupResources::Included);
-    let range = section_range(&bytes, "domains/prod/models.nspl");
+    let range = section_range(&bytes, "domains/prod/models.plexus");
     bytes[range.start] ^= 0x20;
     let error = read_error(&bytes);
     assert_eq!(
         error.current_context(),
         &ArchiveReadError::DigestMismatch {
-            path: "domains/prod/models.nspl".to_string(),
+            path: "domains/prod/models.plexus".to_string(),
         }
     );
 }
@@ -821,6 +1238,40 @@ fn a_section_the_manifest_does_not_name_is_refused() {
 }
 
 #[test]
+fn manifest_admission_reads_only_the_identified_bounded_header() {
+    let (_, bytes) = cluster_archive(BackupResources::Included);
+    let mut reader = std::io::Cursor::new(&bytes);
+    let header = read_manifest_header(&mut reader).assured("the current manifest header is valid");
+    assert_eq!(reader.position(), 512);
+    assert_eq!(
+        header.length(),
+        tar::Header::from_byte_slice(&bytes[..512])
+            .size()
+            .assured("the current header has a length")
+    );
+    assert!(header.length() > 0);
+
+    let mut header = tar::Header::new_gnu();
+    header
+        .set_path("manifest.rkyv")
+        .assured("the manifest path fits the header");
+    header.set_size(MAX_RECORD_BYTES + 1);
+    header.set_mode(0o600);
+    header.set_cksum();
+    let error = read_manifest_header(&mut header.as_bytes().as_slice())
+        .err()
+        .assured("an oversized current manifest is refused before allocation");
+    assert_eq!(
+        error.current_context(),
+        &ArchiveReadError::SectionTooLarge {
+            path: "manifest.rkyv".to_string(),
+            length: MAX_RECORD_BYTES + 1,
+            limit: MAX_RECORD_BYTES,
+        }
+    );
+}
+
+#[test]
 fn an_archive_that_does_not_begin_with_its_manifest_is_refused() {
     let mut builder = tar::Builder::new(Vec::new());
     let mut header = tar::Header::new_gnu();
@@ -851,7 +1302,7 @@ fn a_cluster_archive_without_users_is_refused() {
         record_section(SectionPath::domain_record(&prod), &unpaced_domain("prod")),
         bytes_section(
             SectionPath::domain_models(&prod),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             Vec::new(),
         ),
     ];
@@ -889,7 +1340,7 @@ fn a_domain_without_its_models_is_refused() {
         read_error(&bytes).current_context(),
         &ArchiveReadError::IncompleteDomain {
             domain: "prod".to_string(),
-            missing: "models.nspl",
+            missing: "models.plexus",
         }
     );
 }
@@ -904,7 +1355,7 @@ fn a_record_at_another_domains_path_is_refused() {
         ),
         bytes_section(
             SectionPath::domain_models(&prod),
-            SectionContent::Nspl,
+            SectionContent::Plexus,
             Vec::new(),
         ),
     ];
@@ -947,8 +1398,8 @@ fn supplied_bytes_that_differ_from_their_entry_are_refused() {
     let layout = ArchiveLayout::new(manifest).assured("the archive lays out");
     let mut bytes = Vec::new();
     let error = layout
-        .write_to(&mut bytes, |_, sink| {
-            std::io::Write::write_all(sink, b"other")
+        .write_to(&mut bytes, |_, connector| {
+            std::io::Write::write_all(connector, b"other")
         })
         .expect_err("the supplied bytes differ");
     assert_eq!(
@@ -977,13 +1428,13 @@ fn the_pieces_of_a_layout_add_up_to_its_total() {
     );
 }
 
-/// A visitor that keeps the bytes of every NSPL section.
+/// A visitor that keeps the bytes of every Plexus section.
 #[derive(Default)]
-struct NsplCollector {
+struct PlexusCollector {
     texts: Vec<String>,
 }
 
-impl SectionVisitor for NsplCollector {
+impl SectionVisitor for PlexusCollector {
     fn manifest(&mut self, _manifest: &BackupManifest) -> Result<(), Report<ArchiveReadError>> {
         Ok(())
     }
@@ -993,11 +1444,11 @@ impl SectionVisitor for NsplCollector {
         entry: &SectionEntry,
         content: &mut SectionReader<'_>,
     ) -> Result<(), Report<ArchiveReadError>> {
-        if entry.content == SectionContent::Nspl {
+        if entry.content == SectionContent::Plexus {
             let mut text = String::new();
             content
                 .read_to_string(&mut text)
-                .assured("the test NSPL is UTF-8");
+                .assured("the test Plexus is UTF-8");
             self.texts.push(text);
         }
         Ok(())
@@ -1007,7 +1458,7 @@ impl SectionVisitor for NsplCollector {
 #[test]
 fn a_visitor_that_reads_part_of_a_section_still_gets_every_section_verified() {
     let (_, bytes) = cluster_archive(BackupResources::Included);
-    let mut collector = NsplCollector::default();
+    let mut collector = PlexusCollector::default();
     read_archive(bytes.as_slice(), &mut collector).assured("the archive reads back");
     assert_eq!(
         collector.texts,
@@ -1021,64 +1472,16 @@ fn a_visitor_that_reads_part_of_a_section_still_gets_every_section_verified() {
 #[test]
 fn bolero_domain_records_and_manifests_round_trip() {
     bolero::check!()
-        .with_iterations(128)
-        .with_max_len(128)
-        .with_type::<(u64, u64, i64, i64, u16, bool, u8)>()
-        .for_each(
-            |&(period, skew, wall, logical, start_version, running, placement)| {
-                let period =
-                    NonZeroU64::new(period.max(1)).assured("max with one is always nonzero");
-                let record = DomainRecord {
-                    pace: DomainPace::Paced {
-                        period: DomainClockPeriod::from_nanos(period),
-                        skew: DomainClockSkew::from_nanos(skew),
-                    },
-                    placement: match placement % 4 {
-                        0 => PlacementPolicy::RequireColocation,
-                        1 => PlacementPolicy::PreferColocation,
-                        2 => PlacementPolicy::Neutral,
-                        _ => PlacementPolicy::SuggestSeparation,
-                    },
-                    status: if running {
-                        DomainStatus::Running
-                    } else {
-                        DomainStatus::Paused
-                    },
-                    start_version: u64::from(start_version),
-                    start_point: DomainStartPoint::At {
-                        timestamp: Timestamp::from_unix_nanos(logical),
-                        time_rate: rate(0.5),
-                    },
-                    clock: Some(DomainClockState::new(
-                        Timestamp::from_unix_nanos(wall),
-                        Timestamp::from_unix_nanos(logical),
-                        rate(0.5),
-                    )),
-                    logical_frontier: Some(Timestamp::from_unix_nanos(wall)),
-                    ..paced_domain("prod")
-                };
-                let encoded = record.encode().assured("every valid record encodes");
-                assert_eq!(
-                    DomainRecord::decode("domain.rkyv", &encoded)
-                        .assured("its own encoding decodes"),
-                    record
-                );
-                let entry = SectionEntry {
-                    path: SectionPath::domain_record(&record.domain),
-                    content: SectionContent::Record(RecordKind::Domain),
-                    length: skew,
-                    digest: SectionDigester::digest_of(&wall.to_le_bytes()),
-                };
-                let manifest = BackupManifest {
-                    captured_at: Timestamp::from_unix_nanos(logical),
-                    ..manifest_of(ArchiveScope::Cluster, vec![entry])
-                };
-                let encoded = manifest.encode().assured("every valid manifest encodes");
-                assert_eq!(
-                    BackupManifest::decode("manifest.rkyv", &encoded)
-                        .assured("its own encoding decodes"),
-                    manifest
-                );
-            },
-        );
+        .with_iterations(256)
+        .with_max_len(4096)
+        .for_each(|bytes| {
+            let mut values = crate::archive_values::Values::new(bytes);
+            let domain = values.0.name();
+            crate::archive_properties::assert_record(&values.domain_record(domain));
+            for cut in 0..4 {
+                let cluster = values.0.entropy().flag();
+                let resources = values.0.entropy().flag();
+                values.case(cluster, resources, cut).assert_records();
+            }
+        });
 }

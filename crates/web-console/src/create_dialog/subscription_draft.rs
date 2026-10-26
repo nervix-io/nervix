@@ -5,17 +5,22 @@
 //! - **Owns.** Incomplete subscription editor state — its name, relay reference, filter, delivery,
 //!   and sampling — the typed field references it inserts into the filter, and its one-way
 //!   conversion into the current subscription Model.
-//! - **Depends on.** Vocabulary Models and names, the NSPL expression and sample-rate grammar, and
+//! - **Depends on.** Vocabulary Models and names, the Plexus expression and sample-rate grammar, and
 //!   the create dialog's selected references.
 //! - **Must not know.** Subscription tabs, session transport, or how references are looked up.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
 
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_models::{
     CreateSubscription, Expression, FieldName, FieldReference, FieldScope, ModelKind, NodeRef,
-    RelayName, SubscriptionDeliveryBehavior, SubscriptionName, expression_to_nspl,
+    RelayName, SubscriptionDeliveryBehavior, SubscriptionName, expression_to_plexus,
 };
-use nervix_nspl::{parse_expression, subscribe::parse_batch_sample_rate};
+use nervix_plexus::{parse_expression, subscribe::parse_batch_sample_rate};
 use thiserror::Error;
 
 use super::SelectedReference;
@@ -96,7 +101,7 @@ impl SubscriptionDraft {
     /// spells an `input` field.
     pub(super) fn insert_field_reference(&mut self, field: FieldName) {
         let reference = Expression::Field(FieldReference::scoped(FieldScope::Input, field));
-        let rendered = expression_to_nspl(&reference)
+        let rendered = expression_to_plexus(&reference)
             .assured("a field reference holds no float literal, the only expression that fails");
         if !self.filter.trim().is_empty() && !self.filter.ends_with(char::is_whitespace) {
             self.filter.push(' ');
@@ -113,7 +118,7 @@ impl SubscriptionDraft {
             Ok(expression) => expression,
             Err(error) => return FilterReading::Invalid(error.current_context().to_string()),
         };
-        match expression_to_nspl(&expression) {
+        match expression_to_plexus(&expression) {
             Ok(canonical) => FilterReading::Expression(canonical),
             Err(error) => FilterReading::Invalid(error.current_context().to_string()),
         }
@@ -174,13 +179,17 @@ pub(super) enum SubscriptionDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         FieldName, ModelKind, ModelName, NodeRef, RelayName, SubscriptionDeliveryBehavior,
         SubscriptionName,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
     use strum::IntoEnumIterator as _;
 
     use super::{FilterReading, SubscriptionDraft, SubscriptionDraftError};
@@ -213,7 +222,7 @@ mod tests {
         let statement =
             ClientStatement::CreateSubscription(draft.build().assured("the draft is complete"));
         let source = statement
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .assured("a subscription statement renders");
         assert_eq!(
             parse_client_statement(&source).assured("the canonical statement parses"),
@@ -262,7 +271,7 @@ mod tests {
         let typed = parse_client_statement(
             r#"CREATE SUBSCRIPTION acme TO notifications WHERE input.tenant = 'a\nb' OR input.tenant = "c\'d";"#,
         )
-        .assured("the typed statement is valid NSPL");
+        .assured("the typed statement is valid Plexus");
         assert_eq!(
             ClientStatement::CreateSubscription(draft.build().assured("the draft is complete")),
             typed

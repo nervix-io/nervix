@@ -1,11 +1,11 @@
 Feature: JAQ native codec
   Scenario: JAQ codecs reject a transformation without an explicit direction
     Given a 1 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail
+    When these Plexus commands fail
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -21,11 +21,11 @@ Feature: JAQ native codec
   Scenario Outline: HTTP endpoint ingestor decodes JAQ native payload formats
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -43,8 +43,8 @@ Feature: JAQ native codec
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -80,12 +80,12 @@ Feature: JAQ native codec
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -111,8 +111,8 @@ Feature: JAQ native codec
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_notification_codec
         TO notifications
         INHERIT ALL
@@ -121,13 +121,12 @@ Feature: JAQ native codec
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING xml_notification_codec
+        CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING xml_notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -159,11 +158,11 @@ Feature: JAQ native codec
   Scenario Outline: Ingestor rejects emitting-only JAQ native codec
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "codec 'xml_notification_codec' cannot be used for decoding because it does not declare an ON INGESTION transformation"
+    When these Plexus commands fail with "codec 'xml_notification_codec' cannot be used for decoding because it does not declare an ON INGESTION transformation"
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -185,8 +184,8 @@ Feature: JAQ native codec
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING xml_notification_codec
         TO notifications
         INHERIT ALL
@@ -205,11 +204,11 @@ Feature: JAQ native codec
     Given Kafka is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands fail with "codec 'json_notification_codec' cannot be used for encoding because it does not declare an ON EMITTING transformation"
+    When these Plexus commands fail with "codec 'json_notification_codec' cannot be used for encoding because it does not declare an ON EMITTING transformation"
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -223,14 +222,13 @@ Feature: JAQ native codec
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
 
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
 
-      CREATE EMITTER kafka_notifications FROM notifications TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING json_notification_codec
+      CREATE KAFKA TOPIC EMITTER kafka_notifications FROM notifications TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING json_notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -241,3 +239,72 @@ Feature: JAQ native codec
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: Kafka emitter and ingestor keep every digit of an F64 through a JAQ native <format> codec
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "readings_{{test_id}}" exists with 1 partitions
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA reading ( sensor I64, level F64, levels <levels_type> );
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( sensor integer, level number, levels array );
+      CREATE CODEC exact_reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE CODEC transforming_reading_codec FROM <format> TO SCHEMA reading
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING '.';
+      CREATE RELAY readings SCHEMA reading UNBRANCHED;
+      CREATE RELAY echoed_readings SCHEMA reading UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT readings_endpoint ON edge PATH '/readings' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR http_readings
+        FROM readings_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_reading_codec
+        TO readings
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE KAFKA CLIENT kafka_main CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC EMITTER emitted_readings FROM readings
+        TO kafka_main TOPIC 'readings_{{test_id}}'
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING transforming_reading_codec
+        INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE KAFKA TOPIC INGESTOR kafka_readings
+        FROM kafka_main TOPIC 'readings_{{test_id}}'
+        OFFSET BY CONSUMER GROUP 'nervix_cucumber_readings_{{test_id}}'
+        MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING transforming_reading_codec
+        TO echoed_readings
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION echoed_subscription TO echoed_readings;
+      START;
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/readings"
+      """
+      {"sensor":7,"level":1.4000000000000001,"levels":[0.9999999999999999,90.33333333333333]}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "sensor":7 | "level":1.4000000000000001 | "levels":[0.9999999999999999,90.33333333333333]
+      """
+
+    Examples:
+      | cluster_size | format | levels_type |
+      | 1            | JSON   | VEC<F64>    |
+      | 3            | JSON   | VEC<F64>    |
+      | 1            | CBOR   | VEC<F64>    |
+      | 3            | CBOR   | VEC<F64>    |

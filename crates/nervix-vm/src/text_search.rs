@@ -4,7 +4,15 @@
 //!
 //! - **Owns.** Building Arrow string and list outputs for text functions and bounding pattern sets.
 //! - **Depends on.** Arrow arrays, the linear-time Aho-Corasick matcher, and VM row errors.
-//! - **Must not know.** NSPL Models, graph ownership, branches, or external connectors.
+//! - **Must not know.** Plexus Models, graph ownership, branches, or external connectors.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
 
 use std::{
     hash::{Hash, Hasher},

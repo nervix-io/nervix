@@ -1,5 +1,7 @@
 # Resource Versions And Bindings
 
+*Plexus, the Nervix graph definition language.*
+
 A resource version is an immutable directory tree that the cluster verifies and installs on every
 live node before anything can use it. A binding is the part of a model that selects one of those
 versions: a TLS VHOST, a protobuf codec or signaling protocol, an inferencer, a WASM processor, a
@@ -12,7 +14,7 @@ completed version it binds, and its consumers load exactly that version. An uplo
 version to the catalog. A running consumer moves to another version only when a validated,
 classified, and atomic model mutation rebinds it.
 
-This chapter describes the architecture. [Resources](./resources.md) owns the NSPL statements, the
+This chapter describes the architecture. [Resources](./resources.md) owns the Plexus statements, the
 upload format, the per-version limits, and examples.
 
 ## Ownership By Layer
@@ -36,6 +38,12 @@ The resource store keeps each version under `<db-path>/resources`, in one direct
 resource, and version number. It installs bytes and reports what it holds. It does not know how a
 version was uploaded, which node sent it, or which models use it.
 
+Every resource keeps a directory of its own. A resource name may begin with a dot, as `.` and `..`
+do, and the store names its own staging directories with a leading dot, so such a name's directory
+writes that dot as `%2E`: the versions of a resource named `..` sit in `%2E.`. `%` is outside the
+name alphabet, so no other resource's directory has that name. A domain name holds no dot, and its
+directory is its name.
+
 Registry validation and the transaction planner decide from the catalog inputs captured with a plan:
 the declared resources of the domain and its completed versions. Before a plan commits, the leader
 also checks three kinds of content against its own copy of a version: a VHOST's TLS bundle must
@@ -55,7 +63,7 @@ runtime revision its node applied.
 
 Visual client-mount and VHOST-TLS forms select a resource and one of its completed versions through
 typed session choices. Their drafts may submit `LATEST`; neither form resolves it locally or
-creates resource content. The server applies the same version validation and pinning as the NSPL
+creates resource content. The server applies the same version validation and pinning as the Plexus
 command path, so the rendered stored Model and every listener use a concrete version.
 
 ## Version Lifecycle
@@ -66,6 +74,10 @@ command path, so the rendered stored Model and every listener use a concrete ver
 Uploads are leader operations. A client-protocol upload declares the exact size of the archive it
 streams, and a follower redirects it to the leader. A web-console upload streams the selected files
 to the leader, which builds the archive itself; a follower refuses it.
+
+The native client's directory archive is completed and flushed locally before its upload call
+opens. A failed or cancelled construction discards its partial temporary archive and assigns no
+version. Once built, that exact archive is retained for every retry within the upload call.
 
 A number is assigned when the leader admits an upload. Once the complete body has arrived, the
 leader holds the archive's digest and records the upload under its identity in one consensus
@@ -250,6 +262,13 @@ clause. Omitting the clause is a parse error.
 | `HASH MAP` | The file it names, decoded line by line through its codec into an in-memory index | When a node builds the domain's execution: on every live node, whatever the schedule assigns, for running and stopped domains |
 | `CLIENT ... MOUNT` | The version's content directory, linked into a temporary mount root; the connector reads the files it names from there | Whenever the client is instantiated, such as by an ingestor or emitter when it starts, or once per node for a pooled client; each client instance keeps its mount root for its lifetime |
 
+Client CONFIG preflight renders mount templates against the candidate's pinned completed version
+before a standalone mutation or transaction commits, including a resource rebinding that changes a
+client. It checks the rendered schema and readability of Nervix-owned file keys without selecting
+a newer version or contacting the connector's service. Client initialization retains its material
+and network checks at the load boundary above. The [Connector Contract](connector-contract.md)
+defines the shared key schema and offline driver checks.
+
 Registry planning derives typed lookup and WASM resource inputs from each committed schedule. The
 lookup input carries the exact resource identity, version, file path, codec, and key field. The
 leader rejects a missing file during candidate binding validation. Running and stopped domain
@@ -270,6 +289,15 @@ through the existing client's pinned mount before the replacement opens the newl
 client. Changing that client's definition or rebinding its mounted resource takes the ordinary
 configuration-entity domain pause. If the drain cannot complete, the candidate definition and
 its resource binding are not installed.
+
+MQTT input retirement resolves the preceding and replacement clients through their own pinned
+mounts and keeps both mount leases until network cleanup and replacement preparation finish.
+It can resolve the preceding client from a stopped domain's typed plan. A missing preceding
+mount is a reported best-effort cleanup failure; preparing the explicitly selected replacement
+still requires that replacement's complete binding. Retirement never changes a binding or
+selects a newer resource version. Pulsar input retirement resolves the dropped input's client the
+same way, from a stopped domain's typed plan too, and keeps its mount lease until the
+subscription's removal finishes; a missing mount is likewise a reported best-effort failure.
 
 ### The Pinning Invariant
 
@@ -322,7 +350,7 @@ before retrying against that identity. A conflict found after admission ends the
 transaction instead of replanning it.
 
 Either way, a plan never commits a `LATEST` it resolved against an older catalog.
-[Control Plane](./control-plane.md#replicated-nspl-transactions) defines preview identity,
+[Control Plane](./control-plane.md#replicated-plexus-transactions) defines preview identity,
 admission, and the frozen plan.
 
 ## Rebinding
@@ -603,7 +631,7 @@ each kind of ending.
 | Command results | `uploaded resource version <n>`, every `resolved VERSION LATEST ...` line, and the rebinding summary with one `from`/`to` line per selected usage. |
 | Web console | The highest completed version of each resource in the sidebar and, in the resource dialog, every version's entries and the models bound to it, read from the typed resource description. See [Web Console](./client-tools-web-console.md#uploading-resources). |
 | Server log | `rebound resource usages` at `info` once the leader has applied a rebinding's step, before the step's outcome is recorded, with the domain, resource, target version, and the counts of selected and changed usages; `installed HTTPS listener TLS configuration` at `info` whenever a node's listener starts presenting a changed set of certificates. |
-| Interconnect metrics | Archive fetches in flight and fetches refused for lack of capacity appear in `nervix_interconnect_pending_operations` and `nervix_interconnect_quota_failures_total` with `operation="resource"`. Their bytes count toward `nervix_interconnect_bulk_bytes_total{class="bulk"}`, which snapshots share. See [Metrics And Observability](./metrics-and-observability.md#interconnection-metrics). |
+| Interconnect metrics | Archive fetches in flight and fetches refused for lack of capacity appear in `nervix_interconnect_pending_operations` and `nervix_interconnect_quota_failures_total` with `operation="resource"`. Their bytes count toward `nervix_interconnect_bulk_bytes_total{class="bulk"}`. Consensus snapshot transfers share the Bulk pool but move as requests, which `nervix_interconnect_requests_total{operation="snapshot"}` counts instead. See [Metrics And Observability](./metrics-and-observability.md#interconnection-metrics). |
 
 A version's upload outcome is not a line of its own. `latest:` names the highest completed version,
 and the per-node lines show which incarnations installed a version and why one failed; replica

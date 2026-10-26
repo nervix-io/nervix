@@ -131,10 +131,11 @@ impl ScheduledNodeTask {
 
     pub(super) async fn checkpoint_via(
         commands: &mpsc::Sender<ProcessorNodeCommand>,
+        purpose: ProcessorCheckpointPurpose,
     ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
         let (response, receiver) = oneshot::channel();
         commands
-            .send(ProcessorNodeCommand::Checkpoint { response })
+            .send(ProcessorNodeCommand::Checkpoint { purpose, response })
             .await
             .map_err(|_| {
                 OwnershipHandoffError::checkpoint(
@@ -194,11 +195,15 @@ impl ScheduledNodeTask {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{
-        ConsumerGroupName, CreateClientKafka, CreateIngestor, FlushPolicy, GeneralErrorPolicy,
-        IngestQuiesceMode, IngestSource, KafkaIngestMode, KafkaOffsetMode, Model, OutputBranch,
-        ParseAsType, ProcessorOutputs,
+        CreateClientKafka, CreateIngestor, FlushPolicy, GeneralErrorPolicy, IngestQuiesceMode,
+        IngestorEntity, KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
+        KafkaTopicIngestor, Model, OutputBranch, ParseAsType, ProcessorOutputs,
     };
     use nonzero_ext::nonzero;
 
@@ -211,14 +216,14 @@ mod tests {
                 .with_flush_policy(FlushPolicy::Immediate)
                 .with_branch(OutputBranch::Unbranched),
             input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-                source: IngestSource::Kafka {
+                source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                     client: named("kafka"),
                     topic: named("events"),
                     offset_mode,
                     instances: nonzero!(1u64),
-                    mode: KafkaIngestMode::NoAckParallel,
+                    mode: KafkaIngestMode::NoAck,
                     quiesce: IngestQuiesceMode::Suspend,
-                },
+                })),
                 codec: named("payload_codec"),
             }),
             timestamp_source: None,
@@ -249,7 +254,7 @@ mod tests {
                 kafka_ingestor("domain_offsets", KafkaOffsetMode::Domain),
                 kafka_ingestor(
                     "group_offsets",
-                    KafkaOffsetMode::ConsumerGroup(named::<ConsumerGroupName>("group")),
+                    KafkaOffsetMode::ConsumerGroup(named::<KafkaConsumerGroupName>("group")),
                 ),
             ],
         );

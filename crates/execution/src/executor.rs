@@ -31,10 +31,15 @@ struct ExecutorInner {
     bulk_cpu: WorkerPool,
     consensus_storage: WorkerPool,
     filesystem_storage: WorkerPool,
+    connector_storage: WorkerPool,
     management_memory: MemoryBudget,
     commands_memory: MemoryBudget,
     relay_memory: MemoryBudget,
+    state_read_memory: MemoryBudget,
+    state_read_cache_memory: MemoryBudget,
     bulk_memory: MemoryBudget,
+    bulk_window_memory: MemoryBudget,
+    restore_metadata_memory: MemoryBudget,
     credentials_memory: MemoryBudget,
 }
 
@@ -49,10 +54,15 @@ pub struct ExecutorSnapshot {
     pub bulk_cpu: WorkerClassSnapshot,
     pub consensus_storage: WorkerClassSnapshot,
     pub filesystem_storage: WorkerClassSnapshot,
+    pub connector_storage: WorkerClassSnapshot,
     pub management_memory: MemoryBudgetSnapshot,
     pub commands_memory: MemoryBudgetSnapshot,
     pub relay_memory: MemoryBudgetSnapshot,
+    pub state_read_memory: MemoryBudgetSnapshot,
+    pub state_read_cache_memory: MemoryBudgetSnapshot,
     pub bulk_memory: MemoryBudgetSnapshot,
+    pub bulk_window_memory: MemoryBudgetSnapshot,
+    pub restore_metadata_memory: MemoryBudgetSnapshot,
     pub credentials_memory: MemoryBudgetSnapshot,
 }
 
@@ -121,6 +131,11 @@ impl Executor {
                     validated.workers.filesystem_storage,
                     validated.workers.pending_jobs,
                 ),
+                connector_storage: WorkerPool::new(
+                    StorageClass::Connector.into(),
+                    *validated.workers.connector_storage.value(),
+                    validated.workers.pending_jobs,
+                ),
                 management_memory: MemoryBudget::new(
                     MemoryClass::Management,
                     validated.budgets.management,
@@ -130,7 +145,23 @@ impl Executor {
                     validated.budgets.commands,
                 ),
                 relay_memory: MemoryBudget::new(MemoryClass::Relay, validated.budgets.relay),
+                state_read_memory: MemoryBudget::new(
+                    MemoryClass::StateRead,
+                    validated.budgets.relay,
+                ),
+                state_read_cache_memory: MemoryBudget::new(
+                    MemoryClass::StateReadCache,
+                    validated.budgets.relay,
+                ),
                 bulk_memory: MemoryBudget::new(MemoryClass::Bulk, validated.budgets.bulk),
+                bulk_window_memory: MemoryBudget::new(
+                    MemoryClass::BulkWindow,
+                    validated.budgets.bulk_window,
+                ),
+                restore_metadata_memory: MemoryBudget::new(
+                    MemoryClass::RestoreMetadata,
+                    validated.budgets.restore_metadata,
+                ),
                 credentials_memory: MemoryBudget::new(
                     MemoryClass::Credentials,
                     validated.budgets.credentials,
@@ -226,6 +257,9 @@ impl Executor {
 
     /// Run one storage job on `class`'s workers. The consensus class has a single worker, so its
     /// jobs execute in the order they were admitted.
+    ///
+    /// A class whose wait queue is full refuses the job, which is what work answering a request
+    /// needs; [`Self::run_storage_with`] states another [`QueueAdmission`].
     pub async fn run_storage<T>(
         &self,
         class: StorageClass,
@@ -235,8 +269,24 @@ impl Executor {
     where
         T: Send + 'static,
     {
+        self.run_storage_with(class, QueueAdmission::RefuseWhenFull, reservation, job)
+            .await
+    }
+
+    /// Run one storage job like [`Self::run_storage`], with `admission` saying what a full wait
+    /// queue does with it.
+    pub async fn run_storage_with<T>(
+        &self,
+        class: StorageClass,
+        admission: QueueAdmission,
+        reservation: Reservation,
+        job: impl FnOnce(Reservation, &Cancellation) -> T + Send + 'static,
+    ) -> Result<T, Report<ExecutionError>>
+    where
+        T: Send + 'static,
+    {
         self.storage_pool(class)
-            .run(QueueAdmission::RefuseWhenFull, reservation, job)
+            .run(admission, reservation, job)
             .await
     }
 
@@ -262,12 +312,28 @@ impl Executor {
             bulk_cpu: self.inner.bulk_cpu.snapshot(),
             consensus_storage: self.inner.consensus_storage.snapshot(),
             filesystem_storage: self.inner.filesystem_storage.snapshot(),
+            connector_storage: self.inner.connector_storage.snapshot(),
             management_memory: self.inner.management_memory.snapshot(),
             commands_memory: self.inner.commands_memory.snapshot(),
             relay_memory: self.inner.relay_memory.snapshot(),
+            state_read_memory: self.inner.state_read_memory.snapshot(),
+            state_read_cache_memory: self.inner.state_read_cache_memory.snapshot(),
             bulk_memory: self.inner.bulk_memory.snapshot(),
+            bulk_window_memory: self.inner.bulk_window_memory.snapshot(),
+            restore_metadata_memory: self.inner.restore_metadata_memory.snapshot(),
             credentials_memory: self.inner.credentials_memory.snapshot(),
         }
+    }
+
+    /// What one memory class holds now.
+    ///
+    /// An owner that must not take a place in the class's queue reads this to tell whether its
+    /// charge fits before it asks for one. A place in the queue takes every byte the class releases
+    /// until that place is satisfied, so an owner whose room is released by other work of the same
+    /// class would hold that work up behind itself. While another charge waits in the queue, the
+    /// class reports no room, so reading it never overtakes that charge.
+    pub fn memory(&self, class: MemoryClass) -> MemoryBudgetSnapshot {
+        self.budget(class).snapshot()
     }
 
     fn budget(&self, class: MemoryClass) -> &MemoryBudget {
@@ -275,7 +341,11 @@ impl Executor {
             MemoryClass::Management => &self.inner.management_memory,
             MemoryClass::Commands => &self.inner.commands_memory,
             MemoryClass::Relay => &self.inner.relay_memory,
+            MemoryClass::StateRead => &self.inner.state_read_memory,
+            MemoryClass::StateReadCache => &self.inner.state_read_cache_memory,
             MemoryClass::Bulk => &self.inner.bulk_memory,
+            MemoryClass::BulkWindow => &self.inner.bulk_window_memory,
+            MemoryClass::RestoreMetadata => &self.inner.restore_metadata_memory,
             MemoryClass::Credentials => &self.inner.credentials_memory,
         }
     }
@@ -294,6 +364,7 @@ impl Executor {
         match class {
             StorageClass::Consensus => &self.inner.consensus_storage,
             StorageClass::Filesystem => &self.inner.filesystem_storage,
+            StorageClass::Connector => &self.inner.connector_storage,
         }
     }
 }

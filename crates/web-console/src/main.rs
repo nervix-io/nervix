@@ -1,3 +1,13 @@
+//! Browser application edge.
+//! Layer: edges.
+//! - **Owns.** Navigation, session orchestration, forms and rendered client results.
+//! - **Depends on.** The client protocol, vocabulary and language for client-side parsing.
+//! - **Must not know.** Server runtime ownership, placement or consensus implementation.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "public client language adapter")
+)]
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
@@ -29,7 +39,7 @@ use nervix_client_wire::{
     SubscriptionRows, SubscriptionType, SuggestRequest, Suggestion as WireSuggestion,
     SuggestionKind, SuggestionStatus, TextEdit, TransferAssembly, TransferPart,
     UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
-    websocket::{ClientWebSocketCodec, WebSocketData},
+    websocket::{CONSOLE_SESSION_PATH, ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdgeKind, DataflowGraph, DataflowInputSide, DataflowNodeKind,
@@ -40,9 +50,9 @@ use nervix_models::{
     CommandExecutionReference, CreateSubscription, DomainName, DomainPace, DomainStatus, ModelKind,
     RelayName, ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
     ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName, Timestamp,
-    TransactionLifecycle, TransactionStatus, expression_to_nspl,
+    TransactionLifecycle, TransactionStatus, expression_to_plexus,
 };
-use nervix_nspl::client_statement::{
+use nervix_plexus::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
 use nervix_primitives::unmodeled::futures::{AbortHandle, Abortable};
@@ -57,11 +67,16 @@ use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+mod backup_dialog;
 mod clock_display;
 mod create_dialog;
 mod request_handoff;
 mod transaction_inspector;
 
+use backup_dialog::{
+    BackupCommand, BackupDialog, BackupMenuButton, BackupSignals, ConsoleHandles,
+    boxed_session_storage,
+};
 use clock_display::{ClockDisplay, ClockPanel, ClockSelection, ClockSelectionChange, ClockStatus};
 use create_dialog::{
     ChoiceControl, ChoiceRequestContext, CommandDispatch, CreateCommandContext, CreateDialog,
@@ -166,6 +181,10 @@ struct WebConsoleSignals {
     cluster_counters: RwSignal<ClusterCounters>,
     active_domain: RwSignal<Option<DomainName>>,
     clock_display: RwSignal<ClockDisplay>,
+    /// The clock attachment each connection asked for. The session loop records the one a
+    /// connection opens with and forgets it when the connection ends; the clock effect follows
+    /// selection changes on the confirmed connection.
+    clock_selection: RwSignal<ClockSelection>,
     transaction_status: RwSignal<Option<TransactionStatus>>,
     inspector: InspectorSignals,
     domains: RwSignal<Vec<DomainView>>,
@@ -179,6 +198,10 @@ struct WebConsoleSignals {
     create: CreateSignals,
     selected_resource: RwSignal<Option<String>>,
     upload_status: RwSignal<String>,
+    backups: BackupSignals,
+    /// The console the session talks to: the page's own, or the leader's once the session
+    /// followed a redirect. Uploads, downloads and restores go there.
+    upload_base_url: RwSignal<Option<String>>,
 }
 
 impl WebConsoleSignals {
@@ -233,6 +256,40 @@ impl WebConsoleSignals {
         }
     }
 
+    /// The requests a new connection sends before any ordered request it holds: the active domain's
+    /// selection, the selected domain's clock, the restorations of the interrupted subscription
+    /// tabs, and the session's transaction. The clock and the tabs go out before the transaction,
+    /// because a session that holds a transaction refuses clock attachments and subscriptions.
+    fn connection_opening(self, connection_generation: u64) -> Vec<ConsoleRequest> {
+        let mut opening = Vec::new();
+        let active_domain = self.active_domain.get_untracked();
+        if let Some(domain) = active_domain.clone() {
+            opening.push(ConsoleRequest::SelectDomain(SelectDomainRequest { domain }));
+        }
+        let mut selection = self.clock_selection.get_untracked();
+        let clock = selection.open(connection_generation, active_domain);
+        self.clock_selection.set(selection);
+        if let Some(domain) = clock {
+            self.clock_display
+                .set(ClockDisplay::selected(Some(domain.clone()), true));
+            opening.push(ConsoleRequest::DomainClockAttach {
+                request: AttachDomainClockRequest { domain },
+                connection_generation,
+                origin: ClockRequestOrigin::Automatic,
+            });
+        }
+        opening.extend(self.begin_restorations());
+        let transaction_id = self
+            .transaction_status
+            .with_untracked(|status| transaction_to_attach(status.as_ref()));
+        if let Some(transaction_id) = transaction_id {
+            opening.push(ConsoleRequest::AttachTransaction(
+                AttachTransactionRequest { transaction_id },
+            ));
+        }
+        opening
+    }
+
     /// A replacement credential starts a separate view of the cluster. No tab, suggestion, or
     /// observed graph from the previous identity may remain visible to the new session.
     fn clear_authenticated_view(self) {
@@ -255,6 +312,7 @@ impl WebConsoleSignals {
         self.create.connection_lost();
         self.selected_resource.set(None);
         self.upload_status.set(String::new());
+        self.backups.clear();
     }
 
     fn apply_clock_attach_outcome(
@@ -456,7 +514,7 @@ struct SuggestionQuery {
 /// A request the console sends over its session, together with what its reply is for.
 #[derive(Clone)]
 enum ConsoleRequest {
-    /// Executes NSPL statements.
+    /// Executes Plexus statements.
     Command {
         request: CommandRequest,
         purpose: CommandPurpose,
@@ -531,6 +589,8 @@ enum CommandPurpose {
     /// The resource dialog reads the versions of `resource` from its typed `DESCRIBE RESOURCE`
     /// description.
     ResourceDescription { resource: String },
+    /// The REPL prints a `BACKUP`'s outcome, and the backup dialog downloads its archive.
+    Backup(BackupCommand),
 }
 
 impl ConsoleRequest {
@@ -1235,6 +1295,7 @@ fn initialize_test_executor() {
 fn App() -> impl IntoView {
     let active_domain = RwSignal::new(None::<DomainName>);
     let clock_display = RwSignal::new(ClockDisplay::NoDomain);
+    let clock_selection = RwSignal::new(ClockSelection::default());
     let clock_now = RwSignal::new(clock_display::browser_utc_now());
     let clock_interval = set_interval_with_handle(
         move || clock_now.set(clock_display::browser_utc_now()),
@@ -1269,6 +1330,16 @@ fn App() -> impl IntoView {
     let create = CreateSignals::new();
     let selected_resource = RwSignal::new(None::<String>);
     let upload_status = RwSignal::new(String::new());
+    let upload_base_url = RwSignal::new(web_console_http_base_url());
+    let backups = BackupSignals::new(
+        ConsoleHandles {
+            base_url: upload_base_url,
+            auth_token,
+            terminal_lines,
+            transaction_status,
+        },
+        boxed_session_storage(),
+    );
     let signals = WebConsoleSignals {
         terminal_lines,
         suggestions,
@@ -1279,6 +1350,7 @@ fn App() -> impl IntoView {
         cluster_counters,
         active_domain,
         clock_display,
+        clock_selection,
         transaction_status,
         inspector,
         domains,
@@ -1292,8 +1364,21 @@ fn App() -> impl IntoView {
         create,
         selected_resource,
         upload_status,
+        backups,
+        upload_base_url,
     };
     let web_console_session = use_websocket_session(signals);
+    // A backup a previous page of this tab sent and did not download goes out again under its
+    // reference as soon as the session can serve it.
+    backups.resume_pending(web_console_session.request_tx);
+    let domain_names = Signal::derive(move || {
+        domains.with(|listed| {
+            listed
+                .iter()
+                .map(|domain| domain.domain.clone())
+                .collect::<Vec<_>>()
+        })
+    });
 
     let active_domain_name = move || match active_domain.get() {
         Some(domain) => domain.to_string(),
@@ -1338,7 +1423,6 @@ fn App() -> impl IntoView {
         }
     });
     let clock_session = web_console_session;
-    let clock_selection = RwSignal::new(ClockSelection::default());
     Effect::new(move |_| {
         let domain = active_domain.get();
         let connected = clock_session.state.get() == ConsoleConnectionState::Connected;
@@ -1606,15 +1690,34 @@ fn App() -> impl IntoView {
                         .update(|lines| lines.push(TermLine::error("no active domain selected")));
                 }
             }
-        } else if let Ok(
-            ClientStatement::DescribeBackup(_)
-            | ClientStatement::Server(Statement::Backup(_) | Statement::Restore(_)),
-        ) = parse_client_statement(&command)
+        } else if let Ok(ClientStatement::Server(Statement::Backup(backup))) =
+            parse_client_statement(&command)
         {
+            // The backup dialog sends it on this session and downloads its archive.
+            backups.start_backup(
+                web_console_session.request_tx,
+                command.clone(),
+                active_domain.get_untracked(),
+                &backup,
+            );
+        } else if let Ok(ClientStatement::Server(Statement::Restore(restore))) =
+            parse_client_statement(&command)
+        {
+            // The browser cannot read the path the statement names: the restore form takes its
+            // options and asks for the archive.
+            backups.open_restore(&restore);
+        } else if let Ok(ClientStatement::DescribeBackup(_)) = parse_client_statement(&command) {
             terminal_lines.update(|lines| {
                 lines.push(TermLine::error(
-                    "BACKUP, RESTORE and DESCRIBE BACKUP write and read archive files on the \
-                     client's machine; run them with nervix-cli",
+                    "DESCRIBE BACKUP reads an archive file on the client's machine and is served \
+                     by nervix-cli; a restore's dry run in the Backups dialog reports an \
+                     archive's summary",
+                ));
+            });
+        } else if archive_statements_in_batch(&command) {
+            terminal_lines.update(|lines| {
+                lines.push(TermLine::error(
+                    "BACKUP, RESTORE and DESCRIBE BACKUP must be executed on their own",
                 ));
             });
         } else if let Ok(ClientStatement::DeleteSubscription(delete)) =
@@ -1748,6 +1851,7 @@ fn App() -> impl IntoView {
                     transaction_status=transaction_status
                     inspector=inspector
                     create=create
+                    backups=backups
                 />
                 <div class="console-body">
                     <Sidebar active_domain=active_domain clock_display=clock_display clock_now=clock_now domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details selected_resource=selected_resource upload_status=upload_status create=create web_console_session=web_console_session run_command=run_command />
@@ -1791,6 +1895,11 @@ fn App() -> impl IntoView {
                     session_generation=session_generation
                     request_tx=web_console_session.request_tx
                     submit=submit_create
+                />
+                <BackupDialog
+                    backups=backups
+                    request_tx=web_console_session.request_tx
+                    domain_names=domain_names
                 />
             </main>
         </Show>
@@ -1979,7 +2088,7 @@ fn AuthPanel(
 
 fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
     let state = RwSignal::new(ConsoleConnectionState::Connecting);
-    let upload_base_url = RwSignal::new(web_console_http_base_url());
+    let upload_base_url = signals.upload_base_url;
     let (sender, receiver) = request_handoff();
     let request_tx = RwSignal::new(Some(sender));
     let (abort, registration) = AbortHandle::new_pair();
@@ -2032,6 +2141,7 @@ async fn run_websocket_session(
                 queued.discard_waiting();
                 upload_base_url.set(web_console_http_base_url());
                 signals.clear_authenticated_view();
+                signals.backups.forget_recorded_backup();
             }
         }
         let Some(current_auth_token) = auth_token.get_untracked() else {
@@ -2070,17 +2180,18 @@ async fn run_websocket_session(
                             .checked_add(1)
                             .assured("a console cannot open 2^64 websocket connections");
                     });
-                    Some(
-                        serve_connection(
-                            signals,
-                            state,
-                            socket,
-                            &mut requests,
-                            &mut queued,
-                            &current_auth_token,
-                        )
-                        .await,
+                    let ended = serve_connection(
+                        signals,
+                        state,
+                        socket,
+                        &mut requests,
+                        &mut queued,
+                        &current_auth_token,
                     )
+                    .await;
+                    // The connection's clock attachment ended with its session.
+                    signals.clock_selection.update(ClockSelection::close);
+                    Some(ended)
                 } else {
                     // A server that ends the session at once, such as a follower redirecting to the
                     // leader, can close the connection before this loop sees it open. Its frames
@@ -2113,8 +2224,11 @@ async fn run_websocket_session(
                         ConnectionEnd::Dropped => {}
                         ConnectionEnd::Redirected(leader) => {
                             upload_base_url.set(Some(leader.to_string()));
-                            redirected_url =
-                                web_console_websocket_url_from_base(&leader, &current_auth_token);
+                            redirected_url = web_console_websocket_url_from_base(
+                                &leader,
+                                CONSOLE_SESSION_PATH,
+                                &current_auth_token,
+                            );
                         }
                         ConnectionEnd::ConsoleClosed => {
                             state.set(ConsoleConnectionState::Waiting);
@@ -2208,10 +2322,10 @@ async fn drain_closed_connection(
 /// Serves one connection until it ends.
 ///
 /// The connection first selects the active domain again, so the domain's observations resume,
-/// restores the interrupted subscription tabs, and attaches the session's transaction again. The
-/// tabs come before the transaction, because a session that holds a transaction refuses
-/// subscriptions. Ordered requests wait until the server confirms that the serving node leads and
-/// the transaction is attached, and then go out in the order the console issued them.
+/// attaches the selected domain's clock, restores the interrupted subscription tabs, and attaches
+/// the session's transaction again; see [`WebConsoleSignals::connection_opening`]. Ordered requests
+/// wait until the server confirms that the serving node leads and the transaction is attached, and
+/// then go out in the order the console issued them.
 async fn serve_connection(
     signals: WebConsoleSignals,
     state: RwSignal<ConsoleConnectionState>,
@@ -2221,19 +2335,7 @@ async fn serve_connection(
     current_auth_token: &str,
 ) -> ConnectionEnd {
     let codec = ClientWebSocketCodec::new(SESSION_LIMITS);
-    let mut opening = Vec::new();
-    if let Some(domain) = signals.active_domain.get_untracked() {
-        opening.push(ConsoleRequest::SelectDomain(SelectDomainRequest { domain }));
-    }
-    opening.extend(signals.begin_restorations());
-    let transaction_id = signals
-        .transaction_status
-        .with_untracked(|status| transaction_to_attach(status.as_ref()));
-    if let Some(transaction_id) = transaction_id {
-        opening.push(ConsoleRequest::AttachTransaction(
-            AttachTransactionRequest { transaction_id },
-        ));
-    }
+    let opening = signals.connection_opening(signals.session_generation.get_untracked());
     for request in opening {
         if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
             return ConnectionEnd::Dropped;
@@ -2525,7 +2627,7 @@ fn web_console_websocket_url(auth_token: &str) -> Option<String> {
     };
     let host = location.host().ok()?;
     Some(format!(
-        "{protocol}//{host}/console/ws?auth={}",
+        "{protocol}//{host}{CONSOLE_SESSION_PATH}?auth={}",
         encode_query_component(auth_token)
     ))
 }
@@ -2539,11 +2641,16 @@ fn web_console_http_base_url() -> Option<String> {
     Some(format!("{protocol}//{host}"))
 }
 
-/// The session websocket address of the web console at `base_url`.
+/// The address of the console WebSocket at `path` of the web console at `base_url`: the session,
+/// a backup download or a restore stream.
 ///
-/// `None` says the base URL is not one a session can be opened on: its scheme has no websocket
+/// `None` says the base URL is not one a WebSocket can be opened on: its scheme has no websocket
 /// counterpart. The caller falls back to the page's own location.
-fn web_console_websocket_url_from_base(base_url: &Url, auth_token: &str) -> Option<String> {
+fn web_console_websocket_url_from_base(
+    base_url: &Url,
+    path: &str,
+    auth_token: &str,
+) -> Option<String> {
     let mut url = base_url.clone();
     let websocket_scheme = match url.scheme() {
         "https" | "wss" => "wss",
@@ -2551,11 +2658,11 @@ fn web_console_websocket_url_from_base(base_url: &Url, auth_token: &str) -> Opti
         _ => return None,
     };
     url.set_scheme(websocket_scheme).ok()?;
-    url.set_path("/console/ws");
-    url.set_query(Some(&format!(
-        "auth={}",
-        encode_query_component(auth_token)
-    )));
+    url.set_path(path);
+    // The node reads the query as form data, so the token is written as form data too.
+    url.query_pairs_mut()
+        .clear()
+        .append_pair("auth", auth_token);
     url.set_fragment(None);
     Some(url.to_string())
 }
@@ -2955,6 +3062,10 @@ fn apply_command_outcome(
                 details.insert(resource, detail);
             });
         }
+        CommandPurpose::Backup(command) => {
+            signals.backups.backup_outcome(&command, &outcome);
+            show_command_outcome(signals, order, &request.query, outcome);
+        }
     }
     SessionStep::Continue
 }
@@ -3298,6 +3409,15 @@ fn fail_request(signals: WebConsoleSignals, request: ConsoleRequest, reason: Str
             signals.resource_details.update(|details| {
                 details.insert(resource, detail);
             });
+        }
+        ConsoleRequest::Command {
+            purpose: CommandPurpose::Backup(command),
+            ..
+        } => {
+            signals
+                .terminal_lines
+                .update(|lines| lines.push(TermLine::error(reason.clone())));
+            signals.backups.backup_refused(&command, reason);
         }
         ConsoleRequest::SubscriptionStart { tab_id, origin, .. } => {
             fail_subscription_start(signals, tab_id, vec![TermLine::error(reason.clone())]);
@@ -3682,8 +3802,8 @@ fn subscription_tab_title(subscription: &CreateSubscription) -> String {
     let Some(filter) = &subscription.where_clause else {
         return relay;
     };
-    let filter = expression_to_nspl(filter)
-        .assured("an expression the NSPL parser produced renders back to NSPL");
+    let filter = expression_to_plexus(filter)
+        .assured("an expression the Plexus parser produced renders back to Plexus");
     format!("{relay} {filter}")
 }
 
@@ -3856,6 +3976,7 @@ fn Header(
     transaction_status: RwSignal<Option<TransactionStatus>>,
     inspector: InspectorSignals,
     create: CreateSignals,
+    backups: BackupSignals,
 ) -> impl IntoView {
     let theme_open = RwSignal::new(false);
     let selected_domain = move || {
@@ -3877,6 +3998,7 @@ fn Header(
             <span class="crumb">"console"</span>
             <div class="topbar-status">
                 <CreateMenu signals=create active_domain=active_domain />
+                <BackupMenuButton backups=backups active_domain=active_domain />
                 <Show when=move || transaction_status.get().is_some_and(|status| status.lifecycle().is_active()) fallback=|| ()>
                     <button class="transaction-indicator" type="button" on:click=move |_| inspector.open_attached()>
                         "Transaction · Inspect"
@@ -4364,6 +4486,21 @@ fn request_resource_describe(
     resource_details.update(|details| {
         details.insert(resource, detail);
     });
+}
+
+/// Whether `command` holds several statements, one of them a `BACKUP`, `RESTORE` or `DESCRIBE
+/// BACKUP`, which a console runs only on its own.
+fn archive_statements_in_batch(command: &str) -> bool {
+    let Ok(statements) = parse_client_statements(command) else {
+        return false;
+    };
+    if statements.len() < 2 {
+        return false;
+    }
+    // Bounded by the statements the operator typed into one command.
+    statements
+        .iter()
+        .any(ClientStatement::handles_backup_archive)
 }
 
 /// Durable command admission reads the creation time embedded in a UUIDv7 retry identity, so a
@@ -5851,7 +5988,7 @@ fn ReplPanel(
                     }
                 >
                     <SidebarIcon kind="terminal" />
-                    <span>"NSPL REPL"</span>
+                    <span>"Plexus REPL"</span>
                 </button>
                 <For
                     each=move || subscription_tabs.get()
@@ -6750,10 +6887,10 @@ impl GraphViewNode {
     /// stands on the group's border rather than within it, which is the same rule the layout
     /// applies when it decides which items a group's bands contain.
     fn group_branch(&self) -> Option<&str> {
-        self.branch
-            .as_ref()
-            .filter(|_| !self.role.constructs_branches() && !self.role.collapses_branches())
-            .map(|branch| branch.name.as_str())
+        if self.role.constructs_branches() || self.role.collapses_branches() {
+            return None;
+        }
+        self.branch.as_ref().map(|branch| branch.name.as_str())
     }
 
     fn command_kind(&self) -> &'static str {
@@ -7727,6 +7864,10 @@ impl TermLineKind {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use leptos::prelude::Owner;
     use nervix_client_wire::{
@@ -7747,6 +7888,23 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn only_a_batch_holding_an_archive_statement_is_refused() {
+        assert!(archive_statements_in_batch(
+            "LIST DOMAINS; BACKUP CLUSTER TO 'cluster.nvxb';"
+        ));
+        assert!(archive_statements_in_batch(
+            "DESCRIBE BACKUP 'cluster.nvxb'; LIST DOMAINS;"
+        ));
+        assert!(!archive_statements_in_batch(
+            "BACKUP CLUSTER TO 'cluster.nvxb';"
+        ));
+        assert!(!archive_statements_in_batch(
+            "LIST DOMAINS; SHOW TRANSACTIONS;"
+        ));
+        assert!(!archive_statements_in_batch("BACKUP CLUSTER TO"));
+    }
 
     #[test]
     fn completion_edits_preserve_unicode_suffixes_and_ignore_invalid_byte_ranges() {
@@ -7911,8 +8069,21 @@ mod tests {
     fn subscription_signals(state: SubscriptionTabState) -> WebConsoleSignals {
         let name = SubscriptionName::parse("live").assured("the test subscription name is valid");
         let domain = DomainName::parse("tenant").assured("the test domain name is valid");
+        let terminal_lines = RwSignal::new(TermLineHistory::default());
+        let transaction_status = RwSignal::new(None);
+        let auth_token = RwSignal::new(None);
+        let upload_base_url = RwSignal::new(None);
+        let backups = BackupSignals::new(
+            ConsoleHandles {
+                base_url: upload_base_url,
+                auth_token,
+                terminal_lines,
+                transaction_status,
+            },
+            None,
+        );
         WebConsoleSignals {
-            terminal_lines: RwSignal::new(TermLineHistory::default()),
+            terminal_lines,
             suggestions: RwSignal::new(Vec::new()),
             suggestion_status: RwSignal::new(None),
             suggestion_query: RwSignal::new(None),
@@ -7921,7 +8092,8 @@ mod tests {
             cluster_counters: RwSignal::new(ClusterCounters::default()),
             active_domain: RwSignal::new(Some(domain.clone())),
             clock_display: RwSignal::new(ClockDisplay::selected(Some(domain.clone()), true)),
-            transaction_status: RwSignal::new(None),
+            clock_selection: RwSignal::new(ClockSelection::default()),
+            transaction_status,
             inspector: InspectorSignals::new(),
             domains: RwSignal::new(Vec::new()),
             resource_details: RwSignal::new(BTreeMap::new()),
@@ -7936,12 +8108,14 @@ mod tests {
             }]),
             active_subscription_tab: RwSignal::new(Some(1)),
             domains_loaded: RwSignal::new(true),
-            auth_token: RwSignal::new(None),
+            auth_token,
             auth_error: RwSignal::new(None),
             session_generation: RwSignal::new(0),
             create: CreateSignals::new(),
             selected_resource: RwSignal::new(None),
             upload_status: RwSignal::new(String::new()),
+            backups,
+            upload_base_url,
         }
     }
 
@@ -8266,6 +8440,65 @@ mod tests {
             assert!(
                 requests.release_held().is_empty(),
                 "a restoration is never held"
+            );
+        });
+    }
+
+    #[test]
+    fn a_new_connection_attaches_its_clock_and_restores_its_tabs_before_its_transaction() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Interrupted);
+            let domain = domain_name("tenant");
+            let transaction = TransactionStatus::new(
+                "attached".to_string(),
+                domain.clone(),
+                TransactionLifecycle::Open,
+                TransactionPosition::new(1),
+                0,
+            )
+            .assured("an open transaction's accepted operation has not applied");
+            signals.transaction_status.set(Some(transaction));
+            signals
+                .clock_display
+                .set(ClockDisplay::selected(Some(domain.clone()), false));
+
+            let opening = signals.connection_opening(4);
+            let [
+                ConsoleRequest::SelectDomain(selected),
+                ConsoleRequest::DomainClockAttach {
+                    request: clock,
+                    connection_generation,
+                    origin: clock_origin,
+                },
+                ConsoleRequest::SubscriptionStart {
+                    origin: restoration,
+                    ..
+                },
+                ConsoleRequest::AttachTransaction(attach),
+            ] = opening.as_slice()
+            else {
+                panic!(
+                    "a connection selects its domain, attaches its clock, restores its tab and \
+                     attaches its transaction, in that order"
+                );
+            };
+            assert_eq!(selected.domain, domain);
+            assert_eq!(clock.domain, domain);
+            assert_eq!(*connection_generation, 4);
+            assert!(*clock_origin == ClockRequestOrigin::Automatic);
+            assert_eq!(*restoration, SubscriptionOrigin::Restoration);
+            assert_eq!(attach.transaction_id, "attached");
+            assert_eq!(
+                signals.clock_display.get_untracked(),
+                ClockDisplay::selected(Some(domain.clone()), true)
+            );
+
+            let mut selection = signals.clock_selection.get_untracked();
+            let confirmed = selection.change(true, 4, Some(domain));
+            assert_eq!(confirmed.detach, None);
+            assert_eq!(
+                confirmed.attach, None,
+                "the confirmed connection does not attach its clock again"
             );
         });
     }
@@ -11416,7 +11649,7 @@ mod tests {
             ChoiceControl::HashCodec => nervix_client_wire::ChoiceTarget::Codec,
             ChoiceControl::HashKey => nervix_client_wire::ChoiceTarget::CodecField,
             ChoiceControl::IngestSourceRef => {
-                nervix_client_wire::ChoiceTarget::IngestEndpointSource
+                nervix_client_wire::ChoiceTarget::IngestHttpEndpointSource
             }
             ChoiceControl::IngestCodec => nervix_client_wire::ChoiceTarget::IngestCodec,
             ChoiceControl::IngestTimestampField | ChoiceControl::IngestInputField => {

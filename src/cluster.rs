@@ -11,6 +11,13 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "gossip membership and management health coordinate topology outside record \
@@ -41,7 +48,8 @@ use nervix_interconnect::{
     RequestError, RequestSubquota, Transport as InterconnectTransport, TransportError,
 };
 use nervix_models::{
-    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodeServiceUrl,
+    ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, NodeEndpoint, NodePrerequisites,
+    NodeServiceUrl,
 };
 use nervix_primitives::{
     collections::DashMap,
@@ -54,6 +62,18 @@ use nervix_primitives::{
 use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
 use tracing::{debug, info, warn};
+
+#[cfg(test)]
+use crate::runtime::AdvertisedSubscriptionInterest;
+use crate::runtime::SubscriptionInterestIndex;
+
+mod prerequisites;
+mod settings;
+pub use prerequisites::{ClockSkew, PrerequisitesView, register_clock_probe_handler};
+pub use settings::{
+    ClockSkewTolerance, GossipInterval, MembershipSettings, MembershipSettingsError,
+    MembershipValues, NodeUnavailabilityTimeout,
+};
 
 const KEY_CLUSTER_ID: &str = "cluster_id";
 const KEY_NODE_ID: &str = "node_id";
@@ -68,6 +88,8 @@ const KEY_SUBSCRIPTION_INTEREST_PREFIX: &str = "subscription_interest:";
 const KEY_AUTHORITATIVE_REVISION_APPLIED: &str = "authoritative_revision_applied";
 const KEY_RUNTIME_REVISION_PREPARED: &str = "runtime_revision_prepared";
 const KEY_RUNTIME_REVISION_READY: &str = "runtime_revision_ready";
+/// The runtime revision through which every domain clock the node holds is the committed one.
+const KEY_DOMAIN_CLOCK_REVISION_INSTALLED: &str = "domain_clock_revision_installed";
 /// How many cluster changes a session can fall behind before the bus drops the oldest.
 const CLUSTER_EVENT_CAPACITY: usize = 256;
 const GOSSIP_QUEUE_CAPACITY: usize = 1024;
@@ -76,12 +98,17 @@ const GOSSIP_OUTGOING_QUEUE_CAPACITY: usize = 4;
 /// Leaves room for the typed request fields inside the 64-KiB management-event limit.
 const MAX_GOSSIP_MESSAGE_BYTES: usize = 60 * 1024;
 
+#[cfg_attr(
+    nervix_lint,
+    nervix::value(cluster_access, reason = "gossip membership and cluster observations")
+)]
 pub struct ClusterHandle {
     local_incarnation: nervix_models::ClusterNodeIncarnation,
     chitchat: StdArc<nervix_primitives::unmodeled::sync::Mutex<Chitchat>>,
     /// The membership task owns the other reference and replaces this snapshot whenever the
     /// Chitchat live-node state watcher changes.
     subscription_interest: StdArc<SubscriptionInterestPublication>,
+    prerequisites: PrerequisitesView,
     /// The transport the gossip server and the membership task also hold, kept here so shutdown
     /// can close it before it asks the gossip server to stop.
     gossip_transport: InterconnectGossipTransport,
@@ -92,91 +119,33 @@ pub struct ClusterHandle {
     membership_task: Mutex<Option<JoinHandle<()>>>,
 }
 
-/// The interested node incarnations for every domain and relay advertised by live gossip state.
-///
-/// Strings are retained only in this cold-path snapshot. A relay owner looks them up through
-/// borrowed `str` keys, then iterates the node map without formatting a gossip key or allocating.
-#[derive(Debug, Default)]
-pub(crate) struct SubscriptionInterestIndex {
-    domains: BTreeMap<
-        String,
-        BTreeMap<String, BTreeMap<ClusterNodeName, AdvertisedSubscriptionInterest>>,
-    >,
-}
-
-/// One live advertisement, fenced by both the node incarnation and its interest key's version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct AdvertisedSubscriptionInterest {
-    incarnation: ClusterNodeIncarnation,
-    version: u64,
-}
-
-impl SubscriptionInterestIndex {
-    fn from_live_node_states(nodes: &BTreeMap<ChitchatId, NodeState>) -> Self {
-        let mut index = Self::default();
-        for (chitchat_id, state) in nodes {
-            let Some(identity) = cluster_node_identity(chitchat_id) else {
+fn subscription_interests_from_live_nodes(
+    nodes: &BTreeMap<ChitchatId, NodeState>,
+) -> SubscriptionInterestIndex {
+    let mut index = SubscriptionInterestIndex::default();
+    for (chitchat_id, state) in nodes {
+        let Some(identity) = cluster_node_identity(chitchat_id) else {
+            continue;
+        };
+        for (key, _) in state.key_values() {
+            let Some((domain, relay)) = subscription_interest_from_key(key) else {
                 continue;
             };
-            for (key, _) in state.key_values() {
-                let Some((domain, relay)) = subscription_interest_from_key(key) else {
-                    continue;
-                };
-                let version = state
-                    .get_versioned(key)
-                    .assured("key_values yields a live entry from this same immutable node state")
-                    .version;
-                let advertisement = AdvertisedSubscriptionInterest {
-                    incarnation: identity.incarnation(),
-                    version,
-                };
-                let relays = index.domains.entry(domain.to_string()).or_default();
-                let interested_nodes = relays.entry(relay.to_string()).or_default();
-                match interested_nodes.entry(identity.node_id().clone()) {
-                    std::collections::btree_map::Entry::Occupied(mut current) => {
-                        if advertisement > *current.get() {
-                            current.insert(advertisement);
-                        }
-                    }
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(advertisement);
-                    }
-                }
-            }
+            let version = state
+                .get_versioned(key)
+                .assured("key_values yields a live entry from this same immutable node state")
+                .version;
+            index.record(domain, relay, &identity, version);
         }
-        index
     }
-
-    pub(crate) fn nodes(
-        &self,
-        domain: &str,
-        relay: &str,
-    ) -> Option<&BTreeMap<ClusterNodeName, AdvertisedSubscriptionInterest>> {
-        let relays = self.domains.get(domain)?;
-        relays.get(relay)
-    }
-
-    fn contains(
-        &self,
-        subscriber: &ClusterNodeIdentity,
-        domain: &str,
-        relay: &str,
-        minimum_version: u64,
-    ) -> bool {
-        let Some(nodes) = self.nodes(domain, relay) else {
-            return false;
-        };
-        let Some(advertisement) = nodes.get(subscriber.node_id()) else {
-            return false;
-        };
-        advertisement.incarnation == subscriber.incarnation()
-            && advertisement.version >= minimum_version
-    }
+    index
 }
 
 /// Atomic publication plus a cold-path change notification for creation handshakes.
 struct SubscriptionInterestPublication {
     index: ArcSwap<SubscriptionInterestIndex>,
+    /// The same membership writer publishes current process identities for ACK watcher lifetimes.
+    live_runs: ArcSwap<BTreeMap<ClusterNodeName, ClusterNodeIncarnation>>,
     changed: watch::Sender<()>,
 }
 
@@ -184,13 +153,21 @@ impl SubscriptionInterestPublication {
     fn new() -> Self {
         Self {
             index: ArcSwap::from_pointee(SubscriptionInterestIndex::default()),
+            live_runs: ArcSwap::from_pointee(BTreeMap::new()),
             changed: watch::channel(()).0,
         }
     }
 
     fn publish(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
-        let index = SubscriptionInterestIndex::from_live_node_states(nodes);
+        let index = subscription_interests_from_live_nodes(nodes);
         self.index.store(StdArc::new(index));
+        let mut runs = BTreeMap::new();
+        for node in nodes.keys() {
+            if let Some(identity) = cluster_node_identity(node) {
+                runs.insert(identity.node_id().clone(), identity.incarnation());
+            }
+        }
+        self.live_runs.store(StdArc::new(runs));
         self.changed.send_replace(());
     }
 
@@ -765,37 +742,52 @@ impl RetainedPeerHealth {
 struct PeerHealthStateWatcher {
     state: watch::Receiver<PeerHealthStateSnapshot>,
     observation_freshness: Duration,
+    /// The scheduling revision the caller last read the cluster state under: the one current when
+    /// the watcher subscribed, and then the one each wait returned for. A caller subscribes before
+    /// it reads, so a change it has not read yet always differs from this.
+    observed: u64,
 }
 
 impl PeerHealthStateWatcher {
-    fn wait_for_change_or_next_transition(&mut self) -> impl std::future::Future<Output = ()> + '_ {
-        let scheduling_revision = self.state.borrow_and_update().scheduling_revision();
-        async move {
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                let next_transition = self
-                    .state
-                    .borrow()
-                    .next_effective_transition(Instant::now(), self.observation_freshness);
-                nervix_primitives::select! {
-                    changed = self.state.changed() => {
-                        changed.assured(
-                            "the cluster handle retains its peer-health state sender for its \
-                             lifetime",
-                        );
-                        if self.state.borrow_and_update().scheduling_revision()
-                            != scheduling_revision
-                        {
-                            return;
-                        }
-                    }
-                    _ = async {
-                        match next_transition {
-                            Some(deadline) => nervix_primitives::time::sleep_until(deadline).await,
-                            None => std::future::pending::<()>().await,
-                        }
-                    } => return,
+    fn new(
+        mut state: watch::Receiver<PeerHealthStateSnapshot>,
+        observation_freshness: Duration,
+    ) -> Self {
+        let observed = state.borrow_and_update().scheduling_revision();
+        Self {
+            state,
+            observation_freshness,
+            observed,
+        }
+    }
+
+    /// Waits until the scheduling revision differs from the one the caller last read under, or
+    /// until a peer's health next takes effect. A change made after the caller read, even one made
+    /// before this wait was prepared, ends the wait.
+    async fn wait_for_change_or_next_transition(&mut self) {
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            let current = self.state.borrow_and_update().scheduling_revision();
+            if current != self.observed {
+                self.observed = current;
+                return;
+            }
+            let next_transition = self
+                .state
+                .borrow()
+                .next_effective_transition(Instant::now(), self.observation_freshness);
+            nervix_primitives::select! {
+                changed = self.state.changed() => {
+                    changed.assured(
+                        "the cluster handle retains its peer-health state sender for its lifetime",
+                    );
                 }
+                _ = async {
+                    match next_transition {
+                        Some(deadline) => nervix_primitives::time::sleep_until(deadline).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => return,
             }
         }
     }
@@ -835,6 +827,10 @@ impl ClusterStateWatcher {
 #[derive(Clone)]
 pub struct ClusterSettings {
     pub cluster_id: String,
+    #[cfg_attr(
+        nervix_lint,
+        nervix::identity(node, reason = "configured cluster member identity")
+    )]
     pub node_id: ClusterNodeName,
     pub grpc_listen_addr: SocketAddr,
     pub client_advertise_url: NodeServiceUrl,
@@ -843,7 +839,8 @@ pub struct ClusterSettings {
     pub bootstrap_host: Option<String>,
     pub recovery_endpoints: BTreeSet<NodeEndpoint>,
     pub interconnect: InterconnectTransport,
-    pub node_unavailability_timeout: Duration,
+    pub membership: MembershipSettings,
+    pub prerequisites: NodePrerequisites,
     pub fault_injection: crate::ConfiguredFaultInjection,
 }
 
@@ -858,6 +855,13 @@ struct GossipExchange {
 /// The refusal is the exchange's answer on the wire, so the sending node learns why its message was
 /// not taken without parsing text.
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the fixed gossip wire answer carries a typed exchange refusal"
+    )
+)]
 enum GossipExchangeRefusal {
     #[error("a gossip message of {size} bytes exceeds the {limit}-byte bound")]
     Oversized { size: u64, limit: u64 },
@@ -1221,7 +1225,56 @@ impl GossipSocket for InterconnectGossipSocket {
         if !remaining.is_empty() {
             anyhow::bail!("gossip message has trailing bytes");
         }
+        #[cfg(feature = "testing")]
+        let message = {
+            let mut message = message;
+            if let ChitchatMessage::Syn { digest, .. } | ChitchatMessage::SynAck { digest, .. } =
+                &mut message
+            {
+                self.freeze_startup_voter_digest(digest)?;
+            }
+            message
+        };
         Ok((from, message))
+    }
+}
+
+#[cfg(feature = "testing")]
+impl InterconnectGossipSocket {
+    fn freeze_startup_voter_digest<D: chitchat::Serializable + chitchat::Deserializable>(
+        &self,
+        digest: &mut D,
+    ) -> anyhow::Result<()> {
+        // Chitchat keeps digest entries private. Decode and encode its current public wire
+        // representation to hold just the selected heartbeat while other voters keep progressing.
+        let encoded = digest.serialize_to_vec();
+        let mut remaining = encoded.as_slice();
+        let count = <u16 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+        let mut frozen = Vec::with_capacity(encoded.len());
+        chitchat::Serializable::serialize(&count, &mut frozen);
+        for _ in 0..count {
+            let id = ChitchatId::deserialize(&mut remaining)?;
+            let mut heartbeat = <u64 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+            let gc_version = <u64 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+            let max_version = <u64 as chitchat::Deserializable>::deserialize(&mut remaining)?;
+            if let Some(identity) = cluster_node_identity(&id) {
+                heartbeat = self
+                    .transport
+                    .inner
+                    .fault_injection
+                    .freeze_startup_voter_heartbeat(
+                        self.transport.inner.interconnect.node_id(),
+                        identity,
+                        heartbeat,
+                    );
+            }
+            id.serialize(&mut frozen);
+            chitchat::Serializable::serialize(&heartbeat, &mut frozen);
+            chitchat::Serializable::serialize(&gc_version, &mut frozen);
+            chitchat::Serializable::serialize(&max_version, &mut frozen);
+        }
+        *digest = D::deserialize(&mut frozen.as_slice())?;
+        Ok(())
     }
 }
 
@@ -1252,6 +1305,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         .addr;
     let mut seed_targets = BTreeMap::new();
     let mut seed_nodes = BTreeSet::new();
+    let has_recovered_peers = !settings.recovery_endpoints.is_empty();
     let recovered = join_all(settings.recovery_endpoints.into_iter().map(|endpoint| {
         let interconnect = &settings.interconnect;
         async move { (endpoint.clone(), interconnect.resolve(&endpoint).await) }
@@ -1274,14 +1328,17 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         let seed = seed
             .parse::<NodeEndpoint>()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let targets = settings
-            .interconnect
-            .resolve(&seed)
-            .await
-            .map_err(|report| io::Error::other(report.into_error()))?;
-        for target in targets {
-            seed_nodes.insert(target.addr.to_string());
-            seed_targets.insert(target.addr, target);
+        match settings.interconnect.resolve(&seed).await {
+            Ok(targets) => {
+                for target in targets {
+                    seed_nodes.insert(target.addr.to_string());
+                    seed_targets.insert(target.addr, target);
+                }
+            }
+            Err(error) if has_recovered_peers => {
+                warn!(%seed, %error, "could not resolve the configured bootstrap host for gossip");
+            }
+            Err(error) => return Err(io::Error::other(error.into_error())),
         }
     }
     let transport = InterconnectGossipTransport::build(
@@ -1300,10 +1357,10 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let config = chitchat::ChitchatConfig {
         chitchat_id,
         cluster_id: settings.cluster_id.clone(),
-        gossip_interval: Duration::from_millis(500),
+        gossip_interval: settings.membership.gossip_interval(),
         listen_addr: settings.interconnect.local_addr(),
         seed_nodes: seed_nodes.into_iter().collect(),
-        failure_detector_config: chitchat::FailureDetectorConfig::default(),
+        failure_detector_config: settings.membership.failure_detector_config(),
         marked_for_deletion_grace_period: Duration::from_secs(60),
         catchup_callback: None,
         extra_liveness_predicate: None,
@@ -1336,6 +1393,7 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
             KEY_BOOTSTRAP_HOST.to_string(),
             settings.bootstrap_host.clone().unwrap_or_default(),
         ),
+        prerequisites::initial_key_value(&settings.prerequisites),
     ];
 
     let chitchat = spawn_chitchat(config, initial_key_values, &transport)
@@ -1347,12 +1405,15 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
     let mut live_nodes = chitchat_state.lock().await.live_nodes_watch_stream();
     let subscription_interest = StdArc::new(SubscriptionInterestPublication::new());
     let subscription_interest_publisher = subscription_interest.clone();
+    let prerequisites = PrerequisitesView::new();
+    let prerequisites_publisher = prerequisites.clone();
     let event_tx = events.clone();
     let route_transport = transport.clone();
     let membership_task = nervix_primitives::task::spawn(async move {
         while let Some(nodes) = live_nodes.next().await {
             nervix_primitives::task::consume_budget().await;
             subscription_interest_publisher.publish(&nodes);
+            prerequisites_publisher.publish(&nodes);
             route_transport.refresh_routes(&nodes);
             let report = membership_report(&nodes);
             info!(members = ?report, "cluster membership updated");
@@ -1364,11 +1425,12 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
         local_incarnation: nervix_models::ClusterNodeIncarnation::new(generation_id),
         chitchat: chitchat_state,
         subscription_interest,
+        prerequisites,
         gossip_transport: transport,
         chitchat_server: Mutex::new(Some(chitchat)),
         events,
         peer_health_state: watch::channel(PeerHealthStateSnapshot::default()).0,
-        node_unavailability_timeout: settings.node_unavailability_timeout,
+        node_unavailability_timeout: settings.membership.node_unavailability_timeout(),
         membership_task: Mutex::new(Some(membership_task)),
     })
 }
@@ -1421,7 +1483,21 @@ impl ClusterHandle {
     pub(crate) async fn subscribe_live_node_states(
         &self,
     ) -> nervix_primitives::unmodeled::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
-        self.chitchat.lock().await.live_nodes_watcher()
+        Self::live_node_changes_after(self.chitchat.lock().await.live_nodes_watcher())
+    }
+
+    /// A subscription to the live set, made from the receiver Chitchat hands out.
+    ///
+    /// Chitchat keeps one receiver and never marks what it published as seen, and a clone keeps
+    /// the version of the receiver it was cloned from, so the subscription marks the current set
+    /// seen: it reports the changes made after it, not every publication before it.
+    fn live_node_changes_after(
+        mut watcher: nervix_primitives::unmodeled::sync::watch::Receiver<
+            BTreeMap<ChitchatId, NodeState>,
+        >,
+    ) -> nervix_primitives::unmodeled::sync::watch::Receiver<BTreeMap<ChitchatId, NodeState>> {
+        watcher.mark_unchanged();
+        watcher
     }
 
     pub(crate) async fn subscribe_state_changes(&self) -> ClusterStateWatcher {
@@ -1538,6 +1614,15 @@ impl ClusterHandle {
         );
     }
 
+    /// Whether this process incarnation has advertised that it is terminating. It reads the
+    /// node's own state, so the answer never waits for gossip to carry the advertisement, and an
+    /// incarnation keeps the advertisement until it exits.
+    pub async fn local_incarnation_is_terminating(&self) -> bool {
+        let chitchat_handle = self.chitchat.clone();
+        let mut chitchat = chitchat_handle.lock().await;
+        chitchat.self_node_state().get(KEY_TERMINATING).is_some()
+    }
+
     pub async fn set_local_runtime_revision_ready(&self, revision: u64) {
         self.set_local_revision(KEY_RUNTIME_REVISION_READY, revision)
             .await;
@@ -1597,6 +1682,22 @@ impl ClusterHandle {
         revision: u64,
     ) -> BTreeSet<ClusterNodeIdentity> {
         self.nodes_at_revision(KEY_RUNTIME_REVISION_READY, revision)
+            .await
+    }
+
+    /// Advertises that every domain clock this node holds, authority fence included, is the
+    /// committed one of runtime `revision`.
+    pub async fn set_local_domain_clock_revision_installed(&self, revision: u64) {
+        self.set_local_revision(KEY_DOMAIN_CLOCK_REVISION_INSTALLED, revision)
+            .await;
+    }
+
+    /// The incarnations whose domain clocks match runtime `revision` or a later one.
+    pub async fn nodes_with_domain_clocks_installed(
+        &self,
+        revision: u64,
+    ) -> BTreeSet<ClusterNodeIdentity> {
+        self.nodes_at_revision(KEY_DOMAIN_CLOCK_REVISION_INSTALLED, revision)
             .await
     }
 
@@ -1679,6 +1780,18 @@ impl ClusterHandle {
         self.local_subscription_interest_version(domain, relay)
             .await
             .is_some()
+    }
+
+    /// Read the membership writer's immutable identity publication without a gossip lock.
+    pub(crate) fn live_node_incarnation(
+        &self,
+        node: &ClusterNodeName,
+    ) -> Option<ClusterNodeIncarnation> {
+        self.subscription_interest
+            .live_runs
+            .load()
+            .get(node)
+            .copied()
     }
 
     pub(crate) fn subscription_interest_index(&self) -> Guard<StdArc<SubscriptionInterestIndex>> {
@@ -1800,10 +1913,10 @@ impl ClusterHandle {
     }
 
     fn subscribe_peer_health_state(&self) -> PeerHealthStateWatcher {
-        PeerHealthStateWatcher {
-            state: self.peer_health_state.subscribe(),
-            observation_freshness: self.node_unavailability_timeout,
-        }
+        PeerHealthStateWatcher::new(
+            self.peer_health_state.subscribe(),
+            self.node_unavailability_timeout,
+        )
     }
 
     pub(crate) fn node_unavailability_timeout(&self) -> Duration {
@@ -1930,6 +2043,7 @@ fn to_gossip_node(node_id: &ChitchatId, state: &NodeState) -> Option<GossipNode>
         client_url: advertised_service_url(state, KEY_GRPC_ADVERTISE_ADDR),
         console_url: advertised_service_url(state, KEY_WEB_CONSOLE_ADVERTISE_ADDR),
         interconnect_endpoint: advertised_endpoint(state),
+        prerequisites: prerequisites::advertised_prerequisites(&identity, state),
     })
 }
 
@@ -2438,7 +2552,7 @@ mod tests {
             (node_two_id.clone(), node_two_state),
         ]);
 
-        let index = SubscriptionInterestIndex::from_live_node_states(&live_nodes);
+        let index = subscription_interests_from_live_nodes(&live_nodes);
         let expected = BTreeMap::from([
             (
                 ClusterNodeName::parse("node-1").assured("the test node name is valid"),
@@ -2468,7 +2582,7 @@ mod tests {
             .get_mut(&node_two_id)
             .assured("the second test node is live")
             .delete(&subscription_interest_key("sales", "events"));
-        let withdrawn = SubscriptionInterestIndex::from_live_node_states(&live_nodes);
+        let withdrawn = subscription_interests_from_live_nodes(&live_nodes);
         let remaining = withdrawn
             .nodes("sales", "events")
             .assured("the first test node remains interested");
@@ -2527,6 +2641,26 @@ mod tests {
             "events",
             minimum_version,
         ));
+    }
+
+    #[test]
+    fn membership_publication_replaces_the_process_identity_for_remote_ack_watchers() {
+        let publication = SubscriptionInterestPublication::new();
+        let (node, state) = subscription_state("node-1", 7, 7101, &[]);
+        let name = ClusterNodeName::parse("node-1").assured("the fixture node is valid");
+        publication.publish(&BTreeMap::from([(node, state)]));
+        assert_eq!(
+            publication.live_runs.load().get(&name),
+            Some(&ClusterNodeIncarnation::new(7))
+        );
+        let (node, state) = subscription_state("node-1", 8, 7101, &[]);
+        publication.publish(&BTreeMap::from([(node, state)]));
+        assert_eq!(
+            publication.live_runs.load().get(&name),
+            Some(&ClusterNodeIncarnation::new(8))
+        );
+        publication.publish(&BTreeMap::new());
+        assert!(publication.live_runs.load().is_empty());
     }
 
     #[test]
@@ -2770,6 +2904,68 @@ mod tests {
         assert!(capacity.unavailable_nodes().is_empty());
     }
 
+    /// Chitchat keeps one receiver of its live set and never marks what it published as seen, and
+    /// hands out clones of it. A subscription taken after the set was published must still wait for
+    /// the next change rather than report the publications before it.
+    #[nervix_primitives::test]
+    async fn a_live_set_subscription_waits_for_a_change_made_after_it() {
+        let (live_set, chitchat_receiver) =
+            nervix_primitives::unmodeled::sync::watch::channel(BTreeMap::new());
+        live_set.send_replace(BTreeMap::new());
+        let (_peer_health_state, peer_health_state_receiver) =
+            watch::channel(PeerHealthStateSnapshot::default());
+        let mut watcher = ClusterStateWatcher {
+            live_node_states: ClusterHandle::live_node_changes_after(chitchat_receiver.clone()),
+            peer_health_state: PeerHealthStateWatcher::new(
+                peer_health_state_receiver,
+                Duration::from_secs(10),
+            ),
+        };
+        let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
+
+        nervix_primitives::select! {
+            biased;
+            _ = &mut waiting => {
+                panic!("a fresh subscription to the live set reported a change made before it")
+            }
+            () = nervix_primitives::task::yield_now() => {}
+        }
+    }
+
+    /// A caller subscribes, reads the cluster state, and only then prepares its wait. A health
+    /// change published between its read and its wait must still wake that wait.
+    #[nervix_primitives::test]
+    async fn cluster_state_watcher_observes_a_health_target_change_before_wait_preparation() {
+        let observation_freshness = Duration::from_secs(10);
+        let (_live_state, live_state_receiver) =
+            nervix_primitives::unmodeled::sync::watch::channel(BTreeMap::new());
+        let (peer_health_state, peer_health_state_receiver) =
+            watch::channel(PeerHealthStateSnapshot::default());
+        let mut watcher = ClusterStateWatcher {
+            live_node_states: live_state_receiver,
+            peer_health_state: PeerHealthStateWatcher::new(
+                peer_health_state_receiver,
+                observation_freshness,
+            ),
+        };
+        peer_health_state.send_modify(|snapshot| {
+            snapshot.replace_endpoints(
+                [health_endpoint("node-2", 7, "node-2.example:7001")],
+                Instant::now(),
+                observation_freshness,
+            );
+        });
+        let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
+
+        nervix_primitives::select! {
+            biased;
+            _ = &mut waiting => {}
+            () = nervix_primitives::task::yield_now() => {
+                panic!("a health target update before wait preparation must wake the waiter")
+            }
+        }
+    }
+
     #[nervix_primitives::test]
     async fn cluster_state_watcher_observes_a_health_target_change_after_wait_preparation() {
         let observation_freshness = Duration::from_secs(10);
@@ -2779,10 +2975,10 @@ mod tests {
             watch::channel(PeerHealthStateSnapshot::default());
         let mut watcher = ClusterStateWatcher {
             live_node_states: live_state_receiver,
-            peer_health_state: PeerHealthStateWatcher {
-                state: peer_health_state_receiver,
+            peer_health_state: PeerHealthStateWatcher::new(
+                peer_health_state_receiver,
                 observation_freshness,
-            },
+            ),
         };
         let mut waiting = Box::pin(watcher.wait_for_change_or_next_unavailability());
         peer_health_state.send_modify(|snapshot| {

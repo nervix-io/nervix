@@ -21,12 +21,17 @@
 //! loses an outcome or the batch: [`Producer::pending_submissions`] lists it, and a producer whose
 //! application stops reading outcomes stops being granted credit for new batches.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{collections::BTreeMap, fmt, num::NonZeroU64, time::Duration};
 
 use ahash::HashMap;
 use arch_into::ArchInto as _;
 use bytes::Bytes;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     ClientMessage, ClientRequest, CloseIngestorRequest, OpenIngestorDisposition,
@@ -42,6 +47,7 @@ use nervix_models::{
 use nervix_primitives::sync::{Arc, StdArc, StdWeak, blocking::Mutex as SyncMutex, oneshot, watch};
 use nervix_recovery::Discarded as _;
 use thiserror::Error;
+use tracing::debug;
 
 use crate::{
     client::{Client, RecoveryMode, SessionRecovery},
@@ -286,6 +292,27 @@ struct RegisteredProducer {
 pub(crate) struct ProducerSignals {
     admission: watch::Sender<ClientProducerAdmission>,
     end: watch::Sender<Option<ProducerEnd>>,
+}
+
+/// Whether a producer had ended when one waiter looked, and otherwise how it observes the end.
+enum ProducerEndWatch {
+    Ended(ProducerEnd),
+    /// The producer was running; the receiver observes its end.
+    Running(watch::Receiver<Option<ProducerEnd>>),
+}
+
+impl ProducerSignals {
+    /// Reports the producer's end, or a subscription that observes it.
+    ///
+    /// It subscribes before it reads: a subscription marks the end published so far as seen, so an
+    /// end published between a read and a later subscription would never reach the waiter.
+    fn watch_end(&self) -> ProducerEndWatch {
+        let mut end = self.end.subscribe();
+        if let Some(ended) = end.borrow_and_update().clone() {
+            return ProducerEndWatch::Ended(ended);
+        }
+        ProducerEndWatch::Running(end)
+    }
 }
 
 impl ProducerRegistry {
@@ -536,7 +563,7 @@ impl Client {
             let exchange = self.inner.exchange.lock().await;
             (exchange.requests(), exchange.generation.clone())
         };
-        let registry = self.inner.events.sinks.producers.clone();
+        let registry = self.inner.events.emitters.producers.clone();
         let client = self.clone();
         let (answer, answered) = oneshot::channel();
         // The open runs in a task of its own, so a caller that stops waiting leaves behind a task
@@ -602,12 +629,9 @@ pub(crate) async fn send_on_exchange(
         request_id: registered.request_id,
         request,
     };
-    let frame = message.encode(&SESSION_LIMITS).map_err(|report| {
-        Report::new(ClientError::EncodeRequest {
-            request: kind,
-            source: report.current_context().clone(),
-        })
-    })?;
+    let frame = message
+        .encode(&SESSION_LIMITS)
+        .change_context(ClientError::EncodeRequest { request: kind })?;
     if exchange.frames.send(frame).await.is_err() {
         return Err(Report::new(exchange.pending.lock().failure()));
     }
@@ -829,6 +853,14 @@ impl ProducerInner {
         self.request.clone()
     }
 
+    pub(crate) fn domain(&self) -> &DomainName {
+        &self.domain
+    }
+
+    pub(crate) fn ingestor(&self) -> &IngestorName {
+        &self.ingestor
+    }
+
     pub(crate) fn restoration_failed(&self, generation: &Arc<()>) {
         let mut phase = self.lifecycle.phase.lock();
         if !matches!(&*phase, ProducerPhase::Restoring(current) if Arc::ptr_eq(current, generation))
@@ -875,6 +907,12 @@ impl ProducerInner {
             *phase = ProducerPhase::ReopenRequired(reason);
             drop(phase);
             self.lifecycle.changed.send_replace(());
+            debug!(
+                domain = self.domain.as_str(),
+                ingestor = self.ingestor.as_str(),
+                refusal = refusal.as_ref(),
+                "a producer restoration was refused for good"
+            );
             return false;
         }
         true
@@ -1235,12 +1273,14 @@ impl Producer {
             let bytes = u32::try_from(ipc.len()).assured(
                 "a batch within the granted bytes, which one session's budget bounds, fits u32",
             );
-            if let Some(ended) = attachment.end() {
-                self.inner
-                    .attachment_ended(&attachment.generation, attachment.id, ended);
-                continue;
-            }
-            let mut end = attachment.signals.end.subscribe();
+            let mut end = match attachment.signals.watch_end() {
+                ProducerEndWatch::Ended(ended) => {
+                    self.inner
+                        .attachment_ended(&attachment.generation, attachment.id, ended);
+                    continue;
+                }
+                ProducerEndWatch::Running(end) => end,
+            };
             let credit = nervix_primitives::select! {
                 acquired = self.inner.slots.credit(bytes) => {
                     let Some(credit) = acquired else {
@@ -1404,9 +1444,49 @@ mod arrow_batch {
 
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_tests {
+    use std::num::NonZeroU64;
+
+    use meticulous::OptionExt as _;
+    use nervix_client_wire::RequestId;
     use nervix_model_harness::shuttle::check_random_and_pct;
 
     use super::*;
+
+    /// A submission checks whether its producer ended while the application closes it: the
+    /// submission sees the end, or its wait for the end observes it.
+    #[test]
+    fn shuttle_a_submission_racing_its_producers_end_observes_the_end() {
+        check_random_and_pct(|| {
+            shuttle::future::block_on(async {
+                let registry = ProducerRegistry::default();
+                let generation = Arc::new(());
+                let producer = ProducerId::opened_by(RequestId::new(NonZeroU64::MIN));
+                registry.opened(&generation, producer, ClientProducerAdmission::Open);
+                let signals = registry
+                    .signals(&generation, producer)
+                    .assured("the producer was registered above");
+                let submitting = nervix_primitives::task::spawn(async move {
+                    match signals.watch_end() {
+                        ProducerEndWatch::Ended(_) => {}
+                        ProducerEndWatch::Running(mut end) => {
+                            end.changed()
+                                .await
+                                .assured("the signals keep the sender of the producer's end");
+                        }
+                    }
+                });
+                let closing = nervix_primitives::task::spawn(async move {
+                    registry.closed(&generation, producer);
+                });
+                closing
+                    .await
+                    .assured("the closing side only closes the producer");
+                submitting
+                    .await
+                    .assured("the submitting side only waits for the end");
+            });
+        });
+    }
 
     #[test]
     fn shuttle_close_fences_a_producer_restore_started_on_the_same_exchange() {

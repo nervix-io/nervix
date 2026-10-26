@@ -3,11 +3,11 @@ Feature: Reingestor output flushing
   Scenario Outline: Reingestor output waits for its route flush cadence
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (
         tenant STRING,
@@ -33,8 +33,8 @@ Feature: Reingestor output flushing
       CREATE RELAY repartitioned SCHEMA event BRANCHED BY by_tenant;
       CREATE VHOST edge reingestor-flush-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming
           INHERIT ALL
@@ -57,8 +57,7 @@ Feature: Reingestor output flushing
       """
       {"tenant":"acme","seq":1}
       """
-    Then the relay subscription does not receive a payload within "100ms"
-    And within "5s" the relay subscription receives payloads
+    Then within "5s" the relay subscription receives payloads no sooner than "100ms" after they were published
       """
       "seq":1,"tenant":"acme"
       """

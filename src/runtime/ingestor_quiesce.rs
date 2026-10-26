@@ -3,8 +3,12 @@
 //! Layer: data plane.
 //! - **Owns.** In-memory quiescence causes, bounded retained payloads and intake decisions.
 //! - **Depends on.** Typed ingestor policy, observed input timestamps and runtime task handles.
-//! - **Must not know.** NSPL parsing, consensus decisions or persisted payload state.
+//! - **Must not know.** Plexus parsing, consensus decisions or persisted payload state.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -20,6 +24,10 @@ use nervix_connector::{IngestMetadataRow, RetainedIngestHeaders};
 use nervix_models::parse_duration_text;
 
 use super::*;
+
+#[path = "source_readiness.rs"]
+mod readiness;
+pub(in crate::runtime) use readiness::IngestorInstanceReadiness;
 
 pub(super) const DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -369,7 +377,14 @@ impl IngestorQuiescePublication {
 /// buffer owns these values and appends them into the group's builders on replay.
 #[derive(Debug, Clone)]
 pub(in crate::runtime) enum BufferedIngestMetadata {
-    Syslog { peer_addr: std::net::SocketAddr },
+    Websockets {
+        frame_type: nervix_models::WebsocketsFrameType,
+        // Retains the message's exact connection header snapshot without copying it per frame.
+        headers: Arc<RetainedIngestHeaders>,
+    },
+    Syslog {
+        peer_addr: std::net::SocketAddr,
+    },
     Headers(RetainedIngestHeaders),
 }
 
@@ -382,6 +397,13 @@ impl BufferedIngestMetadata {
 
     pub(super) fn row(&self) -> IngestMetadataRow<'_> {
         match self {
+            Self::Websockets {
+                frame_type,
+                headers,
+            } => IngestMetadataRow::Websockets {
+                frame_type: *frame_type,
+                headers,
+            },
             Self::Syslog { peer_addr } => IngestMetadataRow::Syslog {
                 peer_addr: *peer_addr,
             },
@@ -455,15 +477,24 @@ impl BufferedIngestPayload {
             .row()
     }
 
-    pub(super) fn metadata_rows(&self) -> Vec<IngestMetadataRow<'_>> {
-        self.metadata
+    /// The payloads this buffer holds, each with its place in the buffer, which
+    /// [`Self::metadata_row`] reads the payload's metadata at.
+    pub(super) fn indexed_payloads(&self) -> impl Iterator<Item = BatchPayload<'_, usize>> {
+        self.payloads
             .iter()
-            .map(BufferedIngestMetadata::row)
-            .collect()
+            .enumerate()
+            .map(|(index, payload)| BatchPayload {
+                payload,
+                entry: index,
+            })
     }
 
-    pub(super) fn payloads(&self) -> impl Iterator<Item = &[u8]> {
-        self.payloads.iter().map(Vec::as_slice)
+    /// The metadata row of the payload at `index` in this buffer.
+    pub(super) fn metadata_row(&self, index: usize) -> IngestMetadataRow<'_> {
+        self.metadata
+            .get(index)
+            .assured("the metadata is row-aligned with the payloads every index names")
+            .row()
     }
 
     pub(super) const fn observed_at(&self) -> Timestamp {
@@ -505,7 +536,11 @@ impl IngestorQuiesceBuffer {
     /// here: altering an ingestor may lower `max_size` under an already filled buffer, and such a
     /// buffer has no room left until it drains.
     pub(super) fn remaining_capacity(&self, max_size: usize) -> usize {
-        max_size.saturating_sub(self.bytes)
+        nervix_primitives::expect_lint!(
+            nervix::clamped_arithmetic,
+            "lowering the limit below retained bytes leaves zero admission capacity",
+            max_size.saturating_sub(self.bytes)
+        )
     }
 
     /// Whether `payload_bytes` would fit within `max_size` once overflow evicted every payload it
@@ -709,6 +744,25 @@ pub(in crate::runtime) struct IngestorQuiesceObservation {
     publication: StdArc<IngestorQuiescePublication>,
 }
 
+impl IngestorQuiesceObservation {
+    /// Whether the observed publication quiesces the ingestor.
+    pub(in crate::runtime) fn is_quiesced(&self) -> bool {
+        self.publication.decision.cause().is_some()
+    }
+}
+
+/// How the wait of a live payload on its way to its ingest group ended.
+#[derive(Debug)]
+pub(in crate::runtime) enum LiveDeliveryEnd<T> {
+    /// The delivery completed with its output.
+    Completed(T),
+    /// The ingestor stopped first.
+    Stopped,
+    /// A quiesce publication newer than the decision the payload was taken in under arrived first,
+    /// so the payload is decided again.
+    Redecide,
+}
+
 impl IngestorQuiesceControl {
     pub(super) fn new(
         mode: IngestQuiesceMode,
@@ -784,6 +838,11 @@ impl IngestorQuiesceControl {
 
     pub(in crate::runtime) fn is_quiesced(&self) -> bool {
         self.cause().is_some()
+    }
+
+    /// Whether memory pressure is among the reasons engaged, whichever reason takes precedence.
+    fn paused_by_memory_pressure(&self) -> bool {
+        self.published.load().reasons.memory_pressure
     }
 
     fn mode(&self) -> IngestQuiesceMode {
@@ -955,6 +1014,45 @@ impl IngestorQuiesceControl {
         }
     }
 
+    /// Held endpoint responses end when intake stops for shutdown or ownership handoff. A
+    /// resumable pause still lets an admitted request finish through its existing ACK root.
+    pub(in crate::runtime) async fn wait_until_intake_stops(&self) {
+        let mut observation = self.observation();
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            if observation
+                .publication
+                .decision
+                .cause()
+                .is_some_and(IngestorQuiesceCause::stops_intake_regardless_of_mode)
+            {
+                return;
+            }
+            self.wait_for_change_since(&mut observation).await;
+        }
+    }
+
+    /// Runs `delivery`, the work that brings a live payload to its ingest group, until it
+    /// completes, `stop` turns true, or a publication newer than `decided` replaces the decision
+    /// the payload was taken in under. A new decision leaves `decided` observing it, and ends
+    /// `delivery` wherever it waits so that the payload can be decided again.
+    ///
+    /// `stop` is a receiver the caller keeps for this race alone: the wait marks the stop as seen
+    /// on it.
+    pub(in crate::runtime) async fn run_until_redecided<T>(
+        &self,
+        decided: &mut IngestorQuiesceObservation,
+        stop: &mut watch::Receiver<bool>,
+        delivery: impl Future<Output = T>,
+    ) -> LiveDeliveryEnd<T> {
+        nervix_primitives::select! {
+            biased;
+            output = delivery => LiveDeliveryEnd::Completed(output),
+            _ = stop.wait_for(|stop| *stop) => LiveDeliveryEnd::Stopped,
+            () = self.wait_for_change_since(decided) => LiveDeliveryEnd::Redecide,
+        }
+    }
+
     /// Takes the oldest payload `instance` retained out for delivery, unless this ingestor is
     /// quiesced or that payload is already out.
     pub(in crate::runtime) fn take_buffered(&self, instance: u64) -> Option<RetainedDelivery<'_>> {
@@ -1047,21 +1145,28 @@ pub(crate) struct IngestorQuiesceCounters {
 
 #[derive(Debug)]
 pub(super) struct IngestorReadiness {
-    pub(super) expected_instances: NonZeroU64,
-    pub(super) ready_instances: BTreeSet<u64>,
+    instances: Vec<IngestorInstanceReadiness>,
 }
 
 impl IngestorReadiness {
     pub(super) fn new(expected_instances: NonZeroU64) -> Self {
-        Self {
-            expected_instances,
-            ready_instances: BTreeSet::new(),
-        }
+        let count: usize = expected_instances.get().arch_into();
+        let instances = (0..count)
+            .map(|_| IngestorInstanceReadiness::new())
+            .collect();
+        Self { instances }
     }
 
     pub(super) fn is_ready(&self) -> bool {
-        let ready_instances: u64 = self.ready_instances.len().arch_into();
-        ready_instances >= self.expected_instances.get()
+        self.instances
+            .iter()
+            .all(IngestorInstanceReadiness::is_ready)
+    }
+
+    pub(super) fn retire(&self) {
+        for instance in &self.instances {
+            instance.retire();
+        }
     }
 }
 
@@ -1071,16 +1176,34 @@ pub(super) struct RuntimeReconnectStatus {
     pub(super) retry_at: Instant,
 }
 
+/// What the sources of one ingestor publish about it on this node, for its `DESCRIBE INGESTOR`.
+#[derive(Debug, Default)]
+pub(super) struct IngestorStatus {
+    /// The connector's failure and the retry that follows it, while it has one.
+    pub(super) connection: task_status::TaskStatus<RuntimeReconnectStatus>,
+    /// The latest decode rejection of a payload the ingestor's codec refused on this node.
+    last_decode_rejection: ArcSwapOption<DecodeRejection>,
+}
+
+impl IngestorStatus {
+    /// Publishes `rejection` as the latest decode rejection, in place of the one before it.
+    pub(super) fn record_decode_rejection(&self, rejection: DecodeRejection) {
+        self.last_decode_rejection
+            .store(Some(StdArc::new(rejection)));
+    }
+
+    pub(super) fn last_decode_rejection(&self) -> Option<StdArc<DecodeRejection>> {
+        self.last_decode_rejection.load_full()
+    }
+}
+
 impl Runtime {
-    pub(super) fn ingestor_status(
-        &self,
-        key: &DomainNodeRef,
-    ) -> Arc<task_status::TaskStatus<RuntimeReconnectStatus>> {
+    pub(super) fn ingestor_status(&self, key: &DomainNodeRef) -> Arc<IngestorStatus> {
         if let Some(status) = self.inner.ingestor_statuses.get(key) {
             return status.clone();
         }
         // Execution preparation serializes this entity's first registration before instances start.
-        let status = Arc::new(task_status::TaskStatus::<RuntimeReconnectStatus>::default());
+        let status = Arc::new(IngestorStatus::default());
         self.inner
             .ingestor_statuses
             .insert(key.clone(), status.clone());
@@ -1094,7 +1217,9 @@ impl Runtime {
         error: impl Into<String>,
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        self.ingestor_status(&key).record_error(error.into());
+        self.ingestor_status(&key)
+            .connection
+            .record_error(error.into());
     }
 
     pub(in crate::runtime) fn clear_ingestor_transient_error(
@@ -1104,7 +1229,7 @@ impl Runtime {
     ) {
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
         if let Some(status) = self.inner.ingestor_statuses.get(&key) {
-            status.clear();
+            status.connection.clear();
         }
     }
 
@@ -1113,11 +1238,15 @@ impl Runtime {
         domain: &DomainName,
         ingestor: &IngestorName,
         expected_instances: NonZeroU64,
-    ) {
-        self.inner.ingestor_readiness.insert(
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone()),
-            IngestorReadiness::new(expected_instances),
-        );
+    ) -> Vec<IngestorInstanceReadiness> {
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        if let Some(predecessor) = self.inner.ingestor_readiness.get(&key) {
+            predecessor.retire();
+        }
+        let readiness = IngestorReadiness::new(expected_instances);
+        let handles = readiness.instances.clone();
+        self.inner.ingestor_readiness.insert(key, readiness);
+        handles
     }
 
     pub(in crate::runtime) fn prepare_ingestor_quiescence(
@@ -1147,10 +1276,10 @@ impl Runtime {
             self.inner.metrics.clone(),
             metric_labels,
         ));
-        if self.ingestors_paused_for_memory_pressure() {
-            control.engage(IngestorQuiesceCause::MemoryPressure);
-        }
         self.inner.ingestor_quiescence.insert(key, control.clone());
+        // Read after the control is visible, and under the lock a pause marks itself under, so a
+        // memory-pressure pause either engages this control or is observed here.
+        self.inner.memory_pressure.engage_if_paused(&control);
         // Read after the control is visible, so a local intake boundary closing concurrently
         // either engages this control itself or is observed here.
         if self.local_intake_is_closed() {
@@ -1266,68 +1395,16 @@ impl Runtime {
         }
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "the source task checks its retained quiesce state before each admitted \
-                      payload or poll"
-        )
-    )]
-    pub(in crate::runtime) fn mark_ingestor_instance_ready(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        instance_idx: u64,
-    ) {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if let Some(mut readiness) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 (86bc9eqjv): retain the source instance readiness publication \
-             instead of finding its registry slot during polling",
-            self.inner.ingestor_readiness.get_mut(&key)
-        ) {
-            readiness.ready_instances.insert(instance_idx);
-        }
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "the source task checks its retained quiesce state before each admitted \
-                      payload or poll"
-        )
-    )]
-    pub(in crate::runtime) fn mark_ingestor_instance_unready(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        instance_idx: u64,
-    ) {
-        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        if let Some(mut readiness) = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 (86bc9eqjv): retain the source instance readiness publication \
-             instead of finding its registry slot during polling",
-            self.inner.ingestor_readiness.get_mut(&key)
-        ) {
-            readiness.ready_instances.remove(&instance_idx);
-        }
-    }
-
     pub(in crate::runtime) fn clear_ingestor_readiness(
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
     ) {
-        self.inner
-            .ingestor_readiness
-            .remove(&DomainNodeRef::node_in(
-                domain.clone(),
-                ModelKind::Ingestor,
-                ingestor.clone(),
-            ));
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        if let Some(readiness) = self.inner.ingestor_readiness.get(&key) {
+            readiness.retire();
+        }
+        self.inner.ingestor_readiness.remove(&key);
     }
 
     pub(super) fn ingestor_ready(&self, domain: &DomainName, ingestor: &IngestorName) -> bool {
@@ -1372,52 +1449,39 @@ impl Runtime {
         }
     }
 
+    /// Pauses every ingestor this node registered, including those still starting, which register
+    /// their quiesce control before they run. Returns how many it paused.
     pub(crate) async fn pause_ingestors_for_memory_pressure(&self) -> usize {
-        self.inner
-            .ingestors_paused_for_memory_pressure
-            .store(true, Ordering::SeqCst);
-        let ingestors = self
+        let registered = self
             .inner
-            .ingestors
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect::<Vec<_>>();
-
-        let mut quiesced = 0;
-        for key in ingestors {
+            .memory_pressure
+            .pause(&self.inner.ingestor_quiescence);
+        let mut quiesced = 0_usize;
+        for RegisteredQuiesceControl { key, control } in registered {
             nervix_primitives::task::consume_budget().await;
-            if self
-                .engage_ingestor_quiesce(
-                    &key.domain,
-                    &IngestorName::from(key.identifier()),
-                    IngestorQuiesceCause::MemoryPressure,
-                )
-                .is_some()
-            {
-                quiesced += 1;
-            }
+            control.engage(IngestorQuiesceCause::MemoryPressure);
+            info!(
+                domain = key.domain.as_str(),
+                ingestor = key.identifier().as_str(),
+                cause = IngestorQuiesceCause::MemoryPressure.as_str(),
+                "ingestor entered quiesce"
+            );
+            quiesced = quiesced
+                .checked_add(1)
+                .assured("a node holds fewer than usize::MAX ingestors");
         }
         quiesced
     }
 
-    pub(crate) async fn resume_one_ingestor_after_memory_pressure(
-        &self,
-    ) -> Result<bool, RuntimeError> {
-        let mut keys = self
+    /// Releases the memory-pressure quiesce of one paused ingestor, and reports whether one was
+    /// paused.
+    pub(crate) async fn resume_one_ingestor_after_memory_pressure(&self) -> bool {
+        let Some(key) = self
             .inner
-            .ingestor_quiescence
-            .iter()
-            .filter_map(|entry| {
-                (entry.value().cause() == Some(IngestorQuiesceCause::MemoryPressure))
-                    .then(|| entry.key().clone())
-            })
-            .collect::<Vec<_>>();
-        keys.sort();
-        let Some(key) = keys.first() else {
-            self.inner
-                .ingestors_paused_for_memory_pressure
-                .store(false, Ordering::SeqCst);
-            return Ok(false);
+            .memory_pressure
+            .next_to_resume(&self.inner.ingestor_quiescence)
+        else {
+            return false;
         };
         self.release_ingestor_quiesce(
             &key.domain,
@@ -1429,17 +1493,93 @@ impl Runtime {
             ingestor = key.identifier().as_str(),
             "resumed ingestor after memory pressure"
         );
-        Ok(true)
+        true
     }
 
     pub(crate) fn ingestors_paused_for_memory_pressure(&self) -> bool {
-        self.inner
-            .ingestors_paused_for_memory_pressure
-            .load(Ordering::SeqCst)
+        self.inner.memory_pressure.is_paused()
+    }
+}
+
+/// Whether memory pressure pauses this node's ingestors, and the one lock every decision about it
+/// takes.
+///
+/// A starting ingestor registers its quiesce control before it reads the pause under the lock. A
+/// pause marks itself and collects every registered control under the lock, and resuming clears it
+/// under the lock only once no registered control is still paused by it. A starting ingestor is
+/// therefore among the controls a pause engages, or engages itself because it observes the pause,
+/// or observes no pause; and no control is left paused by memory pressure once the pause is clear.
+#[derive(Debug, Default)]
+pub(in crate::runtime) struct MemoryPressurePause {
+    paused: nervix_primitives::sync::blocking::Mutex<bool>,
+}
+
+/// The quiesce controls of a node's ingestors, as the runtime registers them.
+type IngestorQuiesceControls = DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>;
+
+/// One registered quiesce control, and the ingestor it belongs to.
+struct RegisteredQuiesceControl {
+    key: DomainNodeRef,
+    control: Arc<IngestorQuiesceControl>,
+}
+
+impl MemoryPressurePause {
+    fn is_paused(&self) -> bool {
+        *self.paused.lock()
+    }
+
+    /// Engages `control`, which its ingestor has just registered, when memory pressure pauses
+    /// ingestors.
+    fn engage_if_paused(&self, control: &IngestorQuiesceControl) {
+        let paused = self.paused.lock();
+        if *paused {
+            control.engage(IngestorQuiesceCause::MemoryPressure);
+        }
+    }
+
+    /// Marks ingestors paused, and returns every control registered by then, which the caller
+    /// engages.
+    fn pause(&self, controls: &IngestorQuiesceControls) -> Vec<RegisteredQuiesceControl> {
+        let mut paused = self.paused.lock();
+        *paused = true;
+        controls
+            .iter()
+            .map(|entry| RegisteredQuiesceControl {
+                key: entry.key().clone(),
+                control: entry.value().clone(),
+            })
+            .collect()
+    }
+
+    /// The registered ingestor to resume next, the first in key order that memory pressure still
+    /// pauses, or `None` once it pauses none, which clears the pause.
+    fn next_to_resume(&self, controls: &IngestorQuiesceControls) -> Option<DomainNodeRef> {
+        let mut paused = self.paused.lock();
+        let mut next: Option<DomainNodeRef> = None;
+        for entry in controls.iter() {
+            if !entry.value().paused_by_memory_pressure() {
+                continue;
+            }
+            let earlier = match &next {
+                Some(current) => entry.key() < current,
+                None => true,
+            };
+            if earlier {
+                next = Some(entry.key().clone());
+            }
+        }
+        if next.is_none() {
+            *paused = false;
+        }
+        next
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{IngestQuiesceMode, IngestQuiesceOverflow, IngestorName, ModelKind};
     use nervix_primitives::sync::{
@@ -2019,6 +2159,30 @@ mod tests {
         assert_eq!(control.counters().dropped_total, 1);
     }
 
+    /// An ingestor registers its quiesce control before it starts running, so memory pressure that
+    /// engages while it starts must still pause it.
+    #[nervix_primitives::test]
+    async fn memory_pressure_pauses_an_ingestor_that_is_still_starting() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let ingestor = named::<IngestorName>("source");
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let control =
+            test_ingestor_quiesce_control(&runtime, &domain, &ingestor, IngestQuiesceMode::Suspend);
+        runtime
+            .inner
+            .ingestor_quiescence
+            .insert(key.clone(), control.clone());
+
+        runtime.pause_ingestors_for_memory_pressure().await;
+
+        assert_eq!(
+            control.cause(),
+            Some(IngestorQuiesceCause::MemoryPressure),
+            "an ingestor still starting when memory pressure paused ingestors runs unpaused"
+        );
+    }
+
     #[nervix_primitives::test]
     async fn memory_pressure_quiesces_registered_ingestors_without_stopping_them() {
         let runtime = Runtime::default();
@@ -2039,6 +2203,7 @@ mod tests {
                 shutdown: shutdown_tx,
                 branched: Vec::new(),
                 tasks: vec![task],
+                domain_offsets: None,
             },
         );
         runtime.inner.ingestor_quiescence.insert(
@@ -2058,17 +2223,10 @@ mod tests {
                 .and_then(|control| control.cause()),
             Some(IngestorQuiesceCause::MemoryPressure)
         );
+        assert!(runtime.resume_one_ingestor_after_memory_pressure().await);
         assert!(
-            runtime
-                .resume_one_ingestor_after_memory_pressure()
-                .await
-                .expect("resume should succeed")
-        );
-        assert!(
-            !runtime
-                .resume_one_ingestor_after_memory_pressure()
-                .await
-                .expect("pause should clear after the last ingestor resumes")
+            !runtime.resume_one_ingestor_after_memory_pressure().await,
+            "the pause clears once the last ingestor resumes"
         );
         runtime
             .stop_ingestor(&domain, &ingestor)
@@ -2082,12 +2240,7 @@ mod tests {
 
         assert_eq!(runtime.pause_ingestors_for_memory_pressure().await, 0);
         assert!(runtime.ingestors_paused_for_memory_pressure());
-        assert!(
-            !runtime
-                .resume_one_ingestor_after_memory_pressure()
-                .await
-                .expect("resume should succeed")
-        );
+        assert!(!runtime.resume_one_ingestor_after_memory_pressure().await);
         assert!(!runtime.ingestors_paused_for_memory_pressure());
     }
 
@@ -2418,6 +2571,125 @@ mod tests {
         #[test]
         fn shuttle_a_shutdown_ends_a_delivery_waiting_for_extension_room() {
             check_interleavings(|| interrupted_delivery_keeps_its_payload(Interruption::Shutdown));
+        }
+
+        /// What ends the wait of a live payload for a place the extension class never frees.
+        #[derive(Debug, Clone, Copy)]
+        enum LiveInterruption {
+            BufferingQuiesce,
+            Stop,
+        }
+
+        /// A live payload the open control let dispatch waits for a place on a full extension
+        /// class while another task quiesces the ingestor under `BUFFER` or stops it. Only that
+        /// interruption can end the wait, so a waiter that registered after reading the decision
+        /// it watches would never wake, which Shuttle reports as a deadlock. A new decision is the
+        /// one the payload is decided under next, and the buffer retains it, counted with its
+        /// bytes; a stop leaves nothing retained.
+        fn interrupted_live_delivery(interruption: LiveInterruption) {
+            shuttle::future::block_on(async move {
+                let metrics = RuntimeMetrics::default();
+                let metric_labels =
+                    metrics.register_ingestor_quiesce(&domain("default"), &named("source"), None);
+                let control = Arc::new(IngestorQuiesceControl::new(
+                    IngestQuiesceMode::Buffer {
+                        max_size: "1MiB".to_string(),
+                        overflow: IngestQuiesceOverflow::DropOldest,
+                    },
+                    metrics,
+                    metric_labels,
+                ));
+                let mut decided = control.observation();
+                let intake = control.intake(
+                    0,
+                    BufferedIngestPayload::new(
+                        b"live",
+                        BufferedIngestMetadata::without_headers(),
+                        Timestamp::from_unix_nanos(1),
+                    ),
+                    false,
+                );
+                let IngestorQuiesceIntake::Dispatch(live) = intake else {
+                    panic!("an open control lets a live payload dispatch");
+                };
+
+                let executor = single_worker_executor();
+                let held = HeldExtensionQueue::hold(&executor).await;
+                let (stop_tx, mut stop) = watch::channel(false);
+                let interrupter = nervix_primitives::task::spawn({
+                    let control = control.clone();
+                    async move {
+                        match interruption {
+                            LiveInterruption::BufferingQuiesce => {
+                                control.engage(IngestorQuiesceCause::EntityHold);
+                            }
+                            LiveInterruption::Stop => {
+                                stop_tx.send_replace(true);
+                            }
+                        }
+                        // The sender outlives the delivery either way, so a dropped sender never
+                        // stands in for the interruption under check.
+                        stop_tx
+                    }
+                });
+
+                let charge = executor
+                    .try_reserve(MemoryClass::Relay, 1)
+                    .assured("the relay class has room for one more byte");
+                let unfolding = executor.run_cpu_with(
+                    CpuClass::Extension,
+                    QueueAdmission::WaitForPlace,
+                    charge,
+                    |_charge, _cancellation| (),
+                );
+                let end = control
+                    .run_until_redecided(&mut decided, &mut stop, unfolding)
+                    .await;
+                let _stop_tx = interrupter
+                    .await
+                    .assured("the interrupting task returns the stop sender");
+
+                match interruption {
+                    LiveInterruption::BufferingQuiesce => {
+                        assert!(
+                            matches!(end, LiveDeliveryEnd::Redecide),
+                            "only the new decision ends a wait for a place that never frees: \
+                             {end:?}"
+                        );
+                        assert!(
+                            decided.is_quiesced(),
+                            "the payload is decided next under the decision that ended its wait"
+                        );
+                        assert!(matches!(
+                            control.intake(0, live, false),
+                            IngestorQuiesceIntake::Buffered
+                        ));
+                        assert_eq!(control.counters().buffered_records, 1);
+                        assert_eq!(control.counters().buffered_bytes, b"live".len());
+                        control.release(IngestorQuiesceCause::EntityHold);
+                    }
+                    LiveInterruption::Stop => {
+                        assert!(
+                            matches!(end, LiveDeliveryEnd::Stopped),
+                            "only the stop ends a wait for a place that never frees: {end:?}"
+                        );
+                        assert_eq!(control.counters(), IngestorQuiesceCounters::default());
+                    }
+                }
+                held.release().await;
+            });
+        }
+
+        #[test]
+        fn shuttle_a_new_quiesce_decides_again_on_a_live_payload_waiting_for_extension_room() {
+            check_interleavings(|| {
+                interrupted_live_delivery(LiveInterruption::BufferingQuiesce);
+            });
+        }
+
+        #[test]
+        fn shuttle_a_stop_ends_a_live_payload_waiting_for_extension_room() {
+            check_interleavings(|| interrupted_live_delivery(LiveInterruption::Stop));
         }
     }
 }

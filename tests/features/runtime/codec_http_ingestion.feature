@@ -2,11 +2,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: JSON ingestion preserves every wire value and reports strict and malformed payloads
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA json_value (
         max_u8 U8,
@@ -51,8 +51,8 @@ Feature: HTTP codec ingestion
       CREATE RELAY json_values SCHEMA json_value UNBRANCHED;
       CREATE VHOST edge json-values-{{test_id}}.example.com;
       CREATE ENDPOINT json_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
-      CREATE INGESTOR json_values_ingestor
-        FROM ENDPOINT json_values_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR json_values_ingestor
+        FROM json_values_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_value_codec
         TO json_values
         INHERIT ALL
@@ -158,14 +158,134 @@ Feature: HTTP codec ingestion
       | 1            | VEC<ARRAY<I16, 2>> |
       | 3            | VEC<ARRAY<I16, 2>> |
 
-  Scenario Outline: HTTP endpoint ingestor maps a payload encoded as <wire_format> from wire field order into internal schema order
-    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+  Scenario Outline: A <wire_format> codec binds every exact wire type to the internal type of its name
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA exact_value (
+        u8_max U8,
+        i8_min I8,
+        u16_max U16,
+        i16_min I16,
+        u32_max U32,
+        i32_min I32,
+        u64_max U64,
+        i64_min I64,
+        f32_value F32,
+        f64_value F64,
+        occurred_at DATETIME
+      );
+      CREATE WIRE <wire_format> SCHEMA exact_value_wire MODE STRICT (
+        u8_max U8,
+        i8_min I8,
+        u16_max U16,
+        i16_min I16,
+        u32_max U32,
+        i32_min I32,
+        u64_max U64,
+        i64_min I64,
+        f32_value F32,
+        f64_value F64,
+        occurred_at DATETIME
+      );
+      CREATE CODEC exact_value_codec
+        FROM WIRE <wire_format> SCHEMA exact_value_wire
+        TO SCHEMA exact_value;
+      CREATE RELAY exact_values SCHEMA exact_value UNBRANCHED;
+      CREATE VHOST edge exact-values-{{test_id}}.example.com;
+      CREATE ENDPOINT exact_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR exact_values_ingestor
+        FROM exact_values_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING exact_value_codec
+        TO exact_values
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION exact_values_subscription TO exact_values;
+      START;
+      """
+    When http payload encoded as "<wire_format>" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
+      """
+      {"u8_max":255,"i8_min":-128,"u16_max":65535,"i16_min":-32768,"u32_max":4294967295,"i32_min":-2147483648,"u64_max":18446744073709551615,"i64_min":-9223372036854775808,"f32_value":1.25,"f64_value":-2.5,"occurred_at":"2024-02-29T12:34:56.123456789Z"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"f32_value":1.25,"f64_value":-2.5,"i16_min":-32768,"i32_min":-2147483648,"i64_min":-9223372036854775808,"i8_min":-128,"occurred_at":"2024-02-29T12:34:56.123456789+00:00","u16_max":65535,"u32_max":4294967295,"u64_max":18446744073709551615,"u8_max":255}
+      """
+    When http payload encoded as "<wire_format>" is posted to host "exact-values-{{test_id}}.example.com" path "/ingest"
+      """
+      {"u8_max":256,"i8_min":0,"u16_max":0,"i16_min":0,"u32_max":0,"i32_min":0,"u64_max":0,"i64_min":0,"f32_value":0.5,"f64_value":0.5,"occurred_at":"2024-02-29T12:34:56Z"}
+      """
+    Then within "10s" the active session observes a server error containing
+      """
+      codec 'exact_value_codec' failed to parse field 'u8_max'
+      """
+
+    Examples:
+      | cluster_size | wire_format |
+      | 1            | JSON        |
+      | 3            | JSON        |
+      | 1            | CBOR        |
+      | 3            | CBOR        |
+
+  Scenario Outline: A <wire_format> number reads as the F32 whose shortest decimal it is
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA single_value ( value F32 );
+      CREATE WIRE <wire_format> SCHEMA single_value_wire MODE STRICT ( value number );
+      CREATE CODEC single_value_codec
+        FROM WIRE <wire_format> SCHEMA single_value_wire
+        TO SCHEMA single_value;
+      CREATE RELAY single_values SCHEMA single_value UNBRANCHED;
+      CREATE VHOST edge single-values-{{test_id}}.example.com;
+      CREATE ENDPOINT single_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR single_values_ingestor
+        FROM single_values_endpoint MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING single_value_codec
+        TO single_values
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION single_values_subscription TO single_values;
+      START;
+      """
+    When http payload is posted to host "single-values-{{test_id}}.example.com" path "/ingest"
+      """
+      {"value":7.038531e-26}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"value":7.038530691851209e-26}
+      """
+
+    Examples:
+      | cluster_size | wire_format |
+      | 1            | JSON        |
+      | 3            | JSON        |
+
+  Scenario Outline: HTTP endpoint ingestor maps a payload encoded as <wire_format> from wire field order into internal schema order
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -186,8 +306,8 @@ Feature: HTTP codec ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -224,11 +344,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a schemaful codec
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metrics (
         device STRING,
@@ -251,8 +371,8 @@ Feature: HTTP codec ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR metrics_ingestor
-        FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metrics_ingestor
+        FROM metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metrics_codec
         TO metrics_stream
         INHERIT ALL
@@ -284,11 +404,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: HTTP endpoint ingestor preserves multidimensional fixed and variable array shapes
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA shaped_metrics (
         device STRING,
@@ -309,8 +429,8 @@ Feature: HTTP codec ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-      CREATE INGESTOR shaped_metrics_ingestor
-        FROM ENDPOINT shaped_metrics_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR shaped_metrics_ingestor
+        FROM shaped_metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING shaped_metrics_codec
         TO shaped_metrics_stream
         INHERIT ALL
@@ -338,11 +458,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: Schemaful <wire_format> wire schemas enforce strictness for extra fields
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -382,8 +502,8 @@ Feature: HTTP codec ingestion
         PATH '/loose'
         TYPE HTTP;
 
-      CREATE INGESTOR strict_notifications_source
-        FROM ENDPOINT strict_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR strict_notifications_source
+        FROM strict_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING strict_notification_codec
         TO strict_notifications
         INHERIT ALL
@@ -392,8 +512,8 @@ Feature: HTTP codec ingestion
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR loose_notifications_source
-        FROM ENDPOINT loose_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR loose_notifications_source
+        FROM loose_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING loose_notification_codec
         TO loose_notifications
         INHERIT ALL
@@ -431,11 +551,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a JAQ-native codec
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metrics (
         device STRING,
@@ -454,8 +574,8 @@ Feature: HTTP codec ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR metrics_ingestor
-        FROM ENDPOINT metrics_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR metrics_ingestor
+        FROM metrics_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metrics_codec
         TO metrics_stream
         INHERIT ALL
@@ -485,11 +605,11 @@ Feature: HTTP codec ingestion
   Scenario Outline: HTTP endpoint ingestor delivers a single <wire_format> payload through a JAQ-native codec
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -507,8 +627,8 @@ Feature: HTTP codec ingestion
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

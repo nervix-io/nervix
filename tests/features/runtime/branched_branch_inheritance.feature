@@ -3,11 +3,11 @@ Feature: Branched branch inheritance
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         tenant STRING,
@@ -24,14 +24,13 @@ Feature: Branched branch inheritance
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA tenant_user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
         CREATE RELAY projected_notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-branched-processor-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL

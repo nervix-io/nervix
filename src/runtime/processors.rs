@@ -2,12 +2,12 @@ use std::{collections::VecDeque, num::NonZeroUsize, time::Duration};
 
 use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     Assignment, AssignmentTarget, BranchName, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
     ErrorPolicies, FieldName, InferencerTensorDeclaration, InferencerTensorMapping,
-    MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName, RouteConstruction,
-    StructuredMessageError, Timestamp,
+    MessageErrorOperation, MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName,
+    RouteConstruction, StructuredMessageError, Timestamp,
 };
 use nervix_primitives::sync::{Arc, StdArc};
 use nervix_roto::UdfExecutor;
@@ -23,13 +23,13 @@ use nervix_wasm::CompiledWasmProcessor;
 use ordered_float::OrderedFloat;
 
 use super::{
-    BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchKey, BranchRuntime,
+    BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchRuntime, BranchScope,
     CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest, DeduplicatorKeyspace,
     DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch, RelayBoundaryServices,
     RelayMessage, RelayRecordBatch, ReplicatedWasmProcessorState, ReplicatedWindowProcessorState,
     RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence,
-    WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
-    inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchError,
+    WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState,
+    inferencer::OnnxInferencerSession,
 };
 use crate::{
     registry::{BranchInstanceAckBoundary, BranchedProcessorNodeSpec},
@@ -82,7 +82,7 @@ pub(super) struct WasmAckContext {
 #[derive(Debug, Clone)]
 pub(super) struct BranchInstanceTemplate {
     pub(super) revision: ProcessorPlanRevision,
-    pub(super) source_kind: ModelKind,
+    pub(super) entity_kind: ModelKind,
     pub(super) source: RelayName,
     pub(super) root_relay: RelayName,
     pub(super) branch: Option<BranchName>,
@@ -131,6 +131,9 @@ pub(super) enum RelayProcessorOperationTemplate {
     },
     WindowProcessor {
         output_routes: RelayProcessorOutputsTemplate,
+        /// The schema every input relay of the processor shares. The aggregates are compiled
+        /// against it, and a branch restores the rows its open window retains under it.
+        input_schema: Arc<CompiledSchema>,
         width_messages: Option<usize>,
         step_messages: Option<usize>,
         width_duration: Option<Duration>,
@@ -352,44 +355,27 @@ pub(super) enum ProcessorCompileError {
 /// Every way resolving a stateful processor's materialized dependencies for one branch fails.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ProcessorMaterializedError {
-    #[error("failed to read the domain routing for branch '{}'", branch_key_display(.branch))]
-    DomainRouting { branch: Option<BranchKey> },
+    #[error("failed to read the domain routing ({branch})")]
+    DomainRouting { branch: BranchScope },
+    #[error("failed to resolve materialized dependencies ({branch})")]
+    Resolve { branch: BranchScope },
     #[error(
-        "failed to resolve materialized dependencies in branch '{}'",
-        branch_key_display(.branch)
+        "materialized state a REQUIRED SKIP dependency needs was evicted after the batch was \
+         admitted ({branch})"
     )]
-    Resolve { branch: Option<BranchKey> },
+    EvictedRequiredSkip { branch: BranchScope },
     #[error(
-        "{} '{}' requires materialized state that was evicted from branch '{}' after the batch was \
-         admitted",
-        .node_kind.as_str(),
-        .processor.as_str(),
-        branch_key_display(.branch)
+        "materialized state a REQUIRED WAIT dependency awaits was evicted after the batch was \
+         admitted ({branch})"
     )]
-    EvictedRequiredSkip {
-        node_kind: ModelKind,
-        processor: ModelName,
-        branch: Option<BranchKey>,
-    },
-    #[error(
-        "{} '{}' awaits materialized state that was evicted from branch '{}' after the batch was \
-         admitted",
-        .node_kind.as_str(),
-        .processor.as_str(),
-        branch_key_display(.branch)
-    )]
-    EvictedRequiredWait {
-        node_kind: ModelKind,
-        processor: ModelName,
-        branch: Option<BranchKey>,
-    },
+    EvictedRequiredWait { branch: BranchScope },
 }
 
 /// A stateful processor failed to publish the live state its branch task owns.
 #[derive(Debug, thiserror::Error)]
-#[error("failed to publish processor live state for branch '{}'", branch_key_display(.branch))]
+#[error("failed to publish processor live state ({branch})")]
 pub(super) struct ProcessorLiveStateError {
-    pub(super) branch: Option<BranchKey>,
+    pub(super) branch: BranchScope,
 }
 
 #[derive(Debug, Clone)]
@@ -709,33 +695,28 @@ pub(super) enum ReordererOutputBatchError {
     RowCountOverflow,
     #[error("cannot order an empty reorderer output buffer")]
     Empty,
-    #[error("failed to concatenate buffered reorderer batches: {report}")]
-    Concatenate {
-        report: Report<RelayRecordBatchError>,
-    },
-    #[error("failed to reorder the buffered relay batch: {report}")]
-    Reorder {
-        report: Report<RelayRecordBatchError>,
-    },
+    #[error("failed to concatenate buffered reorderer batches")]
+    Concatenate,
+    #[error("failed to reorder the buffered relay batch")]
+    Reorder,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("{error}")]
+/// A reorderer flush that failed, together with every batch the buffer held. The caller resolves
+/// the ACKs those batches carry, so a failure that dropped one would strand them.
+#[derive(Debug)]
 pub(super) struct ReordererOutputBatchFailure {
-    #[source]
-    pub(super) error: ReordererOutputBatchError,
+    pub(super) error: Report<ReordererOutputBatchError>,
     pub(super) batches: Vec<RelayRecordBatch>,
 }
 
 impl ReordererOutputBatchFailure {
-    /// Fail a flush while handing every buffered batch back to the caller. The caller resolves the
-    /// ACKs those batches carry, so a failure that dropped one would strand them.
+    /// Fail a flush while handing every buffered batch back to the caller.
     fn retaining(
         error: ReordererOutputBatchError,
         pending: Vec<ReordererPendingBatch>,
     ) -> Box<Self> {
         Box::new(Self {
-            error,
+            error: Report::new(error),
             batches: pending.into_iter().map(|pending| pending.batch).collect(),
         })
     }
@@ -835,9 +816,9 @@ impl ReordererOutputBuffer {
             Err(failure) => {
                 let failure = *failure;
                 return Err(Box::new(ReordererOutputBatchFailure {
-                    error: ReordererOutputBatchError::Concatenate {
-                        report: failure.error,
-                    },
+                    error: failure
+                        .error
+                        .change_context(ReordererOutputBatchError::Concatenate),
                     batches: failure.preserved,
                 }));
             }
@@ -850,9 +831,9 @@ impl ReordererOutputBuffer {
             Err(failure) => {
                 let failure = *failure;
                 Err(Box::new(ReordererOutputBatchFailure {
-                    error: ReordererOutputBatchError::Reorder {
-                        report: failure.error,
-                    },
+                    error: failure
+                        .error
+                        .change_context(ReordererOutputBatchError::Reorder),
                     batches: vec![failure.batch],
                 }))
             }
@@ -942,6 +923,26 @@ pub(super) enum ReorderKeyPart {
     Utf8(String),
     Bytes(Vec<u8>),
     Datetime(i64),
+}
+
+impl ReorderKeyPart {
+    /// The bytes of the text or byte value this part owns on the heap, and nothing for a part held
+    /// inline.
+    pub(super) fn value_bytes(&self) -> u64 {
+        match self {
+            Self::Utf8(value) => {
+                u64::try_from(value.len()).assured("an addressable string's length fits 64 bits")
+            }
+            Self::Bytes(value) => u64::try_from(value.len())
+                .assured("an addressable byte string's length fits 64 bits"),
+            Self::Null
+            | Self::Boolean(_)
+            | Self::Int64(_)
+            | Self::UInt64(_)
+            | Self::Float64(_)
+            | Self::Datetime(_) => 0,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1042,20 +1043,142 @@ pub(super) struct PlannedMessageError {
     pub(super) execution_now: Timestamp,
 }
 
-#[derive(thiserror::Error)]
-#[error("{reason}")]
-pub(super) struct PlannedGeneralError {
-    pub(super) acks: Vec<AckSet>,
-    pub(super) reason: String,
+/// Why a planned batch failed as a whole rather than one message at a time.
+///
+/// A variant names the step that failed and, where a program ran it, the program by the operation
+/// its rejected messages report. The failure the step itself returned stays beneath it in the
+/// report, and nothing is formatted until the node's error policy reports the failure.
+#[derive(Debug, PartialEq, thiserror::Error)]
+pub(super) enum PlannedGeneralError {
+    #[error(
+        "{} received {found} {sidecar} rows for {expected} records",
+        ProgramName::of(.operation)
+    )]
+    SidecarRowCount {
+        operation: MessageErrorOperation,
+        sidecar: PlannedSidecar,
+        expected: usize,
+        found: usize,
+    },
+    #[error(
+        "{} produced {produced} rows for {selected} selected rows",
+        ProgramName::of(.operation)
+    )]
+    SelectedRowCount {
+        operation: MessageErrorOperation,
+        produced: usize,
+        selected: usize,
+    },
+    #[error("{} selected row {row} outside its {rows}-row input", ProgramName::of(.operation))]
+    SelectedRowOutOfBounds {
+        operation: MessageErrorOperation,
+        row: usize,
+        rows: usize,
+    },
+    #[error("failed to prepare {} LOOKUP_HASH_MAP inputs", ProgramName::of(.operation))]
+    PrepareLookups { operation: MessageErrorOperation },
+    #[error("failed to prepare {} input batch", ProgramName::of(.operation))]
+    PrepareInput { operation: MessageErrorOperation },
+    #[error("{} execution failed", ProgramName::of(.operation))]
+    Execute { operation: MessageErrorOperation },
+    #[error("failed to materialize {} error input row {row}", ProgramName::of(.operation))]
+    MaterializeErrorInput {
+        operation: MessageErrorOperation,
+        row: usize,
+    },
+    #[error("failed to materialize successful {} rows", ProgramName::of(.operation))]
+    MaterializeOutput { operation: MessageErrorOperation },
+    #[error("failed to build {} output batch", ProgramName::of(.operation))]
+    BuildOutputBatch { operation: MessageErrorOperation },
+    #[error("evaluated output route '{relay}' without preparing its relay schema")]
+    OutputSchemaUnprepared { relay: RelayName },
+    #[error("failed to project output relay '{relay}'")]
+    ProjectOutput { relay: RelayName },
+    #[error("FILTER-MAP output schema does not match relay '{relay}'")]
+    OutputSchemaMismatch { relay: RelayName },
+    #[error("failed to select the input rows of branch construction")]
+    SelectBranchInputs,
+    #[error("branch construction wrote '{field}', which is not a field name")]
+    BranchFieldName { field: String },
+    #[error("branch construction wrote field '{field}' as a type no branch key holds")]
+    BranchFieldType { field: FieldName },
+    #[error("failed to read branch field '{field}'")]
+    BranchFieldValue { field: FieldName },
+    #[error("branch field '{field}' is null")]
+    BranchFieldNull { field: FieldName },
+    #[error("branch construction wrote no branch key")]
+    BranchKey,
+    #[error("branch construction failed for input row {row}")]
+    BranchRow { row: usize },
+    #[error("failed to group output rows by their branch")]
+    GroupByBranch,
+    #[error("ordering group expression produced no ordering group column")]
+    OrderingGroupColumn,
+    #[error("ordering group expression produced {data_type}, expected STRING")]
+    OrderingGroupType { data_type: arrow_schema::DataType },
+    #[error("ordering group expression referenced missing input row {row}")]
+    OrderingGroupRow { row: usize },
+    #[error("failed to prepare the HTTP requests of the batch")]
+    HttpRequests,
 }
 
 pub(super) type PlannedGeneralResult<T> = error_stack::Result<T, PlannedGeneralError>;
 
-impl std::fmt::Debug for PlannedGeneralError {
+/// A row sidecar a planned program reads beside the batch it runs over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(super) enum PlannedSidecar {
+    #[strum(serialize = "runtime metadata")]
+    RuntimeMetadata,
+    #[strum(serialize = "branch key")]
+    BranchKeys,
+    #[strum(serialize = "ingest metadata")]
+    IngestMetadata,
+    #[strum(serialize = "input")]
+    Input,
+}
+
+/// How a planned failure names the program whose rejected messages report `operation`: by the
+/// clause the node's Plexus spells it with, or by the operation's own name.
+pub(super) struct ProgramName(MessageErrorOperation);
+
+impl ProgramName {
+    pub(super) fn of(operation: &MessageErrorOperation) -> Self {
+        Self(*operation)
+    }
+}
+
+impl std::fmt::Display for ProgramName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match &self.0 {
+            MessageErrorOperation::SourceWhere => "FROM WHERE",
+            MessageErrorOperation::FilterWhere => "FILTER WHERE",
+            MessageErrorOperation::RouteWhere => "ROUTE WHERE",
+            MessageErrorOperation::Set => "FILTER-MAP",
+            MessageErrorOperation::BranchSet => "branch construction",
+            operation => operation.as_ref(),
+        };
+        formatter.write_str(name)
+    }
+}
+
+/// A failure that ends a whole planned batch, with the acknowledgements of every message the batch
+/// held. Whoever reports the failure resolves them through the node's error policy.
+pub(super) struct PlannedGeneralFailure {
+    pub(super) error: Report<PlannedGeneralError>,
+    pub(super) acks: Vec<AckSet>,
+}
+
+impl PlannedGeneralFailure {
+    pub(super) fn new(error: Report<PlannedGeneralError>, acks: Vec<AckSet>) -> Self {
+        Self { error, acks }
+    }
+}
+
+impl std::fmt::Debug for PlannedGeneralFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PlannedGeneralError")
+        f.debug_struct("PlannedGeneralFailure")
+            .field("error", &self.error)
             .field("ack_count", &self.acks.len())
-            .field("reason", &self.reason)
             .finish()
     }
 }
@@ -1066,6 +1189,10 @@ pub(super) struct FilterMapPlan {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{

@@ -4,11 +4,11 @@ Feature: Altering reingestors and generators
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( key integer, alternate integer );
@@ -17,8 +17,8 @@ Feature: Altering reingestors and generators
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reingestor.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -37,7 +37,7 @@ Feature: Altering reingestors and generators
       """
       {"alternate":2,"key":1}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER REINGESTOR repartition
         SET DETACHED,
@@ -51,7 +51,7 @@ Feature: Altering reingestors and generators
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE REINGESTOR repartition;
       """
@@ -84,11 +84,11 @@ Feature: Altering reingestors and generators
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( key integer, alternate integer );
@@ -98,8 +98,8 @@ Feature: Altering reingestors and generators
       CREATE RELAY generated SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-generator.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TIMESTAMP NOW
         TO state_events INHERIT ALL UNBRANCHED
@@ -123,7 +123,7 @@ Feature: Altering reingestors and generators
       """
       {"alternate":6,"key":5}
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER GENERATOR synth SET EACH 1h;
       """
@@ -131,7 +131,7 @@ Feature: Altering reingestors and generators
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER GENERATOR synth
         SET EACH 200ms,
@@ -144,7 +144,7 @@ Feature: Altering reingestors and generators
       """
       quiesce level: ENTITY_PAUSE
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE GENERATOR synth;
       """

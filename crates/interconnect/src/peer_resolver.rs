@@ -8,6 +8,14 @@
 //!   primitive boundary offers only in its Turmoil mode.
 //! - **Must not know.** Sockets, TLS, HTTP/2, peer identity, or transport operations.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{net::SocketAddr, time::Duration};
 
 use error_stack::Report;

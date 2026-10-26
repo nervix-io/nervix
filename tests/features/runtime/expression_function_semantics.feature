@@ -2,11 +2,11 @@ Feature: Expression function semantics
   Scenario Outline: Case conversion agrees across literal, column and repeated expressions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA greeting (
         id STRING,
@@ -33,8 +33,8 @@ Feature: Expression function semantics
       CREATE RELAY normalized_greetings SCHEMA normalized_greeting UNBRANCHED;
       CREATE VHOST edge case-mapping-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/greetings' TYPE HTTP;
-      CREATE INGESTOR greeting_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR greeting_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING greeting_codec
         TO greetings
           INHERIT ALL
@@ -77,11 +77,11 @@ Feature: Expression function semantics
   Scenario Outline: NULLIF uses the same equality as the comparison operator
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA measurement (
         id STRING,
@@ -107,8 +107,8 @@ Feature: Expression function semantics
       CREATE RELAY compared_measurements SCHEMA compared_measurement UNBRANCHED;
       CREATE VHOST edge nullif-equality-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/measurements' TYPE HTTP;
-      CREATE INGESTOR measurement_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR measurement_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_codec
         TO measurements
           INHERIT ALL
@@ -155,11 +155,11 @@ Feature: Expression function semantics
   Scenario Outline: Regular expressions prepare constant patterns and read per-message patterns
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA note (
         id STRING,
@@ -195,8 +195,8 @@ Feature: Expression function semantics
       CREATE RELAY note_errors SCHEMA note_error UNBRANCHED;
       CREATE VHOST edge regexp-patterns-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/notes' TYPE HTTP;
-      CREATE INGESTOR note_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR note_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING note_codec
         TO notes
           INHERIT ALL
@@ -265,11 +265,11 @@ Feature: Expression function semantics
   Scenario Outline: CASE ignores float function errors from unselected arms
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA growth (
         id STRING,
@@ -296,8 +296,8 @@ Feature: Expression function semantics
       CREATE RELAY growth_errors SCHEMA growth_error UNBRANCHED;
       CREATE VHOST edge unselected-arm-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/growths' TYPE HTTP;
-      CREATE INGESTOR growth_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR growth_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING growth_codec
         TO growths
           INHERIT ALL
@@ -345,11 +345,11 @@ Feature: Expression function semantics
   Scenario Outline: List sum reports integer overflow as a message error
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         id STRING,
@@ -376,8 +376,8 @@ Feature: Expression function semantics
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge list-sum-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings
           INHERIT ALL
@@ -421,11 +421,11 @@ Feature: Expression function semantics
   Scenario Outline: Count and position functions read unsigned counts in full and refuse text a STRING cannot hold
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA sizing (
         id STRING,
@@ -458,8 +458,8 @@ Feature: Expression function semantics
       CREATE RELAY sizing_errors SCHEMA sizing_error UNBRANCHED;
       CREATE VHOST edge text-sizing-{{test_id}}.example.com;
       CREATE ENDPOINT sizing_ingress ON edge PATH '/sizings' TYPE HTTP;
-      CREATE INGESTOR sizing_source
-        FROM ENDPOINT sizing_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sizing_source
+        FROM sizing_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sizing_batch_codec
         TO sizings
           INHERIT ALL
@@ -512,7 +512,7 @@ Feature: Expression function semantics
 
   Scenario Outline: List item functions reject nested elements when the statement is applied
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "function 'first' requires ARRAY or VEC elements of a scalar type"
+    When these Plexus commands fail with "function 'first' requires ARRAY or VEC elements of a scalar type"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA detection_batch (

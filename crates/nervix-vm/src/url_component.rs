@@ -7,8 +7,16 @@
 //!   percent-decoding that rejects a malformed escape or text that is not UTF-8.
 //! - **Depends on.** The `url` crate, Arrow string, integer, Boolean and list columns, and the VM's
 //!   row errors.
-//! - **Must not know.** NSPL syntax, routes, schemas or connectors. It never resolves a host,
+//! - **Must not know.** Plexus syntax, routes, schemas or connectors. It never resolves a host,
 //!   fetches a URL or consults a public-suffix list.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
 
 use std::num::NonZeroUsize;
 

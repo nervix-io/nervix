@@ -2,11 +2,11 @@ Feature: Session subscription delivery options
   Scenario Outline: Dropping sampled session subscriptions suppress matching records
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA telemetry (
         device STRING,
@@ -29,8 +29,8 @@ Feature: Session subscription delivery options
         ON edge
         PATH '/telemetry'
         TYPE HTTP;
-        CREATE INGESTOR telemetry_http
-        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR telemetry_http
+        FROM telemetry_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
         TIMESTAMP NOW
         TO telemetry
@@ -56,11 +56,11 @@ Feature: Session subscription delivery options
 
   Scenario Outline: A fractional sample rate passes part of the rows, drawn independently per subscription
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metric (
         value I64
@@ -77,8 +77,8 @@ Feature: Session subscription delivery options
         ON edge
         PATH '/metrics'
         TYPE HTTP;
-      CREATE INGESTOR metric_http
-        FROM ENDPOINT metric_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_http
+        FROM metric_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TIMESTAMP NOW
         TO metrics
@@ -104,11 +104,11 @@ Feature: Session subscription delivery options
 
   Scenario Outline: Rows a subscription filter cannot evaluate are skipped and reported
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA ratio (
         device STRING,
@@ -129,8 +129,8 @@ Feature: Session subscription delivery options
         ON edge
         PATH '/ratios'
         TYPE HTTP;
-      CREATE INGESTOR ratio_http
-        FROM ENDPOINT ratio_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR ratio_http
+        FROM ratio_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ratio_codec
         TIMESTAMP NOW
         TO ratios
@@ -171,11 +171,11 @@ Feature: Session subscription delivery options
   Scenario Outline: Blocking sampled session subscriptions deliver records after filtering
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA telemetry (
         device STRING,
@@ -198,8 +198,8 @@ Feature: Session subscription delivery options
         ON edge
         PATH '/telemetry'
         TYPE HTTP;
-        CREATE INGESTOR telemetry_http
-        FROM ENDPOINT telemetry_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR telemetry_http
+        FROM telemetry_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING telemetry_codec
         TIMESTAMP NOW
         TO telemetry

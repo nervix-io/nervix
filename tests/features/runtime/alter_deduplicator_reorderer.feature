@@ -3,11 +3,11 @@ Feature: Altering deduplicators and reorderers
   Scenario Outline: ALTER DEDUPLICATOR applies ordered operations and SHOW CREATE renders the result
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE RELAY incoming_a SCHEMA event UNBRANCHED;
@@ -61,11 +61,11 @@ Feature: Altering deduplicators and reorderers
   Scenario Outline: ALTER REORDERER applies ordered operations and SHOW CREATE renders the result
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( primary_key I64, secondary_key I64 );
       CREATE RELAY incoming_a SCHEMA event UNBRANCHED;
@@ -119,11 +119,11 @@ Feature: Altering deduplicators and reorderers
   Scenario Outline: Deduplicator MAX TIME changes dynamically without losing its state
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( key integer, alternate integer );
@@ -132,8 +132,8 @@ Feature: Altering deduplicators and reorderers
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-dedup-dynamic.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -159,7 +159,7 @@ Feature: Altering deduplicators and reorderers
       {"key":1,"alternate":2}
       """
     Then the relay subscription does not receive a payload within "300ms"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER DEDUPLICATOR dedup_events SET MAX TIME 1ms;
       """
@@ -182,11 +182,11 @@ Feature: Altering deduplicators and reorderers
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( key I64, alternate I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( key integer, alternate integer );
@@ -195,8 +195,8 @@ Feature: Altering deduplicators and reorderers
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-dedup-key.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -217,7 +217,7 @@ Feature: Altering deduplicators and reorderers
       """
       "key":1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER DEDUPLICATOR dedup_events SET DEDUPLICATE ON input.alternate;
       """
@@ -248,11 +248,11 @@ Feature: Altering deduplicators and reorderers
   Scenario Outline: Reorderer MAX TIME changes dynamically and releases buffered output
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( primary_key I64, secondary_key I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( primary_key integer, secondary_key integer );
@@ -261,8 +261,8 @@ Feature: Altering deduplicators and reorderers
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reorder-dynamic.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -280,7 +280,7 @@ Feature: Altering deduplicators and reorderers
       {"primary_key":1,"secondary_key":1}
       """
     Then the relay subscription does not receive a payload within "300ms"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER REORDERER order_events SET MAX TIME 1ms;
       """
@@ -303,21 +303,21 @@ Feature: Altering deduplicators and reorderers
     Given entity gate deadline is configured as "5s"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( primary_key I64, secondary_key I64 );
-      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( primary_key integer, secondary_key integer );
-      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE CODEC event_codec FROM JSON TO SCHEMA event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE RELAY incoming SCHEMA event UNBRANCHED;
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-alter-reorder-key.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO incoming INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -330,7 +330,7 @@ Feature: Altering deduplicators and reorderers
       CREATE SUBSCRIPTION outgoing_subscription TO outgoing;
       START;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       ALTER REORDERER order_events SET BY input.secondary_key;
       """
@@ -338,13 +338,10 @@ Feature: Altering deduplicators and reorderers
       """
       quiesce level: ENTITY_PAUSE
       """
+    # Both candidates enter one ingestion batch and share the reorder interval.
     When http payload is posted to host "http-{{test_id}}-alter-reorder-key.example.com" path "/events"
       """
-      {"primary_key":1,"secondary_key":2}
-      """
-    And http payload is posted to host "http-{{test_id}}-alter-reorder-key.example.com" path "/events"
-      """
-      {"primary_key":2,"secondary_key":1}
+      [{"primary_key":1,"secondary_key":2},{"primary_key":2,"secondary_key":1}]
       """
     Then within "5s" the relay subscription receives payloads in order
       """

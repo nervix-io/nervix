@@ -1,6 +1,6 @@
 //! The path a JSON extraction follows from the root of a document to the value it reads.
 //!
-//! A path is written as text inside an NSPL string literal, such as `'$.orders[0]["unit price"]'`,
+//! A path is written as text inside a Plexus string literal, such as `'$.orders[0]["unit price"]'`,
 //! and parsed once, when the statement is parsed, into the steps it takes. Execution follows the
 //! steps and never reads the text again, and canonical rendering writes the steps back.
 

@@ -1,6 +1,8 @@
 # Command Line Client
 
-`nervix-cli` is the interactive NSPL client. It is installed alongside `nervix-server`
+*Plexus, the Nervix graph definition language.*
+
+`nervix-cli` is the interactive Plexus client. It is installed alongside `nervix-server`
 ([Cargo Install From GitHub](installation-cargo.md)) and is also present in the container image
 ([Docker](installation-docker.md)).
 
@@ -40,7 +42,8 @@ nervix-cli --server https://nervix.example.com:47390 --tls required --tls-ca-cer
 | `--domain <NAME>` | | `default` | domain the session starts in |
 | `--username <NAME>` | `NERVIX_USERNAME` | `default` | registry user |
 | `--password <PASSWORD>` | `NERVIX_PASSWORD` | | prompted interactively when unset |
-| `--command <NSPL>` | | | run statements once and exit |
+| `--command <Plexus>` | | | run statements once and exit |
+| `--backup-wait-timeout <DURATION>` | | `10m` | overall wait of one `BACKUP` command across its cuts, redirects and reconnects, from one millisecond through 24 hours; applies to `backup`, `--command` and the REPL |
 
 There is no general CLI configuration file and no `--version` flag. `--server`, `--domain`, and the
 TLS options have no environment-variable equivalents. The DNS options select the resolver used by
@@ -57,14 +60,14 @@ subcommand for this release.
 The client runs in exactly one of three modes, in this order of precedence:
 
 1. **A subcommand**, such as `subscribe`, `domain-clock`, `backup`, `restore`, or `drain-node`.
-2. **`--command`**, which submits NSPL, prints the result, and exits.
+2. **`--command`**, which submits Plexus, prints the result, and exits.
 3. **The interactive REPL**, when neither of the above is given.
 
 There is no file-execution mode. To run a saved script, pass it through `--command`; to format
-one, use [`nervix-nspl-format`](client-tools-nspl-format.md):
+one, use [`nervix-plexus-format`](client-tools-plexus-format.md):
 
 ```bash
-nervix-cli --domain quickstart --command "$(cat pipeline.nspl)"
+nervix-cli --domain quickstart --command "$(cat pipeline.plexus)"
 ```
 
 ## The Interactive REPL
@@ -139,10 +142,14 @@ independently of the prompt and are printed above it:
 [events] domain clock [simulation] tick: generation 3, id 12, boundary 2030-01-01T00:00:01.100Z, authority UTC 2026-09-27T00:00:00Z, node logical 2030-01-01T00:00:01.120Z
 ```
 
-A domain clock line follows every state change or accepted tick after the attach reply. A slow
-client may skip tick ids because its pending tick is replaced by the newest one. When the server ends an
-attachment, or the session holding it is interrupted and the clock is attached again on the next
-session, the line reads `[events] domain clock [<domain>] notice: ...` with the reason.
+A domain clock line follows each newer state or accepted tick after the attach reply. A state or
+tick that changes again before it is delivered or read is replaced by the newest one, so a slow
+client can skip states and tick ids. Between prompts the REPL holds at most 128 event lines, each
+cut at 8 KiB with `… [line truncated]`; lines that arrive while it is full are dropped, and
+`[events] notice: <n> event lines were omitted because terminal output could not keep up` reports
+how many. When the server ends an attachment, or the session holding it is interrupted and the clock
+is attached again on the next session, the line reads `[events] domain clock [<domain>] notice: ...`
+with the reason.
 
 The REPL prints these lines when it draws its next prompt: after the statement that is running
 finishes, or when you press Enter on an empty line.
@@ -152,10 +159,10 @@ a new one; the client also opens one at once while a subscription or a followed 
 restored. Server notices then resume with the new session, rows arrive from every subscription
 restored on it or opened after it, and a followed clock prints its state again once it is attached
 there. When the client cannot open a session within its 120-second retry deadline, a line names
-what is waiting and why, and the client keeps trying:
+what is waiting and the whole chain of why, and the client keeps trying:
 
 ```text
-[events] notice: subscription events could not resume yet: failed to connect to server; the client keeps trying
+[events] notice: subscription events could not resume yet: failed to connect to server: transport error: tcp connect error: tcp connect error: Connection refused (os error 111); the client keeps trying
 ```
 
 After a reconnect the CLI opens every subscription and attaches every clock again. When the new
@@ -163,7 +170,7 @@ session refuses one, a notice line reports the server's message and when the nex
 
 ```text
 [events] subscription [watch] notice: opening the subscription again failed: stream 'orders' does not exist in domain 'quickstart'; the next attempt follows in 2s
-[events] domain clock [simulation] notice: attaching the clock again failed: session-scoped and client-local statements cannot be queued in a transaction; the next attempt follows in 1s
+[events] domain clock [simulation] notice: attaching the clock again failed: session-scoped and client-local statements cannot be queued in a transaction; the next attempt follows in 2s
 ```
 
 `DELETE SUBSCRIPTION` of a subscription no open session holds, because its session ended or the new
@@ -217,13 +224,15 @@ attached to the clock of domain 'simulation': generation 1, paced: period 1s, sk
 ```
 
 A second attach is refused because the session already follows that clock, and a detach without an
-attachment is refused because it does not. The CLI attaches the clocks it follows again after a
-reconnect. See [Domain Clock Attachment](sessions.md#domain-clock-attachment). Read-only statements, subscriptions, `CREATE DOMAIN`, `CREATE USER`, and node
-administration are also rejected while queueing transaction content. `DESCRIBE TRANSACTION` is the
-exception: while a transaction is open it reads that transaction's impact report without queueing
-anything or consuming an operation number, so the next queued statement keeps the number it would
-have had. It must be submitted on its own. With an id it reads another transaction of the same user
-and leaves the prompt, the active domain, and the attached transaction as they were:
+attachment is refused because it does not. `USE` does not detach a clock, so the REPL can follow the
+clocks of several domains at once, and the CLI attaches the clocks it follows again after a
+reconnect. See [Domain Clock Attachment](sessions.md#domain-clock-attachment). Read-only statements,
+subscriptions, `CREATE DOMAIN`, `CREATE USER`, and node administration are also rejected while
+queueing transaction content. `DESCRIBE TRANSACTION` is the exception: while a transaction is open
+it reads that transaction's impact report without queueing anything or consuming an operation
+number, so the next queued statement keeps the number it would have had. It must be submitted on its
+own. With an id it reads another transaction of the same user and leaves the prompt, the active
+domain, and the attached transaction as they were:
 
 ```bash
 nervix-cli --domain production --command \
@@ -233,7 +242,9 @@ nervix-cli --domain production --command \
 For a standalone `--command` inspection with `FORMAT JSON`, stdout contains exactly one JSON
 document serialized from the typed report, without terminal decoration or unrelated events.
 Failures print one JSON object with `error.code` and `error.message` on stdout and exit nonzero;
-diagnostic details and unrelated events go to stderr. `FORMAT TEXT` uses the normal readable
+a configuration, connection or request failure's message is the whole chain of causes, such as
+`invalid server URL: relative URL without a base`. Diagnostic details and unrelated events go to
+stderr. `FORMAT TEXT` uses the normal readable
 terminal output. Inspection output is complete rather than paginated or truncated, so redirect a
 large text or JSON report to a file or downstream process when terminal output is impractical.
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
@@ -268,7 +279,7 @@ sorted line for every selected model. In a transaction, the queued response is a
 ## Backing Up
 
 `BACKUP` in the REPL or through `--command` runs the backup and downloads its archive into the
-named file on this machine. The `backup` subcommand does the same with arguments instead of NSPL,
+named file on this machine. The `backup` subcommand does the same with arguments instead of Plexus,
 and exits with a nonzero status whenever the archive was not delivered:
 
 ```bash
@@ -277,13 +288,28 @@ nervix-cli --domain payments backup domain --output - --without-resources > paym
 nervix-cli backup domain payments --output payments.nvxb --format json
 ```
 
-`--output -` writes the archive to standard output and the report to standard error. `--format
-json` prints the report, or the failure, as one JSON document. `DESCRIBE BACKUP` reads a local
-archive without connecting to a server, whether it is typed in the REPL or passed to `--command`:
+`--output -` writes the archive to standard output and the report to standard error. A standard
+output that would discard the archive, the null device or one that was closed when the CLI started,
+fails with `WRITE_FAILED` before the backup is taken. The archive is downloaded and verified in a
+staging directory first; when standard output then fails, for example because its reader closed
+the pipe, the CLI keeps the verified archive there and reports `WRITE_FAILED` with the backup's
+execution reference and the kept file, which is the only copy left.
+[Backup And Restore](backup-and-restore.md#delivering-to-standard-output) describes how to recover
+it. `--format json` prints the report, or the failure, as one JSON document. `DESCRIBE
+BACKUP` reads a local archive without connecting to a server, whether it is typed in the REPL or
+passed to `--command`:
 
 ```bash
 nervix-cli --command "DESCRIBE BACKUP 'cluster.nvxb' FORMAT JSON;"
 ```
+
+The description lists every runtime state section of each domain under `runtime_state`. A
+deduplicator line names its keyspace's branch fingerprint, key count, groups, revision and schema
+fingerprint; a window processor line names its branch fingerprint, retained rows, groups, branch
+incarnation, next admission sequence, pending delayed histogram removals, revision, schema
+fingerprint and window model digest. JSON reports the same values with `kind` `deduplicator` or
+`window_processor`, together with the length and digest of every section. Neither form prints
+branch-key values or deduplicator keys.
 
 See [Backup And Restore](backup-and-restore.md) for what an archive holds and how long the server
 retains it.
@@ -292,14 +318,22 @@ retains it.
 
 `RESTORE` in the REPL or through `--command` streams the archive the statement names from this
 machine to the leader, and prints the restore's report when it ends. The `restore` subcommand does
-the same with arguments instead of NSPL, shows how much of the archive was sent while it streams,
+the same with arguments instead of Plexus, shows how much of the archive was sent while it streams,
 and exits with a nonzero status whenever the restore did not complete:
 
 ```bash
 nervix-cli restore cluster --input cluster.nvxb --on-existing-user skip
 nervix-cli restore domain payments --as payments_copy --input cluster.nvxb
 nervix-cli restore domain payments --input payments.nvxb --dry-run --format json
+nervix-cli restore domain payments --input payments.nvxb --resume --format json
 ```
+
+`--resume` starts the complete restored domain at its archived generation and mapping, preserving
+materialized rows, deduplicator keys and windows. The default leaves it stopped; a subsequent
+normal `START` advances its generation and clears materialized state, while deduplicator keys and
+windows continue. A window whose model or branch incarnation changed starts empty, and the report
+lists it among its warnings. Text and JSON reports include each domain's status and
+start generation, including the planned lifecycle of a dry run.
 
 `--dry-run` verifies the archive and plans the restore without changing anything, and `--format
 json` prints the report, or the failure, as one JSON document. The Rust client sends the archive
@@ -329,7 +363,7 @@ nervix-cli --domain quickstart subscribe sampled orders \
 | `--dropping` | drop deliveries when the session transport queue is full |
 | `--blocking` | block instead of dropping; this is the default, so the flag is only ever explicit |
 | `--batch-sample-rate <0.0-1.0>` | sampling of each row the predicate selected |
-| `--where <expression>` | NSPL predicate over delivered records, read exactly as the `WHERE` clause of a typed `CREATE SUBSCRIPTION` and validated locally before the subscription opens |
+| `--where <expression>` | Plexus predicate over delivered records, read exactly as the `WHERE` clause of a typed `CREATE SUBSCRIPTION` and validated locally before the subscription opens |
 
 `--dropping` and `--blocking` are mutually exclusive. Subscription semantics, sampling, and
 backpressure are covered in [Sessions](sessions.md).
@@ -380,7 +414,10 @@ observers can parse them. Every line has one of these forms:
 Within a line:
 
 - In the attach reply, state, and tick lines, fields are separated by `, ` and appear in the order
-  shown. Each field is its name, one space, and its value.
+  shown. Each field but the state is its name, one space, and its value, and a name can contain
+  spaces, as `logical origin`, `UTC anchor`, `time rate`, `authority UTC` and `node logical` do.
+  The state is `stopped`, `uninstalled`, `unpaced`, or `paced:` followed by one space and the
+  period field.
 - `<n>` is an unsigned decimal integer. The generation counts the domain's `START`s, and tick ids
   number the ticks of a generation from one: a tick's boundary is the logical origin plus the id
   minus one periods.
@@ -403,10 +440,13 @@ new session. A node that is still starting answers the attach once it has instal
 committed domains, so a restart never ends the attachment. When the new session refuses the attach
 for another reason, a notice line reports it and when the client tries again on that session.
 
-The server ends an attachment when the domain no longer exists on the serving node; the end line is
-the last clock line and the command exits with status `0`, as it does after Ctrl-C detaches the
-clock. A refused attach, including a missing domain, prints the typed reason on stderr and exits
-nonzero, as does a lost session the client cannot replace within its retry deadline.
+The server ends an attachment when the domain no longer exists on the serving node, and a new
+session that no longer has the domain ends it the same way. `<reason>` then reads
+`the domain no longer exists on the serving node`. The end line is the last clock line and the
+command exits with status `0`, as it does after Ctrl-C detaches the clock or finds it already
+detached. A failed connection, a refused attach, including a missing domain, and a refused detach
+print the typed reason on stderr and exit nonzero, as does a lost session the client cannot replace
+within its retry deadline.
 
 ## Cluster Node Administration
 
@@ -457,8 +497,11 @@ the server, so it works before a cluster exists.
 Persistent statements are applied by the leader. The CLI gives each one a stable execution
 reference and retains it until the terminal result. If the session lands on a follower, the client
 follows the redirect and reconnects on its own, repeating the statement under the same reference,
-and waits out an election the same way; all of it is bounded by the client's 120-second retry
-deadline. A statement the leader never answered in that time is reported with its execution
+and waits out an election the same way; ordinary commands are bounded by the client's 120-second
+retry deadline. `BACKUP` uses the global `--backup-wait-timeout` instead, ten minutes by default,
+for the entire command across all domain cuts and reconnections. This applies to Plexus in
+`--command` and the REPL as well as the `backup` subcommand. Its per-domain `TIMEOUT` does not
+determine that total wait. A statement the leader never answered in its wait is reported with its execution
 reference as not known yet. A redirect that reaches the terminal as a statement's own result is
 printed as:
 
@@ -466,10 +509,16 @@ printed as:
 topology: not-a-leader, retry on leader 'node-2' at http://10.0.0.12:47391/
 ```
 
+After an uncertain backup, `backup --execution-reference REFERENCE` recovers the admitted command
+and downloads its archive with the original selected domain, scope, resources and capture
+options. The output file or stdout destination may change. The JSON failure report exposes
+`error.execution_reference`; [Backup And Restore](backup-and-restore.md#waiting-and-recovering)
+describes recovery and retention limits.
+
 Transaction controls follow the same redirect beginning with `BEGIN`. The CLI retains the returned
 transaction id and attaches it on the new connection before resuming any queued statement or
 commit. Each append keeps its execution reference and expected queue position. A pending commit
 waits for the exact retained terminal result recorded under its own reference. An open
 transaction therefore survives an unclean connection loss or leader failover; a clean CLI exit
-reverts it. See [Replicated NSPL Transactions](control-plane.md#replicated-nspl-transactions) and
+reverts it. See [Replicated Plexus Transactions](control-plane.md#replicated-plexus-transactions) and
 [Client Session Protocol](client-session-protocol.md).

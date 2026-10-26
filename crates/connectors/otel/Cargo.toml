@@ -19,13 +19,14 @@ arrow-schema = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
+faster-hex = { workspace = true }
 flate2 = { workspace = true }
 hyper-util = { workspace = true, features = ["client-legacy", "tokio"] }
 meticulous = { workspace = true }
 nervix-approx-into = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-dns = { workspace = true }
-nervix-models = { workspace = true }
+nervix-models = { workspace = true, features = ["arrow"] }
 nervix-primitives = { workspace = true, features = ["native"] }
 opentelemetry-proto = { workspace = true, features = [
   "gen-tonic",
@@ -50,6 +51,7 @@ tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
+bolero = { workspace = true }
 # The test hosts hand a sink the node's executor, as the server's host does.
 nervix-execution = { workspace = true }
 nervix-test-environment = { workspace = true }

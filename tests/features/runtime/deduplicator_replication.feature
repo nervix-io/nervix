@@ -5,13 +5,13 @@ Feature: Deduplicator state replication
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "notifications_out_{{test_id}}" is observed
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA transaction (
         tenant STRING,
@@ -35,8 +35,8 @@ Feature: Deduplicator state replication
         ON edge
         PATH '/dedup'
         TYPE HTTP;
-        CREATE INGESTOR source_txns
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR source_txns
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING transaction_codec
         TO ss1
         INHERIT ALL
@@ -53,13 +53,12 @@ Feature: Deduplicator state replication
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE EMITTER kafka_notifications FROM ss2 TO KAFKA kafka_main TOPIC notifications_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING transaction_codec
+        CREATE KAFKA TOPIC EMITTER kafka_notifications FROM ss2 TO kafka_main TOPIC 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING transaction_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG

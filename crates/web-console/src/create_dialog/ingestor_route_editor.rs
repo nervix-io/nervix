@@ -6,6 +6,11 @@
 //! - **Depends on.** Browser drafts and typed choice presentation.
 //! - **Must not know.** Registry validation or data-plane execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use leptos::prelude::*;
 
 use super::{

@@ -1,4 +1,4 @@
-//! Resource upload: the archive a directory becomes, and the stream that carries it to a server.
+//! Edges layer: the archive a directory becomes, and the stream that carries it to a server.
 //!
 //! - **Owns.** Building the deterministic archive of a directory, streaming it as upload frames,
 //!   checking the reply against the upload it answers, and the routing that reply calls for.
@@ -12,7 +12,7 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
-use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     EncodedFrame, RequestId, UploadChunk, UploadDisposition, UploadFrame, UploadReply,
@@ -24,8 +24,9 @@ use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
 use tempfile::TempPath;
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
 };
+use tokio_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 
 use crate::{
@@ -46,6 +47,10 @@ const _: () = assert!(UPLOAD_CHUNK_BYTES <= SESSION_LIMITS.frame_bytes() / 2);
 /// Upload frames queued for the stream before the archive reader waits for the transport.
 const UPLOAD_FRAME_CAPACITY: usize = 8;
 
+/// Archive construction keeps one bounded read buffer and one bounded write buffer, avoiding
+/// a filesystem worker handoff for every small tar copy and header write.
+const ARCHIVE_BUFFER_BYTES: usize = 1024 * 1024;
+
 /// The request identity of an upload's start frame. Every attempt is a stream of its own that
 /// exactly one reply answers, so the identity only has to be non-zero.
 const UPLOAD_REQUEST_ID: RequestId = RequestId::new(NonZeroU64::MIN);
@@ -56,9 +61,9 @@ impl Client {
         identifier: &str,
         directory: impl AsRef<Path>,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let Some(domain) = self.domain().await else {
-            return Err(ClientError::NoActiveDomain);
+            return Err(Report::new(ClientError::NoActiveDomain));
         };
         self.upload_resource_from_directory_with_identity(
             identifier,
@@ -81,11 +86,10 @@ impl Client {
         domain: DomainName,
         upload_identity: ResourceUploadIdentity,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
-    ) -> Result<CommandOutcome, ClientError> {
+    ) -> error_stack::Result<CommandOutcome, ClientError> {
         let resource =
-            ResourceName::parse(identifier).map_err(|report| ClientError::InvalidResourceName {
+            ResourceName::parse(identifier).change_context(ClientError::InvalidResourceName {
                 name: identifier.to_string(),
-                source: report.current_context().clone(),
             })?;
         let archive = UploadArchive::build(directory.as_ref()).await?;
         let result =
@@ -100,13 +104,12 @@ impl Client {
                         total_bytes: archive.total_bytes,
                     }
                     .encode(&SESSION_LIMITS)
-                    .map_err(|report| ClientError::EncodeRequest {
+                    .change_context(ClientError::EncodeRequest {
                         request: RequestKind::UploadResource,
-                        source: report.current_context().clone(),
                     })?;
                     let reader = File::open(&archive.path)
                         .await
-                        .map_err(|_| ClientError::BuildUploadArchive)?;
+                        .change_context(ClientError::BuildUploadArchive)?;
                     let stream = UploadAttempt {
                         channel: self.current_channel().await,
                         start,
@@ -130,21 +133,22 @@ impl Client {
                             match self.recover_session(RecoveryMode::Replace).await? {
                                 SessionRecovery::Ready => continue,
                                 SessionRecovery::Unavailable => {
-                                    return Err(ClientError::UploadResource(status));
+                                    return Err(Report::new(ClientError::UploadResource(status)));
                                 }
                             }
                         }
-                        Err(status) => return Err(ClientError::UploadResource(status)),
+                        Err(status) => {
+                            return Err(Report::new(ClientError::UploadResource(status)));
+                        }
                     };
-                    let reply = UploadReply::decode(response.get_ref()).map_err(|report| {
-                        ClientError::InvalidUploadReply(report.current_context().clone())
-                    })?;
+                    let reply = UploadReply::decode(response.get_ref())
+                        .change_context(ClientError::InvalidUploadReply)?;
                     if let Some(request_id) = reply.request_id
                         && request_id != UPLOAD_REQUEST_ID
                     {
-                        return Err(ClientError::UnexpectedReply {
+                        return Err(Report::new(ClientError::UnexpectedReply {
                             request: RequestKind::UploadResource,
-                        });
+                        }));
                     }
                     let received = match &reply.disposition {
                         UploadDisposition::Installed {
@@ -158,10 +162,10 @@ impl Client {
                     if let Some(received) = received
                         && received != &upload_identity
                     {
-                        return Err(ClientError::UploadIdentityMismatch {
+                        return Err(Report::new(ClientError::UploadIdentityMismatch {
                             expected: upload_identity.clone(),
                             received: received.clone(),
-                        });
+                        }));
                     }
                     let outcome = CommandOutcome::from_upload(reply, upload_identity.clone());
                     match outcome.routing() {
@@ -184,17 +188,17 @@ impl Client {
             .await;
         match result {
             Ok(Ok(outcome)) => Ok(outcome),
-            Ok(Err(error)) if error.can_hide_installed_upload() => {
-                Err(ClientError::UncertainUpload {
+            Ok(Err(report)) if report.current_context().can_hide_installed_upload() => Err(report
+                .change_context(ClientError::UncertainUpload {
                     identity: upload_identity,
-                    source: Box::new(error),
-                })
+                })),
+            Ok(Err(report)) => Err(report),
+            Err(_) => {
+                let expired = Report::new(ClientError::RetryDeadline);
+                Err(expired.change_context(ClientError::UncertainUpload {
+                    identity: upload_identity,
+                }))
             }
-            Ok(Err(error)) => Err(error),
-            Err(_) => Err(ClientError::UncertainUpload {
-                identity: upload_identity,
-                source: Box::new(ClientError::RetryDeadline),
-            }),
         }
     }
 }
@@ -207,26 +211,29 @@ struct UploadArchive {
 }
 
 impl UploadArchive {
-    async fn build(directory: &Path) -> Result<Self, ClientError> {
+    async fn build(directory: &Path) -> error_stack::Result<Self, ClientError> {
         let directory = expand_user_path(directory);
         if !directory.is_dir() {
-            return Err(ClientError::BuildUploadArchive);
+            return Err(Report::new(ClientError::BuildUploadArchive));
         }
         let path = tempfile::NamedTempFile::new()
-            .map_err(|_| ClientError::BuildUploadArchive)?
+            .change_context(ClientError::BuildUploadArchive)?
             .into_temp_path();
         let file = File::create(&path)
             .await
-            .map_err(|_| ClientError::BuildUploadArchive)?;
-        Self::write(&directory, file)
-            .await
-            .map_err(|_| ClientError::BuildUploadArchive)?;
+            .change_context(ClientError::BuildUploadArchive)?;
+        Self::write(
+            &directory,
+            BufWriter::with_capacity(ARCHIVE_BUFFER_BYTES, file),
+        )
+        .await
+        .change_context(ClientError::BuildUploadArchive)?;
         let length = tokio::fs::metadata(&path)
             .await
-            .map_err(|_| ClientError::BuildUploadArchive)?
+            .change_context(ClientError::BuildUploadArchive)?
             .len();
         let Some(total_bytes) = NonZeroU64::new(length) else {
-            return Err(ClientError::BuildUploadArchive);
+            return Err(Report::new(ClientError::BuildUploadArchive));
         };
         Ok(Self { path, total_bytes })
     }
@@ -238,9 +245,11 @@ impl UploadArchive {
         W: AsyncWrite + Unpin + Send + Sync,
     {
         let entries = UploadArchiveEntry::collect(directory)?;
-        let mut builder = AsyncTarBuilder::new(writer);
+        // This constructor has no asynchronous drop finalizer: an error or cancellation
+        // abandons the partial archive with its writer. Only the successful path writes the
+        // terminator and flushes, before build exposes the temporary file to an upload.
+        let mut builder = AsyncTarBuilder::new_non_terminated(writer);
         builder.mode(HeaderMode::Deterministic);
-        let mut result = Ok(());
 
         for entry in entries {
             nervix_primitives::task::consume_budget().await;
@@ -248,7 +257,7 @@ impl UploadArchive {
             header.set_mtime(0);
             header.set_uid(0);
             header.set_gid(0);
-            let write_result = match entry {
+            match entry {
                 UploadArchiveEntry::Directory { relative } => {
                     header.set_size(0);
                     header.set_mode(0o755);
@@ -256,7 +265,7 @@ impl UploadArchive {
                     header.set_cksum();
                     builder
                         .append_data(&mut header, &relative, tokio::io::empty())
-                        .await
+                        .await?;
                 }
                 UploadArchiveEntry::File {
                     full_path,
@@ -268,20 +277,14 @@ impl UploadArchive {
                     header.set_entry_type(EntryType::Regular);
                     header.set_cksum();
                     let file = File::open(&full_path).await?;
-                    builder.append_data(&mut header, &relative, file).await
+                    let reader = BufReader::with_capacity(ARCHIVE_BUFFER_BYTES, file);
+                    builder.append_data(&mut header, &relative, reader).await?;
                 }
-            };
-
-            if let Err(error) = write_result {
-                result = Err(error);
-                break;
             }
         }
 
         let mut writer = builder.into_inner().await?;
-        let shutdown_result = writer.shutdown().await;
-        result?;
-        shutdown_result?;
+        writer.shutdown().await?;
         Ok(())
     }
 }
@@ -429,3 +432,7 @@ pub(crate) fn upload_status_is_retryable(status: &Status) -> bool {
     }
     false
 }
+
+#[cfg(all(test, not(feature = "shuttle")))]
+#[path = "upload_tests.rs"]
+mod tests;

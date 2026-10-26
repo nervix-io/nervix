@@ -1,9 +1,9 @@
-//! Decides the complete specification for starting one emitter's sink.
+//! Decides the complete specification for starting one emitter's emitter.
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** Resolving an emitter and the client Models its sink names into one typed start
-//!   plan: each connector's clients, sink parameters and publishing mode, lowered row mappings,
+//! - **Owns.** Resolving an emitter and the client Models its emitter names into one typed start
+//!   plan: each connector's clients, emitter parameters and publishing mode, lowered row mappings,
 //!   and the emitter's retry policy. It also binds every planned client to the configuration the
 //!   host resolved for it.
 //! - **Depends on.** The emitter and client Models, runtime vocabulary values, and the contract
@@ -15,11 +15,18 @@
 //! plan whose clients carry what their Models declare: the resource version each one mounts and the
 //! entries rendered against that mount. The host resolves those mounts, and
 //! [`EmitterStartPlan::resolve_clients`] binds the resolved paths into the plan that the emitter
-//! task and its sink constructors receive. Neither of them sees a Model.
+//! task and its emitter constructors receive. Neither of them sees a Model.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
+mod entities;
 use std::{num::NonZeroUsize, time::Duration};
 
 use arch_into::ArchInto as _;
+pub(super) use entities::*;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
@@ -33,17 +40,23 @@ use nervix_connector_mysql::MySqlConflictAction;
 use nervix_connector_nats::NatsPublishingMode;
 use nervix_connector_otel::{
     OtelAggregationTemporality, OtelLiteral, OtelMetric, OtelMetricKind, OtelResourceAttribute,
-    OtelScope, OtelSignal,
+    OtelScope,
 };
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
-    AckWindow, Assignment, AssignmentTarget, CLIENT_CONSUMER_SESSION_BYTES, ChannelName,
-    ClickHouseValueMapping, ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount,
-    CollectionName, CreateEmitter, EmitSink, EmitterBatchPolicy, EmitterPublishingMode, Expression,
-    FieldName, HttpOrigin, IcebergCatalog, IcebergStorageBackend, Literal, Model, QueueName,
-    RetryPolicy, RouteConstruction, SchemaName, SubjectName, TableName, TopicName,
-    parse_duration_text,
+    AckWindow, Assignment, AssignmentTarget, CLIENT_CONSUMER_SESSION_BYTES, ClickHouseEmitter,
+    ClickHouseTableEmitter, ClickHouseValueMapping, ClientConfigEntry, ClientConsumerEmitter,
+    ClientEmitter, ClientName, ClientPoolBounds, ClientResourceMount, CreateEmitter,
+    EmitterBatchPolicy, EmitterEntity, Expression, FieldName, HttpEmitter, HttpOrigin,
+    HttpRequestEmitter, IcebergCatalog, IcebergEmitter, IcebergStorageBackend, IcebergTableEmitter,
+    KafkaEmitter, KafkaTopicEmitter, Literal, Model, MongoDbCollectionEmitter, MongoDbEmitter,
+    MqttEmitter, MqttTopicEmitter, MySqlEmitter, MySqlTableEmitter, NatsEmitter,
+    NatsSubjectEmitter, OtelEmitter, OtelMappings, OtelMetricsEmitter, PostgresEmitter,
+    PostgresTableEmitter, PulsarEmitter, PulsarTopicEmitter, RabbitMqEmitter, RabbitMqQueueEmitter,
+    RedisEmitter, RedisPubSubEmitter, RetryPolicy, RouteConstruction, SchemaName, SentryEmitter,
+    SentryEventEmitter, SqsEmitter, SqsQueueEmitter, SyslogCollectorEmitter, SyslogEmitter,
+    ZeroMqEmitter, ZeroMqPushEmitter, parse_duration_text,
 };
 use nervix_vm::{
     SemanticScopePolicy, lower_route_construction,
@@ -80,18 +93,18 @@ impl EmitterDurationSetting {
     }
 }
 
-/// Why an emitter's sink cannot be planned from its Model and the client Models it names.
+/// Why an emitter's emitter cannot be planned from its Model and the client Models it names.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub(super) enum EmitterStartPlanError {
-    #[error("{sink} emitter client '{client}' does not exist")]
+    #[error("{connector} emitter client '{client}' does not exist")]
     MissingClient {
-        sink: &'static str,
+        connector: &'static str,
         client: ClientName,
     },
-    #[error("{sink} emitter requires a {expected} client, found {found} '{client}'")]
+    #[error("{connector} emitter requires a {expected} client, found {found} '{client}'")]
     ClientKindMismatch {
-        sink: &'static str,
-        expected: &'static str,
+        connector: &'static str,
+        expected: nervix_models::EmitterReferenceKind,
         found: &'static str,
         client: ClientName,
     },
@@ -107,11 +120,6 @@ pub(super) enum EmitterStartPlanError {
         client: ClientName,
         found: &'static str,
     },
-    #[error("MODE {mode} is not supported by the {sink} sink")]
-    UnsupportedPublishingMode {
-        mode: &'static str,
-        sink: &'static str,
-    },
     #[error("invalid {setting} '{value}'")]
     InvalidDuration {
         setting: EmitterDurationSetting,
@@ -123,28 +131,27 @@ pub(super) enum EmitterStartPlanError {
     RetryMaxBackoffBelowBackoff,
     #[error("ack timeout must be greater than zero")]
     ZeroAckTimeout,
-    #[error("{sink} emitter declares no BATCH MAX MESSAGES <n> MAX SIZE <bytes>")]
-    BatchRequired { sink: &'static str },
-    #[error("CLIENT emitter batch maximum {bytes} bytes exceeds the 32 MiB consumer window")]
+    #[error("{} emitter batch maximum {bytes} bytes exceeds the 32 MiB consumer window", <ClientConsumerEmitter as nervix_models::EmitterEntityModel>::KIND)]
     ClientBatchTooLarge { bytes: u64 },
-    #[error("HTTP emitter client '{client}' declares no http or https origin endpoint")]
+    #[error("{} emitter client '{client}' declares no http or https origin endpoint", <HttpRequestEmitter as nervix_models::EmitterEntityModel>::KIND)]
     InvalidHttpEndpoint { client: ClientName },
-    #[error("{sink} emitter '{emitter}' requires at least one VALUES mapping")]
+    #[error("{connector} emitter '{emitter}' requires at least one VALUES mapping")]
     EmptyValues {
-        sink: &'static str,
+        connector: &'static str,
         emitter: nervix_models::EmitterName,
     },
-    #[error("{sink} emitter '{emitter}' has invalid VALUES mappings")]
+    #[error("{connector} emitter '{emitter}' has invalid VALUES mappings")]
     InvalidValues {
-        sink: &'static str,
+        connector: &'static str,
         emitter: nervix_models::EmitterName,
     },
-    #[error("OTEL emitter '{emitter}' has a nonliteral RESOURCE attribute '{attribute}'")]
+    #[error("{kind} emitter '{emitter}' has a nonliteral RESOURCE attribute '{attribute}'")]
     InvalidOtelResource {
+        kind: nervix_models::EmitterEntityKind,
         emitter: nervix_models::EmitterName,
         attribute: String,
     },
-    #[error("Iceberg emitter '{emitter}' has invalid {setting} '{value}'")]
+    #[error("{} emitter '{emitter}' has invalid {setting} '{value}'", <IcebergTableEmitter as nervix_models::EmitterEntityModel>::KIND)]
     InvalidIcebergCommit {
         emitter: nervix_models::EmitterName,
         setting: IcebergCommitSetting,
@@ -152,7 +159,7 @@ pub(super) enum EmitterStartPlanError {
     },
 }
 
-/// A row sink's ordered external columns and its already lowered expression program.
+/// A row emitter's ordered external columns and its already lowered expression program.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct MappedValuesPlan {
     pub(super) columns: Vec<String>,
@@ -162,13 +169,13 @@ pub(super) struct MappedValuesPlan {
 impl MappedValuesPlan {
     pub(crate) fn decide(
         emitter: &nervix_models::EmitterName,
-        sink: &'static str,
+        connector: &'static str,
         namespace: &'static str,
         mappings: &[ClickHouseValueMapping],
     ) -> Result<Self, Report<EmitterStartPlanError>> {
         if mappings.is_empty() {
             return Err(Report::new(EmitterStartPlanError::EmptyValues {
-                sink,
+                connector,
                 emitter: emitter.clone(),
             }));
         }
@@ -192,7 +199,7 @@ impl MappedValuesPlan {
             SemanticScopePolicy::read_write("input", namespace),
         )
         .change_context(EmitterStartPlanError::InvalidValues {
-            sink,
+            connector,
             emitter: emitter.clone(),
         })?;
         Ok(Self {
@@ -214,6 +221,7 @@ fn otel_resource_attributes(
         .map(|mapping| {
             let value = otel_literal(&mapping.expression).ok_or_else(|| {
                 Report::new(EmitterStartPlanError::InvalidOtelResource {
+                    kind: emitter.connector.kind(),
                     emitter: emitter.name.clone(),
                     attribute: mapping.column.clone(),
                 })
@@ -267,32 +275,24 @@ fn iceberg_commit_policy(
 }
 
 impl EmitterStartPlanError {
-    /// The report for a publishing mode that `sink` does not publish with.
-    fn unsupported_mode(sink: &EmitSink, mode: &EmitterPublishingMode) -> Report<Self> {
-        Report::new(Self::UnsupportedPublishingMode {
-            mode: mode.kind_label(),
-            sink: sink.transport_label(),
-        })
-    }
-
-    /// The report for a sink whose client name resolved to a Model of another kind.
-    fn client_kind_mismatch(sink: &EmitSink, client: &Model) -> Report<Self> {
+    /// The report for an emitter whose client name resolved to a Model of another kind.
+    fn client_kind_mismatch(connector: &EmitterEntity, client: &Model) -> Report<Self> {
         Report::new(Self::ClientKindMismatch {
-            sink: sink.transport_label(),
-            expected: sink.expected_client_type(),
+            connector: connector.transport_label(),
+            expected: connector.capabilities().reference,
             found: Self::found_label(client),
-            client: sink
+            client: connector
                 .client()
-                .verified("only external sinks resolve client Models")
+                .verified("only external emitters resolve client Models")
                 .clone(),
         })
     }
 
-    /// How a Model that a client name resolved to reads in a kind mismatch: its client type, or
-    /// its model kind when the name resolved to something other than a client.
+    /// How a Model that a client name resolved to reads in a kind mismatch: the connector it
+    /// configures, or its model kind when the name resolved to something other than a client.
     fn found_label(model: &Model) -> &'static str {
-        match model.client_type_label() {
-            Some(label) => label,
+        match model.connector_kind() {
+            Some(connector) => connector.keyword(),
             None => model.kind().into(),
         }
     }
@@ -306,7 +306,7 @@ pub(super) struct DeclaredClientConfig {
     pub(super) entries: Vec<ClientConfigEntry>,
 }
 
-/// One client a sink connects through.
+/// One client an emitter connects through.
 ///
 /// `Config` is what the plan knows of the client's configuration: what its Model declares until
 /// the host resolves the client, and afterwards the rendered entries together with the mounted
@@ -318,7 +318,7 @@ pub(super) struct EmitterClientSpec<Config = ResolvedClientConfig> {
 }
 
 impl EmitterClientSpec<DeclaredClientConfig> {
-    /// The client a sink references by `expected`, as the Model registered under that name
+    /// The client an emitter references by `expected`, as the Model registered under that name
     /// declares it.
     fn declared(
         expected: &ClientName,
@@ -363,208 +363,14 @@ pub(super) enum PooledTransport {
     Redis,
 }
 
-/// Which pooled transport a sink's client speaks, and the bounds its pool is opened with.
+/// Which pooled transport an emitter's client speaks, and the bounds its pool is opened with.
 ///
-/// The pooled sink plans decide this from the client's Model, so the shared-client registry opens
+/// The pooled emitter plans decide this from the client's Model, so the shared-client registry opens
 /// what it is handed and never works out which driver it is talking to from a Model of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PooledClientPlan {
     pub(super) transport: PooledTransport,
     pub(super) bounds: ClientPoolBounds,
-}
-
-/// Declares the plan of a sink that connects through one client, together with the step that binds
-/// that client to the configuration the host resolved for it.
-macro_rules! single_client_sink_plan {
-    ($(#[$doc:meta])* $name:ident { $($field:ident: $type:ty),* $(,)? }) => {
-        $(#[$doc])*
-        #[derive(Debug, Clone, PartialEq)]
-        pub(super) struct $name<Config = ResolvedClientConfig> {
-            pub(super) client: EmitterClientSpec<Config>,
-            $(pub(super) $field: $type,)*
-        }
-
-        impl $name<DeclaredClientConfig> {
-            fn resolve_clients<Failure>(
-                self,
-                resolve: &mut impl FnMut(
-                    &EmitterClientSpec<DeclaredClientConfig>,
-                ) -> Result<ResolvedClientConfig, Failure>,
-            ) -> Result<$name, Failure> {
-                let client = self.client.resolve(resolve)?;
-                Ok($name {
-                    client,
-                    $($field: self.$field,)*
-                })
-            }
-        }
-    };
-}
-
-single_client_sink_plan! {
-    /// An HTTP sink: the origin its client sends every request to.
-    HttpSinkPlan {
-        origin: HttpOrigin,
-    }
-}
-
-single_client_sink_plan! {
-    /// A Kafka sink: the topic it produces to, and how it learns that a record was accepted.
-    KafkaSinkPlan {
-        topic: TopicName,
-        mode: BrokerPublishingMode,
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// A Pulsar sink: the topic its producer publishes to, and how it learns that a record was
-    /// accepted.
-    PulsarSinkPlan {
-        topic: TopicName,
-        mode: BrokerPublishingMode,
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// A RabbitMQ sink: the queue it publishes to, and how it learns that a record was accepted.
-    RabbitMqSinkPlan {
-        queue: QueueName,
-        mode: BrokerPublishingMode,
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// A Redis sink: the channel it publishes to, and the bounds of the pool its client shares.
-    RedisSinkPlan {
-        pool: ClientPoolBounds,
-        channel: ChannelName,
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// An MQTT sink: the topic it publishes to, and the quality of service it publishes at.
-    MqttSinkPlan {
-        topic: TopicName,
-        mode: MqttPublishingMode,
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// A NATS sink: the subject it publishes to, and whether JetStream confirms each record.
-    NatsSinkPlan {
-        subject: SubjectName,
-        mode: NatsPublishingMode,
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// A ZeroMQ sink, which pushes every record through the socket its client configures.
-    ZeroMqSinkPlan {
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// A Syslog sink, which sends every record to the collector its client configures.
-    SyslogSinkPlan {
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// An SQS sink: the queue it sends to and whether it batches its requests.
-    SqsSinkPlan {
-        queue: String,
-        mode: SqsPublishingMode,
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// A Sentry sink, which sends every record as an event to the project its client names.
-    SentrySinkPlan {
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// An OpenTelemetry sink: the signal it exports and the mappings that build each item.
-    OtelSinkPlan {
-        signal: OtelSignal,
-        mapping: MappedValuesPlan,
-        values: Vec<String>,
-        attributes: Vec<String>,
-        resource: Vec<OtelResourceAttribute>,
-        scope: Option<OtelScope>,
-        batch: Option<EmitterBatchPolicy>,
-    }
-}
-
-single_client_sink_plan! {
-    /// A ClickHouse sink: the table it inserts into, the mapping of each column, and the most rows
-    /// one insert carries.
-    ClickHouseSinkPlan {
-        table: TableName,
-        mapping: MappedValuesPlan,
-        batch: EmitterBatchPolicy,
-    }
-}
-
-single_client_sink_plan! {
-    /// A Postgres sink: the table it inserts into, the mapping of each column, what a conflicting
-    /// row does, the most rows one insert carries, and the bounds of the pool its client shares.
-    PostgresSinkPlan {
-        pool: ClientPoolBounds,
-        table: TableName,
-        mapping: MappedValuesPlan,
-        conflict_action: PostgresConflictAction,
-        batch: EmitterBatchPolicy,
-    }
-}
-
-single_client_sink_plan! {
-    /// A MySQL sink: the table it inserts into, the mapping of each column, what a conflicting row
-    /// does, the most rows one insert carries, and the bounds of the pool its client shares.
-    MySqlSinkPlan {
-        pool: ClientPoolBounds,
-        table: TableName,
-        mapping: MappedValuesPlan,
-        conflict_action: MySqlConflictAction,
-        batch: EmitterBatchPolicy,
-    }
-}
-
-single_client_sink_plan! {
-    /// A MongoDB sink: the collection it writes to, the mapping of each field, what a conflicting
-    /// document does, the most documents one write carries, and the bounds of the pool its client
-    /// shares.
-    MongoDbSinkPlan {
-        pool: ClientPoolBounds,
-        collection: CollectionName,
-        mapping: MappedValuesPlan,
-        conflict_action: MongoDbConflictAction,
-        batch: EmitterBatchPolicy,
-    }
-}
-
-/// The OTLP signal an emitter exports, as its connector states it.
-fn otel_signal(signal: &nervix_models::OtelSignal) -> OtelSignal {
-    match signal {
-        nervix_models::OtelSignal::Logs => OtelSignal::Logs,
-        nervix_models::OtelSignal::Traces => OtelSignal::Traces,
-        nervix_models::OtelSignal::Metric(metric) => OtelSignal::Metric(OtelMetric {
-            name: metric.name.clone(),
-            unit: metric.unit.clone(),
-            description: metric.description.clone(),
-            kind: otel_metric_kind(&metric.kind),
-        }),
-    }
 }
 
 fn otel_metric_kind(kind: &nervix_models::OtelMetricKind) -> OtelMetricKind {
@@ -649,8 +455,8 @@ fn mysql_conflict_action(action: &nervix_models::MySqlConflictAction) -> MySqlCo
     }
 }
 
-impl<Config> RedisSinkPlan<Config> {
-    /// The shared pool this sink leases its command connections from.
+impl<Config> RedisPubSubEmitterPlan<Config> {
+    /// The shared pool this emitter leases its command connections from.
     pub(super) fn pooled_client(&self) -> PooledClientPlan {
         PooledClientPlan {
             transport: PooledTransport::Redis,
@@ -659,8 +465,8 @@ impl<Config> RedisSinkPlan<Config> {
     }
 }
 
-impl<Config> PostgresSinkPlan<Config> {
-    /// The shared pool this sink leases its connections from.
+impl<Config> PostgresTableEmitterPlan<Config> {
+    /// The shared pool this emitter leases its connections from.
     pub(super) fn pooled_client(&self) -> PooledClientPlan {
         PooledClientPlan {
             transport: PooledTransport::Postgres,
@@ -669,8 +475,8 @@ impl<Config> PostgresSinkPlan<Config> {
     }
 }
 
-impl<Config> MySqlSinkPlan<Config> {
-    /// The shared pool this sink leases its connections from.
+impl<Config> MySqlTableEmitterPlan<Config> {
+    /// The shared pool this emitter leases its connections from.
     pub(super) fn pooled_client(&self) -> PooledClientPlan {
         PooledClientPlan {
             transport: PooledTransport::MySql,
@@ -679,8 +485,8 @@ impl<Config> MySqlSinkPlan<Config> {
     }
 }
 
-impl<Config> MongoDbSinkPlan<Config> {
-    /// The shared client this sink leases, whose driver pools connections per server.
+impl<Config> MongoDbCollectionEmitterPlan<Config> {
+    /// The shared client this emitter leases, whose driver pools connections per server.
     pub(super) fn pooled_client(&self) -> PooledClientPlan {
         PooledClientPlan {
             transport: PooledTransport::MongoDb,
@@ -689,31 +495,31 @@ impl<Config> MongoDbSinkPlan<Config> {
     }
 }
 
-/// An Iceberg sink: the object store it stages data files in, the REST catalog it commits
+/// An Iceberg emitter: the object store it stages data files in, the REST catalog it commits
 /// through, and the table, mappings, location and commit cadence it writes with.
 ///
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct IcebergSinkPlan<Config = ResolvedClientConfig> {
+pub(super) struct IcebergTableEmitterPlan<Config = ResolvedClientConfig> {
     pub(super) backend: IcebergStorageBackend,
     pub(super) storage: EmitterClientSpec<Config>,
     pub(super) catalog: EmitterClientSpec<Config>,
-    pub(super) table: TableName,
+    pub(super) table: nervix_models::IcebergTableName,
     pub(super) mapping: MappedValuesPlan,
     pub(super) location: String,
     pub(super) commit: IcebergCommitPolicy,
     pub(super) batch: Option<EmitterBatchPolicy>,
 }
 
-impl IcebergSinkPlan<DeclaredClientConfig> {
+impl IcebergTableEmitterPlan<DeclaredClientConfig> {
     fn resolve_clients<Failure>(
         self,
         resolve: &mut impl FnMut(
             &EmitterClientSpec<DeclaredClientConfig>,
         ) -> Result<ResolvedClientConfig, Failure>,
-    ) -> Result<IcebergSinkPlan, Failure> {
+    ) -> Result<IcebergTableEmitterPlan, Failure> {
         let storage = self.storage.resolve(resolve)?;
         let catalog = self.catalog.resolve(resolve)?;
-        Ok(IcebergSinkPlan {
+        Ok(IcebergTableEmitterPlan {
             backend: self.backend,
             storage,
             catalog,
@@ -726,136 +532,317 @@ impl IcebergSinkPlan<DeclaredClientConfig> {
     }
 }
 
-/// The sink one emitter publishes to, with each connector's typed configuration.
+/// The emitter one emitter publishes to, with each connector's typed configuration.
+/// The consumer entity planned for Client execution.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) enum EmitterSinkPlan<Config = ResolvedClientConfig> {
-    Client(ClientSinkPlan),
-    Http(HttpSinkPlan<Config>),
-    Kafka(KafkaSinkPlan<Config>),
-    Pulsar(PulsarSinkPlan<Config>),
-    RabbitMq(RabbitMqSinkPlan<Config>),
-    Redis(RedisSinkPlan<Config>),
-    Mqtt(MqttSinkPlan<Config>),
-    Nats(NatsSinkPlan<Config>),
-    ZeroMq(ZeroMqSinkPlan<Config>),
-    Syslog(SyslogSinkPlan<Config>),
-    Sqs(SqsSinkPlan<Config>),
-    Sentry(SentrySinkPlan<Config>),
-    Otel(OtelSinkPlan<Config>),
-    ClickHouse(ClickHouseSinkPlan<Config>),
-    Postgres(PostgresSinkPlan<Config>),
-    MySql(MySqlSinkPlan<Config>),
-    MongoDb(MongoDbSinkPlan<Config>),
-    /// Boxed because the Iceberg sink carries two clients beside its table, mappings, location and
-    /// commit cadence, which would otherwise set the size of every sink variant.
-    Iceberg(Box<IcebergSinkPlan<Config>>),
+pub(super) enum ClientEmitterPlan {
+    Consumer(ClientConsumerEmitterPlan),
 }
 
-impl<Config> EmitterSinkPlan<Config> {
-    /// The batching clause this sink publishes under, absent when it publishes one record per
+/// The request entity planned for Http execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum HttpEmitterPlan<Config = ResolvedClientConfig> {
+    Request(HttpRequestEmitterPlan<Config>),
+}
+
+/// The topic entity planned for Kafka execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum KafkaEmitterPlan<Config = ResolvedClientConfig> {
+    Topic(KafkaTopicEmitterPlan<Config>),
+}
+
+/// The topic entity planned for Pulsar execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum PulsarEmitterPlan<Config = ResolvedClientConfig> {
+    Topic(PulsarTopicEmitterPlan<Config>),
+}
+
+/// The queue entity planned for RabbitMq execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum RabbitMqEmitterPlan<Config = ResolvedClientConfig> {
+    Queue(RabbitMqQueueEmitterPlan<Config>),
+}
+
+/// The pubsub entity planned for Redis execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum RedisEmitterPlan<Config = ResolvedClientConfig> {
+    PubSub(RedisPubSubEmitterPlan<Config>),
+}
+
+/// The topic entity planned for Mqtt execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum MqttEmitterPlan<Config = ResolvedClientConfig> {
+    Topic(MqttTopicEmitterPlan<Config>),
+}
+
+/// The subject entity planned for Nats execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum NatsEmitterPlan<Config = ResolvedClientConfig> {
+    Subject(NatsSubjectEmitterPlan<Config>),
+}
+
+/// The push entity planned for ZeroMq execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum ZeroMqEmitterPlan<Config = ResolvedClientConfig> {
+    Push(ZeroMqPushEmitterPlan<Config>),
+}
+
+/// The collector entity planned for Syslog execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum SyslogEmitterPlan<Config = ResolvedClientConfig> {
+    Collector(SyslogCollectorEmitterPlan<Config>),
+}
+
+/// The queue entity planned for Sqs execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum SqsEmitterPlan<Config = ResolvedClientConfig> {
+    Queue(SqsQueueEmitterPlan<Config>),
+}
+
+/// The event entity planned for Sentry execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum SentryEmitterPlan<Config = ResolvedClientConfig> {
+    Event(SentryEventEmitterPlan<Config>),
+}
+
+/// The table entity planned for ClickHouse execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum ClickHouseEmitterPlan<Config = ResolvedClientConfig> {
+    Table(ClickHouseTableEmitterPlan<Config>),
+}
+
+/// The table entity planned for Postgres execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum PostgresEmitterPlan<Config = ResolvedClientConfig> {
+    Table(PostgresTableEmitterPlan<Config>),
+}
+
+/// The table entity planned for MySql execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum MySqlEmitterPlan<Config = ResolvedClientConfig> {
+    Table(MySqlTableEmitterPlan<Config>),
+}
+
+/// The collection entity planned for MongoDb execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum MongoDbEmitterPlan<Config = ResolvedClientConfig> {
+    Collection(MongoDbCollectionEmitterPlan<Config>),
+}
+
+/// The table entity planned for Iceberg execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum IcebergEmitterPlan<Config = ResolvedClientConfig> {
+    Table(Box<IcebergTableEmitterPlan<Config>>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum EmitterConnectorPlan<Config = ResolvedClientConfig> {
+    Client(ClientEmitterPlan),
+    Http(HttpEmitterPlan<Config>),
+    Kafka(KafkaEmitterPlan<Config>),
+    Pulsar(PulsarEmitterPlan<Config>),
+    RabbitMq(RabbitMqEmitterPlan<Config>),
+    Redis(RedisEmitterPlan<Config>),
+    Mqtt(MqttEmitterPlan<Config>),
+    Nats(NatsEmitterPlan<Config>),
+    ZeroMq(ZeroMqEmitterPlan<Config>),
+    Syslog(SyslogEmitterPlan<Config>),
+    Sqs(SqsEmitterPlan<Config>),
+    Sentry(SentryEmitterPlan<Config>),
+    Otel(OtelEmitterPlan<Config>),
+    ClickHouse(ClickHouseEmitterPlan<Config>),
+    Postgres(PostgresEmitterPlan<Config>),
+    MySql(MySqlEmitterPlan<Config>),
+    MongoDb(MongoDbEmitterPlan<Config>),
+    /// Boxed because the Iceberg emitter carries two clients beside its table, mappings, location and
+    /// commit cadence, which would otherwise set the size of every emitter variant.
+    Iceberg(IcebergEmitterPlan<Config>),
+}
+
+impl<Config> EmitterConnectorPlan<Config> {
+    /// The batching clause this emitter publishes under, absent when it publishes one record per
     /// message.
     pub(super) fn batch(&self) -> Option<EmitterBatchPolicy> {
         match self {
-            Self::Client(plan) => Some(plan.batch),
+            Self::Client(ClientEmitterPlan::Consumer(plan)) => Some(plan.batch),
             // Every request carries one source record.
-            Self::Http(_) => None,
-            Self::Kafka(plan) => plan.batch,
-            Self::Pulsar(plan) => plan.batch,
-            Self::RabbitMq(plan) => plan.batch,
-            Self::Redis(plan) => plan.batch,
-            Self::Mqtt(plan) => plan.batch,
-            Self::Nats(plan) => plan.batch,
-            Self::ZeroMq(plan) => plan.batch,
-            Self::Syslog(plan) => plan.batch,
-            Self::Sqs(plan) => plan.batch,
-            Self::Sentry(plan) => plan.batch,
-            Self::Otel(plan) => plan.batch,
-            Self::ClickHouse(plan) => Some(plan.batch),
-            Self::Postgres(plan) => Some(plan.batch),
-            Self::MySql(plan) => Some(plan.batch),
-            Self::MongoDb(plan) => Some(plan.batch),
-            Self::Iceberg(plan) => plan.batch,
+            Self::Http(HttpEmitterPlan::Request(_)) => None,
+            Self::Kafka(KafkaEmitterPlan::Topic(plan)) => plan.batch,
+            Self::Pulsar(PulsarEmitterPlan::Topic(plan)) => plan.batch,
+            Self::RabbitMq(RabbitMqEmitterPlan::Queue(plan)) => plan.batch,
+            Self::Redis(RedisEmitterPlan::PubSub(plan)) => plan.batch,
+            Self::Mqtt(MqttEmitterPlan::Topic(plan)) => plan.batch,
+            Self::Nats(NatsEmitterPlan::Subject(plan)) => plan.batch,
+            Self::ZeroMq(ZeroMqEmitterPlan::Push(plan)) => plan.batch,
+            Self::Syslog(SyslogEmitterPlan::Collector(plan)) => plan.batch,
+            Self::Sqs(SqsEmitterPlan::Queue(plan)) => plan.batch,
+            Self::Sentry(SentryEmitterPlan::Event(plan)) => plan.batch,
+            Self::Otel(plan) => plan.export().batch,
+            Self::ClickHouse(ClickHouseEmitterPlan::Table(plan)) => Some(plan.batch),
+            Self::Postgres(PostgresEmitterPlan::Table(plan)) => Some(plan.batch),
+            Self::MySql(MySqlEmitterPlan::Table(plan)) => Some(plan.batch),
+            Self::MongoDb(MongoDbEmitterPlan::Collection(plan)) => Some(plan.batch),
+            Self::Iceberg(IcebergEmitterPlan::Table(plan)) => plan.batch,
         }
     }
 
-    /// The transport this sink publishes over, as the emitter's diagnostics name it.
-    pub(super) fn label(&self) -> &'static str {
+    /// The vocabulary entity this decided plan composes.
+    pub(super) fn kind(&self) -> nervix_models::EmitterEntityKind {
+        use nervix_models::EmitterEntityModel;
         match self {
-            Self::Client(_) => "client",
-            Self::Http(_) => "http",
-            Self::Kafka(_) => "kafka",
-            Self::Pulsar(_) => "pulsar",
-            Self::RabbitMq(_) => "rabbitmq",
-            Self::Redis(_) => "redis",
-            Self::Mqtt(_) => "mqtt",
-            Self::Nats(_) => "nats",
-            Self::ZeroMq(_) => "zeromq",
-            Self::Syslog(_) => "syslog",
-            Self::Sqs(_) => "sqs",
-            Self::Sentry(_) => "sentry",
-            Self::Otel(_) => "otel",
-            Self::ClickHouse(_) => "clickhouse",
-            Self::Postgres(_) => "postgres",
-            Self::MySql(_) => "mysql",
-            Self::MongoDb(_) => "mongodb",
-            Self::Iceberg(_) => "iceberg",
+            Self::Client(ClientEmitterPlan::Consumer(_)) => {
+                <nervix_models::ClientConsumerEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Http(HttpEmitterPlan::Request(_)) => {
+                <nervix_models::HttpRequestEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Kafka(KafkaEmitterPlan::Topic(_)) => {
+                <nervix_models::KafkaTopicEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Pulsar(PulsarEmitterPlan::Topic(_)) => {
+                <nervix_models::PulsarTopicEmitter as EmitterEntityModel>::KIND
+            }
+            Self::RabbitMq(RabbitMqEmitterPlan::Queue(_)) => {
+                <nervix_models::RabbitMqQueueEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Redis(RedisEmitterPlan::PubSub(_)) => {
+                <nervix_models::RedisPubSubEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Mqtt(MqttEmitterPlan::Topic(_)) => {
+                <nervix_models::MqttTopicEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Nats(NatsEmitterPlan::Subject(_)) => {
+                <nervix_models::NatsSubjectEmitter as EmitterEntityModel>::KIND
+            }
+            Self::ZeroMq(ZeroMqEmitterPlan::Push(_)) => {
+                <nervix_models::ZeroMqPushEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Syslog(SyslogEmitterPlan::Collector(_)) => {
+                <nervix_models::SyslogCollectorEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Sqs(SqsEmitterPlan::Queue(_)) => {
+                <nervix_models::SqsQueueEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Sentry(SentryEmitterPlan::Event(_)) => {
+                <nervix_models::SentryEventEmitter as EmitterEntityModel>::KIND
+            }
+            Self::ClickHouse(ClickHouseEmitterPlan::Table(_)) => {
+                <nervix_models::ClickHouseTableEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Postgres(PostgresEmitterPlan::Table(_)) => {
+                <nervix_models::PostgresTableEmitter as EmitterEntityModel>::KIND
+            }
+            Self::MySql(MySqlEmitterPlan::Table(_)) => {
+                <nervix_models::MySqlTableEmitter as EmitterEntityModel>::KIND
+            }
+            Self::MongoDb(MongoDbEmitterPlan::Collection(_)) => {
+                <nervix_models::MongoDbCollectionEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Iceberg(IcebergEmitterPlan::Table(_)) => {
+                <nervix_models::IcebergTableEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Otel(OtelEmitterPlan::Logs(_)) => {
+                <nervix_models::OtelLogsEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Otel(OtelEmitterPlan::Traces(_)) => {
+                <nervix_models::OtelTracesEmitter as EmitterEntityModel>::KIND
+            }
+            Self::Otel(OtelEmitterPlan::Metrics(_)) => {
+                <nervix_models::OtelMetricsEmitter as EmitterEntityModel>::KIND
+            }
         }
     }
 }
 
-impl EmitterSinkPlan<DeclaredClientConfig> {
+impl EmitterConnectorPlan<DeclaredClientConfig> {
     fn resolve_clients<Failure>(
         self,
         resolve: &mut impl FnMut(
             &EmitterClientSpec<DeclaredClientConfig>,
         ) -> Result<ResolvedClientConfig, Failure>,
-    ) -> Result<EmitterSinkPlan, Failure> {
+    ) -> Result<EmitterConnectorPlan, Failure> {
         let resolved = match self {
-            Self::Client(plan) => EmitterSinkPlan::Client(plan),
-            Self::Http(plan) => EmitterSinkPlan::Http(plan.resolve_clients(resolve)?),
-            Self::Kafka(plan) => EmitterSinkPlan::Kafka(plan.resolve_clients(resolve)?),
-            Self::Pulsar(plan) => EmitterSinkPlan::Pulsar(plan.resolve_clients(resolve)?),
-            Self::RabbitMq(plan) => EmitterSinkPlan::RabbitMq(plan.resolve_clients(resolve)?),
-            Self::Redis(plan) => EmitterSinkPlan::Redis(plan.resolve_clients(resolve)?),
-            Self::Mqtt(plan) => EmitterSinkPlan::Mqtt(plan.resolve_clients(resolve)?),
-            Self::Nats(plan) => EmitterSinkPlan::Nats(plan.resolve_clients(resolve)?),
-            Self::ZeroMq(plan) => EmitterSinkPlan::ZeroMq(plan.resolve_clients(resolve)?),
-            Self::Syslog(plan) => EmitterSinkPlan::Syslog(plan.resolve_clients(resolve)?),
-            Self::Sqs(plan) => EmitterSinkPlan::Sqs(plan.resolve_clients(resolve)?),
-            Self::Sentry(plan) => EmitterSinkPlan::Sentry(plan.resolve_clients(resolve)?),
-            Self::Otel(plan) => EmitterSinkPlan::Otel(plan.resolve_clients(resolve)?),
-            Self::ClickHouse(plan) => EmitterSinkPlan::ClickHouse(plan.resolve_clients(resolve)?),
-            Self::Postgres(plan) => EmitterSinkPlan::Postgres(plan.resolve_clients(resolve)?),
-            Self::MySql(plan) => EmitterSinkPlan::MySql(plan.resolve_clients(resolve)?),
-            Self::MongoDb(plan) => EmitterSinkPlan::MongoDb(plan.resolve_clients(resolve)?),
-            Self::Iceberg(plan) => {
-                EmitterSinkPlan::Iceberg(Box::new((*plan).resolve_clients(resolve)?))
+            Self::Client(ClientEmitterPlan::Consumer(plan)) => {
+                EmitterConnectorPlan::Client(ClientEmitterPlan::Consumer(plan))
             }
+            Self::Http(HttpEmitterPlan::Request(plan)) => {
+                EmitterConnectorPlan::Http(HttpEmitterPlan::Request(plan.resolve_clients(resolve)?))
+            }
+            Self::Kafka(KafkaEmitterPlan::Topic(plan)) => {
+                EmitterConnectorPlan::Kafka(KafkaEmitterPlan::Topic(plan.resolve_clients(resolve)?))
+            }
+            Self::Pulsar(PulsarEmitterPlan::Topic(plan)) => EmitterConnectorPlan::Pulsar(
+                PulsarEmitterPlan::Topic(plan.resolve_clients(resolve)?),
+            ),
+            Self::RabbitMq(RabbitMqEmitterPlan::Queue(plan)) => EmitterConnectorPlan::RabbitMq(
+                RabbitMqEmitterPlan::Queue(plan.resolve_clients(resolve)?),
+            ),
+            Self::Redis(RedisEmitterPlan::PubSub(plan)) => EmitterConnectorPlan::Redis(
+                RedisEmitterPlan::PubSub(plan.resolve_clients(resolve)?),
+            ),
+            Self::Mqtt(MqttEmitterPlan::Topic(plan)) => {
+                EmitterConnectorPlan::Mqtt(MqttEmitterPlan::Topic(plan.resolve_clients(resolve)?))
+            }
+            Self::Nats(NatsEmitterPlan::Subject(plan)) => {
+                EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(plan.resolve_clients(resolve)?))
+            }
+            Self::ZeroMq(ZeroMqEmitterPlan::Push(plan)) => EmitterConnectorPlan::ZeroMq(
+                ZeroMqEmitterPlan::Push(plan.resolve_clients(resolve)?),
+            ),
+            Self::Syslog(SyslogEmitterPlan::Collector(plan)) => EmitterConnectorPlan::Syslog(
+                SyslogEmitterPlan::Collector(plan.resolve_clients(resolve)?),
+            ),
+            Self::Sqs(SqsEmitterPlan::Queue(plan)) => {
+                EmitterConnectorPlan::Sqs(SqsEmitterPlan::Queue(plan.resolve_clients(resolve)?))
+            }
+            Self::Sentry(SentryEmitterPlan::Event(plan)) => EmitterConnectorPlan::Sentry(
+                SentryEmitterPlan::Event(plan.resolve_clients(resolve)?),
+            ),
+            Self::Otel(plan) => EmitterConnectorPlan::Otel(plan.resolve_clients(resolve)?),
+            Self::ClickHouse(ClickHouseEmitterPlan::Table(plan)) => {
+                EmitterConnectorPlan::ClickHouse(ClickHouseEmitterPlan::Table(
+                    plan.resolve_clients(resolve)?,
+                ))
+            }
+            Self::Postgres(PostgresEmitterPlan::Table(plan)) => EmitterConnectorPlan::Postgres(
+                PostgresEmitterPlan::Table(plan.resolve_clients(resolve)?),
+            ),
+            Self::MySql(MySqlEmitterPlan::Table(plan)) => {
+                EmitterConnectorPlan::MySql(MySqlEmitterPlan::Table(plan.resolve_clients(resolve)?))
+            }
+            Self::MongoDb(MongoDbEmitterPlan::Collection(plan)) => EmitterConnectorPlan::MongoDb(
+                MongoDbEmitterPlan::Collection(plan.resolve_clients(resolve)?),
+            ),
+            Self::Iceberg(IcebergEmitterPlan::Table(plan)) => EmitterConnectorPlan::Iceberg(
+                IcebergEmitterPlan::Table(Box::new((*plan).resolve_clients(resolve)?)),
+            ),
         };
         Ok(resolved)
     }
 }
 
-/// The client Models an emitter's sink names, as the host found them among its domain's clients.
+/// The client Models an emitter's emitter names, as the host found them among its domain's clients.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct EmitterClientModels<'a> {
-    /// The client registered under the name the sink publishes through.
+    /// The client registered under the name the emitter publishes through.
     pub(super) client: Option<&'a Model>,
-    /// The client registered under the name of an Iceberg sink's REST catalog.
+    /// The client registered under the name of an Iceberg emitter's REST catalog.
     pub(super) catalog_client: Option<&'a Model>,
 }
 
-/// Everything one emitter's sink is started with.
+/// Everything one emitter's emitter is started with.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct EmitterStartPlan<Config = ResolvedClientConfig> {
-    /// The backoff the emitter waits between publish retries and sink reconnects.
+    /// The declared connector label, allocated once when the plan is decided.
+    pub(super) label: String,
+    /// The backoff the emitter waits between publish retries and emitter reconnects.
     pub(super) retry_policy: ParsedRetryPolicy,
-    pub(super) sink: EmitterSinkPlan<Config>,
+    pub(super) connector: EmitterConnectorPlan<Config>,
 }
 
 /// The native output contract whose deliveries are acknowledged by session consumers.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct ClientSinkPlan {
+pub(super) struct ClientConsumerEmitterPlan {
     pub(super) schema: SchemaName,
     pub(super) window: AckWindow,
     pub(super) ack_timeout: Duration,
@@ -863,77 +850,86 @@ pub(super) struct ClientSinkPlan {
 }
 
 impl EmitterStartPlan<DeclaredClientConfig> {
-    /// Decides the plan for `emitter` from the client Models its sink names.
+    /// Decides the plan for `emitter` from the client Models its emitter names.
     pub(super) fn decide(
         emitter: &CreateEmitter,
         clients: EmitterClientModels<'_>,
     ) -> Result<Self, Report<EmitterStartPlanError>> {
-        let sink = emitter.sink.as_ref();
-        let mode = &emitter.publishing_mode;
-        let retry_policy = Self::decide_retry_policy(mode.retry_policy())?;
-        if let EmitSink::Client { schema } = sink {
-            let EmitterPublishingMode::ClientAck {
+        let connector = emitter.connector.as_ref();
+        let policy = connector.publishing();
+        let retry_policy = Self::decide_retry_policy(policy.retry_policy())?;
+        if let EmitterEntity::Client(ClientEmitter::Consumer(ClientConsumerEmitter {
+            schema,
+            mode,
+        })) = connector
+        {
+            let nervix_models::ClientConsumerPublishingMode::Ack {
                 window,
                 ack_timeout,
                 ..
-            } = mode
-            else {
-                return Err(EmitterStartPlanError::unsupported_mode(sink, mode));
-            };
+            } = mode;
             let ack_timeout = EmitterDurationSetting::AckTimeout.parse(ack_timeout)?;
             if ack_timeout.is_zero() {
                 return Err(Report::new(EmitterStartPlanError::ZeroAckTimeout));
             }
-            let batch = Self::require_batch(sink, emitter.batch)?;
+            let batch = emitter
+                .batch
+                .verified("the registry checked this entity's required BATCH declaration");
             if batch.max_size.bytes().get() > CLIENT_CONSUMER_SESSION_BYTES {
                 return Err(Report::new(EmitterStartPlanError::ClientBatchTooLarge {
                     bytes: batch.max_size.bytes().get(),
                 }));
             }
             return Ok(Self {
+                label: <ClientConsumerEmitter as nervix_models::EmitterEntityModel>::KIND
+                    .connector()
+                    .keyword()
+                    .to_ascii_lowercase(),
                 retry_policy,
-                sink: EmitterSinkPlan::Client(ClientSinkPlan {
-                    schema: schema.clone(),
-                    window: *window,
-                    ack_timeout,
-                    batch,
-                }),
+                connector: EmitterConnectorPlan::Client(ClientEmitterPlan::Consumer(
+                    ClientConsumerEmitterPlan {
+                        schema: schema.clone(),
+                        window: *window,
+                        ack_timeout,
+                        batch,
+                    },
+                )),
             });
         }
-        let client_name = sink
+        let client_name = connector
             .client()
-            .verified("every non-CLIENT sink names an external client");
+            .verified("every non-CLIENT emitter names an external client");
         let Some(client) = clients.client else {
             return Err(Report::new(EmitterStartPlanError::MissingClient {
-                sink: sink.transport_label(),
+                connector: connector.transport_label(),
                 client: client_name.clone(),
             }));
         };
-        let sink_plan = match (sink, client) {
+        let emitter_plan = match (connector, client) {
             (
-                EmitSink::Http {
-                    client: expected, ..
-                },
+                EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
+                    client: expected,
+                    ..
+                })),
                 Model::ClientHttp(client),
-            ) => {
-                Self::require_request_ack(sink, mode)?;
-                EmitterSinkPlan::Http(HttpSinkPlan {
-                    client: EmitterClientSpec::declared(
-                        expected,
-                        &client.name,
-                        client.mount.as_ref(),
-                        &client.config,
-                    )?,
-                    origin: Self::decide_http_origin(expected, &client.config)?,
-                })
-            }
+            ) => EmitterConnectorPlan::Http(HttpEmitterPlan::Request(HttpRequestEmitterPlan {
+                client: EmitterClientSpec::declared(
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+                origin: Self::decide_http_origin(expected, &client.config)?,
+            })),
             (
-                EmitSink::Kafka {
+                EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
                     client: expected,
                     topic,
-                },
+                    mode,
+                    ..
+                })),
                 Model::ClientKafka(client),
-            ) => EmitterSinkPlan::Kafka(KafkaSinkPlan {
+            ) => EmitterConnectorPlan::Kafka(KafkaEmitterPlan::Topic(KafkaTopicEmitterPlan {
                 batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
@@ -942,15 +938,17 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 topic: topic.clone(),
-                mode: decide_broker_publishing_mode(sink, mode)?,
-            }),
+                mode: decide_kafka_publication(mode)?,
+            })),
             (
-                EmitSink::Pulsar {
+                EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
                     client: expected,
                     topic,
-                },
+                    mode,
+                    ..
+                })),
                 Model::ClientPulsar(client),
-            ) => EmitterSinkPlan::Pulsar(PulsarSinkPlan {
+            ) => EmitterConnectorPlan::Pulsar(PulsarEmitterPlan::Topic(PulsarTopicEmitterPlan {
                 batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
@@ -959,34 +957,18 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 topic: topic.clone(),
-                mode: decide_broker_publishing_mode(sink, mode)?,
-            }),
+                mode: decide_pulsar_publication(mode)?,
+            })),
             (
-                EmitSink::RabbitMq {
+                EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(RabbitMqQueueEmitter {
                     client: expected,
                     queue,
-                },
+                    mode,
+                    ..
+                })),
                 Model::ClientRabbitMq(client),
-            ) => EmitterSinkPlan::RabbitMq(RabbitMqSinkPlan {
-                batch: emitter.batch,
-                client: EmitterClientSpec::declared(
-                    expected,
-                    &client.name,
-                    client.mount.as_ref(),
-                    &client.config,
-                )?,
-                queue: queue.clone(),
-                mode: decide_broker_publishing_mode(sink, mode)?,
-            }),
-            (
-                EmitSink::Redis {
-                    client: expected,
-                    channel,
-                },
-                Model::ClientRedis(client),
-            ) => {
-                Self::require_no_ack(sink, mode)?;
-                EmitterSinkPlan::Redis(RedisSinkPlan {
+            ) => EmitterConnectorPlan::RabbitMq(RabbitMqEmitterPlan::Queue(
+                RabbitMqQueueEmitterPlan {
                     batch: emitter.batch,
                     client: EmitterClientSpec::declared(
                         expected,
@@ -994,17 +976,37 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                         client.mount.as_ref(),
                         &client.config,
                     )?,
-                    pool: client.pool,
-                    channel: channel.clone(),
-                })
-            }
+                    queue: queue.clone(),
+                    mode: decide_rabbitmq_publication(mode)?,
+                },
+            )),
             (
-                EmitSink::Mqtt {
+                EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
+                    client: expected,
+                    channel,
+                    ..
+                })),
+                Model::ClientRedis(client),
+            ) => EmitterConnectorPlan::Redis(RedisEmitterPlan::PubSub(RedisPubSubEmitterPlan {
+                batch: emitter.batch,
+                client: EmitterClientSpec::declared(
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+                pool: client.pool,
+                channel: channel.clone(),
+            })),
+            (
+                EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
                     client: expected,
                     topic,
-                },
+                    mode,
+                    ..
+                })),
                 Model::ClientMqtt(client),
-            ) => EmitterSinkPlan::Mqtt(MqttSinkPlan {
+            ) => EmitterConnectorPlan::Mqtt(MqttEmitterPlan::Topic(MqttTopicEmitterPlan {
                 batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
@@ -1013,15 +1015,17 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 topic: topic.clone(),
-                mode: decide_mqtt_publishing_mode(sink, mode)?,
-            }),
+                mode: decide_mqtt_publishing_mode(mode)?,
+            })),
             (
-                EmitSink::Nats {
+                EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
                     client: expected,
                     subject,
-                },
+                    mode,
+                    ..
+                })),
                 Model::ClientNats(client),
-            ) => EmitterSinkPlan::Nats(NatsSinkPlan {
+            ) => EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(NatsSubjectEmitterPlan {
                 batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
@@ -1030,40 +1034,49 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 subject: subject.clone(),
-                mode: decide_nats_publishing_mode(sink, mode)?,
-            }),
-            (EmitSink::ZeroMq { client: expected }, Model::ClientZeroMq(client)) => {
-                Self::require_no_ack(sink, mode)?;
-                EmitterSinkPlan::ZeroMq(ZeroMqSinkPlan {
-                    batch: emitter.batch,
-                    client: EmitterClientSpec::declared(
-                        expected,
-                        &client.name,
-                        client.mount.as_ref(),
-                        &client.config,
-                    )?,
-                })
-            }
-            (EmitSink::Syslog { client: expected }, Model::ClientSyslog(client)) => {
-                Self::require_no_ack(sink, mode)?;
-                EmitterSinkPlan::Syslog(SyslogSinkPlan {
-                    batch: emitter.batch,
-                    client: EmitterClientSpec::declared(
-                        expected,
-                        &client.name,
-                        client.mount.as_ref(),
-                        &client.config,
-                    )?,
-                })
-            }
+                mode: decide_nats_publishing_mode(mode)?,
+            })),
             (
-                EmitSink::Sqs {
+                EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
+                    client: expected,
+                    ..
+                })),
+                Model::ClientZeroMq(client),
+            ) => EmitterConnectorPlan::ZeroMq(ZeroMqEmitterPlan::Push(ZeroMqPushEmitterPlan {
+                batch: emitter.batch,
+                client: EmitterClientSpec::declared(
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+            })),
+            (
+                EmitterEntity::Syslog(SyslogEmitter::Collector(SyslogCollectorEmitter {
+                    client: expected,
+                    ..
+                })),
+                Model::ClientSyslog(client),
+            ) => EmitterConnectorPlan::Syslog(SyslogEmitterPlan::Collector(
+                SyslogCollectorEmitterPlan {
+                    batch: emitter.batch,
+                    client: EmitterClientSpec::declared(
+                        expected,
+                        &client.name,
+                        client.mount.as_ref(),
+                        &client.config,
+                    )?,
+                },
+            )),
+            (
+                EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
                     client: expected,
                     queue,
+                    mode,
                     ..
-                },
+                })),
                 Model::ClientSqs(client),
-            ) => EmitterSinkPlan::Sqs(SqsSinkPlan {
+            ) => EmitterConnectorPlan::Sqs(SqsEmitterPlan::Queue(SqsQueueEmitterPlan {
                 batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
@@ -1072,41 +1085,38 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     &client.config,
                 )?,
                 queue: queue.clone(),
-                mode: decide_sqs_publishing_mode(sink, mode)?,
-            }),
-            (EmitSink::Sentry { client: expected }, Model::ClientSentry(client)) => {
-                Self::require_request_ack(sink, mode)?;
-                EmitterSinkPlan::Sentry(SentrySinkPlan {
-                    batch: emitter.batch,
-                    client: EmitterClientSpec::declared(
-                        expected,
-                        &client.name,
-                        client.mount.as_ref(),
-                        &client.config,
-                    )?,
-                })
-            }
+                mode: decide_sqs_publishing_mode(mode),
+            })),
             (
-                EmitSink::Otel {
+                EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
                     client: expected,
-                    signal,
+                    ..
+                })),
+                Model::ClientSentry(client),
+            ) => EmitterConnectorPlan::Sentry(SentryEmitterPlan::Event(SentryEventEmitterPlan {
+                batch: emitter.batch,
+                client: EmitterClientSpec::declared(
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+            })),
+            (EmitterEntity::Otel(otel), Model::ClientOtel(client)) => {
+                let OtelMappings {
                     values,
                     attributes,
                     resource,
                     scope,
-                },
-                Model::ClientOtel(client),
-            ) => {
-                Self::require_request_ack(sink, mode)?;
-                EmitterSinkPlan::Otel(OtelSinkPlan {
+                } = otel.mappings();
+                let export = OtelExportPlan {
                     batch: emitter.batch,
                     client: EmitterClientSpec::declared(
-                        expected,
+                        otel.client(),
                         &client.name,
                         client.mount.as_ref(),
                         &client.config,
                     )?,
-                    signal: otel_signal(signal),
                     mapping: MappedValuesPlan::decide(
                         &emitter.name,
                         "OTEL",
@@ -1123,19 +1133,38 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                         .collect(),
                     resource: otel_resource_attributes(emitter, resource)?,
                     scope: scope.as_ref().map(otel_scope),
+                };
+                EmitterConnectorPlan::Otel(match otel {
+                    OtelEmitter::Logs(_) => OtelEmitterPlan::Logs(OtelLogsEmitterPlan { export }),
+                    OtelEmitter::Traces(_) => {
+                        OtelEmitterPlan::Traces(OtelTracesEmitterPlan { export })
+                    }
+                    OtelEmitter::Metrics(OtelMetricsEmitter { metric, .. }) => {
+                        OtelEmitterPlan::Metrics(OtelMetricsEmitterPlan {
+                            export,
+                            metric: OtelMetric {
+                                name: metric.name.clone(),
+                                unit: metric.unit.clone(),
+                                description: metric.description.clone(),
+                                kind: otel_metric_kind(&metric.kind),
+                            },
+                        })
+                    }
                 })
             }
             (
-                EmitSink::ClickHouse {
+                EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
                     client: expected,
                     table,
                     values,
-                },
+                    ..
+                })),
                 Model::ClientClickHouse(client),
-            ) => {
-                Self::require_request_ack(sink, mode)?;
-                EmitterSinkPlan::ClickHouse(ClickHouseSinkPlan {
-                    batch: Self::require_batch(sink, emitter.batch)?,
+            ) => EmitterConnectorPlan::ClickHouse(ClickHouseEmitterPlan::Table(
+                ClickHouseTableEmitterPlan {
+                    batch: emitter
+                        .batch
+                        .verified("the registry checked this entity's required BATCH declaration"),
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -1149,20 +1178,22 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                         "clickhouse",
                         values,
                     )?,
-                })
-            }
+                },
+            )),
             (
-                EmitSink::Postgres {
+                EmitterEntity::Postgres(PostgresEmitter::Table(PostgresTableEmitter {
                     client: expected,
                     table,
                     values,
                     conflict_action,
-                },
+                    ..
+                })),
                 Model::ClientPostgres(client),
-            ) => {
-                Self::require_request_ack(sink, mode)?;
-                EmitterSinkPlan::Postgres(PostgresSinkPlan {
-                    batch: Self::require_batch(sink, emitter.batch)?,
+            ) => EmitterConnectorPlan::Postgres(PostgresEmitterPlan::Table(
+                PostgresTableEmitterPlan {
+                    batch: emitter
+                        .batch
+                        .verified("the registry checked this entity's required BATCH declaration"),
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -1178,44 +1209,46 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                         values,
                     )?,
                     conflict_action: postgres_conflict_action(conflict_action),
-                })
-            }
+                },
+            )),
             (
-                EmitSink::MySql {
+                EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
                     client: expected,
                     table,
                     values,
                     conflict_action,
-                },
+                    ..
+                })),
                 Model::ClientMySql(client),
-            ) => {
-                Self::require_request_ack(sink, mode)?;
-                EmitterSinkPlan::MySql(MySqlSinkPlan {
-                    batch: Self::require_batch(sink, emitter.batch)?,
-                    client: EmitterClientSpec::declared(
-                        expected,
-                        &client.name,
-                        client.mount.as_ref(),
-                        &client.config,
-                    )?,
-                    pool: client.pool,
-                    table: table.clone(),
-                    mapping: MappedValuesPlan::decide(&emitter.name, "MySQL", "mysql", values)?,
-                    conflict_action: mysql_conflict_action(conflict_action),
-                })
-            }
+            ) => EmitterConnectorPlan::MySql(MySqlEmitterPlan::Table(MySqlTableEmitterPlan {
+                batch: emitter
+                    .batch
+                    .verified("the registry checked this entity's required BATCH declaration"),
+                client: EmitterClientSpec::declared(
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+                pool: client.pool,
+                table: table.clone(),
+                mapping: MappedValuesPlan::decide(&emitter.name, "MySQL", "mysql", values)?,
+                conflict_action: mysql_conflict_action(conflict_action),
+            })),
             (
-                EmitSink::MongoDb {
+                EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
                     client: expected,
                     collection,
                     values,
                     conflict_action,
-                },
+                    ..
+                })),
                 Model::ClientMongoDb(client),
-            ) => {
-                Self::require_request_ack(sink, mode)?;
-                EmitterSinkPlan::MongoDb(MongoDbSinkPlan {
-                    batch: Self::require_batch(sink, emitter.batch)?,
+            ) => EmitterConnectorPlan::MongoDb(MongoDbEmitterPlan::Collection(
+                MongoDbCollectionEmitterPlan {
+                    batch: emitter
+                        .batch
+                        .verified("the registry checked this entity's required BATCH declaration"),
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -1226,11 +1259,10 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     collection: collection.clone(),
                     mapping: MappedValuesPlan::decide(&emitter.name, "MongoDB", "mongodb", values)?,
                     conflict_action: mongodb_conflict_action(conflict_action),
-                })
-            }
+                },
+            )),
             (
-                EmitSink::Iceberg {
-                    backend,
+                EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
                     client: expected,
                     table,
                     values,
@@ -1238,61 +1270,65 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     catalog: IcebergCatalog::Rest { client: catalog },
                     commit_each,
                     max_commit_size,
-                },
+                    ..
+                })),
                 storage,
             ) => {
-                Self::require_request_ack(sink, mode)?;
-                let storage = Self::decide_iceberg_storage(sink, *backend, expected, storage)?;
+                let (backend, storage) =
+                    Self::decide_iceberg_storage(connector, expected, storage)?;
                 let catalog = Self::decide_iceberg_catalog(catalog, clients.catalog_client)?;
-                EmitterSinkPlan::Iceberg(Box::new(IcebergSinkPlan {
-                    batch: emitter.batch,
-                    backend: *backend,
-                    storage,
-                    catalog,
-                    table: table.clone(),
-                    mapping: MappedValuesPlan::decide(&emitter.name, "Iceberg", "iceberg", values)?,
-                    location: location.clone(),
-                    commit: iceberg_commit_policy(emitter, commit_each, max_commit_size)?,
-                }))
+                EmitterConnectorPlan::Iceberg(IcebergEmitterPlan::Table(Box::new(
+                    IcebergTableEmitterPlan {
+                        batch: emitter.batch,
+                        backend,
+                        storage,
+                        catalog,
+                        table: table.clone(),
+                        mapping: MappedValuesPlan::decide(
+                            &emitter.name,
+                            "Iceberg",
+                            "iceberg",
+                            values,
+                        )?,
+                        location: location.clone(),
+                        commit: iceberg_commit_policy(emitter, commit_each, max_commit_size)?,
+                    },
+                )))
             }
-            (sink, client) => {
-                return Err(EmitterStartPlanError::client_kind_mismatch(sink, client));
+            (connector, client) => {
+                return Err(EmitterStartPlanError::client_kind_mismatch(
+                    connector, client,
+                ));
             }
         };
         Ok(Self {
+            label: emitter_plan
+                .kind()
+                .connector()
+                .keyword()
+                .to_ascii_lowercase(),
             retry_policy,
-            sink: sink_plan,
+            connector: emitter_plan,
         })
     }
 
     /// Binds every client of this plan to the configuration `resolve` returns for its
-    /// declaration, in the order the sink names them: its own client first, then an Iceberg
-    /// sink's catalog.
+    /// declaration, in the order the emitter names them: its own client first, then an Iceberg
+    /// emitter's catalog.
     ///
     /// The host resolves each declared mount into the paths its entries render against, so the
-    /// returned plan carries the mounted paths the sink's connectors read from.
+    /// returned plan carries the mounted paths the emitter's connectors read from.
     pub(super) fn resolve_clients<Failure>(
         self,
         mut resolve: impl FnMut(
             &EmitterClientSpec<DeclaredClientConfig>,
         ) -> Result<ResolvedClientConfig, Failure>,
     ) -> Result<EmitterStartPlan, Failure> {
-        let sink = self.sink.resolve_clients(&mut resolve)?;
+        let connector = self.connector.resolve_clients(&mut resolve)?;
         Ok(EmitterStartPlan {
+            label: self.label,
             retry_policy: self.retry_policy,
-            sink,
-        })
-    }
-
-    /// The batching clause of a sink that has no unbounded write, which the registry requires.
-    fn require_batch(
-        sink: &EmitSink,
-        batch: Option<EmitterBatchPolicy>,
-    ) -> Result<EmitterBatchPolicy, Report<EmitterStartPlanError>> {
-        batch.ok_or_else(|| {
-            Report::new(EmitterStartPlanError::BatchRequired {
-                sink: sink.transport_label(),
-            })
+            connector,
         })
     }
 
@@ -1316,32 +1352,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         })
     }
 
-    /// Accepts `MODE NO_ACK`, the one mode of a sink that cannot confirm what it publishes.
-    fn require_no_ack(
-        sink: &EmitSink,
-        mode: &EmitterPublishingMode,
-    ) -> Result<(), Report<EmitterStartPlanError>> {
-        if let EmitterPublishingMode::NoAck { .. } = mode {
-            Ok(())
-        } else {
-            Err(EmitterStartPlanError::unsupported_mode(sink, mode))
-        }
-    }
-
-    /// Accepts `MODE ACK`, the one mode of a sink whose response to each request is its
-    /// acknowledgement.
-    fn require_request_ack(
-        sink: &EmitSink,
-        mode: &EmitterPublishingMode,
-    ) -> Result<(), Report<EmitterStartPlanError>> {
-        if let EmitterPublishingMode::RequestAck { .. } = mode {
-            Ok(())
-        } else {
-            Err(EmitterStartPlanError::unsupported_mode(sink, mode))
-        }
-    }
-
-    /// The origin an HTTP sink's client sends every request to: its `endpoint`, which the
+    /// The origin an HTTP emitter's client sends every request to: its `endpoint`, which the
     /// registry accepted only as an `http` or `https` origin.
     fn decide_http_origin(
         client: &ClientName,
@@ -1358,40 +1369,57 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         HttpOrigin::parse(endpoint).map_err(|_| invalid())
     }
 
-    /// The object-store client an Iceberg sink stages data files through, which must be the
-    /// client kind its storage backend names.
+    /// Resolves the configured storage client into its backend and declared configuration.
     fn decide_iceberg_storage(
-        sink: &EmitSink,
-        backend: IcebergStorageBackend,
+        destination: &EmitterEntity,
         expected: &ClientName,
         storage: &Model,
-    ) -> Result<EmitterClientSpec<DeclaredClientConfig>, Report<EmitterStartPlanError>> {
-        match (backend, storage) {
-            (IcebergStorageBackend::S3, Model::ClientS3(client)) => EmitterClientSpec::declared(
-                expected,
-                &client.name,
-                client.mount.as_ref(),
-                &client.config,
-            ),
-            (IcebergStorageBackend::Gcs, Model::ClientGcs(client)) => EmitterClientSpec::declared(
-                expected,
-                &client.name,
-                client.mount.as_ref(),
-                &client.config,
-            ),
-            (IcebergStorageBackend::AzureBlob, Model::ClientAzureBlob(client)) => {
+    ) -> Result<
+        (
+            IcebergStorageBackend,
+            EmitterClientSpec<DeclaredClientConfig>,
+        ),
+        Report<EmitterStartPlanError>,
+    > {
+        let (backend, client) = match storage {
+            Model::ClientS3(client) => (
+                IcebergStorageBackend::S3,
                 EmitterClientSpec::declared(
                     expected,
                     &client.name,
                     client.mount.as_ref(),
                     &client.config,
-                )
+                )?,
+            ),
+            Model::ClientGcs(client) => (
+                IcebergStorageBackend::Gcs,
+                EmitterClientSpec::declared(
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+            ),
+            Model::ClientAzureBlob(client) => (
+                IcebergStorageBackend::AzureBlob,
+                EmitterClientSpec::declared(
+                    expected,
+                    &client.name,
+                    client.mount.as_ref(),
+                    &client.config,
+                )?,
+            ),
+            _ => {
+                return Err(EmitterStartPlanError::client_kind_mismatch(
+                    destination,
+                    storage,
+                ));
             }
-            _ => Err(EmitterStartPlanError::client_kind_mismatch(sink, storage)),
-        }
+        };
+        Ok((backend, client))
     }
 
-    /// The REST catalog client an Iceberg sink commits through.
+    /// The REST catalog client an Iceberg emitter commits through.
     fn decide_iceberg_catalog(
         expected: &ClientName,
         catalog_client: Option<&Model>,
@@ -1438,33 +1466,37 @@ fn decide_ack_confirmation(
     })
 }
 
-/// The broker mode `mode` declares for `sink`, which publishes with `MODE NO_ACK` or `MODE ACK`.
-fn decide_broker_publishing_mode(
-    sink: &EmitSink,
-    mode: &EmitterPublishingMode,
-) -> Result<BrokerPublishingMode, Report<EmitterStartPlanError>> {
-    match mode {
-        EmitterPublishingMode::NoAck { .. } => Ok(BrokerPublishingMode::NoAck),
-        EmitterPublishingMode::BrokerAck {
-            window,
-            ack_timeout,
-            ..
-        } => {
-            let confirmation = decide_ack_confirmation(window, ack_timeout)?;
-            Ok(BrokerPublishingMode::Ack(confirmation))
+/// Converts each broker entity's closed policy into the connector's delivery plan.
+macro_rules! broker_publication {
+    ($function:ident, $Mode:ident) => {
+        fn $function(
+            mode: &nervix_models::$Mode,
+        ) -> Result<BrokerPublishingMode, Report<EmitterStartPlanError>> {
+            match mode {
+                nervix_models::$Mode::NoAck { .. } => Ok(BrokerPublishingMode::NoAck),
+                nervix_models::$Mode::Ack {
+                    window,
+                    ack_timeout,
+                    ..
+                } => Ok(BrokerPublishingMode::Ack(decide_ack_confirmation(
+                    window,
+                    ack_timeout,
+                )?)),
+            }
         }
-        _ => Err(EmitterStartPlanError::unsupported_mode(sink, mode)),
-    }
+    };
 }
+broker_publication!(decide_kafka_publication, KafkaTopicPublishingMode);
+broker_publication!(decide_pulsar_publication, PulsarTopicPublishingMode);
+broker_publication!(decide_rabbitmq_publication, RabbitMqQueuePublishingMode);
 
-/// The quality of service `mode` declares for an MQTT `sink`.
+/// The quality of service `mode` declares for an MQTT `emitter`.
 fn decide_mqtt_publishing_mode(
-    sink: &EmitSink,
-    mode: &EmitterPublishingMode,
+    mode: &nervix_models::MqttTopicPublishingMode,
 ) -> Result<MqttPublishingMode, Report<EmitterStartPlanError>> {
     match mode {
-        EmitterPublishingMode::MqttQos0 { .. } => Ok(MqttPublishingMode::Qos0),
-        EmitterPublishingMode::MqttQos1 {
+        nervix_models::MqttTopicPublishingMode::Qos0 { .. } => Ok(MqttPublishingMode::Qos0),
+        nervix_models::MqttTopicPublishingMode::Qos1 {
             window,
             ack_timeout,
             ..
@@ -1472,7 +1504,7 @@ fn decide_mqtt_publishing_mode(
             let confirmation = decide_ack_confirmation(window, ack_timeout)?;
             Ok(MqttPublishingMode::Qos1(confirmation))
         }
-        EmitterPublishingMode::MqttQos2 {
+        nervix_models::MqttTopicPublishingMode::Qos2 {
             window,
             ack_timeout,
             ..
@@ -1480,18 +1512,16 @@ fn decide_mqtt_publishing_mode(
             let confirmation = decide_ack_confirmation(window, ack_timeout)?;
             Ok(MqttPublishingMode::Qos2(confirmation))
         }
-        _ => Err(EmitterStartPlanError::unsupported_mode(sink, mode)),
     }
 }
 
-/// The NATS delivery `mode` declares for a NATS `sink`.
+/// The NATS delivery `mode` declares for a NATS `emitter`.
 fn decide_nats_publishing_mode(
-    sink: &EmitSink,
-    mode: &EmitterPublishingMode,
+    mode: &nervix_models::NatsSubjectPublishingMode,
 ) -> Result<NatsPublishingMode, Report<EmitterStartPlanError>> {
     match mode {
-        EmitterPublishingMode::NoAck { .. } => Ok(NatsPublishingMode::Core),
-        EmitterPublishingMode::NatsJetStream {
+        nervix_models::NatsSubjectPublishingMode::NoAck { .. } => Ok(NatsPublishingMode::Core),
+        nervix_models::NatsSubjectPublishingMode::JetStream {
             window,
             ack_timeout,
             ..
@@ -1499,23 +1529,22 @@ fn decide_nats_publishing_mode(
             let confirmation = decide_ack_confirmation(window, ack_timeout)?;
             Ok(NatsPublishingMode::JetStream(confirmation))
         }
-        _ => Err(EmitterStartPlanError::unsupported_mode(sink, mode)),
     }
 }
 
-/// The request shape `mode` declares for an SQS `sink`.
-fn decide_sqs_publishing_mode(
-    sink: &EmitSink,
-    mode: &EmitterPublishingMode,
-) -> Result<SqsPublishingMode, Report<EmitterStartPlanError>> {
+/// The request shape `mode` declares for an SQS `emitter`.
+fn decide_sqs_publishing_mode(mode: &nervix_models::SqsQueuePublishingMode) -> SqsPublishingMode {
     match mode {
-        EmitterPublishingMode::SqsSingle { .. } => Ok(SqsPublishingMode::Single),
-        EmitterPublishingMode::SqsBatch { .. } => Ok(SqsPublishingMode::Batch),
-        _ => Err(EmitterStartPlanError::unsupported_mode(sink, mode)),
+        nervix_models::SqsQueuePublishingMode::Single { .. } => SqsPublishingMode::Single,
+        nervix_models::SqsQueuePublishingMode::Batch { .. } => SqsPublishingMode::Batch,
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{
         AckMode, BatchMessageLimit, CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs,
@@ -1523,8 +1552,8 @@ mod tests {
         CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
         CreateClientPostgres, CreateClientPulsar, CreateClientRabbitMq, CreateClientRedis,
         CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-        CreateClientZeroMq, EmitterBatchRequirement, ErrorPolicies, FlushPolicy, ProcessorInputs,
-        RouteConstruction,
+        CreateClientZeroMq, EmitterBatchLegality, ErrorPolicies, FlushPolicy, OtelLogsEmitter,
+        ProcessorInputs, RouteConstruction,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
@@ -1532,7 +1561,7 @@ mod tests {
     use super::*;
 
     fn expression(raw: &str) -> Expression {
-        nervix_nspl::parse_expression(raw).expect("valid semantic expression")
+        nervix_plexus::parse_expression(raw).expect("valid semantic expression")
     }
 
     fn value_mapping(column: &str, raw: &str) -> ClickHouseValueMapping {
@@ -1554,18 +1583,6 @@ mod tests {
         RetryPolicy {
             backoff: backoff.to_string(),
             max_backoff: max_backoff.to_string(),
-        }
-    }
-
-    fn no_ack() -> EmitterPublishingMode {
-        EmitterPublishingMode::NoAck {
-            retry_policy: retry_policy("100ms", "1s"),
-        }
-    }
-
-    fn request_ack() -> EmitterPublishingMode {
-        EmitterPublishingMode::RequestAck {
-            retry_policy: retry_policy("100ms", "1s"),
         }
     }
 
@@ -1619,25 +1636,29 @@ mod tests {
         }
     }
 
-    fn emitter(sink: EmitSink, publishing_mode: EmitterPublishingMode) -> CreateEmitter {
+    fn emitter(connector: EmitterEntity) -> CreateEmitter {
         CreateEmitter {
             name: named("orders_out"),
             from: ProcessorInputs::single(named("orders")),
             body: nervix_models::EmitterBody::Values,
-            sink: Box::new(sink),
+            connector: Box::new(connector),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
-            publishing_mode,
             mode: AckMode::Attached,
             construction: RouteConstruction::default(),
             materialized_state: Vec::new(),
         }
     }
 
-    fn iceberg_sink(backend: IcebergStorageBackend) -> EmitSink {
-        EmitSink::Iceberg {
-            backend,
+    fn iceberg_emitter() -> EmitterEntity {
+        EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
+            mode: nervix_models::IcebergTablePublishingMode::Ack {
+                retry_policy: nervix_models::RetryPolicy {
+                    backoff: "100ms".to_string(),
+                    max_backoff: "1s".to_string(),
+                },
+            },
             client: named("upstream"),
             table: named("orders"),
             values: vec![value_mapping("id", "input.id")],
@@ -1647,7 +1668,7 @@ mod tests {
             },
             commit_each: "1s".to_string(),
             max_commit_size: "1MiB".to_string(),
-        }
+        }))
     }
 
     fn iceberg_catalog() -> Model {
@@ -1658,20 +1679,19 @@ mod tests {
         })
     }
 
-    /// One sink an emitter can declare, with the client Models that sink names.
-    struct SinkCase {
-        sink: EmitSink,
-        mode: EmitterPublishingMode,
+    /// One emitter an emitter can declare, with the client Models that emitter names.
+    struct EmitterCase {
+        connector: EmitterEntity,
         client: Model,
         catalog_client: Option<Model>,
     }
 
-    impl SinkCase {
-        /// The emitter publishing to this case's sink, declaring the batching clause a database
-        /// sink requires and leaving it out everywhere else.
+    impl EmitterCase {
+        /// The emitter publishing to this case's emitter, declaring the batching clause a database
+        /// emitter requires and leaving it out everywhere else.
         fn emitter(&self) -> CreateEmitter {
-            let mut emitter = emitter(self.sink.clone(), self.mode.clone());
-            if let EmitterBatchRequirement::Required = self.sink.batch_requirement() {
+            let mut emitter = emitter(self.connector.clone());
+            if let EmitterBatchLegality::Required { .. } = self.connector.batch_legality() {
                 emitter.batch = Some(batch_policy());
             }
             emitter
@@ -1691,7 +1711,7 @@ mod tests {
     }
 
     #[derive(Debug, Clone, Copy)]
-    enum SinkKind {
+    enum EmitterKind {
         Http,
         Kafka,
         Pulsar,
@@ -1713,7 +1733,7 @@ mod tests {
         IcebergAzureBlob,
     }
 
-    impl SinkKind {
+    impl EmitterKind {
         fn label(self) -> &'static str {
             match self {
                 Self::Http => "http",
@@ -1736,16 +1756,21 @@ mod tests {
             }
         }
 
-        fn case(self) -> SinkCase {
+        fn case(self) -> EmitterCase {
             let client = || named::<ClientName>("upstream");
             match self {
-                Self::Http => SinkCase {
-                    sink: EmitSink::Http {
+                Self::Http => EmitterCase {
+                    connector: EmitterEntity::Http(HttpEmitter::Request(HttpRequestEmitter {
+                        mode: nervix_models::HttpRequestPublishingMode::Ack {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
                         client: client(),
                         method: expression("input.method"),
                         path: expression("concat('/orders/', input.id)"),
-                    },
-                    mode: request_ack(),
+                    })),
                     client: Model::ClientHttp(CreateClientHttp {
                         name: client(),
                         mount: client_mount(),
@@ -1753,12 +1778,17 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::Kafka => SinkCase {
-                    sink: EmitSink::Kafka {
+                Self::Kafka => EmitterCase {
+                    connector: EmitterEntity::Kafka(KafkaEmitter::Topic(KafkaTopicEmitter {
+                        mode: nervix_models::KafkaTopicPublishingMode::NoAck {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
                         client: client(),
                         topic: named("orders"),
-                    },
-                    mode: no_ack(),
+                    })),
                     client: Model::ClientKafka(CreateClientKafka {
                         name: client(),
                         mount: client_mount(),
@@ -1766,12 +1796,17 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::Pulsar => SinkCase {
-                    sink: EmitSink::Pulsar {
+                Self::Pulsar => EmitterCase {
+                    connector: EmitterEntity::Pulsar(PulsarEmitter::Topic(PulsarTopicEmitter {
+                        mode: nervix_models::PulsarTopicPublishingMode::NoAck {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
                         client: client(),
                         topic: named("orders"),
-                    },
-                    mode: no_ack(),
+                    })),
                     client: Model::ClientPulsar(CreateClientPulsar {
                         name: client(),
                         mount: client_mount(),
@@ -1779,12 +1814,19 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::RabbitMq => SinkCase {
-                    sink: EmitSink::RabbitMq {
-                        client: client(),
-                        queue: named("orders"),
-                    },
-                    mode: no_ack(),
+                Self::RabbitMq => EmitterCase {
+                    connector: EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(
+                        RabbitMqQueueEmitter {
+                            mode: nervix_models::RabbitMqQueuePublishingMode::NoAck {
+                                retry_policy: nervix_models::RetryPolicy {
+                                    backoff: "100ms".to_string(),
+                                    max_backoff: "1s".to_string(),
+                                },
+                            },
+                            client: client(),
+                            queue: named("orders"),
+                        },
+                    )),
                     client: Model::ClientRabbitMq(CreateClientRabbitMq {
                         name: client(),
                         mount: client_mount(),
@@ -1792,12 +1834,17 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::Redis => SinkCase {
-                    sink: EmitSink::Redis {
+                Self::Redis => EmitterCase {
+                    connector: EmitterEntity::Redis(RedisEmitter::PubSub(RedisPubSubEmitter {
+                        mode: nervix_models::RedisPubSubPublishingMode::NoAck {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
                         client: client(),
                         channel: named("orders"),
-                    },
-                    mode: no_ack(),
+                    })),
                     client: Model::ClientRedis(CreateClientRedis {
                         name: client(),
                         pool: pool_bounds(),
@@ -1806,14 +1853,17 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::Mqtt => SinkCase {
-                    sink: EmitSink::Mqtt {
+                Self::Mqtt => EmitterCase {
+                    connector: EmitterEntity::Mqtt(MqttEmitter::Topic(MqttTopicEmitter {
+                        mode: nervix_models::MqttTopicPublishingMode::Qos0 {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
                         client: client(),
                         topic: named("orders"),
-                    },
-                    mode: EmitterPublishingMode::MqttQos0 {
-                        retry_policy: retry_policy("100ms", "1s"),
-                    },
+                    })),
                     client: Model::ClientMqtt(CreateClientMqtt {
                         name: client(),
                         mount: client_mount(),
@@ -1821,12 +1871,17 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::Nats => SinkCase {
-                    sink: EmitSink::Nats {
+                Self::Nats => EmitterCase {
+                    connector: EmitterEntity::Nats(NatsEmitter::Subject(NatsSubjectEmitter {
+                        mode: nervix_models::NatsSubjectPublishingMode::NoAck {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
                         client: client(),
                         subject: named("orders"),
-                    },
-                    mode: no_ack(),
+                    })),
                     client: Model::ClientNats(CreateClientNats {
                         name: client(),
                         mount: client_mount(),
@@ -1834,9 +1889,16 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::ZeroMq => SinkCase {
-                    sink: EmitSink::ZeroMq { client: client() },
-                    mode: no_ack(),
+                Self::ZeroMq => EmitterCase {
+                    connector: EmitterEntity::ZeroMq(ZeroMqEmitter::Push(ZeroMqPushEmitter {
+                        mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
+                        client: client(),
+                    })),
                     client: Model::ClientZeroMq(CreateClientZeroMq {
                         name: client(),
                         mount: client_mount(),
@@ -1844,9 +1906,18 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::Syslog => SinkCase {
-                    sink: EmitSink::Syslog { client: client() },
-                    mode: no_ack(),
+                Self::Syslog => EmitterCase {
+                    connector: EmitterEntity::Syslog(SyslogEmitter::Collector(
+                        SyslogCollectorEmitter {
+                            mode: nervix_models::SyslogCollectorPublishingMode::NoAck {
+                                retry_policy: nervix_models::RetryPolicy {
+                                    backoff: "100ms".to_string(),
+                                    max_backoff: "1s".to_string(),
+                                },
+                            },
+                            client: client(),
+                        },
+                    )),
                     client: Model::ClientSyslog(CreateClientSyslog {
                         name: client(),
                         mount: client_mount(),
@@ -1854,15 +1925,18 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::Sqs => SinkCase {
-                    sink: EmitSink::Sqs {
+                Self::Sqs => EmitterCase {
+                    connector: EmitterEntity::Sqs(SqsEmitter::Queue(SqsQueueEmitter {
+                        mode: nervix_models::SqsQueuePublishingMode::Batch {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
                         client: client(),
-                        queue: "orders".to_string(),
+                        queue: nervix_models::SqsQueueName::parse("orders").expect("valid queue"),
                         fifo_group: None,
-                    },
-                    mode: EmitterPublishingMode::SqsBatch {
-                        retry_policy: retry_policy("100ms", "1s"),
-                    },
+                    })),
                     client: Model::ClientSqs(CreateClientSqs {
                         name: client(),
                         mount: client_mount(),
@@ -1870,9 +1944,16 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::Sentry => SinkCase {
-                    sink: EmitSink::Sentry { client: client() },
-                    mode: request_ack(),
+                Self::Sentry => EmitterCase {
+                    connector: EmitterEntity::Sentry(SentryEmitter::Event(SentryEventEmitter {
+                        mode: nervix_models::SentryEventPublishingMode::Ack {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
+                        client: client(),
+                    })),
                     client: Model::ClientSentry(CreateClientSentry {
                         name: client(),
                         mount: client_mount(),
@@ -1880,16 +1961,22 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::Otel => SinkCase {
-                    sink: EmitSink::Otel {
+                Self::Otel => EmitterCase {
+                    connector: EmitterEntity::from(OtelLogsEmitter {
+                        mode: nervix_models::OtelLogsPublishingMode::Ack {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
                         client: client(),
-                        signal: nervix_models::OtelSignal::Logs,
-                        values: vec![value_mapping("id", "input.id")],
-                        attributes: Vec::new(),
-                        resource: Vec::new(),
-                        scope: None,
-                    },
-                    mode: request_ack(),
+                        mappings: OtelMappings {
+                            values: vec![value_mapping("id", "input.id")],
+                            attributes: Vec::new(),
+                            resource: Vec::new(),
+                            scope: None,
+                        },
+                    }),
                     client: Model::ClientOtel(CreateClientOtel {
                         name: client(),
                         mount: client_mount(),
@@ -1897,13 +1984,20 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::ClickHouse => SinkCase {
-                    sink: EmitSink::ClickHouse {
-                        client: client(),
-                        table: named("orders"),
-                        values: vec![value_mapping("id", "input.id")],
-                    },
-                    mode: request_ack(),
+                Self::ClickHouse => EmitterCase {
+                    connector: EmitterEntity::ClickHouse(ClickHouseEmitter::Table(
+                        ClickHouseTableEmitter {
+                            mode: nervix_models::ClickHouseTablePublishingMode::Ack {
+                                retry_policy: nervix_models::RetryPolicy {
+                                    backoff: "100ms".to_string(),
+                                    max_backoff: "1s".to_string(),
+                                },
+                            },
+                            client: client(),
+                            table: named("orders"),
+                            values: vec![value_mapping("id", "input.id")],
+                        },
+                    )),
                     client: Model::ClientClickHouse(CreateClientClickHouse {
                         name: client(),
                         mount: client_mount(),
@@ -1911,14 +2005,21 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::Postgres => SinkCase {
-                    sink: EmitSink::Postgres {
-                        client: client(),
-                        table: named("orders"),
-                        values: vec![value_mapping("id", "input.id")],
-                        conflict_action: nervix_models::PostgresConflictAction::None,
-                    },
-                    mode: request_ack(),
+                Self::Postgres => EmitterCase {
+                    connector: EmitterEntity::Postgres(PostgresEmitter::Table(
+                        PostgresTableEmitter {
+                            mode: nervix_models::PostgresTablePublishingMode::Ack {
+                                retry_policy: nervix_models::RetryPolicy {
+                                    backoff: "100ms".to_string(),
+                                    max_backoff: "1s".to_string(),
+                                },
+                            },
+                            client: client(),
+                            table: named("orders"),
+                            values: vec![value_mapping("id", "input.id")],
+                            conflict_action: nervix_models::PostgresConflictAction::None,
+                        },
+                    )),
                     client: Model::ClientPostgres(CreateClientPostgres {
                         name: client(),
                         pool: pool_bounds(),
@@ -1927,14 +2028,19 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::MySql => SinkCase {
-                    sink: EmitSink::MySql {
+                Self::MySql => EmitterCase {
+                    connector: EmitterEntity::MySql(MySqlEmitter::Table(MySqlTableEmitter {
+                        mode: nervix_models::MySqlTablePublishingMode::Ack {
+                            retry_policy: nervix_models::RetryPolicy {
+                                backoff: "100ms".to_string(),
+                                max_backoff: "1s".to_string(),
+                            },
+                        },
                         client: client(),
                         table: named("orders"),
                         values: vec![value_mapping("id", "input.id")],
                         conflict_action: nervix_models::MySqlConflictAction::None,
-                    },
-                    mode: request_ack(),
+                    })),
                     client: Model::ClientMySql(CreateClientMySql {
                         name: client(),
                         pool: pool_bounds(),
@@ -1943,14 +2049,21 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::MongoDb => SinkCase {
-                    sink: EmitSink::MongoDb {
-                        client: client(),
-                        collection: named("orders"),
-                        values: vec![value_mapping("id", "input.id")],
-                        conflict_action: nervix_models::MongoDbConflictAction::None,
-                    },
-                    mode: request_ack(),
+                Self::MongoDb => EmitterCase {
+                    connector: EmitterEntity::MongoDb(MongoDbEmitter::Collection(
+                        MongoDbCollectionEmitter {
+                            mode: nervix_models::MongoDbCollectionPublishingMode::Ack {
+                                retry_policy: nervix_models::RetryPolicy {
+                                    backoff: "100ms".to_string(),
+                                    max_backoff: "1s".to_string(),
+                                },
+                            },
+                            client: client(),
+                            collection: named("orders"),
+                            values: vec![value_mapping("id", "input.id")],
+                            conflict_action: nervix_models::MongoDbConflictAction::None,
+                        },
+                    )),
                     client: Model::ClientMongoDb(CreateClientMongoDb {
                         name: client(),
                         pool: pool_bounds(),
@@ -1959,9 +2072,8 @@ mod tests {
                     }),
                     catalog_client: None,
                 },
-                Self::IcebergS3 => SinkCase {
-                    sink: iceberg_sink(IcebergStorageBackend::S3),
-                    mode: request_ack(),
+                Self::IcebergS3 => EmitterCase {
+                    connector: iceberg_emitter(),
                     client: Model::ClientS3(CreateClientS3 {
                         name: client(),
                         mount: client_mount(),
@@ -1969,9 +2081,8 @@ mod tests {
                     }),
                     catalog_client: Some(iceberg_catalog()),
                 },
-                Self::IcebergGcs => SinkCase {
-                    sink: iceberg_sink(IcebergStorageBackend::Gcs),
-                    mode: request_ack(),
+                Self::IcebergGcs => EmitterCase {
+                    connector: iceberg_emitter(),
                     client: Model::ClientGcs(CreateClientGcs {
                         name: client(),
                         mount: client_mount(),
@@ -1979,9 +2090,8 @@ mod tests {
                     }),
                     catalog_client: Some(iceberg_catalog()),
                 },
-                Self::IcebergAzureBlob => SinkCase {
-                    sink: iceberg_sink(IcebergStorageBackend::AzureBlob),
-                    mode: request_ack(),
+                Self::IcebergAzureBlob => EmitterCase {
+                    connector: iceberg_emitter(),
                     client: Model::ClientAzureBlob(CreateClientAzureBlob {
                         name: client(),
                         mount: client_mount(),
@@ -1994,32 +2104,32 @@ mod tests {
     }
 
     #[rstest]
-    #[case::http(SinkKind::Http)]
-    #[case::kafka(SinkKind::Kafka)]
-    #[case::pulsar(SinkKind::Pulsar)]
-    #[case::rabbitmq(SinkKind::RabbitMq)]
-    #[case::redis(SinkKind::Redis)]
-    #[case::mqtt(SinkKind::Mqtt)]
-    #[case::nats(SinkKind::Nats)]
-    #[case::zeromq(SinkKind::ZeroMq)]
-    #[case::syslog(SinkKind::Syslog)]
-    #[case::sqs(SinkKind::Sqs)]
-    #[case::sentry(SinkKind::Sentry)]
-    #[case::otel(SinkKind::Otel)]
-    #[case::clickhouse(SinkKind::ClickHouse)]
-    #[case::postgres(SinkKind::Postgres)]
-    #[case::mysql(SinkKind::MySql)]
-    #[case::mongodb(SinkKind::MongoDb)]
-    #[case::iceberg_s3(SinkKind::IcebergS3)]
-    #[case::iceberg_gcs(SinkKind::IcebergGcs)]
-    #[case::iceberg_azure_blob(SinkKind::IcebergAzureBlob)]
-    fn decides_each_sink_from_its_client_model(#[case] kind: SinkKind) {
+    #[case::http(EmitterKind::Http)]
+    #[case::kafka(EmitterKind::Kafka)]
+    #[case::pulsar(EmitterKind::Pulsar)]
+    #[case::rabbitmq(EmitterKind::RabbitMq)]
+    #[case::redis(EmitterKind::Redis)]
+    #[case::mqtt(EmitterKind::Mqtt)]
+    #[case::nats(EmitterKind::Nats)]
+    #[case::zeromq(EmitterKind::ZeroMq)]
+    #[case::syslog(EmitterKind::Syslog)]
+    #[case::sqs(EmitterKind::Sqs)]
+    #[case::sentry(EmitterKind::Sentry)]
+    #[case::otel(EmitterKind::Otel)]
+    #[case::clickhouse(EmitterKind::ClickHouse)]
+    #[case::postgres(EmitterKind::Postgres)]
+    #[case::mysql(EmitterKind::MySql)]
+    #[case::mongodb(EmitterKind::MongoDb)]
+    #[case::iceberg_s3(EmitterKind::IcebergS3)]
+    #[case::iceberg_gcs(EmitterKind::IcebergGcs)]
+    #[case::iceberg_azure_blob(EmitterKind::IcebergAzureBlob)]
+    fn decides_each_emitter_from_its_client_model(#[case] kind: EmitterKind) {
         let plan = kind
             .case()
             .decide()
-            .expect("a sink with a matching client must be planned");
+            .expect("an emitter with a matching client must be planned");
 
-        assert_eq!(plan.sink.label(), kind.label());
+        assert_eq!(plan.label, kind.label());
         assert_eq!(
             plan.retry_policy,
             ParsedRetryPolicy {
@@ -2030,25 +2140,35 @@ mod tests {
     }
 
     #[test]
-    fn every_row_sink_carries_its_lowered_mapping_into_the_start_plan() {
+    fn every_row_emitter_carries_its_lowered_mapping_into_the_start_plan() {
         for kind in [
-            SinkKind::ClickHouse,
-            SinkKind::Postgres,
-            SinkKind::MySql,
-            SinkKind::MongoDb,
-            SinkKind::IcebergS3,
+            EmitterKind::ClickHouse,
+            EmitterKind::Postgres,
+            EmitterKind::MySql,
+            EmitterKind::MongoDb,
+            EmitterKind::IcebergS3,
         ] {
             let plan = kind
                 .case()
                 .decide()
-                .expect("the row sink should be planned");
-            let mapping = match &plan.sink {
-                EmitterSinkPlan::ClickHouse(sink) => &sink.mapping,
-                EmitterSinkPlan::Postgres(sink) => &sink.mapping,
-                EmitterSinkPlan::MySql(sink) => &sink.mapping,
-                EmitterSinkPlan::MongoDb(sink) => &sink.mapping,
-                EmitterSinkPlan::Iceberg(sink) => &sink.mapping,
-                _ => panic!("the case must be a row sink"),
+                .expect("the row emitter should be planned");
+            let mapping = match &plan.connector {
+                EmitterConnectorPlan::ClickHouse(ClickHouseEmitterPlan::Table(connector)) => {
+                    &connector.mapping
+                }
+                EmitterConnectorPlan::Postgres(PostgresEmitterPlan::Table(connector)) => {
+                    &connector.mapping
+                }
+                EmitterConnectorPlan::MySql(MySqlEmitterPlan::Table(connector)) => {
+                    &connector.mapping
+                }
+                EmitterConnectorPlan::MongoDb(MongoDbEmitterPlan::Collection(connector)) => {
+                    &connector.mapping
+                }
+                EmitterConnectorPlan::Iceberg(IcebergEmitterPlan::Table(connector)) => {
+                    &connector.mapping
+                }
+                _ => panic!("the case must be a row emitter"),
             };
             assert_eq!(mapping.columns, ["id"], "{}", kind.label());
             assert_eq!(mapping.program.inner.set.len(), 1, "{}", kind.label());
@@ -2063,26 +2183,30 @@ mod tests {
 
     #[test]
     fn otel_plan_combines_values_and_attributes_in_declared_order() {
-        let mut case = SinkKind::Otel.case();
-        let EmitSink::Otel {
-            attributes,
-            resource,
-            ..
-        } = &mut case.sink
+        let mut case = EmitterKind::Otel.case();
+        let EmitterEntity::Otel(OtelEmitter::Logs(OtelLogsEmitter { mappings, .. })) =
+            &mut case.connector
         else {
-            panic!("the case must be OTEL");
+            panic!("the case must be OTEL logs");
         };
-        attributes.push(value_mapping("customer", "input.customer"));
-        resource.push(value_mapping("service.name", "'orders'"));
+        mappings
+            .attributes
+            .push(value_mapping("customer", "input.customer"));
+        mappings
+            .resource
+            .push(value_mapping("service.name", "'orders'"));
         let plan = case.decide().expect("OTEL mappings should be planned");
-        let EmitterSinkPlan::Otel(sink) = plan.sink else {
+        let EmitterConnectorPlan::Otel(OtelEmitterPlan::Logs(OtelLogsEmitterPlan {
+            export: connector,
+        })) = plan.connector
+        else {
             panic!("the plan must be OTEL");
         };
-        assert_eq!(sink.mapping.columns, ["id", "customer"]);
-        assert_eq!(sink.values, ["id"]);
-        assert_eq!(sink.attributes, ["customer"]);
+        assert_eq!(connector.mapping.columns, ["id", "customer"]);
+        assert_eq!(connector.values, ["id"]);
+        assert_eq!(connector.attributes, ["customer"]);
         assert_eq!(
-            sink.resource,
+            connector.resource,
             [OtelResourceAttribute {
                 key: "service.name".to_string(),
                 value: OtelLiteral::String("orders".to_string()),
@@ -2092,17 +2216,22 @@ mod tests {
 
     #[test]
     fn otel_resource_requires_a_literal_during_planning() {
-        let mut case = SinkKind::Otel.case();
-        let EmitSink::Otel { resource, .. } = &mut case.sink else {
-            panic!("the case must be OTEL");
+        let mut case = EmitterKind::Otel.case();
+        let EmitterEntity::Otel(OtelEmitter::Logs(OtelLogsEmitter { mappings, .. })) =
+            &mut case.connector
+        else {
+            panic!("the case must be OTEL logs");
         };
-        resource.push(value_mapping("service.name", "input.customer"));
+        mappings
+            .resource
+            .push(value_mapping("service.name", "input.customer"));
         let error = case
             .decide()
             .expect_err("resource attributes must be fixed values");
         assert_eq!(
             *error.current_context(),
             EmitterStartPlanError::InvalidOtelResource {
+                kind: case.connector.kind(),
                 emitter: named("orders_out"),
                 attribute: "service.name".to_string(),
             }
@@ -2122,11 +2251,11 @@ mod tests {
                 "it is longer than a duration can be",
             ),
         ] {
-            let mut case = SinkKind::IcebergS3.case();
-            let EmitSink::Iceberg {
+            let mut case = EmitterKind::IcebergS3.case();
+            let EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
                 commit_each: cadence,
                 ..
-            } = &mut case.sink
+            })) = &mut case.connector
             else {
                 panic!("the case must be Iceberg");
             };
@@ -2151,10 +2280,11 @@ mod tests {
 
     #[test]
     fn iceberg_commit_limits_are_parsed_during_planning() {
-        let mut case = SinkKind::IcebergS3.case();
-        let EmitSink::Iceberg {
-            max_commit_size, ..
-        } = &mut case.sink
+        let mut case = EmitterKind::IcebergS3.case();
+        let EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
+            max_commit_size,
+            ..
+        })) = &mut case.connector
         else {
             panic!("the case must be Iceberg");
         };
@@ -2171,16 +2301,16 @@ mod tests {
     }
 
     #[test]
-    fn carries_the_batch_clause_into_the_plan_of_every_sink() {
+    fn carries_the_batch_clause_into_the_plan_of_every_emitter() {
         for kind in [
-            SinkKind::Kafka,
-            SinkKind::Sentry,
-            SinkKind::Otel,
-            SinkKind::IcebergS3,
+            EmitterKind::Kafka,
+            EmitterKind::Sentry,
+            EmitterKind::Otel,
+            EmitterKind::IcebergS3,
         ] {
             let case = kind.case();
-            let unbatched = case.decide().expect("the sink must be planned");
-            assert_eq!(unbatched.sink.batch(), None, "{}", kind.label());
+            let unbatched = case.decide().expect("the emitter must be planned");
+            assert_eq!(unbatched.connector.batch(), None, "{}", kind.label());
 
             let mut emitter = case.emitter();
             emitter.batch = Some(batch_policy());
@@ -2191,9 +2321,9 @@ mod tests {
                     catalog_client: case.catalog_client.as_ref(),
                 },
             )
-            .expect("the batching sink must be planned");
+            .expect("the batching emitter must be planned");
             assert_eq!(
-                batched.sink.batch(),
+                batched.connector.batch(),
                 Some(batch_policy()),
                 "{}",
                 kind.label()
@@ -2201,22 +2331,27 @@ mod tests {
         }
 
         for kind in [
-            SinkKind::ClickHouse,
-            SinkKind::Postgres,
-            SinkKind::MySql,
-            SinkKind::MongoDb,
+            EmitterKind::ClickHouse,
+            EmitterKind::Postgres,
+            EmitterKind::MySql,
+            EmitterKind::MongoDb,
         ] {
             let plan = kind
                 .case()
                 .decide()
-                .expect("the database sink must be planned");
-            assert_eq!(plan.sink.batch(), Some(batch_policy()), "{}", kind.label());
+                .expect("the database emitter must be planned");
+            assert_eq!(
+                plan.connector.batch(),
+                Some(batch_policy()),
+                "{}",
+                kind.label()
+            );
         }
     }
 
     #[test]
-    fn plans_an_http_sink_with_its_client_origin() {
-        let case = SinkKind::Http.case();
+    fn plans_an_http_emitter_with_its_client_origin() {
+        let case = EmitterKind::Http.case();
         let emitter = case.emitter();
 
         let plan = EmitterStartPlan::decide(
@@ -2226,18 +2361,18 @@ mod tests {
                 catalog_client: None,
             },
         )
-        .expect("an HTTP sink with an HTTP client must be planned");
+        .expect("an HTTP emitter with an HTTP client must be planned");
 
-        assert_eq!(plan.sink.batch(), None);
-        let EmitterSinkPlan::Http(sink) = plan.sink else {
-            panic!("an HTTP sink must be planned as HTTP");
+        assert_eq!(plan.connector.batch(), None);
+        let EmitterConnectorPlan::Http(HttpEmitterPlan::Request(connector)) = plan.connector else {
+            panic!("an HTTP emitter must be planned as HTTP");
         };
         assert_eq!(
-            sink.origin,
+            connector.origin,
             HttpOrigin::parse("https://orders.example.com:8443")
                 .expect("the fixture endpoint is an origin")
         );
-        assert_eq!(sink.client.name, named::<ClientName>("upstream"));
+        assert_eq!(connector.client.name, named::<ClientName>("upstream"));
     }
 
     #[test]
@@ -2246,7 +2381,7 @@ mod tests {
             Vec::new(),
             http_client_config("https://orders.example.com/v1"),
         ] {
-            let mut case = SinkKind::Http.case();
+            let mut case = EmitterKind::Http.case();
             case.client = Model::ClientHttp(CreateClientHttp {
                 name: named("upstream"),
                 mount: None,
@@ -2255,7 +2390,7 @@ mod tests {
 
             let error = case
                 .decide()
-                .expect_err("an HTTP sink needs an origin endpoint");
+                .expect_err("an HTTP emitter needs an origin endpoint");
 
             assert_eq!(
                 *error.current_context(),
@@ -2267,65 +2402,41 @@ mod tests {
     }
 
     #[test]
-    fn an_http_sink_publishes_only_with_request_acknowledgement() {
-        let case = SinkKind::Http.case();
-        let mut emitter = case.emitter();
-        emitter.publishing_mode = no_ack();
-
-        let error = EmitterStartPlan::decide(
-            &emitter,
-            EmitterClientModels {
-                client: Some(&case.client),
-                catalog_client: None,
-            },
-        )
-        .expect_err("an HTTP sink cannot publish without acknowledgement");
-
-        assert_eq!(
-            *error.current_context(),
-            EmitterStartPlanError::UnsupportedPublishingMode {
-                mode: "NO_ACK",
-                sink: "HTTP",
-            }
-        );
-    }
-
-    #[test]
-    fn a_database_sink_without_its_batch_clause_is_not_planned() {
-        let case = SinkKind::MongoDb.case();
+    fn a_database_emitter_requires_the_batch_its_entity_declares() {
+        let case = EmitterKind::MongoDb.case();
         let mut emitter = case.emitter();
         emitter.batch = None;
-
-        let error = EmitterStartPlan::decide(
-            &emitter,
-            EmitterClientModels {
-                client: Some(&case.client),
-                catalog_client: None,
-            },
-        )
-        .expect_err("a MongoDB sink has no unbounded write");
+        let error = emitter
+            .validate_batch()
+            .expect_err("this entity requires a batch");
         assert_eq!(
-            *error.current_context(),
-            EmitterStartPlanError::BatchRequired { sink: "MONGODB" }
+            error.current_context(),
+            &nervix_models::EmitterBatchContractError::Required {
+                connector: emitter.connector.kind().phrase()
+            },
         );
     }
 
     #[test]
-    fn carries_the_declared_client_and_the_sink_parameters() {
-        let plan = SinkKind::Postgres
+    fn carries_the_declared_client_and_the_emitter_parameters() {
+        let plan = EmitterKind::Postgres
             .case()
             .decide()
-            .expect("a Postgres sink with a Postgres client must be planned");
+            .expect("a Postgres emitter with a Postgres client must be planned");
 
-        let EmitterSinkPlan::Postgres(sink) = plan.sink else {
-            panic!("a Postgres sink must be planned as Postgres");
+        let EmitterConnectorPlan::Postgres(PostgresEmitterPlan::Table(connector)) = plan.connector
+        else {
+            panic!("a Postgres emitter must be planned as Postgres");
         };
-        assert_eq!(sink.client, declared_client("upstream"));
-        assert_eq!(sink.table, named::<TableName>("orders"));
-        assert_eq!(sink.conflict_action, PostgresConflictAction::None);
-        assert_eq!(sink.batch, batch_policy());
+        assert_eq!(connector.client, declared_client("upstream"));
         assert_eq!(
-            sink.pooled_client(),
+            connector.table,
+            named::<nervix_models::PostgresTableName>("orders")
+        );
+        assert_eq!(connector.conflict_action, PostgresConflictAction::None);
+        assert_eq!(connector.batch, batch_policy());
+        assert_eq!(
+            connector.pooled_client(),
             PooledClientPlan {
                 transport: PooledTransport::Postgres,
                 bounds: pool_bounds(),
@@ -2334,27 +2445,31 @@ mod tests {
     }
 
     #[test]
-    fn plans_an_iceberg_sink_with_its_storage_and_catalog_clients() {
-        let plan = SinkKind::IcebergGcs
+    fn plans_an_iceberg_emitter_with_its_storage_and_catalog_clients() {
+        let plan = EmitterKind::IcebergGcs
             .case()
             .decide()
-            .expect("an Iceberg sink with GCS storage and a REST catalog must be planned");
+            .expect("an Iceberg emitter with GCS storage and a REST catalog must be planned");
 
-        let EmitterSinkPlan::Iceberg(sink) = plan.sink else {
-            panic!("an Iceberg sink must be planned as Iceberg");
+        let EmitterConnectorPlan::Iceberg(IcebergEmitterPlan::Table(connector)) = plan.connector
+        else {
+            panic!("an Iceberg emitter must be planned as Iceberg");
         };
-        assert_eq!(sink.backend, IcebergStorageBackend::Gcs);
-        assert_eq!(sink.storage, declared_client("upstream"));
-        assert_eq!(sink.catalog, declared_client("catalog"));
-        assert_eq!(sink.location, "s3://warehouse/orders");
-        assert_eq!(sink.commit.interval, Duration::from_secs(1));
-        assert_eq!(sink.commit.max_size, 1_048_576);
+        assert_eq!(connector.backend, IcebergStorageBackend::Gcs);
+        assert_eq!(connector.storage, declared_client("upstream"));
+        assert_eq!(connector.catalog, declared_client("catalog"));
+        assert_eq!(connector.location, "s3://warehouse/orders");
+        assert_eq!(connector.commit.interval, Duration::from_secs(1));
+        assert_eq!(connector.commit.max_size, 1_048_576);
     }
 
     #[test]
     fn decides_a_broker_confirmation_window_timeout_and_retry_policy() {
-        let mut case = SinkKind::Kafka.case();
-        case.mode = EmitterPublishingMode::BrokerAck {
+        let mut case = EmitterKind::Kafka.case();
+        let EmitterEntity::Kafka(KafkaEmitter::Topic(destination)) = &mut case.connector else {
+            panic!("expected Kafka destination");
+        };
+        destination.mode = nervix_models::KafkaTopicPublishingMode::Ack {
             window: AckWindow::Parallel {
                 max: nonzero!(17u64),
             },
@@ -2364,7 +2479,7 @@ mod tests {
 
         let plan = case
             .decide()
-            .expect("a Kafka sink accepts an acknowledged broker mode");
+            .expect("a Kafka emitter accepts an acknowledged broker mode");
 
         assert_eq!(
             plan.retry_policy,
@@ -2373,11 +2488,11 @@ mod tests {
                 max_backoff: Duration::from_secs(2),
             }
         );
-        let EmitterSinkPlan::Kafka(sink) = plan.sink else {
-            panic!("a Kafka sink must be planned as Kafka");
+        let EmitterConnectorPlan::Kafka(KafkaEmitterPlan::Topic(connector)) = plan.connector else {
+            panic!("a Kafka emitter must be planned as Kafka");
         };
         assert_eq!(
-            sink.mode,
+            connector.mode,
             BrokerPublishingMode::Ack(AckConfirmation {
                 max_in_flight: nonzero!(17usize),
                 timeout: Duration::from_secs(3),
@@ -2387,14 +2502,19 @@ mod tests {
 
     #[test]
     fn decides_transport_specific_mqtt_nats_and_sqs_modes() {
-        let mut mqtt = SinkKind::Mqtt.case();
-        mqtt.mode = EmitterPublishingMode::MqttQos2 {
+        let mut mqtt = EmitterKind::Mqtt.case();
+        let EmitterEntity::Mqtt(MqttEmitter::Topic(destination)) = &mut mqtt.connector else {
+            panic!("expected Mqtt destination");
+        };
+        destination.mode = nervix_models::MqttTopicPublishingMode::Qos2 {
             window: AckWindow::Sequential,
             ack_timeout: "7s".to_string(),
             retry_policy: retry_policy("10ms", "1s"),
         };
-        let EmitterSinkPlan::Mqtt(mqtt) = mqtt.decide().expect("valid MQTT mode").sink else {
-            panic!("an MQTT sink must be planned as MQTT");
+        let EmitterConnectorPlan::Mqtt(MqttEmitterPlan::Topic(mqtt)) =
+            mqtt.decide().expect("valid MQTT mode").connector
+        else {
+            panic!("an MQTT emitter must be planned as MQTT");
         };
         assert_eq!(
             mqtt.mode,
@@ -2404,18 +2524,22 @@ mod tests {
             })
         );
 
-        let mut jetstream = SinkKind::Nats.case();
-        jetstream.mode = EmitterPublishingMode::NatsJetStream {
+        let mut jetstream = EmitterKind::Nats.case();
+        let EmitterEntity::Nats(NatsEmitter::Subject(destination)) = &mut jetstream.connector
+        else {
+            panic!("expected Nats destination");
+        };
+        destination.mode = nervix_models::NatsSubjectPublishingMode::JetStream {
             window: AckWindow::Parallel {
                 max: nonzero!(23u64),
             },
             ack_timeout: "11s".to_string(),
             retry_policy: retry_policy("10ms", "1s"),
         };
-        let EmitterSinkPlan::Nats(jetstream) =
-            jetstream.decide().expect("valid JetStream mode").sink
+        let EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(jetstream)) =
+            jetstream.decide().expect("valid JetStream mode").connector
         else {
-            panic!("a NATS sink must be planned as NATS");
+            panic!("a NATS emitter must be planned as NATS");
         };
         assert_eq!(
             jetstream.mode,
@@ -2425,61 +2549,25 @@ mod tests {
             })
         );
 
-        let EmitterSinkPlan::Nats(core) = SinkKind::Nats
+        let EmitterConnectorPlan::Nats(NatsEmitterPlan::Subject(core)) = EmitterKind::Nats
             .case()
             .decide()
-            .expect("a NATS sink accepts NO_ACK")
-            .sink
+            .expect("a NATS emitter accepts NO_ACK")
+            .connector
         else {
-            panic!("a NATS sink must be planned as NATS");
+            panic!("a NATS emitter must be planned as NATS");
         };
         assert_eq!(core.mode, NatsPublishingMode::Core);
 
-        let EmitterSinkPlan::Sqs(sqs) = SinkKind::Sqs
+        let EmitterConnectorPlan::Sqs(SqsEmitterPlan::Queue(sqs)) = EmitterKind::Sqs
             .case()
             .decide()
-            .expect("an SQS sink accepts BATCH")
-            .sink
+            .expect("an SQS emitter accepts BATCH")
+            .connector
         else {
-            panic!("an SQS sink must be planned as SQS");
+            panic!("an SQS emitter must be planned as SQS");
         };
         assert_eq!(sqs.mode, SqsPublishingMode::Batch);
-    }
-
-    #[rstest]
-    #[case::broker_sink(
-        SinkKind::Kafka,
-        EmitterPublishingMode::MqttQos0 { retry_policy: retry_policy("25ms", "2s") },
-        "QOS 0",
-        "KAFKA"
-    )]
-    #[case::no_ack_sink(
-        SinkKind::Redis,
-        EmitterPublishingMode::RequestAck { retry_policy: retry_policy("25ms", "2s") },
-        "ACK",
-        "REDIS"
-    )]
-    #[case::request_sink(SinkKind::Postgres, no_ack(), "NO_ACK", "POSTGRES")]
-    fn rejects_a_mode_its_sink_does_not_publish_with(
-        #[case] kind: SinkKind,
-        #[case] mode: EmitterPublishingMode,
-        #[case] expected_mode: &'static str,
-        #[case] expected_sink: &'static str,
-    ) {
-        let mut case = kind.case();
-        case.mode = mode;
-
-        let error = case
-            .decide()
-            .expect_err("a foreign publishing mode must not be planned");
-
-        assert_eq!(
-            error.current_context(),
-            &EmitterStartPlanError::UnsupportedPublishingMode {
-                mode: expected_mode,
-                sink: expected_sink,
-            }
-        );
     }
 
     #[rstest]
@@ -2506,8 +2594,11 @@ mod tests {
         #[case] policy: RetryPolicy,
         #[case] expected: EmitterStartPlanError,
     ) {
-        let mut case = SinkKind::Kafka.case();
-        case.mode = EmitterPublishingMode::NoAck {
+        let mut case = EmitterKind::Kafka.case();
+        let EmitterEntity::Kafka(KafkaEmitter::Topic(destination)) = &mut case.connector else {
+            panic!("expected Kafka destination");
+        };
+        destination.mode = nervix_models::KafkaTopicPublishingMode::NoAck {
             retry_policy: policy,
         };
 
@@ -2538,8 +2629,12 @@ mod tests {
         #[case] ack_timeout: &str,
         #[case] expected: EmitterStartPlanError,
     ) {
-        let mut case = SinkKind::RabbitMq.case();
-        case.mode = EmitterPublishingMode::BrokerAck {
+        let mut case = EmitterKind::RabbitMq.case();
+        let EmitterEntity::RabbitMq(RabbitMqEmitter::Queue(destination)) = &mut case.connector
+        else {
+            panic!("expected Kafka destination");
+        };
+        destination.mode = nervix_models::RabbitMqQueuePublishingMode::Ack {
             window: AckWindow::Sequential,
             ack_timeout: ack_timeout.to_string(),
             retry_policy: retry_policy("25ms", "2s"),
@@ -2554,7 +2649,7 @@ mod tests {
 
     #[test]
     fn reports_a_missing_client() {
-        let case = SinkKind::Kafka.case();
+        let case = EmitterKind::Kafka.case();
 
         let error = EmitterStartPlan::decide(
             &case.emitter(),
@@ -2563,12 +2658,12 @@ mod tests {
                 catalog_client: None,
             },
         )
-        .expect_err("a sink without its client must not be planned");
+        .expect_err("an emitter without its client must not be planned");
 
         assert_eq!(
             error.current_context(),
             &EmitterStartPlanError::MissingClient {
-                sink: "KAFKA",
+                connector: "KAFKA TOPIC",
                 client: named("upstream"),
             }
         );
@@ -2576,18 +2671,20 @@ mod tests {
 
     #[test]
     fn reports_a_client_of_another_kind() {
-        let mut case = SinkKind::Kafka.case();
-        case.client = SinkKind::Pulsar.case().client;
+        let mut case = EmitterKind::Kafka.case();
+        case.client = EmitterKind::Pulsar.case().client;
 
         let error = case
             .decide()
-            .expect_err("a Kafka sink must not be planned over a Pulsar client");
+            .expect_err("a Kafka emitter must not be planned over a Pulsar client");
 
         assert_eq!(
             error.current_context(),
             &EmitterStartPlanError::ClientKindMismatch {
-                sink: "KAFKA",
-                expected: "KAFKA",
+                connector: "KAFKA TOPIC",
+                expected: nervix_models::EmitterReferenceKind::Client(
+                    nervix_models::ConnectorKind::Kafka
+                ),
                 found: "PULSAR",
                 client: named("upstream"),
             }
@@ -2595,20 +2692,24 @@ mod tests {
     }
 
     #[test]
-    fn reports_iceberg_storage_of_another_backend() {
-        let mut case = SinkKind::IcebergS3.case();
-        case.client = SinkKind::IcebergGcs.case().client;
+    fn reports_an_iceberg_storage_client_of_another_kind() {
+        let mut case = EmitterKind::IcebergS3.case();
+        case.client = EmitterKind::Kafka.case().client;
 
         let error = case
             .decide()
-            .expect_err("an S3 Iceberg sink must not be planned over a GCS client");
+            .expect_err("an Iceberg destination needs an object-store client");
 
         assert_eq!(
             error.current_context(),
             &EmitterStartPlanError::ClientKindMismatch {
-                sink: "ICEBERG",
-                expected: "S3",
-                found: "GCS",
+                connector: "ICEBERG TABLE",
+                expected: nervix_models::EmitterReferenceKind::StorageClient(&[
+                    nervix_models::ConnectorKind::S3,
+                    nervix_models::ConnectorKind::Gcs,
+                    nervix_models::ConnectorKind::AzureBlob
+                ]),
+                found: "KAFKA",
                 client: named("upstream"),
             }
         );
@@ -2616,12 +2717,12 @@ mod tests {
 
     #[test]
     fn reports_a_missing_iceberg_catalog_client() {
-        let mut case = SinkKind::IcebergS3.case();
+        let mut case = EmitterKind::IcebergS3.case();
         case.catalog_client = None;
 
         let error = case
             .decide()
-            .expect_err("an Iceberg sink without its catalog must not be planned");
+            .expect_err("an Iceberg emitter without its catalog must not be planned");
 
         assert_eq!(
             error.current_context(),
@@ -2633,8 +2734,8 @@ mod tests {
 
     #[test]
     fn reports_an_iceberg_catalog_client_of_another_kind() {
-        let mut case = SinkKind::IcebergS3.case();
-        case.catalog_client = Some(SinkKind::IcebergS3.case().client);
+        let mut case = EmitterKind::IcebergS3.case();
+        case.catalog_client = Some(EmitterKind::IcebergS3.case().client);
 
         let error = case
             .decide()
@@ -2651,7 +2752,7 @@ mod tests {
 
     #[test]
     fn reports_a_client_model_registered_under_another_name() {
-        let mut case = SinkKind::Sentry.case();
+        let mut case = EmitterKind::Sentry.case();
         case.client = Model::ClientSentry(CreateClientSentry {
             name: named("different"),
             mount: None,
@@ -2672,11 +2773,10 @@ mod tests {
     }
 
     #[test]
-    fn binds_every_client_to_its_resolved_configuration_in_sink_order() {
-        let decided = SinkKind::IcebergAzureBlob
-            .case()
-            .decide()
-            .expect("an Iceberg sink with Azure Blob storage and a REST catalog must be planned");
+    fn binds_every_client_to_its_resolved_configuration_in_emitter_order() {
+        let decided = EmitterKind::IcebergAzureBlob.case().decide().expect(
+            "an Iceberg emitter with Azure Blob storage and a REST catalog must be planned",
+        );
         let mut resolved_names = Vec::new();
 
         let plan = decided
@@ -2698,21 +2798,22 @@ mod tests {
             resolved_names,
             vec![named::<ClientName>("upstream"), named("catalog")]
         );
-        let EmitterSinkPlan::Iceberg(sink) = plan.sink else {
-            panic!("resolution must keep the Iceberg sink");
+        let EmitterConnectorPlan::Iceberg(IcebergEmitterPlan::Table(connector)) = plan.connector
+        else {
+            panic!("resolution must keep the Iceberg emitter");
         };
-        assert_eq!(sink.storage.name, named::<ClientName>("upstream"));
-        assert_eq!(sink.storage.config.entries[1].value, "upstream");
-        assert_eq!(sink.catalog.name, named::<ClientName>("catalog"));
-        assert_eq!(sink.catalog.config.entries[1].value, "catalog");
+        assert_eq!(connector.storage.name, named::<ClientName>("upstream"));
+        assert_eq!(connector.storage.config.entries[1].value, "upstream");
+        assert_eq!(connector.catalog.name, named::<ClientName>("catalog"));
+        assert_eq!(connector.catalog.config.entries[1].value, "catalog");
     }
 
     #[test]
     fn a_failed_resolution_fails_the_plan() {
-        let decided = SinkKind::Kafka
+        let decided = EmitterKind::Kafka
             .case()
             .decide()
-            .expect("a Kafka sink with a Kafka client must be planned");
+            .expect("a Kafka emitter with a Kafka client must be planned");
 
         let failure = decided
             .resolve_clients(|client| Err(client.name.clone()))

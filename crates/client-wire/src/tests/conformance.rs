@@ -693,12 +693,14 @@ fn backup_archive() -> BackupArchiveSummary {
             BackupDomainSummary {
                 domain: name("analytics"),
                 revision: u64::MAX,
+                cut: nervix_models::BackupCut::ConfigurationOnly,
                 sections: 0,
                 section_bytes: u64::MAX,
             },
             BackupDomainSummary {
                 domain: name("tenant"),
                 revision: 1,
+                cut: nervix_models::BackupCut::Live,
                 sections: 7,
                 section_bytes: 4096,
             },
@@ -727,6 +729,8 @@ fn restore_report() -> RestoreReport {
                 domain: name("tenant_copy"),
                 resource_versions: 3,
                 models: u64::MAX,
+                status: nervix_models::DomainStatus::Stopped,
+                start_version: 4,
                 planned_models: None,
             },
             RestoredDomain {
@@ -734,6 +738,8 @@ fn restore_report() -> RestoreReport {
                 domain: name("analytics"),
                 resource_versions: 0,
                 models: 0,
+                status: nervix_models::DomainStatus::Stopped,
+                start_version: 4,
                 planned_models: None,
             },
         ],

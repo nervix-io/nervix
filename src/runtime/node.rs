@@ -6,6 +6,11 @@
 //! - **Depends on.** Every subsystem whose state the node holds.
 //! - **Must not know.** How any of that state is used; the subsystems own their own behaviour.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::{schedule_apply::AppliedRuntimeRecoveryExpansions, *};
 
 pub const DEFAULT_TEMP_DIR: &str = "/tmp";
@@ -31,9 +36,9 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Also held by the entity gate's deadline task, alongside `ingestors`.
     pub(in crate::runtime) ingestor_quiescence:
         Arc<DashMap<DomainNodeRef, Arc<IngestorQuiesceControl>, RandomState>>,
-    pub(in crate::runtime) ingestors_paused_for_memory_pressure: AtomicBool,
+    pub(in crate::runtime) memory_pressure: MemoryPressurePause,
     pub(in crate::runtime) ingestor_statuses:
-        DashMap<DomainNodeRef, Arc<task_status::TaskStatus<RuntimeReconnectStatus>>, RandomState>,
+        DashMap<DomainNodeRef, Arc<IngestorStatus>, RandomState>,
     pub(in crate::runtime) ingestor_readiness:
         DashMap<DomainNodeRef, IngestorReadiness, RandomState>,
     pub(in crate::runtime) emitter_statuses:
@@ -51,7 +56,7 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) executions: DashMap<DomainName, DomainExecution, RandomState>,
     /// Stable per-domain publication handles retained across execution rebuilds. Data-plane tasks
     /// resolve one handle when they start and keep its cache instead of revisiting `executions`.
-    pub(in crate::runtime) domain_routings: DashMap<DomainName, SharedDomainRouting, RandomState>,
+    pub(in crate::runtime) domain_routings: domain_execution::DomainRoutings,
     pub(in crate::runtime) message_error_routes:
         DashMap<MessageErrorRouteKey, Arc<MessageErrorRouteRuntime>, RandomState>,
     pub(in crate::runtime) compiled_domain_udfs:
@@ -97,11 +102,19 @@ pub(in crate::runtime) struct RuntimeInner {
     /// its lease expires.
     pub(in crate::runtime) frozen_ownership_handoff_entities:
         Arc<DashMap<DomainNodeRef, Arc<OwnershipHandoffFreezeState>, RandomState>>,
+    /// Owns the tasks that finish entity-gate engagements and releases and end each lease, so
+    /// teardown can end every lease this node holds once its domains have stopped and wait for
+    /// them, rather than leave one to a deadline past the node's stop.
+    pub(in crate::runtime) entity_gate_tasks: EntityGateTasks,
     /// Also held by every outstanding `DomainAlterGuard`, which clears its entry on drop.
     pub(in crate::runtime) active_domain_alters:
         Arc<DashMap<DomainName, ActiveDomainAlter, RandomState>>,
     pub(in crate::runtime) state_identities:
         DashMap<DomainNodeRef, SharedStateAssignment, RandomState>,
+    /// Immutable routes retain the state installed for each replication relationship. Frames and
+    /// announcers share those handles with the executing tasks until cold teardown retires them.
+    pub(in crate::runtime) state_replication_routing:
+        state_replication::routing::StateReplicationRouting,
     /// The endpoint task of every client ingestor this node executes, kept while the ingestor
     /// restarts so its producers stay attached.
     pub(in crate::runtime) client_ingestors:
@@ -134,12 +147,20 @@ pub(in crate::runtime) struct RuntimeInner {
     /// Owns acknowledgement progress tasks so none can retain an interconnect after shutdown.
     pub(in crate::runtime) remote_ack_watcher_tasks: TaskTracker,
     /// Owns checkpoint announcement work that outlives the event that scheduled it. Closing it
-    /// when the runtime stops ends every announcer.
-    pub(in crate::runtime) state_replication_tasks: TaskTracker,
+    /// after domain drain cancels each announcer, including a pending dispatch or retry wait.
+    pub(in crate::runtime) state_replication_tasks: state_replication::CheckpointAnnouncementTasks,
+    /// Owns the snapshot task of every deduplicator and window branch, which writes what its
+    /// branch published last after that branch's task is gone. Closing it after domain drain has
+    /// each task write that state, and waiting for it keeps this runtime's storage from being
+    /// released under one of them.
+    pub(in crate::runtime) branch_snapshot_tasks: state_replication::BranchSnapshotTasks,
     /// The copy of each branch checkpoint this node installed as a replica, taken when it is
     /// promoted and dropped when its branch lifecycle stops naming the branch.
     pub(in crate::runtime) passive_runtime_state_snapshots:
         DashMap<RuntimeStatePlacement, PersistedRuntimeStateEntry, RandomState>,
+    /// Immutable registry of per-domain publication handles shared by branch tasks and backup.
+    pub(in crate::runtime) backup_capture_fences:
+        ArcSwap<HashMap<DomainName, Arc<backup_capture_fence::BackupCaptureFence>>>,
     /// The branch lifecycle this node holds for each branch-keyed entity, as its owner or as a
     /// replica, with the catalog of the branch checkpoints it owns for the entity and the owner's
     /// announcements a replica has not acted on yet. The replica task that keeps an entity current

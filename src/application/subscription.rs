@@ -1,6 +1,6 @@
 //! Read-only filtered views a session attaches to a relay.
 //!
-//! Layer: control plane.
+//! Layer: edges.
 //!
 //! - **Owns.** Subscription creation and deletion, the per-session subscription set and the
 //!   generation each subscription is opened with, the lifecycle every subscription moves through,
@@ -32,6 +32,14 @@
 //! A name reused after deletion opens a new generation, so frames about an earlier generation can
 //! never be taken for a later one.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        edge,
+        reason = "session subscription adapter owns parsed requests and client lane results"
+    )
+)]
+
 mod delivery;
 mod interest;
 
@@ -58,7 +66,7 @@ use nervix_models::{
     DomainName, FieldName, ParseAsType, RelayName, ScheduledModel, SchemaName, SubscriptionBinding,
     SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, UserName,
 };
-use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
+use nervix_plexus::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_primitives::{
     sync::{
         Arc,
@@ -665,7 +673,7 @@ async fn select_subscription_rows(
                 Ok(record) => {
                     execute_subscription_predicate_on_record(executor, predicate, &record, now)
                         .await
-                        .map_err(|error| error.to_string())
+                        .map_err(|error| format!("{error:#}"))
                 }
                 Err(error) => Err(error.to_string()),
             };
@@ -888,51 +896,83 @@ pub(in crate::application) fn parse_subscription_literal(
             Ok(RuntimeValue::String(v.clone()))
         }
         (ParseAsType::Datetime, SubscriptionLiteral::String(v)) => {
-            chrono::DateTime::parse_from_rfc3339(v)
-                .map(RuntimeValue::Datetime)
-                .map_err(|_| bad(ExpectedSubscriptionLiteral::Datetime))
+            let mapping_input = chrono::DateTime::parse_from_rfc3339(v).map(RuntimeValue::Datetime);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Datetime)),
+            }
         }
         (ParseAsType::Bool, SubscriptionLiteral::Bool(v)) => Ok(RuntimeValue::Bool(*v)),
-        (ParseAsType::U8, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::U8)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::I8, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::I8)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::U16, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::U16)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::I16, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::I16)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::U32, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::U32)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::I32, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::I32)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::U64, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::U64)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::I64, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::I64)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::F32, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::F32)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
-        (ParseAsType::F64, SubscriptionLiteral::Number(v)) => v
-            .parse()
-            .map(RuntimeValue::F64)
-            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::U8, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::U8);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::I8, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::I8);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::U16, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::U16);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::I16, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::I16);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::U32, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::U32);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::I32, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::I32);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::U64, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::U64);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::I64, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::I64);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::F32, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::F32);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
+        (ParseAsType::F64, SubscriptionLiteral::Number(v)) => {
+            let mapping_input = v.parse().map(RuntimeValue::F64);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(_) => Err(bad(ExpectedSubscriptionLiteral::Numeric)),
+            }
+        }
         _ => Err(bad(match ty {
             ParseAsType::String | ParseAsType::Datetime => ExpectedSubscriptionLiteral::String,
             ParseAsType::Bool => ExpectedSubscriptionLiteral::Boolean,
@@ -995,7 +1035,9 @@ impl SessionServiceImpl {
         while let Some((node_id, result)) = checks.next().await {
             nervix_primitives::task::consume_budget().await;
             if let Err(error) = result {
-                errors.insert(node_id.clone(), error);
+                errors.insert(node_id.clone(), error).discarded(
+                    "the latest check for this node supersedes its previous observation failure",
+                );
             }
         }
         let nodes = errors.keys().cloned().collect();
@@ -1246,7 +1288,6 @@ impl SessionServiceImpl {
             Some(expression) => {
                 let udfs = self.inner.runtime.udf_executor(domain);
                 let compiled_predicate = compile_subscription_predicate(
-                    domain,
                     &subscription.name,
                     expression,
                     SubscriptionPredicateCompileContext::new(
@@ -1259,7 +1300,7 @@ impl SessionServiceImpl {
                     Ok(predicate) => Some(predicate),
                     Err(err) => {
                         return Err(Box::new(command_error(format!(
-                            "failed to compile session subscription '{}': {err}",
+                            "failed to compile session subscription '{}': {err:#}",
                             subscription.name
                         ))));
                     }
@@ -1338,7 +1379,9 @@ impl SessionServiceImpl {
             .await;
         let receiver = match attached {
             Ok(receiver) => receiver,
-            Err(RuntimeError::RelayRedefined { .. }) => {
+            Err(error)
+                if matches!(error.current_context(), RuntimeError::RelayRedefined { .. }) =>
+            {
                 lease.release().await;
                 return Err(Box::new(command_error(format!(
                     "failed to subscribe to relay '{}': it was redefined while the subscription \
@@ -1349,7 +1392,7 @@ impl SessionServiceImpl {
             Err(err) => {
                 lease.release().await;
                 return Err(Box::new(command_error(format!(
-                    "failed to subscribe to relay '{}': {err}",
+                    "failed to subscribe to relay '{}': {err:#}",
                     relay.as_str()
                 ))));
             }
@@ -1628,6 +1671,10 @@ impl SessionServiceImpl {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::time::Duration;
 

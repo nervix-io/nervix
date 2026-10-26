@@ -8,10 +8,7 @@ async fn filter_evaluation_uses_the_typed_operation_when_the_error_site_is_unmap
     ]);
     let output_schema = test_schema(&[("amount", ParseAsType::I64)]);
     let mut program = compile_processor_output_filter_map_program(
-        RuntimeCompileTarget {
-            domain: &domain("default"),
-            identifier: &named("route_filter"),
-        },
+        &named("route_filter"),
         &[named("amounts")],
         &named("filtered_amounts"),
         &construction("SET amount = input.amount / input.denominator"),
@@ -73,10 +70,7 @@ async fn filter_predicate_evaluation_error_becomes_a_planned_message_error() {
         ("denominator", ParseAsType::I64),
     ]);
     let program = compile_scoped_filter_program(
-        RuntimeCompileTarget {
-            domain: &domain("default"),
-            identifier: &named("input_filter"),
-        },
+        &named("input_filter"),
         Some(&expression("input.amount / input.denominator > 0")),
         RuntimeVmSchema {
             schema: input_schema.arrow_schema(),

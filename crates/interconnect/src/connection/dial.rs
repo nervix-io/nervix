@@ -7,13 +7,21 @@
 //!   DNS setup budget, and the socket seam.
 //! - **Must not know.** TLS, HTTP/2, or the operations a connection will carry.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::net::SocketAddr;
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
-use nervix_dns::ConnectionBudget;
+use nervix_dns::OperationBudget;
 use nervix_models::NodeEndpoint;
-use nervix_primitives::{net::TcpStream, sync::Arc, time::timeout};
+use nervix_primitives::{net::TcpStream, time::timeout};
 use tracing::debug;
 
 use super::{ConnectionSlotKey, TransportState};
@@ -44,7 +52,7 @@ impl TransportState {
     pub(super) async fn dial(
         &self,
         key: &ConnectionSlotKey,
-        budget: &ConnectionBudget,
+        budget: &OperationBudget,
     ) -> Result<DialedStream, Report<TransportError>> {
         let dial = self.current_dial(key)?;
         let addresses = match dial {
@@ -52,7 +60,7 @@ impl TransportState {
             OutboundDial::Advertised => {
                 let resolved = self
                     .resolver
-                    .resolve(key.endpoint.host(), key.endpoint.port(), budget.remaining())
+                    .resolve(key.endpoint.host(), key.endpoint.port(), budget.lookup())
                     .await;
                 match resolved {
                     Ok(addresses) => addresses,
@@ -106,13 +114,8 @@ impl TransportState {
         &self,
         key: &ConnectionSlotKey,
     ) -> Result<OutboundDial, Report<TransportError>> {
-        let current = nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 03 https://app.clickup.com/t/86bc9eqjv: retain published connection \
-             slots instead of recurring shared registry lookup",
-            self.targets.get(&key.node_id)
-        )
-        .map(|current| Arc::clone(current.value()));
+        let targets = self.targets.load();
+        let current = targets.get(&key.node_id);
         let Some(current) = current else {
             return Err(Report::new(TransportError::Closed(key.endpoint.clone())));
         };

@@ -7,6 +7,11 @@
 //! - **Depends on.** Nothing but the message each report carries.
 //! - **Must not know.** Which subsystem recovered, or how.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use super::*;
 
 /// How many runtime events the bus holds for a receiver that has fallen behind. A receiver that

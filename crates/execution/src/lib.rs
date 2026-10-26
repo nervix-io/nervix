@@ -7,13 +7,14 @@
 //!   allocations that job performs, the cancellation boundary it checks between bounded units, and
 //!   the incremental writer that fails at its budget boundary instead of growing past it. It is
 //!   the only entry point for variable-size encoding, decoding, validation, hashing, compilation,
-//!   program execution, snapshot construction, and synchronous filesystem or database work. Two
-//!   kinds of work have classes of their own: operator-supplied code the node cannot bound, and
-//!   password hashing, which anyone who reaches a listener can request.
+//!   program execution, snapshot construction, synchronous filesystem or database work and admitted
+//!   connector control I/O. Operator-supplied code, password hashing and connector driver calls
+//!   have isolated admission classes: those operations can retain a worker beyond other work's
+//!   latency or cancellation budget.
 //! - **Depends on.** The primitive boundary for its atomics, semaphores and clock and for the
 //!   mechanisms that run a job: the runtime's blocking pool for storage work, and the boundary's
 //!   CPU-job mechanism, which is the same pool except in the Turmoil build. Also the byte
-//!   vocabulary its budgets are configured in.
+//!   vocabulary its budgets are configured in and the vocabulary's typed setting declarations.
 //! - **Must not know.** What a job computes. It admits, charges, runs and cancels; it decides
 //!   nothing about relays, branches, domains, peers, graphs or the cluster.
 //!
@@ -41,6 +42,14 @@
 //! charge ownership apply in every build mode, and this executor is the only caller of the CPU-job
 //! mechanism.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 mod cancellation;
 mod executor;
 mod limits;
@@ -51,8 +60,8 @@ pub use crate::{
     cancellation::{Cancellation, Cancelled},
     executor::{ExecutionFailure, Executor, ExecutorSnapshot},
     limits::{
-        CpuClass, ExecutionConfig, ExecutionConfigError, MemoryBudgets, MemoryClass,
-        OperationLimits, StorageClass, WorkerCounts,
+        ConnectorStorageWorkers, CpuClass, ExecutionConfig, ExecutionConfigError, MemoryBudgets,
+        MemoryClass, OperationLimits, StorageClass, WorkerCounts,
     },
     memory::{
         AdmissionError, BudgetedBuffer, BufferLimitExceeded, ChargedBytes, MemoryBudgetSnapshot,

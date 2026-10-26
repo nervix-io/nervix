@@ -12,6 +12,14 @@
 //! - **Must not know.** Schemas, relays or branches. Its callers decide what a program means; this
 //!   crate only runs it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{fmt::Display, io, str::FromStr};
 
 use bytes::Bytes;
@@ -128,10 +136,16 @@ impl TryFrom<JsonValue> for JaqInput {
     type Error = Report<JaqProgramError>;
 
     fn try_from(value: JsonValue) -> Result<Self, Self::Error> {
-        let value = serde_json::from_value(value).map_err(|error| {
-            let reason = error.to_string();
-            Report::new(error).change_context(JaqProgramError::Eval { reason })
-        })?;
+        let value = {
+            let mapping_input = serde_json::from_value(value);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    Report::new(error).change_context(JaqProgramError::Eval { reason })
+                }),
+            }
+        }?;
         Ok(Self(value))
     }
 }
@@ -248,10 +262,16 @@ impl StatefulJaqProgram {
     }
 
     fn bind(&self, state: &JsonValue) -> error_stack::Result<Vec<JaqVal>, JaqProgramError> {
-        let state: JaqVal = serde_json::from_value(state.clone()).map_err(|error| {
-            let reason = error.to_string();
-            Report::new(error).change_context(JaqProgramError::Eval { reason })
-        })?;
+        let state: JaqVal = {
+            let mapping_input = serde_json::from_value(state.clone());
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    Report::new(error).change_context(JaqProgramError::Eval { reason })
+                }),
+            }
+        }?;
         Ok(vec![state])
     }
 }
@@ -451,10 +471,16 @@ impl JaqNativeFormat {
                 self.decode("payload produced multiple input values"),
             ));
         }
-        jaq_value_to_json(value.0).map_err(|report| {
-            let reason = report.current_context().to_string();
-            report.change_context(self.decode(reason))
-        })
+        {
+            let mapping_input = jaq_value_to_json(value.0);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(report) => Err({
+                    let reason = report.current_context().to_string();
+                    report.change_context(self.decode(reason))
+                }),
+            }
+        }
     }
 
     /// Whether a value the reader produced is one of the payload's values.
@@ -510,29 +536,49 @@ impl JaqNativeFormat {
                     self.encode("RAW payloads require a string value"),
                 ));
             };
-            return output.write_all(value.as_bytes()).map_err(|error| {
-                let reason = error.to_string();
-                Report::new(error).change_context(self.encode(reason))
-            });
+            return {
+                let mapping_input = output.write_all(value.as_bytes());
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(error) => Err({
+                        let reason = error.to_string();
+                        Report::new(error).change_context(self.encode(reason))
+                    }),
+                }
+            };
         }
-        let value = JaqVal::deserialize(value).map_err(|error| {
-            let reason = error.to_string();
-            Report::new(error).change_context(self.encode(reason))
-        })?;
+        let value = {
+            let mapping_input = JaqVal::deserialize(value);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    Report::new(error).change_context(self.encode(reason))
+                }),
+            }
+        }?;
         let writer = JaqWriter {
-            format: self.jaq_format(),
-            // YAML reads `{1:2}` as the key `"1:2"`, so a space after the separator is required
-            // rather than cosmetic.
+            // JSON-compatible YAML flow syntax quotes every string, preserving its contents.
+            format: match self {
+                Self::Yaml => JaqFormat::Json,
+                _ => self.jaq_format(),
+            },
             pp: jaq_json::write::Pp {
                 sep_space: true,
                 ..Default::default()
             },
             join: true,
         };
-        jaq_write::write(output, &writer, &value).map_err(|error| {
-            let reason = error.to_string();
-            Report::new(error).change_context(self.encode(reason))
-        })
+        {
+            let mapping_input = jaq_write::write(output, &writer, &value);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let reason = error.to_string();
+                    Report::new(error).change_context(self.encode(reason))
+                }),
+            }
+        }
     }
 
     fn decode(self, reason: impl Display) -> JaqFormatError {
@@ -613,15 +659,21 @@ fn jaq_value_to_json_inner(value: JaqVal) -> error_stack::Result<JsonValue, JaqP
         JaqVal::BStr(_) => Err(error_stack::Report::new(
             JaqProgramError::BinaryStringNotJson,
         )),
-        JaqVal::TStr(value) => String::from_utf8(value.to_vec())
-            .map(JsonValue::String)
-            .map_err(|error| {
-                let utf8 = error.utf8_error();
-                error_stack::Report::new(utf8).change_context(JaqProgramError::InvalidJsonText {
-                    valid_up_to: utf8.valid_up_to(),
-                    error_len: utf8.error_len(),
-                })
-            }),
+        JaqVal::TStr(value) => {
+            let mapping_input = String::from_utf8(value.to_vec()).map(JsonValue::String);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err({
+                    let utf8 = error.utf8_error();
+                    error_stack::Report::new(utf8).change_context(
+                        JaqProgramError::InvalidJsonText {
+                            valid_up_to: utf8.valid_up_to(),
+                            error_len: utf8.error_len(),
+                        },
+                    )
+                }),
+            }
+        }
         JaqVal::Arr(values) => values
             .iter()
             .cloned()
@@ -632,15 +684,21 @@ fn jaq_value_to_json_inner(value: JaqVal) -> error_stack::Result<JsonValue, JaqP
             let mut object = JsonMap::new();
             for (key, value) in values.iter() {
                 let key = match key {
-                    JaqVal::TStr(key) => String::from_utf8(key.to_vec()).map_err(|error| {
-                        let utf8 = error.utf8_error();
-                        error_stack::Report::new(utf8).change_context(
-                            JaqProgramError::InvalidJsonText {
-                                valid_up_to: utf8.valid_up_to(),
-                                error_len: utf8.error_len(),
-                            },
-                        )
-                    })?,
+                    JaqVal::TStr(key) => {
+                        let mapping_input = String::from_utf8(key.to_vec());
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(error) => Err({
+                                let utf8 = error.utf8_error();
+                                error_stack::Report::new(utf8).change_context(
+                                    JaqProgramError::InvalidJsonText {
+                                        valid_up_to: utf8.valid_up_to(),
+                                        error_len: utf8.error_len(),
+                                    },
+                                )
+                            }),
+                        }
+                    }?,
                     _ => {
                         return Err(error_stack::Report::new(
                             JaqProgramError::JsonObjectKeyType {
@@ -659,19 +717,29 @@ fn jaq_value_to_json_inner(value: JaqVal) -> error_stack::Result<JsonValue, JaqP
 
 fn jaq_num_to_json(value: JaqNum) -> error_stack::Result<JsonValue, JaqProgramError> {
     let rendered = value.to_string();
-    serde_json::Number::from_str(&rendered)
-        .map(JsonValue::Number)
-        .map_err(|error| {
-            let issue = error.classify().into();
-            let line = error.line();
-            let column = error.column();
-            error_stack::Report::new(error).change_context(JaqProgramError::InvalidJsonNumber {
-                issue,
-                line,
-                column,
-            })
-        })
+    {
+        let mapping_input = serde_json::Number::from_str(&rendered).map(JsonValue::Number);
+        match mapping_input {
+            Ok(mapped_value) => Ok(mapped_value),
+            Err(error) => Err({
+                let issue = error.classify().into();
+                let line = error.line();
+                let column = error.column();
+                error_stack::Report::new(error).change_context(JaqProgramError::InvalidJsonNumber {
+                    issue,
+                    line,
+                    column,
+                })
+            }),
+        }
+    }
 }
+
+#[cfg(test)]
+mod number_properties;
+
+#[cfg(test)]
+mod string_properties;
 
 #[cfg(test)]
 mod tests {

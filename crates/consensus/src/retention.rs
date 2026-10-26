@@ -10,6 +10,14 @@
 //! Only entries a durable snapshot already covers are ever purged, so a failed or incomplete
 //! snapshot build leaves every entry the node still needs in place.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
 use nervix_primitives::time::{MissedTickBehavior, interval};
@@ -37,16 +45,30 @@ pub struct RaftRetentionPolicy {
     pub retention_admission_timeout: Duration,
 }
 
-impl Default for RaftRetentionPolicy {
-    fn default() -> Self {
+impl RaftRetentionPolicy {
+    /// The policy of the given bounds, with the reclamation wait the retention machinery owns.
+    pub(crate) fn with_bounds(
+        snapshot_entry_threshold: u64,
+        snapshot_byte_threshold: u64,
+        covered_entries_retained: u64,
+        covered_bytes_retained: u64,
+        retained_log_cap_bytes: u64,
+    ) -> Self {
         Self {
-            snapshot_entry_threshold: 10_000,
-            snapshot_byte_threshold: 64 * 1024 * 1024,
-            covered_entries_retained: 1_000,
-            covered_bytes_retained: 64 * 1024 * 1024,
-            retained_log_cap_bytes: 1024 * 1024 * 1024,
+            snapshot_entry_threshold,
+            snapshot_byte_threshold,
+            covered_entries_retained,
+            covered_bytes_retained,
+            retained_log_cap_bytes,
             retention_admission_timeout: Duration::from_secs(30),
         }
+    }
+}
+
+impl Default for RaftRetentionPolicy {
+    /// The policy of the retention settings' defaults.
+    fn default() -> Self {
+        crate::RaftRetentionSettings::default().policy()
     }
 }
 

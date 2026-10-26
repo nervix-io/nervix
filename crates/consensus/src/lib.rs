@@ -12,12 +12,23 @@
 
 #![cfg_attr(
     nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+#![cfg_attr(
+    nervix_lint,
     nervix::context(
         outside,
         reason = "Raft log, snapshot and control-plane replication ownership is outside graph \
                   processing"
     )
 )]
+
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATIONS: alloc_count::AllocCounter = alloc_count::AllocCounter(std::alloc::System);
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -35,9 +46,10 @@ use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, ClusterSchedule,
     CoordinationIdentity, DomainClockAuthority, DomainClockState, DomainName, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, NodeEndpoint, NodeServiceUrl, ResourceId,
-    ResourceName, ResourceNodeStatus, ResourceUpload, ResourceUploadKey, ResourceVersion,
-    ResourceVersionStatus, Statement, TransactionImpactReport, UserName,
+    DomainStartPoint, DomainState, DomainStatus, NodeEndpoint, NodePrerequisites, NodeServiceUrl,
+    PrerequisiteMismatch, ResourceId, ResourceName, ResourceNodeStatus, ResourceUpload,
+    ResourceUploadKey, ResourceVersion, ResourceVersionStatus, Statement, TransactionImpactReport,
+    UserName,
 };
 use nervix_primitives::{
     sync::{
@@ -79,7 +91,7 @@ use rkyv::{
 use serde::{Deserialize, Serialize};
 use sorted_vec::SortedSet;
 use thiserror::Error;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
 mod archive_count_tests;
@@ -92,6 +104,7 @@ mod records;
 mod replication;
 mod restore;
 mod retention;
+mod settings;
 mod snapshot;
 pub use command_execution::{
     CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
@@ -103,8 +116,17 @@ pub use command_execution::{
     CommandExecutionTransactionTarget, DiagnosticSpan,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
-pub use restore::{RestoreExecution, RestoreStepEffect, RestoredResource};
+pub use restore::{
+    RestoreExecution, RestoreStateInstallationError, RestoreStateRetention, RestoreStepEffect,
+    RestoredResource,
+};
 pub use retention::RaftRetentionPolicy;
+pub use settings::{
+    ELECTION_TIMEOUT_MAX_HEARTBEATS, ELECTION_TIMEOUT_MIN_HEARTBEATS, RAFT_LOG_DURABILITY,
+    RaftCoveredLogBytesRetained, RaftCoveredLogEntriesRetained, RaftHeartbeatInterval,
+    RaftRetainedLogCap, RaftRetentionBounds, RaftRetentionSettings, RaftSnapshotByteThreshold,
+    RaftSnapshotEntryThreshold, RaftTimingError, RaftTimings,
+};
 pub use snapshot::{SealedSnapshot, SnapshotRetention};
 mod storage;
 mod storage_fault;
@@ -117,6 +139,9 @@ use replication::AppendPath;
 use storage::FjallLogReader;
 use storage::FjallStore;
 mod transaction;
+mod transaction_retention;
+#[cfg(test)]
+mod transaction_retention_tests;
 use connectivity_fault::ConnectivityFault;
 use domain_mutation::{DomainMutationAdmission, DomainMutationError};
 #[cfg(any(test, feature = "testing"))]
@@ -343,6 +368,8 @@ impl DomainPlanningInputs {
 pub struct TransactionControlSnapshot {
     pub planning_inputs: DomainPlanningInputs,
     pub resources: ResourceVersionStatus,
+    /// The restore whose incomplete state generation prevents this domain from starting.
+    pub restore_installation: Option<nervix_models::CommandExecutionReference>,
 }
 
 #[derive(
@@ -355,6 +382,12 @@ pub enum ConsensusCommand {
         policy: CommandExecutionAdmissionPolicy,
     },
     AcquireCommandDomainMutation {
+        reference: nervix_models::CommandExecutionReference,
+        owner: UserName,
+        request_digest: [u8; 32],
+        domain: DomainName,
+    },
+    ReleaseCommandDomainMutation {
         reference: nervix_models::CommandExecutionReference,
         owner: UserName,
         request_digest: [u8; 32],
@@ -458,6 +491,12 @@ pub enum ConsensusCommand {
         reference: nervix_models::CommandExecutionReference,
         step: nervix_models::RestoreStep,
         effect: Box<RestoreStepEffect>,
+    },
+    /// Admits one complete runtime state installation under this leader's tenure.
+    BeginRestoreStateInstallation {
+        reference: nervix_models::CommandExecutionReference,
+        domain: DomainName,
+        tenure: LeaderTenure,
     },
     /// Records a resource version a restore imports under its archived number, published with the
     /// leader's ready copy.
@@ -624,6 +663,13 @@ impl std::fmt::Display for ConsensusCommand {
                 "acquire-command-domain-mutation:{reference}:{}",
                 domain.as_str()
             ),
+            Self::ReleaseCommandDomainMutation {
+                reference, domain, ..
+            } => write!(
+                f,
+                "release-command-domain-mutation:{reference}:{}",
+                domain.as_str()
+            ),
             Self::FinishCommandExecution { reference, .. } => {
                 write!(f, "finish-command-execution:{reference}")
             }
@@ -722,6 +768,9 @@ impl std::fmt::Display for ConsensusCommand {
             Self::ApplyRestoreStep {
                 reference, step, ..
             } => write!(f, "apply-restore-step:{reference}:{step}"),
+            Self::BeginRestoreStateInstallation {
+                reference, domain, ..
+            } => write!(f, "begin-restore-state-installation:{reference}:{domain}"),
             Self::ImportResourceVersion {
                 reference,
                 resource,
@@ -828,10 +877,8 @@ pub struct ConsensusSettings {
     pub interconnect_advertise_addr: NodeEndpoint,
     pub interconnect: Transport,
     pub executor: nervix_execution::Executor,
-    pub raft_heartbeat_interval: Duration,
-    pub raft_election_timeout_min: Duration,
-    pub raft_election_timeout_max: Duration,
-    pub raft_retention: RaftRetentionPolicy,
+    pub raft_timings: RaftTimings,
+    pub raft_retention: RaftRetentionSettings,
 }
 
 /// One node as cluster discovery currently describes it.
@@ -850,6 +897,10 @@ pub struct GossipNode {
     pub console_url: Option<NodeServiceUrl>,
     /// Where peers reach this node's interconnect listener.
     pub interconnect_endpoint: Option<NodeEndpoint>,
+    /// What the node brings to the cluster, once it has published a record this build reads. The
+    /// leader admits a node to the membership only when this record is compatible with every live
+    /// voter's.
+    pub prerequisites: Option<NodePrerequisites>,
 }
 
 impl GossipNode {
@@ -881,22 +932,6 @@ impl GossipState {
 
     pub fn live_node_ids(&self) -> BTreeSet<ClusterNodeName> {
         self.latest_admission_candidates().into_keys().collect()
-    }
-
-    /// The nodes of `nodes` this view neither reports live nor declares dead: a node gossip has
-    /// not heard from since this process started, which may still be starting.
-    pub fn unobserved_node_ids<'a>(
-        &self,
-        nodes: impl IntoIterator<Item = &'a ClusterNodeName>,
-    ) -> BTreeSet<ClusterNodeName> {
-        let live = self.live_node_ids();
-        let mut unobserved = BTreeSet::new();
-        for node in nodes {
-            if !live.contains(node) && !self.dead_node_ids.contains(node) {
-                unobserved.insert(node.clone());
-            }
-        }
-        unobserved
     }
 
     pub fn placement_candidate_node_ids(&self) -> BTreeSet<ClusterNodeName> {
@@ -1077,10 +1112,30 @@ impl MembershipSnapshot {
         &self,
         gossip: &GossipState,
         admission_fences: &BTreeMap<ClusterNodeName, ClusterNodeIncarnation>,
-    ) -> Vec<MembershipMutation> {
+    ) -> MembershipPlan {
+        let candidates = gossip.latest_admission_candidates();
+        let mut voter_records = BTreeMap::new();
+        for (node_id, node) in &candidates {
+            if !self.voters.contains(node_id) {
+                continue;
+            }
+            if let Some(record) = &node.prerequisites {
+                voter_records.insert(node_id.clone(), record.clone());
+            }
+        }
         let mut mutations = Vec::new();
+        let mut refusals = Vec::new();
         let mut desired_voters = self.voters.clone();
-        for node in gossip.latest_admission_candidates().into_values() {
+        for node in candidates.into_values() {
+            if !self.voters.contains(&node.node_id)
+                && let Some(reason) = AdmissionRefusalReason::of(&node, &voter_records)
+            {
+                refusals.push(AdmissionRefusal {
+                    candidate: node.identity(),
+                    reason,
+                });
+                continue;
+            }
             let Some(endpoint) = node.interconnect_endpoint else {
                 continue;
             };
@@ -1116,7 +1171,91 @@ impl MembershipSnapshot {
                 voters: desired_voters,
             });
         }
-        mutations
+        MembershipPlan {
+            mutations,
+            refusals,
+        }
+    }
+}
+
+/// The membership changes one reconciliation makes, and the candidates it leaves outside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MembershipPlan {
+    mutations: Vec<MembershipMutation>,
+    refusals: Vec<AdmissionRefusal>,
+}
+
+/// A gossip-discovered node the leader leaves outside the membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AdmissionRefusal {
+    candidate: ClusterNodeIdentity,
+    reason: AdmissionRefusalReason,
+}
+
+/// Why a candidate stays outside the membership.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdmissionRefusalReason {
+    /// The candidate has not published a prerequisite record this build reads.
+    Unpublished,
+    /// The candidate cannot run beside a live voter. The mismatch is seen from that voter.
+    Incompatible {
+        voter: ClusterNodeName,
+        mismatch: PrerequisiteMismatch,
+    },
+}
+
+impl AdmissionRefusalReason {
+    /// Why `candidate` cannot join beside the live voters whose records are `voter_records`, if it
+    /// cannot.
+    fn of(
+        candidate: &GossipNode,
+        voter_records: &BTreeMap<ClusterNodeName, NodePrerequisites>,
+    ) -> Option<Self> {
+        let Some(record) = &candidate.prerequisites else {
+            return Some(Self::Unpublished);
+        };
+        for (voter, voter_record) in voter_records {
+            if let Err(mismatch) = voter_record.verify_peer(record) {
+                return Some(Self::Incompatible {
+                    voter: voter.clone(),
+                    mismatch,
+                });
+            }
+        }
+        None
+    }
+}
+
+/// The admission refusals the leader has reported, so each is logged once while it holds.
+#[derive(Debug, Default)]
+struct ReportedAdmissionRefusals(BTreeMap<ClusterNodeIdentity, AdmissionRefusalReason>);
+
+impl ReportedAdmissionRefusals {
+    /// Reports every refusal that is new or whose reason changed, and forgets the candidates no
+    /// longer refused.
+    fn report(&mut self, refusals: &[AdmissionRefusal]) {
+        let mut current = BTreeMap::new();
+        for refusal in refusals {
+            let already_reported = self.0.get(&refusal.candidate) == Some(&refusal.reason);
+            if !already_reported {
+                match &refusal.reason {
+                    AdmissionRefusalReason::Unpublished => debug!(
+                        candidate = %refusal.candidate,
+                        "a gossip-discovered node waits outside the membership until it publishes \
+                         its prerequisites"
+                    ),
+                    AdmissionRefusalReason::Incompatible { voter, mismatch } => warn!(
+                        candidate = %refusal.candidate,
+                        %voter,
+                        prerequisite = %mismatch.prerequisite(),
+                        refusal = %mismatch,
+                        "refused to admit a node that cannot run beside a voter"
+                    ),
+                }
+            }
+            current.insert(refusal.candidate.clone(), refusal.reason.clone());
+        }
+        self.0 = current;
     }
 }
 
@@ -1134,6 +1273,7 @@ struct StateMachineData {
     cordoned_node_ids: Records<ClusterNodeName, ()>,
     node_admission_fences: Records<ClusterNodeName, ClusterNodeIncarnation>,
     domain_mutations: Records<DomainName, DomainMutationLease>,
+    domain_restore_installations: Records<DomainName, restore::DomainRestoreInstallation>,
     transactions: Records<String, ReplicatedTransaction>,
     transaction_commit_plans: transaction_plan::TransactionCommitPlanRecords,
     transaction_reports: TransactionReportRecords,
@@ -1815,7 +1955,8 @@ struct ConsensusState {
     interconnect: Transport,
     connectivity: ConnectivityFault,
     raft_retention: RaftRetentionPolicy,
-    membership_mutation: AsyncMutex<()>,
+    /// Serializes membership changes, and holds the admission refusals the leader has reported.
+    membership_mutation: AsyncMutex<ReportedAdmissionRefusals>,
     incoming_snapshots: Mutex<BTreeMap<ClusterNodeName, IncomingSnapshotTransfer>>,
     events: ConsensusEvents,
     metrics_task: Mutex<Option<JoinHandle<()>>>,
@@ -1835,8 +1976,15 @@ struct ConsensusTestProbeState {
     /// `FjallStore` retains a clone after construction so live delay and failure controls continue
     /// to reach the storage worker without borrowing this probe.
     storage_fault: StorageFault,
-    append_stream_opens: Mutex<BTreeMap<ClusterNodeName, u64>>,
+    append_stream_counts: Mutex<BTreeMap<ClusterNodeName, AppendStreamCounts>>,
     connectivity: ConnectivityFault,
+}
+
+#[cfg(feature = "testing")]
+#[derive(Debug, Default)]
+struct AppendStreamCounts {
+    attempts: u64,
+    opened: u64,
 }
 
 #[cfg(feature = "testing")]
@@ -1851,9 +1999,17 @@ impl ConsensusTestProbe {
     }
 
     pub fn append_stream_open_count(&self, target: &ClusterNodeName) -> u64 {
-        let counts = self.inner.append_stream_opens.lock();
+        let counts = self.inner.append_stream_counts.lock();
         match counts.get(target) {
-            Some(count) => *count,
+            Some(count) => count.opened,
+            None => 0,
+        }
+    }
+
+    pub fn append_stream_attempt_count(&self, target: &ClusterNodeName) -> u64 {
+        let counts = self.inner.append_stream_counts.lock();
+        match counts.get(target) {
+            Some(count) => count.attempts,
             None => 0,
         }
     }
@@ -1867,27 +2023,33 @@ impl ConsensusTestProbe {
     }
 
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
-        let mut counts = self.inner.append_stream_opens.lock();
-        let current = match counts.get(target) {
-            Some(current) => *current,
-            None => 0,
-        };
-        let Some(next) = current.checked_add(1) else {
-            // At u64::MAX this is already a sufficient lower bound for every bounded append-stream
-            // assertion, so retaining it preserves the observation's meaning.
-            return;
-        };
-        counts.insert(target.clone(), next);
+        let mut counts = self.inner.append_stream_counts.lock();
+        let count = counts.entry(target.clone()).or_default();
+        count.opened = count
+            .opened
+            .checked_add(1)
+            .verified("a bounded fixture cannot exhaust its append-stream open counter");
+    }
+
+    fn record_append_stream_attempt(&self, target: &ClusterNodeName) {
+        let mut counts = self.inner.append_stream_counts.lock();
+        let count = counts.entry(target.clone()).or_default();
+        count.attempts = count
+            .attempts
+            .checked_add(1)
+            .verified("a bounded fixture cannot exhaust its append-stream attempt counter");
     }
 }
 
 trait AppendStreamOpenRecorder: Clone + Send + Sync + 'static {
     fn record_append_stream_open(&self, target: &ClusterNodeName);
+    fn record_append_stream_attempt(&self, target: &ClusterNodeName);
     fn connectivity_fault(&self) -> ConnectivityFault;
 }
 
 impl AppendStreamOpenRecorder for () {
     fn record_append_stream_open(&self, _target: &ClusterNodeName) {}
+    fn record_append_stream_attempt(&self, _target: &ClusterNodeName) {}
 
     fn connectivity_fault(&self) -> ConnectivityFault {
         ConnectivityFault::default()
@@ -1898,6 +2060,10 @@ impl AppendStreamOpenRecorder for () {
 impl AppendStreamOpenRecorder for ConsensusTestProbe {
     fn record_append_stream_open(&self, target: &ClusterNodeName) {
         ConsensusTestProbe::record_append_stream_open(self, target);
+    }
+
+    fn record_append_stream_attempt(&self, target: &ClusterNodeName) {
+        ConsensusTestProbe::record_append_stream_attempt(self, target);
     }
 
     fn connectivity_fault(&self) -> ConnectivityFault {
@@ -2027,28 +2193,31 @@ impl Consensus {
     where
         Recorder: AppendStreamOpenRecorder,
     {
-        let retention = settings.raft_retention;
+        let retention = settings.raft_retention.policy();
         let heartbeat_interval =
-            u64::try_from(settings.raft_heartbeat_interval.as_millis()).unwrap_or(u64::MAX);
+            u64::try_from(settings.raft_timings.heartbeat_interval().as_millis())
+                .unwrap_or(u64::MAX);
         let election_timeout_min =
-            u64::try_from(settings.raft_election_timeout_min.as_millis()).unwrap_or(u64::MAX);
+            u64::try_from(settings.raft_timings.election_timeout_min().as_millis())
+                .unwrap_or(u64::MAX);
         // A follower that acknowledged replication sent within the last heartbeat interval already
         // knows what a heartbeat would tell it, so sustained writes send none. The window never
         // takes more than half of the gap before the minimum election timeout, which keeps one
         // interval plus the window below that timeout and leaves the rest for delivery.
-        let heartbeat_min_interval = match election_timeout_min.checked_sub(heartbeat_interval) {
-            Some(election_gap) => heartbeat_interval.min(election_gap / 2),
-            // `validate` rejects an election timeout that does not exceed the heartbeat interval.
-            None => 0,
-        };
+        let election_gap = election_timeout_min
+            .checked_sub(heartbeat_interval)
+            .assured("RaftTimings keeps the minimum election timeout above the heartbeat interval");
+        let heartbeat_min_interval = heartbeat_interval.min(election_gap / 2);
         let config = StdArc::new(
             Config {
                 cluster_name: settings.cluster_name,
                 heartbeat_interval,
                 heartbeat_min_interval: Some(heartbeat_min_interval),
                 election_timeout_min,
-                election_timeout_max: u64::try_from(settings.raft_election_timeout_max.as_millis())
-                    .unwrap_or(u64::MAX),
+                election_timeout_max: u64::try_from(
+                    settings.raft_timings.election_timeout_max().as_millis(),
+                )
+                .unwrap_or(u64::MAX),
                 // A restarted voter may time out before discovery reconnects it to a healthy
                 // leader. Pre-vote lets the current quorum reject that stale candidate without
                 // advancing the term and tearing down the leader's replication streams.
@@ -2140,7 +2309,7 @@ impl Consensus {
                 interconnect: settings.interconnect,
                 connectivity,
                 raft_retention: retention,
-                membership_mutation: AsyncMutex::new(()),
+                membership_mutation: AsyncMutex::new(ReportedAdmissionRefusals::default()),
                 incoming_snapshots: Mutex::new(BTreeMap::new()),
                 events,
                 metrics_task: Mutex::new(Some(metrics_task)),
@@ -2165,11 +2334,18 @@ impl Consensus {
                         .connectivity
                         .check()
                         .map_err(wire::ConsensusRequestError::raft)?;
-                    receiver
-                        .runtime_admission_read()
-                        .await
-                        .map(|read_log_id| read_log_id.log_id().clone().into())
-                        .map_err(wire::ConsensusRequestError::raft)
+                    {
+                        let mapping_input = receiver
+                            .runtime_admission_read()
+                            .await
+                            .map(|read_log_id| read_log_id.log_id().clone().into());
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => {
+                                Err((wire::ConsensusRequestError::raft)(mapping_error))
+                            }
+                        }
+                    }
                 }
             })?;
 
@@ -2196,11 +2372,18 @@ impl Consensus {
                             return Err(wire::ConsensusRequestError::invalid_request(error));
                         }
                     };
-                    receiver
-                        .append_entries(request)
-                        .await
-                        .map(wire::AppendEntriesResponseRecord::from)
-                        .map_err(wire::ConsensusRequestError::raft)
+                    {
+                        let mapping_input = receiver
+                            .append_entries(request)
+                            .await
+                            .map(wire::AppendEntriesResponseRecord::from);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => {
+                                Err((wire::ConsensusRequestError::raft)(mapping_error))
+                            }
+                        }
+                    }
                 }
             })?;
 
@@ -2244,11 +2427,18 @@ impl Consensus {
                         "a pre-vote request",
                     )
                     .map_err(wire::ConsensusRequestError::invalid_origin)?;
-                    receiver
-                        .pre_vote(request.0.into_request())
-                        .await
-                        .map(wire::VoteResponseRecord::from)
-                        .map_err(wire::ConsensusRequestError::raft)
+                    {
+                        let mapping_input = receiver
+                            .pre_vote(request.0.into_request())
+                            .await
+                            .map(wire::VoteResponseRecord::from);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => {
+                                Err((wire::ConsensusRequestError::raft)(mapping_error))
+                            }
+                        }
+                    }
                 }
             })?;
 
@@ -2269,11 +2459,18 @@ impl Consensus {
                         "a vote request",
                     )
                     .map_err(wire::ConsensusRequestError::invalid_origin)?;
-                    receiver
-                        .vote(request.0.into_request())
-                        .await
-                        .map(wire::VoteResponseRecord::from)
-                        .map_err(wire::ConsensusRequestError::raft)
+                    {
+                        let mapping_input = receiver
+                            .vote(request.0.into_request())
+                            .await
+                            .map(wire::VoteResponseRecord::from);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => {
+                                Err((wire::ConsensusRequestError::raft)(mapping_error))
+                            }
+                        }
+                    }
                 }
             })?;
 
@@ -2348,11 +2545,18 @@ impl Consensus {
                         .connectivity
                         .check()
                         .map_err(wire::ConsensusRequestError::raft)?;
-                    receiver
-                        .finish_snapshot_transfer(context.peer_node_id(), request.transfer_id)
-                        .await
-                        .map(wire::SnapshotResponseRecord::from)
-                        .map_err(wire::ConsensusRequestError::snapshot_transfer)
+                    {
+                        let mapping_input = receiver
+                            .finish_snapshot_transfer(context.peer_node_id(), request.transfer_id)
+                            .await
+                            .map(wire::SnapshotResponseRecord::from);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => Err(
+                                (wire::ConsensusRequestError::snapshot_transfer)(mapping_error),
+                            ),
+                        }
+                    }
                 }
             })?;
 
@@ -2373,11 +2577,18 @@ impl Consensus {
                         "a leadership transfer",
                     )
                     .map_err(wire::ConsensusRequestError::invalid_origin)?;
-                    receiver
-                        .transfer_leader(request.into_request())
-                        .await
-                        .map(wire::TransferLeadershipResponse::from)
-                        .map_err(wire::ConsensusRequestError::raft)
+                    {
+                        let mapping_input = receiver
+                            .transfer_leader(request.into_request())
+                            .await
+                            .map(wire::TransferLeadershipResponse::from);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => {
+                                Err((wire::ConsensusRequestError::raft)(mapping_error))
+                            }
+                        }
+                    }
                 }
             })?;
 
@@ -2464,6 +2675,10 @@ impl Observer {
         TransactionControlSnapshot {
             planning_inputs: state.domain_planning_inputs(domain),
             resources: (&state.resources).into(),
+            restore_installation: state
+                .domain_restore_installations
+                .get(domain)
+                .map(|installation| installation.execution().clone()),
         }
     }
     pub async fn current_revision(&self) -> u64 {
@@ -2478,6 +2693,19 @@ impl Observer {
     }
     pub async fn current_transactions(&self) -> BTreeMap<String, ReplicatedTransaction> {
         (&self.inner.store.inner.state().transactions).into()
+    }
+    /// Whether the current replicated state has an aged transaction no applying execution needs.
+    pub async fn has_removable_finished_transactions(
+        &self,
+        finished_before: nervix_models::Timestamp,
+    ) -> bool {
+        !self
+            .inner
+            .store
+            .inner
+            .state()
+            .finished_transaction_removals(finished_before)
+            .is_empty()
     }
     pub async fn current_transaction(&self, id: &str) -> Option<ReplicatedTransaction> {
         self.inner.store.inner.state().transactions.get(id).cloned()
@@ -2516,6 +2744,34 @@ impl Observer {
             .domain_mutations
             .get(domain)
             .cloned()
+    }
+
+    /// Runs a synchronous storage publication while the applied authority revision is held.
+    /// A newer installation or START cannot be published between validation and the mutation.
+    pub fn with_restore_state_installation<T>(
+        &self,
+        domain: &DomainName,
+        authority: &nervix_models::RestoreStateAuthority,
+        publish: impl FnOnce() -> T,
+    ) -> error_stack::Result<T, RestoreStateInstallationError> {
+        self.inner.store.inner.with_restore_state_installation(
+            domain,
+            authority,
+            || self.current_leader_tenure(),
+            publish,
+        )
+    }
+
+    /// Holds an applied revision across synchronous reclamation on any node. No consensus state
+    /// or activation gate is changed by this operation.
+    pub fn with_restore_state_reclamation<T>(
+        &self,
+        reclaim: impl FnOnce(&RestoreStateRetention<'_>) -> T,
+    ) -> T {
+        self.inner
+            .store
+            .inner
+            .with_restore_state_reclamation(reclaim)
     }
     pub async fn current_command_execution(
         &self,
@@ -2782,6 +3038,16 @@ impl Observer {
         lines
     }
 
+    /// The leader this node's Raft core last reported, read without waiting.
+    pub fn current_leader_now(&self) -> Option<ClusterNodeName> {
+        self.inner
+            .raft
+            .metrics()
+            .borrow_watched()
+            .current_leader
+            .clone()
+    }
+
     pub async fn membership_nodes(&self) -> BTreeMap<ClusterNodeName, String> {
         let metrics = self.inner.raft.metrics().borrow_watched().clone();
         metrics
@@ -2890,6 +3156,36 @@ impl Proposer {
         let response = self
             .inner
             .client_write(ConsensusCommand::AcquireCommandDomainMutation {
+                reference: reference.clone(),
+                owner,
+                request_digest,
+                domain,
+            })
+            .await?;
+        match response.data {
+            ConsensusResponse::Applied => self
+                .current_command_execution(&reference)
+                .await
+                .ok_or_else(|| Report::new(ConsensusError::UnexpectedResponse)),
+            ConsensusResponse::Conflict(reason) => {
+                Err(Report::new(ConsensusError::Conflict(reason)))
+            }
+            ConsensusResponse::Transaction(_) => {
+                Err(Report::new(ConsensusError::UnexpectedResponse))
+            }
+        }
+    }
+
+    pub async fn release_command_domain_mutation(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        owner: UserName,
+        request_digest: [u8; 32],
+        domain: DomainName,
+    ) -> Result<CommandExecution, Report<ConsensusError>> {
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::ReleaseCommandDomainMutation {
                 reference: reference.clone(),
                 owner,
                 request_digest,
@@ -3289,6 +3585,51 @@ impl Proposer {
         Self::applied_response(response.data)
     }
 
+    pub async fn begin_restore_state_installation(
+        &self,
+        reference: nervix_models::CommandExecutionReference,
+        domain: DomainName,
+    ) -> error_stack::Result<nervix_models::RestoreStateAuthority, ConsensusError> {
+        let tenure = self
+            .current_leader_tenure()
+            .ok_or_else(|| Report::new(ConsensusError::LeadershipLost { leader_id: None }))?;
+        if tenure.leader_id() != self.local_node_id() {
+            return Err(Report::new(ConsensusError::LeadershipLost {
+                leader_id: Some(tenure.leader_id().clone()),
+            }));
+        }
+        let response = self
+            .inner
+            .client_write(ConsensusCommand::BeginRestoreStateInstallation {
+                reference: reference.clone(),
+                domain: domain.clone(),
+                tenure: tenure.clone(),
+            })
+            .await?;
+        Self::applied_response(response.data)?;
+        let state = self.inner.store.inner.state();
+        let Some(restore::DomainRestoreInstallation::Installing(authority)) =
+            state.domain_restore_installations.get(&domain)
+        else {
+            return Err(Report::new(ConsensusError::Conflict(
+                "restore installation has no admitted generation"
+                    .to_string()
+                    .into(),
+            )));
+        };
+        if authority.execution != reference
+            || authority.term != tenure.term()
+            || self.current_leader_tenure().as_ref() != Some(&tenure)
+        {
+            return Err(Report::new(ConsensusError::LeadershipLost {
+                leader_id: self
+                    .current_leader_tenure()
+                    .map(|tenure| tenure.leader_id().clone()),
+            }));
+        }
+        Ok(authority.clone())
+    }
+
     pub async fn create_resource_catalog(
         &self,
         domain: &DomainName,
@@ -3613,12 +3954,13 @@ impl Administrator {
             self.inner.local_node_id.clone(),
             BasicNode::new(self.inner.interconnect_advertise_addr.to_string()),
         );
-        self.inner
-            .raft
-            .initialize(nodes)
-            .await
-            .map(|_| ())
-            .map_err(|error| Report::new(error).change_context(ConsensusError::Startup))?;
+        {
+            let mapping_input = self.inner.raft.initialize(nodes).await.map(|_| ());
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err(Report::new(error).change_context(ConsensusError::Startup)),
+            }
+        }?;
         self.inner.events.report(format!(
             "raft initialized with single-node membership {}",
             self.inner.local_node_id
@@ -3630,7 +3972,7 @@ impl Administrator {
         &self,
         gossip: impl Future<Output = GossipState>,
     ) -> error_stack::Result<(), ConsensusError> {
-        let _membership_mutation = self.inner.membership_mutation.lock().await;
+        let mut reported_refusals = self.inner.membership_mutation.lock().await;
         let gossip = gossip.await;
         let leader = self.inner.raft.current_leader().await;
         if leader.as_ref() != Some(&self.inner.local_node_id) {
@@ -3640,8 +3982,9 @@ impl Administrator {
         let before = self.effective_membership();
         let state = self.inner.store.inner.state();
         let admission_fences = (&state.node_admission_fences).into();
-        let mutations = before.automatic_mutations(&gossip, &admission_fences);
-        for mutation in mutations {
+        let plan = before.automatic_mutations(&gossip, &admission_fences);
+        reported_refusals.report(&plan.refusals);
+        for mutation in plan.mutations {
             nervix_primitives::task::consume_budget().await;
             match mutation {
                 MembershipMutation::UpdateAddress { node_id, endpoint } => {
@@ -4184,27 +4527,37 @@ where
     ) -> Result<AppendEntriesResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let record = wire::AppendEntriesRecord::from_request(rpc);
-        let response = self
-            .interconnect
-            .request_with_timeout(
-                &self.target,
-                wire::HeartbeatRequest(record),
-                replication::heartbeat_deadline(&option),
-            )
-            .await
-            .map_err(io_error)
-            .map_err(unreachable_err)?
-            .map_err(io_error)
-            .map_err(unreachable_err)?;
+        let response = {
+            let mapping_input = {
+                let mapping_input = self
+                    .interconnect
+                    .request_with_timeout(
+                        &self.target,
+                        wire::HeartbeatRequest(record),
+                        replication::heartbeat_deadline(&option),
+                    )
+                    .await
+                    .map_err(io_error);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                }
+            }?
+            .map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
         Ok(response.into_response())
     }
 
     /// Carry appends on the path this client was built for.
     ///
-    /// A replication client opens one ordered stream to its follower and pipelines every batch
-    /// over it, under the stream's own idle bound rather than OpenRaft's heartbeat-derived soft
-    /// TTL. A heartbeat client keeps OpenRaft's one-probe-at-a-time shape and deadline on the
-    /// management pool, where a saturated append stream cannot reach it.
+    /// A replication client sends initial empty probes on management capacity, then opens one
+    /// ordered stream for its first data batch and subsequent commit updates. That stream uses
+    /// its own idle bound rather than OpenRaft's heartbeat-derived soft TTL. A heartbeat client
+    /// keeps the one-probe-at-a-time shape on the independent management pool.
     fn stream_append<'s, S>(
         &'s mut self,
         input: S,
@@ -4225,29 +4578,15 @@ where
             + Unpin
             + 'static,
     {
-        if let Err(error) = self.connectivity.check() {
-            return Box::pin(async move { Err(RPCError::Unreachable(unreachable_err(error))) });
-        }
         match self.append_path {
             AppendPath::Heartbeat => {
                 openraft::network::stream_append_sequential(self, input, option)
             }
             AppendPath::Replication => {
-                let interconnect = self.interconnect.clone();
-                let executor = self.executor.clone();
-                let local_node_id = self.local_node_id.clone();
-                let target = self.target.clone();
-                let append_stream_open_recorder = self.append_stream_open_recorder.clone();
+                let client = self.clone();
                 Box::pin(async move {
-                    let answers = replication::open_append_stream(
-                        &interconnect,
-                        &executor,
-                        &local_node_id,
-                        &target,
-                        input,
-                    )
-                    .await?;
-                    append_stream_open_recorder.record_append_stream_open(&target);
+                    let answers: openraft::base::BoxStream<'s, _> =
+                        client.replication_answers(input, option).await?;
                     Ok(answers)
                 })
             }
@@ -4261,17 +4600,28 @@ where
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
-        let response = self
-            .interconnect
-            .request_with_timeout(
-                &self.target,
-                wire::RequestVote(wire::VoteRequestRecord::from_request(rpc)),
-                rpc_timeout,
-            )
-            .await
-            .map_err(io_error)
-            .map_err(unreachable_err)?;
-        let response = response.map_err(io_error).map_err(unreachable_err)?;
+        let response = {
+            let mapping_input = self
+                .interconnect
+                .request_with_timeout(
+                    &self.target,
+                    wire::RequestVote(wire::VoteRequestRecord::from_request(rpc)),
+                    rpc_timeout,
+                )
+                .await
+                .map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
+        let response = {
+            let mapping_input = response.map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
         Ok(response.into_response())
     }
 
@@ -4282,17 +4632,28 @@ where
     ) -> Result<VoteResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
-        let response = self
-            .interconnect
-            .request_with_timeout(
-                &self.target,
-                wire::RequestPreVote(wire::VoteRequestRecord::from_request(rpc)),
-                rpc_timeout,
-            )
-            .await
-            .map_err(io_error)
-            .map_err(unreachable_err)?;
-        let response = response.map_err(io_error).map_err(unreachable_err)?;
+        let response = {
+            let mapping_input = self
+                .interconnect
+                .request_with_timeout(
+                    &self.target,
+                    wire::RequestPreVote(wire::VoteRequestRecord::from_request(rpc)),
+                    rpc_timeout,
+                )
+                .await
+                .map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
+        let response = {
+            let mapping_input = response.map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
         Ok(response.into_response())
     }
 
@@ -4314,42 +4675,61 @@ where
         + 'static,
         option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
-        self.connectivity
-            .check()
-            .map_err(unreachable_err)
-            .map_err(StreamingError::from)?;
+        {
+            let mapping_input = self.connectivity.check().map_err(unreachable_err);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((StreamingError::from)(mapping_error)),
+            }
+        }?;
         let rpc_timeout = option.hard_ttl();
         let deadline = Instant::now().checked_add(rpc_timeout).ok_or_else(|| {
             StreamingError::from(unreachable_err(io::Error::other(
                 "snapshot deadline exceeds the monotonic clock range",
             )))
         })?;
-        let transfer_id = self
-            .snapshot_transfer_ids
-            .allocate()
-            .map_err(unreachable_err)
-            .map_err(StreamingError::from)?;
+        let transfer_id = {
+            let mapping_input = self
+                .snapshot_transfer_ids
+                .allocate()
+                .map_err(unreachable_err);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((StreamingError::from)(mapping_error)),
+            }
+        }?;
         let Snapshot { meta, snapshot } = snapshot;
         let manifest = snapshot.manifest().clone();
         let chunk_bytes = snapshot_chunk_bytes(self.executor.limits());
         let transfer = async {
-            self.interconnect
-                .request_with_timeout(
-                    &self.target,
-                    wire::BeginSnapshotTransfer::from_parts(
-                        transfer_id,
-                        vote,
-                        meta,
-                        manifest.section_count,
-                        manifest.total_bytes,
-                    ),
-                    snapshot_request_timeout(deadline).map_err(unreachable_err)?,
-                )
-                .await
-                .map_err(io_error)
-                .map_err(unreachable_err)?
-                .map_err(io_error)
-                .map_err(unreachable_err)?;
+            {
+                let mapping_input = {
+                    let mapping_input = self
+                        .interconnect
+                        .request_with_timeout(
+                            &self.target,
+                            wire::BeginSnapshotTransfer::from_parts(
+                                transfer_id,
+                                vote,
+                                meta,
+                                manifest.section_count,
+                                manifest.total_bytes,
+                            ),
+                            snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                        )
+                        .await
+                        .map_err(io_error);
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                    }
+                }?
+                .map_err(io_error);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                }
+            }?;
 
             for section_index in 0..manifest.section_count {
                 nervix_primitives::task::consume_budget().await;
@@ -4362,23 +4742,34 @@ where
                 let mut offset = 0_u64;
                 for chunk in section.chunks(chunk_bytes) {
                     nervix_primitives::task::consume_budget().await;
-                    self.interconnect
-                        .request_with_timeout(
-                            &self.target,
-                            wire::SnapshotChunk {
-                                transfer_id,
-                                section_index,
-                                section_bytes,
-                                offset,
-                                bytes: chunk.to_vec(),
-                            },
-                            snapshot_request_timeout(deadline).map_err(unreachable_err)?,
-                        )
-                        .await
-                        .map_err(io_error)
-                        .map_err(unreachable_err)?
-                        .map_err(io_error)
-                        .map_err(unreachable_err)?;
+                    {
+                        let mapping_input = {
+                            let mapping_input = self
+                                .interconnect
+                                .request_with_timeout(
+                                    &self.target,
+                                    wire::SnapshotChunk {
+                                        transfer_id,
+                                        section_index,
+                                        section_bytes,
+                                        offset,
+                                        bytes: chunk.to_vec(),
+                                    },
+                                    snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                                )
+                                .await
+                                .map_err(io_error);
+                            match mapping_input {
+                                Ok(mapped_value) => Ok(mapped_value),
+                                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                            }
+                        }?
+                        .map_err(io_error);
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                        }
+                    }?;
                     let chunk_len = u64::try_from(chunk.len())
                         .assured("supported targets have a pointer width no larger than u64");
                     offset = offset
@@ -4387,18 +4778,29 @@ where
                 }
             }
 
-            self.interconnect
-                .request_with_timeout(
-                    &self.target,
-                    wire::FinishSnapshotTransfer { transfer_id },
-                    snapshot_request_timeout(deadline).map_err(unreachable_err)?,
-                )
-                .await
-                .map_err(io_error)
-                .map_err(unreachable_err)?
-                .map(wire::SnapshotResponseRecord::into_response)
-                .map_err(io_error)
-                .map_err(unreachable_err)
+            {
+                let response = {
+                    let mapping_input = self
+                        .interconnect
+                        .request_with_timeout(
+                            &self.target,
+                            wire::FinishSnapshotTransfer { transfer_id },
+                            snapshot_request_timeout(deadline).map_err(unreachable_err)?,
+                        )
+                        .await
+                        .map_err(io_error);
+                    match mapping_input {
+                        Ok(mapped_value) => Ok(mapped_value),
+                        Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                    }
+                }?;
+                let response = response.map(wire::SnapshotResponseRecord::into_response);
+                let mapping_input = response.map_err(io_error);
+                match mapping_input {
+                    Ok(mapped_value) => Ok(mapped_value),
+                    Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+                }
+            }
         };
         tokio::pin!(transfer);
         tokio::pin!(cancel);
@@ -4415,20 +4817,29 @@ where
     ) -> Result<TransferLeaderResponse<TypeConfig>, RPCError<TypeConfig>> {
         self.connectivity.check().map_err(unreachable_err)?;
         let rpc_timeout = option.hard_ttl();
-        let response = self
-            .interconnect
-            .request_with_timeout(
-                &self.target,
-                wire::TransferLeadership::from_request(req),
-                rpc_timeout,
-            )
-            .await
-            .map_err(io_error)
-            .map_err(unreachable_err)?;
-        Ok(response
-            .map(wire::TransferLeadershipResponse::into_response)
-            .map_err(io_error)
-            .map_err(unreachable_err)?)
+        let response = {
+            let mapping_input = self
+                .interconnect
+                .request_with_timeout(
+                    &self.target,
+                    wire::TransferLeadership::from_request(req),
+                    rpc_timeout,
+                )
+                .await
+                .map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?;
+        Ok({
+            let response = response.map(wire::TransferLeadershipResponse::into_response);
+            let mapping_input = response.map_err(io_error);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(mapping_error) => Err((unreachable_err)(mapping_error)),
+            }
+        }?)
     }
 }
 
@@ -4748,6 +5159,38 @@ fn apply_consensus_command_at(
                 state.command_executions.replace(execution);
             }
         }
+        ConsensusCommand::ReleaseCommandDomainMutation {
+            reference,
+            owner,
+            request_digest,
+            domain,
+        } => {
+            let Some(mut execution) = state.command_executions.get(reference).cloned() else {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is unknown"
+                ));
+            };
+            if execution.owner() != Some(owner)
+                || execution.request_digest() != Some(*request_digest)
+            {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is bound to a different owner or \
+                     request"
+                ));
+            }
+            if !execution.is_applying() {
+                return AppliedConsensusCommand::conflict(format!(
+                    "command execution reference '{reference}' is no longer applying"
+                ));
+            }
+            if let Some(lease) = execution.domain_mutation(domain) {
+                if let Err(reason) = release_domain_mutation(state, domain, lease) {
+                    return AppliedConsensusCommand::conflict(reason.to_string());
+                }
+                execution.release_domain_mutation(domain);
+                state.command_executions.replace(execution);
+            }
+        }
         ConsensusCommand::FinishCommandExecution {
             reference,
             owner,
@@ -4862,6 +5305,11 @@ fn apply_consensus_command_at(
             schedule,
             mutation,
         } => {
+            if domain.status != DomainStatus::Stopped
+                && let Err(reason) = restore::validate_restored_domain_start(state, &domain.id)
+            {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -4881,6 +5329,11 @@ fn apply_consensus_command_at(
             changes.schedule_changed = true;
         }
         ConsensusCommand::PutDomain { domain, mutation } => {
+            if domain.status != DomainStatus::Stopped
+                && let Err(reason) = restore::validate_restored_domain_start(state, &domain.id)
+            {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if let Err(reason) = validate_domain_mutation(state, &domain.id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -4894,6 +5347,9 @@ fn apply_consensus_command_at(
             authority,
             mutation,
         } => {
+            if let Err(reason) = restore::validate_restored_domain_start(state, domain_id) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -4926,6 +5382,9 @@ fn apply_consensus_command_at(
             domain_id,
             mutation,
         } => {
+            if let Err(reason) = restore::validate_restored_domain_start(state, domain_id) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
             if let Err(reason) = validate_domain_mutation(state, domain_id, mutation.as_deref()) {
                 return AppliedConsensusCommand::conflict(reason.to_string());
             }
@@ -5014,6 +5473,81 @@ fn apply_consensus_command_at(
             {
                 return AppliedConsensusCommand::conflict(format!("{error:#}"));
             }
+        }
+        ConsensusCommand::BeginRestoreStateInstallation {
+            reference,
+            domain,
+            tenure,
+        } => {
+            if context.leader_term != tenure.term {
+                return AppliedConsensusCommand::conflict(
+                    "restore installer leader tenure changed".to_string(),
+                );
+            }
+            let Some(execution) = state.command_executions.get(reference) else {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation execution is absent".to_string(),
+                );
+            };
+            let Some(restore) = execution.restore_execution() else {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation execution is not applying".to_string(),
+                );
+            };
+            if !restore.is_recorded(&nervix_models::RestoreStep::ImportResources(domain.clone()))
+                || restore.is_recorded(&nervix_models::RestoreStep::ApplyModels(domain.clone()))
+            {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation is out of order".to_string(),
+                );
+            }
+            let Some(lease) = execution.domain_mutation(domain) else {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation mutation lease is absent".to_string(),
+                );
+            };
+            if let Err(reason) = validate_domain_mutation(state, domain, Some(lease)) {
+                return AppliedConsensusCommand::conflict(reason.to_string());
+            }
+            if state
+                .domains
+                .get(domain)
+                .is_none_or(|domain| domain.status != DomainStatus::Stopped)
+            {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation domain is not stopped".to_string(),
+                );
+            }
+            let belongs_to_execution = match state.domain_restore_installations.get(domain) {
+                Some(restore::DomainRestoreInstallation::Pending { execution }) => {
+                    execution == reference
+                }
+                Some(restore::DomainRestoreInstallation::Installing(authority)) => {
+                    &authority.execution == reference
+                }
+                None => false,
+            };
+            if !belongs_to_execution {
+                return AppliedConsensusCommand::conflict(
+                    "restore installation does not own the pending domain".to_string(),
+                );
+            }
+            let generation = state
+                .last_applied_log_id
+                .as_ref()
+                .verified("a committed installation has its applied log identity")
+                .index;
+            let authority = nervix_models::RestoreStateAuthority {
+                leader: tenure.leader_id.clone(),
+                term: tenure.term,
+                execution: reference.clone(),
+                mutation_revision: lease.recovery_fence().revision(),
+                generation,
+            };
+            state.domain_restore_installations.insert(
+                domain.clone(),
+                restore::DomainRestoreInstallation::Installing(authority),
+            );
         }
         ConsensusCommand::ImportResourceVersion {
             reference,
@@ -5753,28 +6287,13 @@ fn apply_consensus_command_at(
             }
         }
         ConsensusCommand::RemoveFinishedTransactions { finished_before } => {
-            let removed_ids = state
-                .transactions
-                .iter()
-                .filter_map(|(id, transaction)| {
-                    let TransactionState::Finished(finished) = &transaction.state else {
-                        return None;
-                    };
-                    (finished.finished_at <= *finished_before).then(|| id.clone())
-                })
-                .collect::<Vec<_>>();
-            let before = state.transactions.len();
-            state.transactions.retain(|_, transaction| {
-                let TransactionState::Finished(finished) = &transaction.state else {
-                    return true;
-                };
-                finished.finished_at > *finished_before
-            });
+            let removed_ids = state.finished_transaction_removals(*finished_before);
             for id in &removed_ids {
+                state.transactions.remove(id);
                 state.transaction_commit_plans.remove(id);
             }
             state.transaction_reports.remove_transactions(&removed_ids);
-            changes.transactions_changed = state.transactions.len() != before;
+            changes.transactions_changed = !removed_ids.is_empty();
         }
     }
     AppliedConsensusCommand::applied(changes)
@@ -5972,6 +6491,15 @@ fn validate_transaction_step_effect(
         }));
     }
 
+    if matches!(effect, TransactionStepEffect::StartDomain { .. })
+        && let Err(reason) =
+            restore::validate_restored_domain_start(state, effect.inputs().domain())
+    {
+        return Err(Report::new(TransactionMutationError::StepConflict {
+            id: transaction.id.clone(),
+            reason: reason.to_string(),
+        }));
+    }
     match validate_domain_planning_inputs(state, effect.inputs()) {
         Err(reason) => Err(Report::new(TransactionMutationError::StepConflict {
             id: transaction.id.clone(),
@@ -6147,12 +6675,14 @@ mod tests {
     use fjall::Database;
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        ClusterNodeIdentity, ClusterNodeIncarnation, DomainClockAuthority, DomainClockState,
-        DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint, DomainState,
-        DomainStatus, DomainTimeRate, NodeEndpoint, ResourceId, ResourceName, ResourceNodeState,
-        ResourceNodeStatus, ResourceReplicaKey, ResourceUploadIdentity, ResourceUploadKey,
-        ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
-        Statement, Timestamp, TransactionPosition,
+        ClusterNodeIdentity, ClusterNodeIncarnation, ConsensusFloors, DomainClockAuthority,
+        DomainClockState, DomainConfig, DomainName, DomainPace, DomainSchedule, DomainStartPoint,
+        DomainState, DomainStatus, DomainTimeRate, NodeEndpoint, NodePrerequisites,
+        PrerequisiteMismatch, PrerequisiteTimings, RaftLogDurability, ResourceId, ResourceName,
+        ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUploadIdentity,
+        ResourceUploadKey, ResourceUploadState, ResourceVersion, ResourceVersionCounter,
+        ResourceVersionStatus, Statement, Timestamp, TimingPrerequisite, TransactionPosition,
+        TrustRootFingerprint, WireContractFingerprint,
     };
     use nervix_primitives::sync::{Arc, atomic::AtomicU64};
     use openraft::{
@@ -6164,12 +6694,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
-        CommandExecutionAdmissionPolicy, CommandExecutionDisposition, CommandExecutionEffect,
-        CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
-        ConsensusCommand, ConsensusConflict, ConsensusResponse, FjallLogReader, FjallStore,
-        GossipNode, GossipState, IncomingSnapshotTransfer, LeaderTenure, MembershipMutation,
-        MembershipSnapshot, ProtocolOriginError, ResourceRecords, SnapshotChunkPart, SnapshotMeta,
+        AdmissionRefusal, AdmissionRefusalReason, AppliedEntryContext, AutomaticScheduleFence,
+        ClusterSchedule, CommandExecution, CommandExecutionAdmissionPolicy,
+        CommandExecutionDisposition, CommandExecutionEffect, CommandExecutionRequestConflict,
+        CommandExecutionResult, CommandExecutionState, ConsensusCommand, ConsensusConflict,
+        ConsensusResponse, FjallLogReader, FjallStore, GossipNode, GossipState,
+        IncomingSnapshotTransfer, LeaderTenure, MembershipMutation, MembershipSnapshot,
+        ProtocolOriginError, ResourceRecords, SnapshotChunkPart, SnapshotMeta,
         SnapshotTransferError, SnapshotTransferIds, StateMachineChanges, StateMachineData,
         StoredMembership, TransactionApplicationOutcome, TransactionCommandResult,
         TransactionCommitAdmissionFailure, TransactionMutationError, TransactionOutcome,
@@ -6444,7 +6975,8 @@ mod tests {
         ));
     }
 
-    /// One discovered node whose endpoints have not been published yet.
+    /// One discovered node whose endpoints have not been published yet, with the prerequisites
+    /// every test node shares.
     fn undiscovered_node(name: &str, incarnation: u64) -> GossipNode {
         GossipNode {
             node_id: ClusterNodeName::parse(name).assured("the test node name is valid"),
@@ -6453,6 +6985,26 @@ mod tests {
             client_url: None,
             console_url: None,
             interconnect_endpoint: None,
+            prerequisites: Some(test_prerequisites(Duration::from_millis(250))),
+        }
+    }
+
+    /// The prerequisites a test node publishes, with `heartbeat` as its Raft heartbeat.
+    fn test_prerequisites(heartbeat: Duration) -> NodePrerequisites {
+        NodePrerequisites {
+            cluster_identity: "cluster".to_string(),
+            trust_root: TrustRootFingerprint::from_digest([1; 32]),
+            wire_contract: WireContractFingerprint::from_digest([2; 32]),
+            consensus_floors: ConsensusFloors {
+                largest_command_bytes: 1 << 20,
+                largest_management_event_bytes: 64 << 10,
+            },
+            durability: RaftLogDurability::FsyncEveryAppend,
+            timings: PrerequisiteTimings {
+                raft_heartbeat_interval: heartbeat,
+                gossip_interval: Duration::from_millis(500),
+                clock_skew_tolerance: Duration::from_millis(500),
+            },
         }
     }
 
@@ -6501,24 +7053,6 @@ mod tests {
         assert_eq!(
             state.latest_observed_identity(&stopped),
             Some(node_identity("node-2", 4))
-        );
-    }
-
-    /// A voter gossip has neither heard from nor declared dead is unobserved: it may still be
-    /// starting. A live voter and a dead one are both observed.
-    #[test]
-    fn a_voter_gossip_neither_heard_from_nor_declared_dead_is_unobserved() {
-        let node = |name: &str| ClusterNodeName::parse(name).expect("valid node name");
-        let state = GossipState {
-            live_nodes: vec![undiscovered_node("node-1", 1)],
-            dead_node_ids: BTreeSet::from([node("node-2")]),
-            dead_node_identities: BTreeSet::new(),
-        };
-        let voters = [node("node-1"), node("node-2"), node("node-3")];
-
-        assert_eq!(
-            state.unobserved_node_ids(voters.iter()),
-            BTreeSet::from([node("node-3")])
         );
     }
 
@@ -6605,7 +7139,9 @@ mod tests {
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip, &admission_fences),
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .mutations,
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
@@ -6635,6 +7171,7 @@ mod tests {
         assert!(
             membership
                 .automatic_mutations(&gossip, &admission_fences)
+                .mutations
                 .is_empty()
         );
     }
@@ -6658,7 +7195,9 @@ mod tests {
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip, &admission_fences),
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .mutations,
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
@@ -6695,7 +7234,9 @@ mod tests {
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip, &admission_fences),
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .mutations,
             vec![
                 MembershipMutation::UpdateAddress {
                     node_id: joining.clone(),
@@ -6735,7 +7276,9 @@ mod tests {
         let admission_fences = BTreeMap::new();
 
         assert_eq!(
-            membership.automatic_mutations(&gossip, &admission_fences),
+            membership
+                .automatic_mutations(&gossip, &admission_fences)
+                .mutations,
             vec![MembershipMutation::UpdateAddress {
                 node_id: restarted.clone(),
                 endpoint: endpoint.clone(),
@@ -6746,6 +7289,7 @@ mod tests {
         assert!(
             membership
                 .automatic_mutations(&gossip, &admission_fences)
+                .mutations
                 .is_empty()
         );
     }
@@ -6771,6 +7315,7 @@ mod tests {
         assert!(
             membership
                 .automatic_mutations(&gossip, &admission_fences)
+                .mutations
                 .is_empty()
         );
 
@@ -6781,7 +7326,9 @@ mod tests {
             .assured("the test gossip has one observed node")
             .incarnation = ClusterNodeIncarnation::new(3);
         assert_eq!(
-            membership.automatic_mutations(&restarted, &admission_fences),
+            membership
+                .automatic_mutations(&restarted, &admission_fences)
+                .mutations,
             vec![
                 MembershipMutation::AddLearner {
                     node_id: joining.clone(),
@@ -6817,6 +7364,151 @@ mod tests {
             ClusterNodeName::parse(raw).expect("valid node name"),
             ClusterNodeIncarnation::new(incarnation),
         )
+    }
+
+    #[test]
+    fn a_candidate_without_a_published_record_stays_outside_the_membership() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![GossipNode {
+                interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                prerequisites: None,
+                ..undiscovered_node("node-2", 2)
+            }],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first, "node-1.test:7443".to_string())]),
+        };
+
+        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+
+        assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.refusals,
+            vec![AdmissionRefusal {
+                candidate: node_identity("node-2", 2),
+                reason: AdmissionRefusalReason::Unpublished,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_candidate_incompatible_with_a_live_voter_is_refused_as_that_voter_judges_it() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-1.test:7443")),
+                    ..undiscovered_node("node-1", 1)
+                },
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                    prerequisites: Some(test_prerequisites(Duration::from_secs(1))),
+                    ..undiscovered_node("node-2", 2)
+                },
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
+        };
+
+        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+
+        assert!(plan.mutations.is_empty());
+        assert_eq!(
+            plan.refusals,
+            vec![AdmissionRefusal {
+                candidate: node_identity("node-2", 2),
+                reason: AdmissionRefusalReason::Incompatible {
+                    voter: first,
+                    mismatch: PrerequisiteMismatch::Timing {
+                        prerequisite: TimingPrerequisite::RaftHeartbeatInterval,
+                        local: Duration::from_millis(250),
+                        peer: Duration::from_secs(1),
+                    },
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn a_candidate_within_the_timing_bound_of_every_live_voter_is_admitted() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let joining = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-1.test:7443")),
+                    ..undiscovered_node("node-1", 1)
+                },
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                    prerequisites: Some(test_prerequisites(Duration::from_millis(400))),
+                    ..undiscovered_node("node-2", 2)
+                },
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone()]),
+            nodes: BTreeMap::from([(first.clone(), "node-1.test:7443".to_string())]),
+        };
+
+        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+
+        assert!(plan.refusals.is_empty());
+        assert_eq!(
+            plan.mutations,
+            vec![
+                MembershipMutation::AddLearner {
+                    node_id: joining.clone(),
+                    endpoint: node_endpoint("node-2.test:7443"),
+                },
+                MembershipMutation::ChangeVoters {
+                    voters: BTreeSet::from([first, joining]),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_voter_whose_record_another_voter_cannot_run_beside_is_never_refused() {
+        let first = ClusterNodeName::parse("node-1").assured("the test node name is valid");
+        let second = ClusterNodeName::parse("node-2").assured("the test node name is valid");
+        let gossip = GossipState {
+            live_nodes: vec![
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-1.test:7443")),
+                    ..undiscovered_node("node-1", 1)
+                },
+                GossipNode {
+                    interconnect_endpoint: Some(node_endpoint("node-2.test:7443")),
+                    prerequisites: Some(test_prerequisites(Duration::from_secs(1))),
+                    ..undiscovered_node("node-2", 2)
+                },
+            ],
+            dead_node_ids: BTreeSet::new(),
+            dead_node_identities: BTreeSet::new(),
+        };
+        let membership = MembershipSnapshot {
+            voters: BTreeSet::from([first.clone(), second.clone()]),
+            nodes: BTreeMap::from([
+                (first, "node-1.test:7443".to_string()),
+                (second, "node-2.test:7443".to_string()),
+            ]),
+        };
+
+        let plan = membership.automatic_mutations(&gossip, &BTreeMap::new());
+
+        assert!(plan.refusals.is_empty());
+        assert!(plan.mutations.is_empty());
     }
 
     #[test]
@@ -7931,6 +8623,72 @@ mod tests {
             },
         );
         assert!(matches!(stale.response, ConsensusResponse::Conflict(_)));
+    }
+
+    #[test]
+    fn command_releases_one_domain_mutation_while_it_keeps_applying() {
+        let owner = UserName::parse("app_user").assured("the owner is an accepted literal");
+        let first_domain = domain("first_domain");
+        let second_domain = domain("second_domain");
+        let execution = CommandExecution::applying(
+            command_reference(99),
+            owner.clone(),
+            Some(first_domain.clone()),
+            [9; 32],
+            Timestamp::from_unix_nanos(1),
+            CommandExecutionEffect::CreateUser {
+                if_not_exists: false,
+                name: UserName::parse("created_user")
+                    .assured("the created user is an accepted literal"),
+                password_hash: "argon2-hash".to_string(),
+            },
+        );
+        let mut state = StateMachineData {
+            last_applied_log_id: Some(LogIdOf::new(committed_leader(1), 11)),
+            ..Default::default()
+        };
+        let admitted = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(execution.clone()),
+                mutation_domains: BTreeSet::from([first_domain.clone(), second_domain.clone()]),
+                policy: command_policy(10),
+            },
+        );
+        assert_eq!(admitted.response, ConsensusResponse::Applied);
+        let release = ConsensusCommand::ReleaseCommandDomainMutation {
+            reference: execution.reference.clone(),
+            owner: owner.clone(),
+            request_digest: [9; 32],
+            domain: first_domain.clone(),
+        };
+        for _ in 0..2 {
+            let response = apply_consensus_command(&mut state, &release);
+            assert_eq!(response.response, ConsensusResponse::Applied);
+        }
+        assert!(!state.domain_mutations.contains_key(&first_domain));
+        assert!(state.domain_mutations.contains_key(&second_domain));
+        let applying = state
+            .command_executions
+            .get(&execution.reference)
+            .assured("the admitted command remains present");
+        assert!(applying.is_applying());
+        assert!(applying.domain_mutation(&first_domain).is_none());
+        assert!(applying.domain_mutation(&second_domain).is_some());
+        let unauthorized = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::ReleaseCommandDomainMutation {
+                reference: execution.reference,
+                owner,
+                request_digest: [8; 32],
+                domain: second_domain.clone(),
+            },
+        );
+        assert!(matches!(
+            unauthorized.response,
+            ConsensusResponse::Conflict(_)
+        ));
+        assert!(state.domain_mutations.contains_key(&second_domain));
     }
 
     #[test]

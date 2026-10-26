@@ -434,6 +434,12 @@ impl IngestorAckRootTrackers {
         AckSet::tracked_roots(vec![self.domain.clone(), self.ingestor.clone()])
     }
 
+    /// A root of a message whose source confirms it on its transport. The root keeps counting
+    /// against both trackers after it resolves, until its completion drops.
+    pub(in crate::runtime) fn confirmed_root(&self) -> (AckSet, AckCompletion) {
+        AckSet::confirmed_roots(vec![self.domain.clone(), self.ingestor.clone()])
+    }
+
     /// Trackers of one ingestor that no runtime shares, for a check that drives its roots alone.
     #[cfg(test)]
     pub(in crate::runtime) fn detached() -> Self {
@@ -448,41 +454,35 @@ impl IngestorAckRootTrackers {
     pub(in crate::runtime) fn ingestor_outstanding(&self) -> usize {
         self.ingestor.outstanding()
     }
+
+    /// The roots of this ingestor an ownership handoff's drain still waits for.
+    #[cfg(test)]
+    pub(in crate::runtime) fn ingestor_outstanding_for_ownership_handoff(&self) -> usize {
+        self.ingestor.outstanding_for_ownership_handoff()
+    }
+
+    /// The roots of this ingestor's domain a node's shutdown drain still waits for.
+    #[cfg(test)]
+    pub(in crate::runtime) fn domain_outstanding_for_ownership_handoff(&self) -> usize {
+        self.domain.outstanding_for_ownership_handoff()
+    }
 }
 
 impl Runtime {
     #[cfg_attr(
         nervix_lint,
         nervix::context(
-            recurring,
-            reason = "a running source publishes its flush readiness and tracks admitted \
-                      acknowledgement roots"
-        )
-    )]
-    pub(in crate::runtime) fn tracked_ack_root(
-        &self,
-        domain: &DomainName,
-    ) -> (AckSet, AckCompletion) {
-        AckSet::tracked_root(self.domain_ack_root_tracker(domain))
-    }
-
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "this owner is reached by recurring record, frame, acknowledgement or \
-                      state-poll work"
+            lifecycle,
+            reason = "domain construction and source startup retain this domain's ACK drain \
+                      tracker before processing records"
         )
     )]
     pub(super) fn domain_ack_root_tracker(&self, domain: &DomainName) -> Arc<AckRootTracker> {
-        nervix_primitives::expect_lint!(
-            nervix::sync_acquisition,
-            "Typed Ratchet 05 https://app.clickup.com/t/86bc9erep: retain acknowledgement root \
-             tracking before admitting relay work",
-            self.inner.in_flight_by_domain.entry(domain.clone())
-        )
-        .or_insert_with(|| Arc::new(AckRootTracker::default()))
-        .clone()
+        self.inner
+            .in_flight_by_domain
+            .entry(domain.clone())
+            .or_insert_with(|| Arc::new(AckRootTracker::default()))
+            .clone()
     }
 
     pub(in crate::runtime) fn ingestor_ack_root_trackers(
@@ -545,7 +545,7 @@ impl Runtime {
         DomainForceFlush::subscribe(&coordinator, Some(counters))
     }
 
-    pub(in crate::runtime) fn force_flush_domain(&self, domain: &DomainName) -> u64 {
+    pub(crate) fn force_flush_domain(&self, domain: &DomainName) -> u64 {
         self.inner
             .force_flush_by_domain
             .entry(domain.clone())
@@ -563,6 +563,10 @@ impl Runtime {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 
@@ -793,6 +797,10 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "shuttle"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod shuttle_tests {
     use std::{future::Future, task::Poll};
 

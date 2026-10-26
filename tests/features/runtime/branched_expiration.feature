@@ -3,11 +3,11 @@ Feature: Branched branch expiration
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -29,8 +29,8 @@ Feature: Branched branch expiration
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -91,11 +91,11 @@ Feature: Branched branch expiration
     And a <cluster_size> node nervix cluster is started
     # SKEW equals PERIOD, so every TIMESTAMP NOW row lies within SKEW of a reached tick center and
     # is admitted.
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT NOW TIME RATE 0.01;
 
@@ -128,8 +128,8 @@ Feature: Branched branch expiration
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TIMESTAMP NOW
         TO notifications
@@ -173,11 +173,11 @@ Feature: Branched branch expiration
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -213,8 +213,8 @@ Feature: Branched branch expiration
         PATH '/right'
         TYPE HTTP;
 
-      CREATE INGESTOR left_ingestor
-        FROM ENDPOINT left_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR left_ingestor
+        FROM left_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO left_events
         INHERIT ALL
@@ -224,8 +224,8 @@ Feature: Branched branch expiration
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE INGESTOR right_ingestor
-        FROM ENDPOINT right_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR right_ingestor
+        FROM right_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO right_events
         INHERIT ALL
@@ -252,7 +252,7 @@ Feature: Branched branch expiration
 
       START;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       SHOW CLUSTER STATUS;
       """
@@ -309,11 +309,11 @@ Feature: Branched branch expiration
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -342,8 +342,8 @@ Feature: Branched branch expiration
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -404,11 +404,11 @@ Feature: Branched branch expiration
     Given branched relay expiration scan interval is configured as "100ms"
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -437,8 +437,8 @@ Feature: Branched branch expiration
         PATH '/ingest'
         TYPE HTTP;
 
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL

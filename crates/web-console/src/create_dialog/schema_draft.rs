@@ -4,7 +4,12 @@
 //!
 //! - **Owns.** Incomplete editor state and its one-way conversion into current semantic Models.
 //! - **Depends on.** Vocabulary Models, names, and the model-owned scalar and wire type catalogs.
-//! - **Must not know.** Registry state, session transport, or canonical NSPL parsing.
+//! - **Must not know.** Registry state, session transport, or canonical Plexus parsing.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
 
 use std::{
     collections::BTreeSet,
@@ -452,6 +457,10 @@ pub(super) enum SchemaDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroU32;
 
@@ -460,7 +469,7 @@ mod tests {
         AvroType, CreateStatement, JsonType, Model, ParseAsType, RequestedResourceVersion,
         SchemaName, Statement, WireSchemaStrictness,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
     use strum::IntoEnumIterator;
 
     use super::*;
@@ -477,7 +486,7 @@ mod tests {
         let model: Model<RequestedResourceVersion> = model.into();
         let statement = Statement::Create(CreateStatement::new(Box::new(model), if_not_exists));
         let source = statement
-            .to_canonical_nspl()
+            .to_canonical_plexus()
             .assured("every completed current Model has a canonical command");
         let parsed = parse_client_statement(&source)
             .assured("the canonical command must parse back to the same Model");

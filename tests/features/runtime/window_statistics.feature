@@ -1,12 +1,90 @@
 Feature: Window statistics
-  Scenario Outline: Typed run admission preserves exact aggregates and centered variance across branches
+  Scenario Outline: Constant finite readings keep zero variance when their run sum overflows
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA overflow_reading (tenant STRING, value F64 OPTIONAL, companion F64 OPTIONAL);
+      CREATE SCHEMA overflow_summary (tenant STRING, mean F64 OPTIONAL, variance F64 OPTIONAL, covariance F64 OPTIONAL, companion_mean F64 OPTIONAL);
+      CREATE CODEC overflow_codec FROM JSON TO SCHEMA overflow_reading WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE SCHEMA overflow_branch_schema (tenant STRING);
+      CREATE BRANCH overflow_branch SCHEMA overflow_branch_schema TTL 5m;
+      CREATE RELAY overflow_readings SCHEMA overflow_reading BRANCHED BY overflow_branch;
+      CREATE RELAY overflow_summaries SCHEMA overflow_summary BRANCHED BY overflow_branch;
+      CREATE VHOST edge overflow-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR overflow_ingestor FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING overflow_codec
+        TO overflow_readings INHERIT ALL BRANCHED BY overflow_branch SET tenant = message.tenant
+        FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR overflow_window FROM overflow_readings WIDTH 17 MESSAGES STEP 17 MESSAGES
+        BRANCHED BY overflow_branch TO overflow_summaries
+        SET tenant = FIRST(input.tenant), mean = AVG(input.value), variance = VAR_POP(input.value),
+            covariance = COVAR_POP(input.value, input.companion), companion_mean = AVG(input.companion)
+        ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION overflow_subscription TO overflow_summaries;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "overflow-{{test_id}}.example.com" path "/readings"
+      """
+      [{"tenant":"acme","value":1e308,"companion":0},
+       {"tenant":"beta","value":2,"companion":15},
+       {"tenant":"acme","value":1e308,"companion":1},
+       {"tenant":"beta","value":2,"companion":14},
+       {"tenant":"acme","value":1e308,"companion":2},
+       {"tenant":"beta","value":2,"companion":13},
+       {"tenant":"acme","value":1e308,"companion":3},
+       {"tenant":"beta","value":2,"companion":12},
+       {"tenant":"acme","value":1e308,"companion":4},
+       {"tenant":"beta","value":2,"companion":11},
+       {"tenant":"acme","value":1e308,"companion":5},
+       {"tenant":"beta","value":2,"companion":10},
+       {"tenant":"acme","value":1e308,"companion":6},
+       {"tenant":"beta","value":2,"companion":9},
+       {"tenant":"acme","value":1e308,"companion":7},
+       {"tenant":"beta","value":2,"companion":8},
+       {"tenant":"acme","value":1e308,"companion":8},
+       {"tenant":"beta","value":2,"companion":7},
+       {"tenant":"acme","value":1e308,"companion":9},
+       {"tenant":"beta","value":2,"companion":6},
+       {"tenant":"acme","value":1e308,"companion":10},
+       {"tenant":"beta","value":2,"companion":5},
+       {"tenant":"acme","value":1e308,"companion":11},
+       {"tenant":"beta","value":2,"companion":4},
+       {"tenant":"acme","value":1e308,"companion":12},
+       {"tenant":"beta","value":2,"companion":3},
+       {"tenant":"acme","value":1e308,"companion":13},
+       {"tenant":"beta","value":2,"companion":2},
+       {"tenant":"acme","value":1e308,"companion":14},
+       {"tenant":"beta","value":2,"companion":1},
+       {"tenant":"acme","value":1e308,"companion":15},
+       {"tenant":"beta","value":2,"companion":0},
+       {"tenant":"acme"},
+       {"tenant":"beta"}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "mean":1e+308 | "variance":0.0 | "covariance":0.0 | "companion_mean":7.5
+      key={"tenant":"beta"} | "mean":2.0 | "variance":0.0 | "covariance":0.0 | "companion_mean":7.5
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Typed run admission preserves exact aggregates and centered variance across branches
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA run_reading (tenant STRING, amount I64 OPTIONAL, reading F64 OPTIONAL, healthy BOOL OPTIONAL, unsafe_text STRING OPTIONAL);
       CREATE SCHEMA run_summary (tenant STRING, total I64 OPTIONAL, samples I64, healthy_samples I64, lowest I64 OPTIONAL, highest I64 OPTIONAL, mean_reading F64 OPTIONAL, variance F64 OPTIONAL, median_bucket F64 OPTIONAL, nan_probe F64 OPTIONAL);
@@ -17,7 +95,7 @@ Feature: Window statistics
       CREATE RELAY run_summaries SCHEMA run_summary BRANCHED BY run_branch;
       CREATE VHOST edge run-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/runs' TYPE HTTP;
-      CREATE INGESTOR run_ingestor FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR run_ingestor FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING run_codec
         TO run_readings INHERIT ALL BRANCHED BY run_branch
         SET tenant = message.tenant
@@ -61,11 +139,11 @@ Feature: Window statistics
   Scenario Outline: Sliding windows compute exact statistics per branch and retract stepped rows
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         tenant STRING,
@@ -107,8 +185,8 @@ Feature: Window statistics
       CREATE RELAY reading_statistics SCHEMA reading_statistics BRANCHED BY by_reading_tenant;
       CREATE VHOST edge statistics-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings
         INHERIT ALL
@@ -195,11 +273,11 @@ Feature: Window statistics
   Scenario Outline: Tumbling windows skip null arguments and emit typed nulls
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA sparse_reading (
         tenant STRING,
@@ -234,8 +312,8 @@ Feature: Window statistics
       CREATE RELAY sparse_summaries SCHEMA sparse_summary BRANCHED BY by_sparse_tenant;
       CREATE VHOST edge sparse-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/sparse' TYPE HTTP;
-      CREATE INGESTOR sparse_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR sparse_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sparse_reading_codec
         TO sparse_readings
         INHERIT ALL
@@ -329,11 +407,11 @@ Feature: Window statistics
   Scenario Outline: An outlier that leaves a sliding window leaves no residue in later statistics
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA measurement (
         tenant STRING,
@@ -359,8 +437,8 @@ Feature: Window statistics
       CREATE RELAY measurement_summaries SCHEMA measurement_summary BRANCHED BY by_measurement_tenant;
       CREATE VHOST edge outlier-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/measurements' TYPE HTTP;
-      CREATE INGESTOR measurement_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR measurement_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING measurement_codec
         TO measurements
         INHERIT ALL
@@ -418,11 +496,11 @@ Feature: Window statistics
   Scenario Outline: Window statistic contracts are enforced when the processor is applied
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA tagged_reading (
         tenant STRING,
@@ -443,7 +521,7 @@ Feature: Window statistics
       CREATE RELAY tagged_readings SCHEMA tagged_reading BRANCHED BY by_contract_tenant;
       CREATE RELAY contract_summaries SCHEMA contract_summary BRANCHED BY by_contract_tenant;
       """
-    When these NSPL commands fail with "<error>"
+    When these Plexus commands fail with "<error>"
       """
       CREATE WINDOW PROCESSOR invalid_statistics FROM tagged_readings
         WIDTH 3 MESSAGES
@@ -471,11 +549,11 @@ Feature: Window statistics
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         tenant STRING,
@@ -504,8 +582,8 @@ Feature: Window statistics
       CREATE RELAY reading_summaries SCHEMA reading_summary BRANCHED BY by_restart_tenant;
       CREATE VHOST edge restart-statistics-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/readings' TYPE HTTP;
-      CREATE INGESTOR reading_ingestor
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR reading_ingestor
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
         TO readings
         INHERIT ALL
@@ -547,7 +625,7 @@ Feature: Window statistics
     Then within "5s" DESCRIBE DOMAIN section "processed" metric "messages_total" "received" relay "readings" across physical nodes totals 4
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION reading_summaries_subscription TO reading_summaries;
       """
@@ -575,11 +653,11 @@ Feature: Window statistics
   Scenario Outline: Describe window processor reports shared statistic structures
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA reading (
         tenant STRING,

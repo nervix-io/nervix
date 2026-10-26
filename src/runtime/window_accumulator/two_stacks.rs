@@ -8,6 +8,11 @@
 //! - **Must not know.** What the aggregate computes, which rows a window retains, or where their
 //!   values live.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use meticulous::OptionExt as _;
 
 /// An aggregate over a sequence of rows that combines with the aggregate of the rows after it.
@@ -104,6 +109,10 @@ impl<A: MergeableAggregate> TwoStacks<A> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

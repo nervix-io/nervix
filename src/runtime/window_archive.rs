@@ -1,0 +1,1557 @@
+//! One window branch's retained rows as archive Arrow groups, and the window rebuilt from them.
+//!
+//! Layer: data plane.
+//! - **Owns.** Opening a published or persisted window against its schemas, bounded row-aligned
+//!   groups of input rows and argument columns, and the native window checkpoint rebuilt from
+//!   archived groups for the branch task to re-admit.
+//! - **Depends on.** The window snapshot codec, the shared columnar generation codec and Arrow
+//!   row views.
+//! - **Must not know.** Archive records or paths, capture fencing, or restore placement.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
+use std::ops::Range;
+
+use arrow_schema::Schema as ArrowSchema;
+use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
+use nervix_execution::{ChargedBytes, Executor};
+use nervix_models::{RemoteRuntimeRecordMetadata, Timestamp};
+use nervix_primitives::sync::{Arc, StdArc};
+
+use super::{
+    BranchKey, LinearHistogramDelayedRemovalSnapshot, MaterializedGeneration,
+    MaterializedGenerationRecord, Runtime, StagedArtifact, WindowAccumulatorSnapshot,
+    WindowProcessorStateSnapshot,
+    published_generation::Generation,
+    snapshot_staging::SnapshotStaging,
+    window_state::{WindowCheckpointPieces, WindowPublishedSnapshot},
+};
+use crate::runtime_schema::{RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeRow};
+
+pub(in crate::runtime) mod stored;
+
+/// Why a window could not become archive groups, or archive groups a window checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum WindowArchiveError {
+    #[error("the persisted window checkpoint could not be opened against its schemas")]
+    Open,
+    #[error("the window's retained rows could not be encoded as Arrow columns")]
+    Encode,
+    #[error("a window group's input rows and argument columns hold different row counts")]
+    GroupRows,
+    #[error("the archived window groups hold {found} rows where its descriptor lists {expected}")]
+    RowCount { expected: usize, found: usize },
+    #[error("the archived window's row sequences overflow")]
+    Sequence,
+    #[error("an archived histogram bucket does not fit this node's address space")]
+    Bucket,
+    #[error("the restored window checkpoint could not be encoded")]
+    Checkpoint,
+}
+
+/// A stepped row a linear histogram still counts, as the archive carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WindowDelayedRemoval {
+    pub(crate) expires_at: Timestamp,
+    pub(crate) bucket: u64,
+}
+
+/// What one aggregate structure keeps beyond the rows its window retains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WindowAccumulatorState {
+    Retained,
+    LinearHistogram {
+        delayed_removals: Vec<WindowDelayedRemoval>,
+    },
+}
+
+/// A live window publication shared by a backup at the revision it stands at.
+#[derive(Debug, Clone)]
+pub(crate) struct CapturedWindow {
+    revision: u64,
+    snapshot: WindowProcessorStateSnapshot,
+}
+
+impl CapturedWindow {
+    /// Share a live publication. An inactive branch uses its selected stored checkpoint instead.
+    pub(super) fn published(
+        generation: &Generation<Option<WindowPublishedSnapshot>>,
+    ) -> Option<Self> {
+        let snapshot = match &generation.value {
+            None | Some(WindowPublishedSnapshot::Sealed(_)) => return None,
+            Some(WindowPublishedSnapshot::Live(snapshot)) => snapshot.clone(),
+        };
+        Some(Self {
+            revision: generation.revision,
+            snapshot,
+        })
+    }
+
+    /// Open the shared publication. A forced-recovery window without a branch lifetime is empty.
+    pub(crate) fn open(self) -> Option<CapturedWindowState> {
+        let snapshot = self.snapshot;
+        let incarnation = snapshot.incarnation?;
+        Some(CapturedWindowState::new(
+            self.revision,
+            incarnation,
+            snapshot,
+        ))
+    }
+}
+
+/// A captured window with a branch lifetime, ready to be written as archive groups.
+#[derive(Clone)]
+pub(crate) struct CapturedWindowState {
+    source: OpenedWindowSource,
+}
+
+#[derive(Clone)]
+enum OpenedWindowSource {
+    Live(Arc<LiveWindowState>),
+    Stored(Arc<stored::StoredWindowState>),
+}
+
+impl std::fmt::Debug for CapturedWindowState {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output
+            .debug_struct("CapturedWindowState")
+            .field("revision", &self.revision())
+            .field("incarnation", &self.incarnation())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CapturedWindowState {
+    fn new(revision: u64, incarnation: u64, snapshot: WindowProcessorStateSnapshot) -> Self {
+        Self {
+            source: OpenedWindowSource::Live(Arc::new(LiveWindowState::new(
+                revision,
+                incarnation,
+                snapshot,
+            ))),
+        }
+    }
+    pub(in crate::runtime) async fn stored(
+        executor: &Executor,
+        revision: u64,
+        view: super::snapshot_staging::MappedArtifact,
+        input: &StdArc<ArrowSchema>,
+        arguments: &StdArc<ArrowSchema>,
+    ) -> error_stack::Result<Option<Self>, WindowArchiveError> {
+        let opened =
+            stored::StoredWindowState::open(executor, revision, view, input, arguments).await?;
+        Ok(opened.map(|opened| Self {
+            source: OpenedWindowSource::Stored(Arc::new(opened)),
+        }))
+    }
+    pub(crate) fn revision(&self) -> u64 {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.revision(),
+            OpenedWindowSource::Stored(window) => window.revision(),
+        }
+    }
+    pub(crate) fn incarnation(&self) -> u64 {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.incarnation(),
+            OpenedWindowSource::Stored(window) => window.incarnation(),
+        }
+    }
+    pub(crate) fn next_sequence(&self) -> u64 {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.next_sequence(),
+            OpenedWindowSource::Stored(window) => window.next_sequence(),
+        }
+    }
+    pub(crate) fn first_sequence(&self) -> Option<u64> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.first_sequence(),
+            OpenedWindowSource::Stored(window) => window.first_sequence(),
+        }
+    }
+    pub(crate) fn row_watermarks(&self) -> Vec<RemoteRuntimeRecordMetadata> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.row_watermarks(),
+            OpenedWindowSource::Stored(window) => window.row_watermarks(),
+        }
+    }
+    pub(crate) fn accumulators(
+        &self,
+    ) -> error_stack::Result<Vec<WindowAccumulatorState>, WindowArchiveError> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.accumulators(),
+            OpenedWindowSource::Stored(window) => window.accumulators(),
+        }
+    }
+    pub(crate) fn groups(&self, limit: u64) -> Vec<Range<usize>> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.groups(limit),
+            OpenedWindowSource::Stored(window) => window.groups(limit),
+        }
+    }
+    pub(crate) async fn encode_input_group(
+        &self,
+        executor: &Executor,
+        group: &Range<usize>,
+    ) -> error_stack::Result<ChargedBytes, WindowArchiveError> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.encode_input_group(executor, group).await,
+            OpenedWindowSource::Stored(window) => window.encode_input_group(executor, group).await,
+        }
+    }
+    pub(crate) async fn encode_argument_group(
+        &self,
+        executor: &Executor,
+        group: &Range<usize>,
+    ) -> error_stack::Result<ChargedBytes, WindowArchiveError> {
+        match &self.source {
+            OpenedWindowSource::Live(window) => window.encode_argument_group(executor, group).await,
+            OpenedWindowSource::Stored(window) => {
+                window.encode_argument_group(executor, group).await
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LiveWindowState {
+    revision: u64,
+    incarnation: u64,
+    snapshot: WindowProcessorStateSnapshot,
+    input: MaterializedGeneration,
+    arguments: MaterializedGeneration,
+}
+
+impl LiveWindowState {
+    fn new(revision: u64, incarnation: u64, snapshot: WindowProcessorStateSnapshot) -> Self {
+        let mut input_records = Vec::with_capacity(snapshot.entries.len());
+        let mut argument_records = Vec::with_capacity(snapshot.entries.len());
+        for entry in &snapshot.entries {
+            input_records.push(MaterializedGenerationRecord {
+                branch: entry.key.clone(),
+                row: entry.record.clone(),
+            });
+            argument_records.push(MaterializedGenerationRecord {
+                branch: None,
+                row: entry.arguments.clone(),
+            });
+        }
+        let (input_schema, argument_schema) = match snapshot.entries.first() {
+            Some(entry) => (
+                entry.record.one_row_batch().schema(),
+                entry.arguments.one_row_batch().schema(),
+            ),
+            None => (
+                StdArc::new(ArrowSchema::empty()),
+                StdArc::new(ArrowSchema::empty()),
+            ),
+        };
+        Self {
+            revision,
+            incarnation,
+            input: MaterializedGeneration::new(
+                revision,
+                0,
+                incarnation,
+                input_schema,
+                input_records,
+            ),
+            arguments: MaterializedGeneration::new(
+                revision,
+                0,
+                incarnation,
+                argument_schema,
+                argument_records,
+            ),
+            snapshot,
+        }
+    }
+
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub(crate) fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.snapshot.next_sequence
+    }
+
+    /// The admission sequence of the oldest retained row.
+    pub(crate) fn first_sequence(&self) -> Option<u64> {
+        let first = self.snapshot.entries.first()?;
+        Some(first.sequence)
+    }
+
+    /// Each retained row's ingestion watermarks, oldest first.
+    pub(crate) fn row_watermarks(&self) -> Vec<RemoteRuntimeRecordMetadata> {
+        self.snapshot
+            .entries
+            .iter()
+            .map(|entry| entry.record.metadata().to_remote())
+            .collect()
+    }
+
+    /// What every aggregate structure keeps beyond the retained rows, in demand order.
+    pub(crate) fn accumulators(
+        &self,
+    ) -> error_stack::Result<Vec<WindowAccumulatorState>, WindowArchiveError> {
+        let mut accumulators = Vec::with_capacity(self.snapshot.accumulators.len());
+        for accumulator in &self.snapshot.accumulators {
+            let state = match accumulator {
+                WindowAccumulatorSnapshot::Retained => WindowAccumulatorState::Retained,
+                WindowAccumulatorSnapshot::LinearHistogram { delayed_removals } => {
+                    let mut removals = Vec::with_capacity(delayed_removals.len());
+                    for removal in delayed_removals {
+                        let bucket = u64::try_from(removal.bucket)
+                            .map_err(|_| Report::new(WindowArchiveError::Bucket))?;
+                        removals.push(WindowDelayedRemoval {
+                            expires_at: removal.expires_at,
+                            bucket,
+                        });
+                    }
+                    WindowAccumulatorState::LinearHistogram {
+                        delayed_removals: removals,
+                    }
+                }
+            };
+            accumulators.push(state);
+        }
+        Ok(accumulators)
+    }
+
+    /// Consecutive retained rows whose input and argument payloads each stay within `limit`,
+    /// oldest first. A row larger than the limit occupies a group of its own.
+    pub(crate) fn groups(&self, limit: u64) -> Vec<Range<usize>> {
+        let mut groups = Vec::new();
+        let mut start = 0;
+        let mut input = 0_u64;
+        let mut arguments = 0_u64;
+        for (index, entry) in self.snapshot.entries.iter().enumerate() {
+            let input_bytes = entry.record.one_row_batch().estimated_bytes();
+            let argument_bytes = entry.arguments.one_row_batch().estimated_bytes();
+            let next_input = input.checked_add(input_bytes);
+            let next_arguments = arguments.checked_add(argument_bytes);
+            let overruns = match (next_input, next_arguments) {
+                (Some(next_input), Some(next_arguments)) => {
+                    next_input > limit || next_arguments > limit
+                }
+                _ => true,
+            };
+            if index > start && overruns {
+                groups.push(start..index);
+                start = index;
+                input = input_bytes;
+                arguments = argument_bytes;
+                continue;
+            }
+            input = next_input.unwrap_or(limit);
+            arguments = next_arguments.unwrap_or(limit);
+        }
+        if start < self.snapshot.entries.len() {
+            groups.push(start..self.snapshot.entries.len());
+        }
+        groups
+    }
+
+    /// The retained input rows in `group` as one Arrow IPC stream of the window's input schema.
+    pub(crate) async fn encode_input_group(
+        &self,
+        executor: &Executor,
+        group: &Range<usize>,
+    ) -> error_stack::Result<ChargedBytes, WindowArchiveError> {
+        self.input
+            .encode_columns(executor, group)
+            .await
+            .change_context(WindowArchiveError::Encode)
+    }
+
+    /// The argument columns of the rows in `group`, row-aligned with their input rows.
+    pub(crate) async fn encode_argument_group(
+        &self,
+        executor: &Executor,
+        group: &Range<usize>,
+    ) -> error_stack::Result<ChargedBytes, WindowArchiveError> {
+        self.arguments
+            .encode_columns(executor, group)
+            .await
+            .change_context(WindowArchiveError::Encode)
+    }
+}
+
+/// Everything of an archived window except its rows, as a restore converts it.
+#[derive(Debug, Clone)]
+pub(crate) struct ArchivedWindow {
+    pub(crate) revision: u64,
+    pub(crate) incarnation: u64,
+    pub(crate) branch: Option<BranchKey>,
+    pub(crate) first_sequence: Option<u64>,
+    pub(crate) next_sequence: u64,
+    pub(crate) rows: Vec<RemoteRuntimeRecordMetadata>,
+    pub(crate) accumulators: Vec<WindowAccumulatorState>,
+}
+
+/// One archived Arrow section of window rows and the batch it decoded into under its exact schema.
+pub(crate) struct ArchivedRows {
+    pub(crate) bytes: ChargedBytes,
+    pub(crate) batch: RuntimeRecordBatch,
+}
+
+/// A group whose input rows were sealed and whose argument columns are still to come.
+#[derive(Debug)]
+#[must_use = "a group's argument columns complete it"]
+pub(crate) struct PendingArguments {
+    /// The position of the group's first row among the window's retained rows.
+    first_row: usize,
+    rows: usize,
+}
+
+/// A window checkpoint being rebuilt from archived groups, oldest row first.
+///
+/// Each group's input rows and then its argument columns are sealed into quota-owned pieces as
+/// soon as they are admitted, keeping their archived Arrow sections whenever the rows' identities
+/// fit one identity record, so the window never exists whole in memory however much it retains.
+pub(crate) struct WindowCheckpointBuilder {
+    executor: Executor,
+    window: ArchivedWindow,
+    /// How many of the window's rows the admitted input rows and argument columns covered.
+    admitted_input: usize,
+    admitted_arguments: usize,
+    pieces: WindowCheckpointPieces,
+}
+
+impl Runtime {
+    /// A builder for the native checkpoint of the archived window `window`, staged under this
+    /// node's staging quota.
+    pub(crate) fn restored_window_checkpoint(
+        &self,
+        window: ArchivedWindow,
+    ) -> WindowCheckpointBuilder {
+        WindowCheckpointBuilder::new(&self.inner.executor, &self.inner.snapshot_staging, window)
+    }
+}
+
+impl WindowCheckpointBuilder {
+    pub(in crate::runtime) fn new(
+        executor: &Executor,
+        staging: &SnapshotStaging,
+        window: ArchivedWindow,
+    ) -> Self {
+        let pieces =
+            WindowCheckpointPieces::new(staging, window.revision, Some(window.incarnation));
+        Self {
+            executor: executor.clone(),
+            window,
+            admitted_input: 0,
+            admitted_arguments: 0,
+            pieces,
+        }
+    }
+
+    /// The watermarks the descriptor lists for the rows from `first_row`, `rows` of them, each as
+    /// the metadata its input row and its argument row carry.
+    fn row_metadata(
+        &self,
+        first_row: usize,
+        rows: usize,
+    ) -> error_stack::Result<Vec<RuntimeRecordMetadata>, WindowArchiveError> {
+        let end = first_row
+            .checked_add(rows)
+            .assured("an admitted row count is shorter than the address space");
+        let Some(watermarks) = self.window.rows.get(first_row..end) else {
+            return Err(Report::new(WindowArchiveError::RowCount {
+                expected: self.window.rows.len(),
+                found: end,
+            }));
+        };
+        let mut metadata = Vec::with_capacity(rows);
+        for watermark in watermarks {
+            metadata.push(RuntimeRecordMetadata::from_remote(watermark.clone()));
+        }
+        Ok(metadata)
+    }
+
+    /// Admits one group's input rows and seals them before this returns. The group's argument
+    /// columns, which must hold the same rows, complete it.
+    ///
+    /// A failure leaves the checkpoint as it was, so a caller the node refused only for room can
+    /// release what it holds and admit the same section again.
+    pub(crate) async fn admit_input(
+        &mut self,
+        input: ArchivedRows,
+    ) -> error_stack::Result<PendingArguments, WindowArchiveError> {
+        if self.admitted_arguments != self.admitted_input {
+            return Err(Report::new(WindowArchiveError::GroupRows));
+        }
+        let first_row = self.admitted_input;
+        let rows = input.batch.batch().num_rows();
+        let metadata = self.row_metadata(first_row, rows)?;
+        let Some(first) = self.window.first_sequence else {
+            return Err(Report::new(WindowArchiveError::Sequence));
+        };
+        let first_offset =
+            u64::try_from(first_row).map_err(|_| Report::new(WindowArchiveError::Sequence))?;
+        let Some(first_sequence) = first.checked_add(first_offset) else {
+            return Err(Report::new(WindowArchiveError::Sequence));
+        };
+        let rows_u64 =
+            u64::try_from(rows).map_err(|_| Report::new(WindowArchiveError::Sequence))?;
+        if let Some(last_offset) = rows_u64.checked_sub(1)
+            && first_sequence.checked_add(last_offset).is_none()
+        {
+            return Err(Report::new(WindowArchiveError::Sequence));
+        }
+        let schema = input.batch.schema();
+        let batch = Arc::new(input.batch);
+        let mut records = Vec::with_capacity(rows);
+        for (row, metadata) in metadata.into_iter().enumerate() {
+            let record = RuntimeRow::new(Arc::clone(&batch), row, metadata)
+                .change_context(WindowArchiveError::GroupRows)?;
+            records.push(MaterializedGenerationRecord {
+                branch: self.window.branch.clone(),
+                row: record,
+            });
+        }
+        let generation = self.pieces.nested_generation(schema, records);
+        self.pieces
+            .append_encoded_input(&self.executor, first_sequence, &generation, input.bytes)
+            .await
+            .change_context(WindowArchiveError::Checkpoint)?;
+        self.admitted_input = first_row
+            .checked_add(rows)
+            .assured("an admitted row count is shorter than the address space");
+        Ok(PendingArguments { first_row, rows })
+    }
+
+    /// Admits the argument columns of the group whose input rows `pending` names, which must hold
+    /// the same number of rows, and seals them before this returns.
+    ///
+    /// Like [`Self::admit_input`], a failure leaves the checkpoint as it was, so a caller the node
+    /// refused only for room can release what it holds and admit the same section again.
+    pub(crate) async fn admit_arguments(
+        &mut self,
+        pending: &PendingArguments,
+        arguments: ArchivedRows,
+    ) -> error_stack::Result<(), WindowArchiveError> {
+        if arguments.batch.batch().num_rows() != pending.rows
+            || pending.first_row != self.admitted_arguments
+        {
+            return Err(Report::new(WindowArchiveError::GroupRows));
+        }
+        let metadata = self.row_metadata(pending.first_row, pending.rows)?;
+        let schema = arguments.batch.schema();
+        let batch = Arc::new(arguments.batch);
+        let mut records = Vec::with_capacity(pending.rows);
+        for (row, metadata) in metadata.into_iter().enumerate() {
+            let record = RuntimeRow::new(Arc::clone(&batch), row, metadata)
+                .change_context(WindowArchiveError::GroupRows)?;
+            records.push(MaterializedGenerationRecord {
+                branch: None,
+                row: record,
+            });
+        }
+        let generation = self.pieces.nested_generation(schema, records);
+        self.pieces
+            .append_encoded_arguments(&self.executor, &generation, arguments.bytes)
+            .await
+            .change_context(WindowArchiveError::Checkpoint)?;
+        self.admitted_arguments = pending
+            .first_row
+            .checked_add(pending.rows)
+            .assured("an admitted row count is shorter than the address space");
+        Ok(())
+    }
+
+    /// The native checkpoint the window's branch task restores and re-admits, in one quota-owned
+    /// artifact.
+    pub(crate) async fn finish(self) -> error_stack::Result<StagedArtifact, WindowArchiveError> {
+        if self.admitted_arguments != self.admitted_input {
+            return Err(Report::new(WindowArchiveError::GroupRows));
+        }
+        if self.admitted_input != self.window.rows.len() {
+            return Err(Report::new(WindowArchiveError::RowCount {
+                expected: self.window.rows.len(),
+                found: self.admitted_input,
+            }));
+        }
+        let mut accumulators = Vec::with_capacity(self.window.accumulators.len());
+        for accumulator in self.window.accumulators {
+            let snapshot = match accumulator {
+                WindowAccumulatorState::Retained => WindowAccumulatorSnapshot::Retained,
+                WindowAccumulatorState::LinearHistogram { delayed_removals } => {
+                    let mut removals = Vec::with_capacity(delayed_removals.len());
+                    for removal in delayed_removals {
+                        let bucket = usize::try_from(removal.bucket)
+                            .map_err(|_| Report::new(WindowArchiveError::Bucket))?;
+                        removals.push(LinearHistogramDelayedRemovalSnapshot {
+                            expires_at: removal.expires_at,
+                            bucket,
+                        });
+                    }
+                    WindowAccumulatorSnapshot::LinearHistogram {
+                        delayed_removals: removals,
+                    }
+                }
+            };
+            accumulators.push(snapshot);
+        }
+        self.pieces
+            .finish(&self.executor, self.window.next_sequence, &accumulators)
+            .await
+            .change_context(WindowArchiveError::Checkpoint)
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use arrow_array::{ArrayRef, BooleanArray, Int64Array, StringArray};
+    use meticulous::ResultExt as _;
+    use nervix_arbitrary::Entropy;
+    use nervix_models::ParseAsType;
+    use ordered_float::OrderedFloat;
+
+    use super::{
+        super::window_state::{
+            WindowSnapshotLifetime, WindowSnapshotSchemas, decode_window_processor_snapshot,
+        },
+        *,
+    };
+    use crate::{
+        runtime::{
+            OptionalTestField, TestWindow, WindowArgumentColumns, WindowProcessorState,
+            batch_value,
+            snapshot_staging::{SnapshotStagingError, SnapshotStagingLimits},
+            window_checkpoint_cases::WindowCheckpointCase,
+            window_state::WindowPublishedSnapshot,
+        },
+        runtime_schema::RuntimeValue,
+    };
+
+    /// Every exact aggregate family, a histogram percentile with a delay, and nullable string and
+    /// boolean arguments, over small integers whose sums and means are exact in `F64`.
+    const AGGREGATES: &str = "SET samples = COUNT(input.latency), total = SUM(input.latency), \
+                              first_label = FIRST(input.label), last_label = LAST(input.label), \
+                              smallest = MIN(input.latency), largest = MAX(input.latency), \
+                              mean_latency = AVG(input.latency), healthy = \
+                              BOOL_AND(input.healthy), p50 = \
+                              PERCENTILE_LINEAR_HISTOGRAM(input.latency, 50, 10, 0, 100, '2s')";
+
+    /// The outputs whose aggregates are exact, so a restored window answers them as the live
+    /// window did.
+    const EXACT_OUTPUTS: [&str; 8] = [
+        "samples",
+        "total",
+        "first_label",
+        "last_label",
+        "smallest",
+        "largest",
+        "healthy",
+        "p50",
+    ];
+
+    /// The mean merges each admission run's result in floating point, so its last digits depend
+    /// on how rows were grouped into runs, which archive groups change.
+    const MERGED_OUTPUT: &str = "mean_latency";
+
+    /// The archive group limit that seals every row as a group of its own.
+    const ROW_GROUP_LIMIT: u64 = 64;
+
+    /// The most rows a property case splits into one-row groups. Every such group is a whole
+    /// archive round of executor jobs and sealed pieces, so splitting a full 192-row window that
+    /// way costs a case seconds on a busy runner. The larger group limits still archive windows of
+    /// every size.
+    const ROW_GROUP_SPLIT_ROWS: usize = 48;
+
+    fn float_output(batch: &RuntimeRecordBatch, field: &str) -> Option<f64> {
+        let value = batch_value(batch, field)?;
+        let RuntimeValue::F64(OrderedFloat(value)) = value else {
+            panic!("{field} is a floating-point output, not {value:?}");
+        };
+        Some(value)
+    }
+
+    /// Asserts the merged mean of `restored` stays within rounding of `expected`'s.
+    fn assert_mean_close(restored: &RuntimeRecordBatch, expected: &RuntimeRecordBatch) {
+        let restored = float_output(restored, MERGED_OUTPUT);
+        let expected = float_output(expected, MERGED_OUTPUT);
+        match (restored, expected) {
+            (Some(restored), Some(expected)) => assert!(
+                (restored - expected).abs() <= expected.abs() * 1e-12,
+                "the restored mean {restored} drifted from {expected}"
+            ),
+            (None, None) => {}
+            (restored, expected) => panic!(
+                "the restored mean {restored:?} and {expected:?} disagree on whether the window \
+                 holds a latency"
+            ),
+        }
+    }
+
+    fn window() -> TestWindow {
+        let input = [
+            OptionalTestField {
+                name: "latency",
+                ty: ParseAsType::I64,
+                optional: true,
+            },
+            OptionalTestField {
+                name: "label",
+                ty: ParseAsType::String,
+                optional: true,
+            },
+            OptionalTestField {
+                name: "healthy",
+                ty: ParseAsType::Bool,
+                optional: true,
+            },
+        ];
+        let output = [
+            OptionalTestField {
+                name: "samples",
+                ty: ParseAsType::I64,
+                optional: false,
+            },
+            OptionalTestField {
+                name: "total",
+                ty: ParseAsType::I64,
+                optional: true,
+            },
+            OptionalTestField {
+                name: "first_label",
+                ty: ParseAsType::String,
+                optional: true,
+            },
+            OptionalTestField {
+                name: "last_label",
+                ty: ParseAsType::String,
+                optional: true,
+            },
+            OptionalTestField {
+                name: "smallest",
+                ty: ParseAsType::I64,
+                optional: true,
+            },
+            OptionalTestField {
+                name: "largest",
+                ty: ParseAsType::I64,
+                optional: true,
+            },
+            OptionalTestField {
+                name: "mean_latency",
+                ty: ParseAsType::F64,
+                optional: true,
+            },
+            OptionalTestField {
+                name: "healthy",
+                ty: ParseAsType::Bool,
+                optional: true,
+            },
+            OptionalTestField {
+                name: "p50",
+                ty: ParseAsType::F64,
+                optional: true,
+            },
+        ];
+        TestWindow::new(AGGREGATES, &input, &output)
+    }
+
+    /// Admits generated batches and steps over some of their rows, as a branch task would.
+    async fn fill(window: &mut TestWindow, entropy: &mut Entropy<'_>, mut remaining: usize) {
+        let mut clock = 0_i64;
+        while remaining > 0 {
+            nervix_primitives::task::consume_budget().await;
+            let maximum = std::num::NonZeroUsize::new(remaining.min(32))
+                .verified("the loop retains at least one row to admit");
+            let rows = entropy.positive_count(maximum);
+            remaining = remaining
+                .checked_sub(rows)
+                .verified("the generated batch fits the remaining row count");
+            let mut latencies = Vec::with_capacity(rows);
+            let mut labels = Vec::with_capacity(rows);
+            let mut healthy = Vec::with_capacity(rows);
+            let mut timestamps = Vec::with_capacity(rows);
+            for _ in 0..rows {
+                let latency = i64::try_from(entropy.between(0..=100))
+                    .verified("the latency was drawn below 101");
+                let latency = if entropy.flag() { None } else { Some(latency) };
+                let label = entropy.pick(["alpha", "beta", "", "é"]);
+                let label = if entropy.flag() { None } else { Some(label) };
+                let health = entropy.flag();
+                let health = if entropy.flag() { None } else { Some(health) };
+                latencies.push(latency);
+                labels.push(label);
+                healthy.push(health);
+                let advance = i64::try_from(entropy.between(0..=3))
+                    .verified("the advance was drawn below four");
+                clock = clock
+                    .checked_add(advance)
+                    .verified("a few small advances stay far below i64::MAX");
+                timestamps.push(clock);
+            }
+            let columns: Vec<ArrayRef> = vec![
+                StdArc::new(Int64Array::from(latencies)),
+                StdArc::new(StringArray::from(labels)),
+                StdArc::new(BooleanArray::from(healthy)),
+            ];
+            let refused = window.admit(columns, &timestamps).await;
+            assert!(
+                refused.is_empty(),
+                "generated rows fit the window: {refused:?}"
+            );
+            if entropy.flag() {
+                let retained = window.state.entries.len();
+                window.step(entropy.count(retained), clock);
+            }
+        }
+    }
+
+    /// The window `published` archives as groups bounded by `limit`, then rebuilt from them as
+    /// the branch task restores it.
+    async fn archived_and_restored(
+        executor: &Executor,
+        window: &TestWindow,
+        published: WindowProcessorStateSnapshot,
+        revision: u64,
+        limit: u64,
+        branch: &Option<BranchKey>,
+    ) -> WindowProcessorStateSnapshot {
+        let input = window.input_schema.arrow_schema();
+        let arguments = WindowArgumentColumns::snapshot_schema(&window.plan);
+        let generation = Generation {
+            revision,
+            value: Some(WindowPublishedSnapshot::Live(published.clone())),
+        };
+        let captured =
+            CapturedWindow::published(&generation).verified("the generation holds a window");
+        let opened = captured
+            .open()
+            .verified("a window the branch task published has a branch lifetime");
+        assert_eq!(opened.revision(), revision);
+        assert_eq!(Some(opened.incarnation()), published.incarnation);
+        assert_eq!(opened.next_sequence(), published.next_sequence);
+
+        let groups = opened.groups(limit);
+        let mut next = 0;
+        for group in &groups {
+            assert_eq!(group.start, next, "groups cover the rows in order");
+            assert!(group.end > group.start, "no group is empty");
+            next = group.end;
+        }
+        assert_eq!(next, published.entries.len(), "groups cover every row");
+
+        let directory = tempfile::tempdir().assured("the staging directory opens");
+        let staging = SnapshotStaging::new(
+            directory.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits::default(),
+        );
+        let native = super::super::window_state::encode_window_processor_snapshot(
+            &published, revision, executor,
+        )
+        .await
+        .assured("the bounded current window encodes");
+        // The stored reader replaces resident decoding of these same native bytes. Arrow may
+        // normalize unused Boolean buffer bits while persisting a live row view, so the complete
+        // byte oracle starts at the same stored checkpoint rather than an earlier live carrier.
+        let resident_native = decode_window_processor_snapshot(
+            &native,
+            executor,
+            WindowSnapshotSchemas {
+                input: &input,
+                arguments: &arguments,
+            },
+            WindowSnapshotLifetime::Recorded,
+        )
+        .await
+        .assured("the bounded native checkpoint opens resident")
+        .verified("the resident checkpoint has its recorded lifetime");
+        let resident_native =
+            CapturedWindowState::new(revision, opened.incarnation(), resident_native);
+        let mut native_writer = staging
+            .try_stage(u64::try_from(native.len()).assured("native length fits"))
+            .await
+            .assured("the native checkpoint has disk quota");
+        native_writer
+            .write_chunk(
+                executor
+                    .charge_owned(nervix_execution::MemoryClass::Bulk, native)
+                    .await
+                    .assured("bounded native fixture bytes are admitted"),
+            )
+            .await
+            .assured("native checkpoint bytes are staged");
+        let view = native_writer
+            .finish_artifact()
+            .await
+            .assured("native artifact finishes")
+            .into_mapped()
+            .await
+            .assured("the native window view is admitted");
+        let from_stored = CapturedWindowState::stored(executor, revision, view, &input, &arguments)
+            .await
+            .assured("stored window opens against its exact schemas")
+            .verified("the generated window has a branch lifetime");
+        assert_eq!(from_stored.revision(), opened.revision());
+        assert_eq!(from_stored.incarnation(), opened.incarnation());
+        assert_eq!(from_stored.first_sequence(), opened.first_sequence());
+        assert_eq!(from_stored.next_sequence(), opened.next_sequence());
+        assert_eq!(from_stored.row_watermarks(), opened.row_watermarks());
+        assert_eq!(
+            from_stored.accumulators().assured("buckets fit"),
+            opened.accumulators().assured("buckets fit")
+        );
+        let stored_groups = from_stored.groups(limit);
+        assert_eq!(stored_groups, resident_native.groups(limit));
+        for group in &stored_groups {
+            let resident = resident_native
+                .encode_input_group(executor, group)
+                .await
+                .assured("resident input encodes");
+            let stored = from_stored
+                .encode_input_group(executor, group)
+                .await
+                .assured("stored input encodes");
+            assert_eq!(
+                stored.as_ref(),
+                resident.as_ref(),
+                "complete input groups match byte for byte"
+            );
+            drop(stored);
+            drop(resident);
+            let resident = resident_native
+                .encode_argument_group(executor, group)
+                .await
+                .assured("resident arguments encode");
+            let stored = from_stored
+                .encode_argument_group(executor, group)
+                .await
+                .assured("stored arguments encode");
+            assert_eq!(
+                stored.as_ref(),
+                resident.as_ref(),
+                "complete argument groups match byte for byte"
+            );
+        }
+        // Restore the new stored reader's complete output; the caller compares every retained
+        // value, sequence, watermark and typed accumulator with the original live publication.
+        let opened = from_stored;
+        let groups = stored_groups;
+        let mut builder = WindowCheckpointBuilder::new(
+            executor,
+            &staging,
+            ArchivedWindow {
+                revision: opened.revision(),
+                incarnation: opened.incarnation(),
+                branch: branch.clone(),
+                first_sequence: opened.first_sequence(),
+                next_sequence: opened.next_sequence(),
+                rows: opened.row_watermarks(),
+                accumulators: opened
+                    .accumulators()
+                    .assured("a bounded window's buckets fit 64 bits"),
+            },
+        );
+        for group in &groups {
+            let input_rows = archived_rows(
+                executor,
+                &input,
+                opened
+                    .encode_input_group(executor, group)
+                    .await
+                    .assured("a bounded input group encodes"),
+            )
+            .await;
+            let argument_rows = archived_rows(
+                executor,
+                &arguments,
+                opened
+                    .encode_argument_group(executor, group)
+                    .await
+                    .assured("a bounded argument group encodes"),
+            )
+            .await;
+            let pending = builder
+                .admit_input(input_rows)
+                .await
+                .assured("a group of the archived input rows is admitted");
+            builder
+                .admit_arguments(&pending, argument_rows)
+                .await
+                .assured("the group's row-aligned argument columns are admitted");
+        }
+        let artifact = builder
+            .finish()
+            .await
+            .assured("the rebuilt window seals as a native checkpoint");
+        let checkpoint = std::fs::read(artifact.path()).assured("the sealed checkpoint reads");
+        assert_eq!(
+            artifact.digest(),
+            *blake3::hash(&checkpoint).as_bytes(),
+            "the artifact names the digest of its bytes"
+        );
+        decode_window_processor_snapshot(
+            &checkpoint,
+            executor,
+            WindowSnapshotSchemas {
+                input: &input,
+                arguments: &arguments,
+            },
+            WindowSnapshotLifetime::Branch(window.state.incarnation),
+        )
+        .await
+        .assured("the rebuilt checkpoint opens for its own branch lifetime")
+        .verified("the rebuilt checkpoint names the branch lifetime it was captured in")
+    }
+
+    /// One archived Arrow section of `schema` and the batch it decodes into.
+    async fn archived_rows(
+        executor: &Executor,
+        schema: &StdArc<ArrowSchema>,
+        bytes: ChargedBytes,
+    ) -> ArchivedRows {
+        let batch = RuntimeRecordBatch::decode_arrow_snapshot_section(
+            executor,
+            StdArc::clone(schema),
+            bytes.clone(),
+        )
+        .await
+        .assured("archived rows decode under their exact schema");
+        ArchivedRows { bytes, batch }
+    }
+
+    /// Asserts `restored` holds exactly the rows, sequences, watermarks, argument values and
+    /// delayed removals of `published`.
+    fn assert_same_window(
+        restored: &WindowProcessorStateSnapshot,
+        published: &WindowProcessorStateSnapshot,
+    ) {
+        assert_eq!(restored.next_sequence, published.next_sequence);
+        assert_eq!(restored.incarnation, published.incarnation);
+        assert_eq!(restored.entries.len(), published.entries.len());
+        for (restored, published) in restored.entries.iter().zip(&published.entries) {
+            assert_eq!(restored.sequence, published.sequence);
+            assert_eq!(restored.timestamp, published.timestamp);
+            let key_bits = |key| {
+                rkyv::to_bytes::<rkyv::rancor::Error>(&BranchKey::to_remote_key(key))
+                    .assured("typed branch fields archive without normalizing float bits")
+                    .to_vec()
+            };
+            assert_eq!(key_bits(&restored.key), key_bits(&published.key));
+            assert_eq!(
+                restored.record.one_row_batch().batch(),
+                published.record.one_row_batch().batch(),
+                "the retained input row survives with its exact schema and values"
+            );
+            assert_eq!(
+                restored.record.metadata().to_remote(),
+                published.record.metadata().to_remote()
+            );
+            assert_eq!(
+                restored.arguments.one_row_batch().batch(),
+                published.arguments.one_row_batch().batch(),
+                "the row's aggregate arguments survive with their exact values"
+            );
+        }
+        assert_eq!(restored.accumulators.len(), published.accumulators.len());
+        for (restored, published) in restored.accumulators.iter().zip(&published.accumulators) {
+            match (restored, published) {
+                (WindowAccumulatorSnapshot::Retained, WindowAccumulatorSnapshot::Retained) => {}
+                (
+                    WindowAccumulatorSnapshot::LinearHistogram {
+                        delayed_removals: restored,
+                    },
+                    WindowAccumulatorSnapshot::LinearHistogram {
+                        delayed_removals: published,
+                    },
+                ) => assert_eq!(restored, published),
+                (restored, published) => {
+                    panic!("accumulator {restored:?} restored where {published:?} was published")
+                }
+            }
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn window_archive_oracle_detects_changed_float_bits_and_datetime_offsets() {
+        let mut window = window();
+        fill(&mut window, &mut Entropy::new(&[]), 1).await;
+        let mut published = window
+            .state
+            .to_snapshot()
+            .assured("one admitted row publishes");
+        let key = |float, at| {
+            let fields = [
+                (
+                    nervix_models::FieldName::parse("float").assured("fixed field name is valid"),
+                    RuntimeValue::F64(OrderedFloat(float)),
+                ),
+                (
+                    nervix_models::FieldName::parse("at").assured("fixed field name is valid"),
+                    RuntimeValue::Datetime(at),
+                ),
+            ];
+            Some(BranchKey::from_fields(fields).assured("two finite typed fields form a key"))
+        };
+        let instant = chrono::DateTime::from_timestamp_nanos(1);
+        let utc = chrono::FixedOffset::east_opt(0).assured("UTC is a fixed offset");
+        let offset = chrono::FixedOffset::east_opt(20_700)
+            .assured("a whole-minute offset within a day is valid");
+        published.entries[0].key = key(-0.0, instant.with_timezone(&utc));
+        assert_same_window(&published, &published);
+        for changed in [
+            key(0.0, instant.with_timezone(&utc)),
+            key(-0.0, instant.with_timezone(&offset)),
+        ] {
+            let mut restored = published.clone();
+            restored.entries[0].key = changed;
+            let mismatch = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                assert_same_window(&restored, &published);
+            }));
+            assert!(
+                mismatch.is_err(),
+                "the complete branch oracle detects the changed key"
+            );
+        }
+    }
+
+    #[test]
+    fn bolero_window_archive_groups_rebuild_the_published_window() {
+        bolero::check!()
+            .with_iterations(64)
+            .with_max_len(1024)
+            .for_each(|input| {
+                let runtime = nervix_primitives::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .assured("property runtime opens");
+                let mut entropy = Entropy::new(input);
+                let case = WindowCheckpointCase::generated(&mut entropy);
+                // The case's own choices come before its rows, which can read every remaining
+                // byte. Drawn after them, the group limit would fall to its first option, and the
+                // revision to zero, in nearly every random case.
+                let revision = entropy.any_u64();
+                let limit = entropy.pick([ROW_GROUP_LIMIT, 512, 65_536]);
+                let mut rows = case.rows;
+                if limit == ROW_GROUP_LIMIT {
+                    rows = rows.min(ROW_GROUP_SPLIT_ROWS);
+                }
+                let executor = case.archive_executor();
+                runtime.block_on(async {
+                    let mut window = window();
+                    fill(&mut window, &mut entropy, rows).await;
+                    let before = window.emitted().await;
+                    let mut published = window
+                        .state
+                        .to_snapshot()
+                        .assured("a bounded window publishes");
+                    for entry in &mut published.entries {
+                        entry.key = case.branch.clone();
+                    }
+                    let restored = archived_and_restored(
+                        &executor,
+                        &window,
+                        published.clone(),
+                        revision,
+                        limit,
+                        &case.branch,
+                    )
+                    .await;
+                    assert_same_window(&restored, &published);
+
+                    let native = WindowProcessorState::from_snapshot(
+                        &window.plan,
+                        window.input_schema.as_ref(),
+                        &published,
+                    )
+                    .assured("the published snapshot re-admits under its own plan");
+                    let archived = WindowProcessorState::from_snapshot(
+                        &window.plan,
+                        window.input_schema.as_ref(),
+                        &restored,
+                    )
+                    .assured("the restored snapshot re-admits under its own plan");
+                    assert_eq!(
+                        archived.next_timeout_deadline(),
+                        native.next_timeout_deadline(),
+                        "pending delayed removals keep their expiry"
+                    );
+                    window.state = native;
+                    let from_native = window.emitted().await;
+                    window.state = archived;
+                    let from_archive = window.emitted().await;
+                    for field in EXACT_OUTPUTS {
+                        assert_eq!(
+                            batch_value(&from_archive, field),
+                            batch_value(&from_native, field),
+                            "{field} answers as the native checkpoint of the same window does"
+                        );
+                        assert_eq!(
+                            batch_value(&from_archive, field),
+                            batch_value(&before, field),
+                            "{field} answers as the live window did"
+                        );
+                    }
+                    assert_mean_close(&from_archive, &from_native);
+                    assert_mean_close(&from_archive, &before);
+                });
+                assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
+            });
+    }
+
+    #[nervix_primitives::test]
+    async fn archived_sketch_windows_answer_as_before_the_backup() {
+        let mut window = TestWindow::new(
+            "SET distinct_values = APPROX_COUNT_DISTINCT(input.value, 10), median_value = \
+             APPROX_QUANTILE(input.value, 50, 128), frequent_values = APPROX_TOP_K(input.value, \
+             2, 16)",
+            &[OptionalTestField {
+                name: "value",
+                ty: ParseAsType::I64,
+                optional: false,
+            }],
+            &[
+                OptionalTestField {
+                    name: "distinct_values",
+                    ty: ParseAsType::I64,
+                    optional: false,
+                },
+                OptionalTestField {
+                    name: "median_value",
+                    ty: ParseAsType::F64,
+                    optional: true,
+                },
+                OptionalTestField {
+                    name: "frequent_values",
+                    ty: ParseAsType::Vec {
+                        element: Box::new(ParseAsType::I64),
+                    },
+                    optional: false,
+                },
+            ],
+        );
+        let values: ArrayRef = StdArc::new(Int64Array::from(vec![5, 7, 5, 9, 5, 11]));
+        let refused = window
+            .admit(
+                vec![values],
+                &[
+                    0,
+                    400_000_000,
+                    800_000_000,
+                    1_200_000_000,
+                    1_500_000_000,
+                    1_900_000_000,
+                ],
+            )
+            .await;
+        assert!(
+            refused.is_empty(),
+            "every row fits the sketch window: {refused:?}"
+        );
+        let before = window.emitted().await;
+        let executor = Executor::default();
+        let published = window
+            .state
+            .to_snapshot()
+            .assured("the sketch window publishes");
+        let restored =
+            archived_and_restored(&executor, &window, published.clone(), 3, 64, &None).await;
+        assert_same_window(&restored, &published);
+        window.state = WindowProcessorState::from_snapshot(
+            &window.plan,
+            window.input_schema.as_ref(),
+            &restored,
+        )
+        .assured("the restored sketch window re-admits its rows");
+        let after = window.emitted().await;
+        for field in ["distinct_values", "median_value", "frequent_values"] {
+            assert_eq!(
+                batch_value(&after, field),
+                batch_value(&before, field),
+                "{field} is rebuilt from the same rows in the same order"
+            );
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn a_window_without_a_branch_lifetime_archives_nothing() {
+        let window = window();
+        let mut never_admitted = window
+            .state
+            .to_snapshot()
+            .assured("an empty window publishes");
+        never_admitted.incarnation = None;
+        let generation = Generation {
+            revision: 4,
+            value: Some(WindowPublishedSnapshot::Live(never_admitted)),
+        };
+        let opened = CapturedWindow::published(&generation)
+            .verified("the generation holds a window")
+            .open();
+        assert!(
+            opened.is_none(),
+            "an empty forced-recovery window restores empty"
+        );
+        let unpublished = Generation {
+            revision: 0,
+            value: None,
+        };
+        assert!(CapturedWindow::published(&unpublished).is_none());
+    }
+
+    /// A window of two admitted rows, opened as a backup opens it, with the schemas of its
+    /// retained rows.
+    struct OpenedWindow {
+        opened: CapturedWindowState,
+        input: StdArc<ArrowSchema>,
+        arguments: StdArc<ArrowSchema>,
+    }
+
+    impl OpenedWindow {
+        async fn of_two_rows() -> Self {
+            let mut window = window();
+            let latencies: ArrayRef = StdArc::new(Int64Array::from(vec![Some(1), Some(2)]));
+            let labels: ArrayRef = StdArc::new(StringArray::from(vec![Some("a"), None]));
+            let healthy: ArrayRef = StdArc::new(BooleanArray::from(vec![Some(true), Some(false)]));
+            let refused = window
+                .admit(vec![latencies, labels, healthy], &[1, 2])
+                .await;
+            assert!(refused.is_empty(), "both rows fit the window: {refused:?}");
+            let published = window.state.to_snapshot().assured("the window publishes");
+            let input = window.input_schema.arrow_schema();
+            let arguments = WindowArgumentColumns::snapshot_schema(&window.plan);
+            let generation = Generation {
+                revision: 2,
+                value: Some(WindowPublishedSnapshot::Live(published)),
+            };
+            let opened = CapturedWindow::published(&generation)
+                .verified("the generation holds a window")
+                .open()
+                .verified("the window has a branch lifetime");
+            Self {
+                opened,
+                input,
+                arguments,
+            }
+        }
+
+        /// The window as a restore reads it from its descriptor.
+        fn archived(&self) -> ArchivedWindow {
+            ArchivedWindow {
+                revision: self.opened.revision(),
+                incarnation: self.opened.incarnation(),
+                branch: None,
+                first_sequence: self.opened.first_sequence(),
+                next_sequence: self.opened.next_sequence(),
+                rows: self.opened.row_watermarks(),
+                accumulators: self.opened.accumulators().assured("bounded buckets fit"),
+            }
+        }
+
+        /// The archived input section of `rows` and the batch it decodes into.
+        async fn input_rows(&self, executor: &Executor, rows: Range<usize>) -> ArchivedRows {
+            let bytes = self
+                .opened
+                .encode_input_group(executor, &rows)
+                .await
+                .assured("the input rows encode");
+            archived_rows(executor, &self.input, bytes).await
+        }
+
+        /// The archived argument section of `rows` and the batch it decodes into.
+        async fn argument_rows(&self, executor: &Executor, rows: Range<usize>) -> ArchivedRows {
+            let bytes = self
+                .opened
+                .encode_argument_group(executor, &rows)
+                .await
+                .assured("the argument columns encode");
+            archived_rows(executor, &self.arguments, bytes).await
+        }
+    }
+
+    /// The same archived section and decoded batch, for an attempt that consumes them.
+    fn same_rows(rows: &ArchivedRows) -> ArchivedRows {
+        ArchivedRows {
+            bytes: rows.bytes.clone(),
+            batch: rows.batch.clone(),
+        }
+    }
+
+    #[nervix_primitives::test]
+    async fn rebuilding_a_window_refuses_groups_that_disagree_with_its_descriptor() {
+        let executor = Executor::default();
+        let window = OpenedWindow::of_two_rows().await;
+        let directory = tempfile::tempdir().assured("the staging directory opens");
+        let staging = SnapshotStaging::new(
+            directory.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits::default(),
+        );
+        let builder = |window| WindowCheckpointBuilder::new(&executor, &staging, window);
+        let input_rows = window.input_rows(&executor, 0..2).await;
+        let one_argument_row = window.argument_rows(&executor, 0..1).await;
+
+        let mut misaligned = builder(window.archived());
+        let pending = misaligned
+            .admit_input(same_rows(&input_rows))
+            .await
+            .assured("the group's input rows are admitted");
+        let error = misaligned
+            .admit_arguments(&pending, one_argument_row)
+            .await
+            .expect_err("a group's input rows and arguments are row-aligned");
+        assert_eq!(error.current_context(), &WindowArchiveError::GroupRows);
+
+        let mut incomplete = builder(window.archived());
+        let _pending = incomplete
+            .admit_input(same_rows(&input_rows))
+            .await
+            .assured("the group's input rows are admitted");
+        let error = incomplete
+            .finish()
+            .await
+            .expect_err("a group's argument columns complete it");
+        assert_eq!(error.current_context(), &WindowArchiveError::GroupRows);
+
+        let mut short = window.archived();
+        short.rows.truncate(1);
+        let error = builder(short)
+            .admit_input(same_rows(&input_rows))
+            .await
+            .expect_err("groups hold no more rows than the descriptor lists");
+        assert_eq!(
+            error.current_context(),
+            &WindowArchiveError::RowCount {
+                expected: 1,
+                found: 2
+            }
+        );
+
+        let error = builder(window.archived())
+            .finish()
+            .await
+            .expect_err("every row the descriptor lists arrives in some group");
+        assert_eq!(
+            error.current_context(),
+            &WindowArchiveError::RowCount {
+                expected: 2,
+                found: 0
+            }
+        );
+
+        let mut overflowing = window.archived();
+        overflowing.first_sequence = Some(u64::MAX);
+        let error = builder(overflowing)
+            .admit_input(input_rows)
+            .await
+            .expect_err("row sequences never pass u64::MAX");
+        assert_eq!(error.current_context(), &WindowArchiveError::Sequence);
+        assert_eq!(executor.snapshot().bulk_memory.reserved_bytes, 0);
+    }
+
+    /// A section refused while it was half staged leaves the checkpoint as it was and releases
+    /// the pieces the refused attempt staged. The same section admitted again then seals the
+    /// checkpoint an unrefused conversion seals, byte for byte.
+    #[nervix_primitives::test]
+    async fn a_refused_section_is_admitted_again_into_the_same_checkpoint() {
+        const MEBIBYTE: u64 = 1024 * 1024;
+        let executor = Executor::default();
+        let window = OpenedWindow::of_two_rows().await;
+        let input_rows = window.input_rows(&executor, 0..2).await;
+        let argument_rows = window.argument_rows(&executor, 0..2).await;
+
+        let unrefused_directory = tempfile::tempdir().assured("the staging directory opens");
+        let unrefused_staging = SnapshotStaging::new(
+            unrefused_directory.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits::default(),
+        );
+        let mut unrefused =
+            WindowCheckpointBuilder::new(&executor, &unrefused_staging, window.archived());
+        let pending = unrefused
+            .admit_input(same_rows(&input_rows))
+            .await
+            .assured("the input rows are admitted");
+        unrefused
+            .admit_arguments(&pending, same_rows(&argument_rows))
+            .await
+            .assured("the argument columns are admitted");
+        let expected = unrefused
+            .finish()
+            .await
+            .assured("the unrefused checkpoint seals");
+        let expected = std::fs::read(expected.path()).assured("the sealed checkpoint reads");
+
+        // The quota is granted in whole mebibytes, one for every staged piece. With two of them
+        // free, a group's identity record and its frame stage, and the frame of its columns is
+        // refused.
+        let directory = tempfile::tempdir().assured("the staging directory opens");
+        let staging = SnapshotStaging::new(
+            directory.path().to_path_buf(),
+            executor.clone(),
+            SnapshotStagingLimits {
+                staging_bytes: 16 * MEBIBYTE,
+                snapshot_bytes: 16 * MEBIBYTE,
+            },
+        );
+        let mut refused = WindowCheckpointBuilder::new(&executor, &staging, window.archived());
+        let held = staging
+            .try_stage(14 * MEBIBYTE)
+            .await
+            .assured("another transfer holds most of the quota");
+        let failure = refused
+            .admit_input(same_rows(&input_rows))
+            .await
+            .expect_err("the quota has no room for the group's columns");
+        let mut full = false;
+        for frame in failure.frames() {
+            let staging = frame.downcast_ref::<SnapshotStagingError>();
+            if let Some(SnapshotStagingError::Full { .. }) = staging {
+                full = true;
+            }
+        }
+        assert!(
+            full,
+            "the refusal names the full staging quota: {failure:?}"
+        );
+        let released = staging
+            .try_stage(2 * MEBIBYTE)
+            .await
+            .assured("the refused attempt released the pieces it staged");
+        drop(released);
+        drop(held);
+
+        let pending = refused
+            .admit_input(same_rows(&input_rows))
+            .await
+            .assured("the same input rows are admitted again");
+        refused
+            .admit_arguments(&pending, same_rows(&argument_rows))
+            .await
+            .assured("the argument columns are admitted");
+        let sealed = refused
+            .finish()
+            .await
+            .assured("the checkpoint seals after its refusal");
+        assert_eq!(
+            std::fs::read(sealed.path()).assured("the sealed checkpoint reads"),
+            expected,
+            "a refused and repeated section seals the unrefused checkpoint"
+        );
+        drop(input_rows);
+        drop(argument_rows);
+        assert_eq!(
+            executor.snapshot().bulk_memory.reserved_bytes,
+            0,
+            "the refused attempt and the repeated one returned their bulk charges"
+        );
+    }
+}

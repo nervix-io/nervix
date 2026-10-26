@@ -39,6 +39,13 @@ const MAX_NAME_LEN: usize = 128;
 
 /// Why a string is not a name.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "name construction returns pure alphabet and length validation refusals"
+    )
+)]
 pub enum NameError {
     #[error("name must not be empty")]
     Empty,
@@ -57,8 +64,8 @@ pub enum NameError {
 /// Whether a dot belongs to a name's alphabet.
 ///
 /// A domain is one segment and never contains a dot, which is what lets a qualified name be split
-/// on its first dot without ambiguity. Every other name may carry one, because external systems
-/// name topics, tables, and subjects that way.
+/// on its first dot without ambiguity. Other Nervix name kinds may carry dots. External entity
+/// names use their own case-preserving rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DotPolicy {
     Allowed,
@@ -148,6 +155,7 @@ macro_rules! declare_names {
         $(
             $(#[$doc])*
             #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+            #[cfg_attr(nervix_lint, nervix::value(name, reason = "immutable validated vocabulary name"))]
             pub struct $Name(NameText);
 
             impl Debug for $Name {
@@ -173,10 +181,10 @@ macro_rules! declare_names {
                     self.0.as_str()
                 }
 
-                /// Read a name back from its serde or archived form, which holds exactly the text
+                /// Read a canonical name from stored text, which holds exactly the text
                 /// `parse` produced. Text that is not already a valid lower-case name is refused
                 /// rather than normalized: no encoder ever wrote it.
-                fn decode(raw: &str) -> Result<Self, Report<NameError>> {
+                pub fn decode(raw: &str) -> Result<Self, Report<NameError>> {
                     let name = Self::parse(raw)?;
                     if let Some(ch) = raw.chars().find(char::is_ascii_uppercase) {
                         return Err(Report::new(NameError::UpperCase { ch }));
@@ -288,7 +296,7 @@ declare_names! {
     WireSchemaName => Allowed,
     /// A codec declared with `CREATE CODEC`.
     CodecName => Allowed,
-    /// A connector client declared with `CREATE CLIENT`.
+    /// A connector client declared with a Plexus `<CONNECTOR> CLIENT` head.
     ClientName => Allowed,
     /// A virtual host declared with `CREATE VHOST`.
     VhostName => Allowed,
@@ -304,7 +312,7 @@ declare_names! {
     InferencerName => Allowed,
     /// A WASM processor declared with `CREATE WASM PROCESSOR`.
     WasmProcessorName => Allowed,
-    /// An ingestor declared with `CREATE INGESTOR`.
+    /// An ingestor declared with `CREATE <CONNECTOR> <ENTITY> INGESTOR`.
     IngestorName => Allowed,
     /// A reingestor declared with `CREATE REINGESTOR`.
     ReingestorName => Allowed,
@@ -322,7 +330,7 @@ declare_names! {
     ReordererName => Allowed,
     /// A window processor declared with `CREATE WINDOW PROCESSOR`.
     WindowProcessorName => Allowed,
-    /// An emitter declared with `CREATE EMITTER`.
+    /// An emitter declared with a connector and entity in its Plexus statement head.
     EmitterName => Allowed,
     /// A placement declared with `CREATE PLACEMENT`.
     PlacementName => Allowed,
@@ -345,26 +353,10 @@ declare_names! {
     /// A built-in function called from an expression.
     BuiltinFunctionName => Allowed,
     /// A node of the Nervix cluster.
+    #[cfg_attr(nervix_lint, nervix::identity(node, reason = "validated cluster-node identity shared by all owners"))]
     ClusterNodeName => Allowed,
 
-    /// A topic of an external broker.
-    TopicName => Allowed,
-    /// A queue of an external broker.
-    QueueName => Allowed,
-    /// A NATS queue group.
-    QueueGroupName => Allowed,
-    /// A channel of an external broker.
-    ChannelName => Allowed,
-    /// A NATS subject.
-    SubjectName => Allowed,
-    /// A table of an external database or catalog.
-    TableName => Allowed,
-    /// A collection of an external document database.
-    CollectionName => Allowed,
-    /// A Kafka consumer group.
-    ConsumerGroupName => Allowed,
-    /// A Pulsar subscription.
-    PulsarSubscriptionName => Allowed,
+
 }
 
 /// Generate the widening of an entity's own name into the kind-erased [`ModelName`].

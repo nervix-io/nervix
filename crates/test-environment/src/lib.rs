@@ -3,8 +3,10 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** Container lifecycle, the in-process DNS authority tests point resolvers at, the
-//!   addresses and TLS material a run is given, and the parallelism budget it is allowed.
-//! - **Depends on.** Container and process management, and the DNS message grammar.
+//!   followed output of the OpenTelemetry Collector and the exports its debug exporter printed,
+//!   the addresses and TLS material a run is given, its shared Postgres observation clients, and
+//!   the parallelism budget it is allowed.
+//! - **Depends on.** Container and process management, SQLx, and the DNS message grammar.
 //! - **Must not know.** Nervix. It provisions what a test points Nervix at; the entities themselves
 //!   are always provisioned explicitly, never as a side effect of the product starting.
 
@@ -42,15 +44,22 @@ use testcontainers::{
     },
     core::{
         BuildImageOptions, CmdWaitFor, ContainerPort, ContainerState, ExecCommand,
-        IntoContainerPort, WaitFor, client::ClientError, wait::HttpWaitStrategy,
+        IntoContainerPort, WaitFor,
+        client::ClientError,
+        wait::{HttpWaitStrategy, LogWaitStrategy},
     },
     runners::{AsyncBuilder, AsyncRunner},
 };
 use thiserror::Error;
 
+pub mod collector_exports;
+pub mod collector_output;
 pub mod dns_authority;
+mod postgres_clients;
 mod reaper;
 
+use collector_output::{CollectorFollower, CollectorOutput};
+pub use postgres_clients::PostgresClients;
 use reaper::ResourceReaper;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
@@ -142,11 +151,20 @@ pub const PULSAR_ADDR: &str = "pulsar_addr";
 pub const PULSAR_TLS_ADDR: &str = "pulsar_tls_addr";
 pub const PULSAR_ADMIN_ADDR: &str = "pulsar_admin_addr";
 pub const RABBITMQ_ADDR: &str = "rabbitmq_addr";
+pub const RABBITMQ_MANAGEMENT_ADDR: &str = "rabbitmq_management_addr";
 pub const RABBITMQ_TLS_ADDR: &str = "rabbitmq_tls_addr";
 pub const REDIS_ADDR: &str = "redis_addr";
 pub const REDIS_TLS_ADDR: &str = "redis_tls_addr";
 pub const MQTT_ADDR: &str = "mqtt_addr";
 pub const MQTT_TLS_ADDR: &str = "mqtt_tls_addr";
+/// A listener of the same MQTT broker that holds a client to a keep-alive of
+/// [`MQTT_SHORT_KEEPALIVE`]: it announces that keep-alive in every CONNACK, checks it every second,
+/// and lets a subscriber hold as many unacknowledged publishes as its own Receive Maximum asks
+/// for, where the default listener holds it to 32.
+pub const MQTT_SHORT_KEEPALIVE_ADDR: &str = "mqtt_short_keepalive_addr";
+/// The keep-alive the listener at [`MQTT_SHORT_KEEPALIVE_ADDR`] holds its clients to. The broker
+/// closes a connection that sends nothing for one and a half of it.
+pub const MQTT_SHORT_KEEPALIVE: Duration = Duration::from_secs(10);
 pub const NATS_ADDR: &str = "nats_addr";
 pub const NATS_TLS_ADDR: &str = "nats_tls_addr";
 pub const SQS_ENDPOINT: &str = "sqs_endpoint";
@@ -159,6 +177,7 @@ pub const MYSQL_ADDR: &str = "mysql_addr";
 pub const MYSQL_TLS_ADDR: &str = "mysql_tls_addr";
 pub const MONGODB_ADDR: &str = "mongodb_addr";
 pub const MONGODB_TLS_ADDR: &str = "mongodb_tls_addr";
+pub const MONGODB_REPLICA_SET_ADDR: &str = "mongodb_replica_set_addr";
 pub const PROMETHEUS_ADDR: &str = "prometheus_addr";
 pub const PROMETHEUS_TLS_ADDR: &str = "prometheus_tls_addr";
 pub const MOCK_HTTP_ADDR: &str = "mock_http_addr";
@@ -291,6 +310,9 @@ pub fn configure_process_lifecycle(mode: ContainerMode) {
 pub struct DependencyEnvironment {
     running: BTreeSet<&'static str>,
     containers: Vec<RunningContainer>,
+    /// The follower of the OpenTelemetry Collector's output, once the Collector started.
+    otel_collector_output: Option<CollectorFollower>,
+    postgres_clients: Option<PostgresClients>,
     endpoints: DependencyEndpoints,
     tls: Option<TlsMaterials>,
     tls_configuration_hash: Option<String>,
@@ -308,6 +330,8 @@ impl DependencyEnvironment {
         Self {
             running: BTreeSet::new(),
             containers: Vec::new(),
+            otel_collector_output: None,
+            postgres_clients: None,
             endpoints: DependencyEndpoints::default(),
             tls: None,
             tls_configuration_hash: None,
@@ -319,6 +343,11 @@ impl DependencyEnvironment {
 
     pub fn endpoints(&self) -> &DependencyEndpoints {
         &self.endpoints
+    }
+
+    /// The shared observation clients, once Postgres is ready on both transports.
+    pub fn postgres_clients(&self) -> Option<PostgresClients> {
+        self.postgres_clients.clone()
     }
 
     pub fn tls_dir(&self) -> io::Result<&Path> {
@@ -507,6 +536,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                 GenericImage::new("rabbitmq", "4.1-management")
                     .with_exposed_port(5672.tcp())
                     .with_exposed_port(5671.tcp())
+                    .with_exposed_port(15672.tcp())
                     .with_wait_for(WaitFor::message_on_either_std("Server startup complete"))
                     .with_env_var("RABBITMQ_DEFAULT_USER", "guest")
                     .with_env_var("RABBITMQ_DEFAULT_PASS", "guest")
@@ -525,6 +555,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .await?;
         let port = mapped_port(&container, 5672, "RabbitMQ").await?;
         let tls_port = mapped_port(&container, 5671, "RabbitMQ TLS").await?;
+        let management_port = mapped_port(&container, 15672, "RabbitMQ management").await?;
         self.endpoints.insert(
             RABBITMQ_ADDR,
             format!("amqp://guest:guest@127.0.0.1:{port}/%2f"),
@@ -532,6 +563,10 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         self.endpoints.insert(
             RABBITMQ_TLS_ADDR,
             format!("amqps://guest:guest@127.0.0.1:{tls_port}/%2f"),
+        );
+        self.endpoints.insert(
+            RABBITMQ_MANAGEMENT_ADDR,
+            format!("http://127.0.0.1:{management_port}"),
         );
         self.containers.push(RunningContainer::Generic(container));
         Ok(())
@@ -579,13 +614,32 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             return Ok(());
         }
         let tls = self.ensure_tls()?.clone();
+        let short_keepalive = MQTT_SHORT_KEEPALIVE.as_secs().to_string();
         let container = self
             .start_container("mqtt", 1883.tcp(), "MQTT", || {
                 GenericImage::new("emqx/emqx", "5.8.4")
                     .with_exposed_port(1883.tcp())
+                    .with_exposed_port(1884.tcp())
                     .with_exposed_port(8883.tcp())
                     .with_wait_for(WaitFor::message_on_either_std("EMQX 5.8.4 is running now"))
                     .with_env_var("EMQX_LISTENERS__TCP__DEFAULT__BIND", "0.0.0.0:1883")
+                    // The broker announces this keep-alive in every CONNACK of the zone's listener
+                    // and checks every second whether a client sent anything within one and a half
+                    // of it, where its own default check runs every 30 seconds.
+                    .with_env_var(
+                        "EMQX_ZONES__SHORT_KEEPALIVE__MQTT__SERVER_KEEPALIVE",
+                        short_keepalive.as_str(),
+                    )
+                    .with_env_var(
+                        "EMQX_ZONES__SHORT_KEEPALIVE__MQTT__KEEPALIVE_CHECK_INTERVAL",
+                        "1s",
+                    )
+                    .with_env_var("EMQX_ZONES__SHORT_KEEPALIVE__MQTT__MAX_INFLIGHT", "65535")
+                    .with_env_var("EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__BIND", "0.0.0.0:1884")
+                    .with_env_var(
+                        "EMQX_LISTENERS__TCP__SHORT_KEEPALIVE__ZONE",
+                        "short_keepalive",
+                    )
                     .with_env_var("EMQX_LISTENERS__SSL__DEFAULT__BIND", "0.0.0.0:8883")
                     .with_env_var(
                         "EMQX_LISTENERS__SSL__DEFAULT__SSL_OPTIONS__CACERTFILE",
@@ -617,9 +671,14 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             })
             .await?;
         let port = mapped_port(&container, 1883, "MQTT").await?;
+        let short_keepalive_port = mapped_port(&container, 1884, "MQTT short keep-alive").await?;
         let tls_port = mapped_port(&container, 8883, "MQTT TLS").await?;
         self.endpoints
             .insert(MQTT_ADDR, format!("mqtt://127.0.0.1:{port}"));
+        self.endpoints.insert(
+            MQTT_SHORT_KEEPALIVE_ADDR,
+            format!("mqtt://127.0.0.1:{short_keepalive_port}"),
+        );
         self.endpoints
             .insert(MQTT_TLS_ADDR, format!("mqtts://127.0.0.1:{tls_port}"));
         self.containers.push(RunningContainer::Generic(container));
@@ -689,12 +748,24 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                 GenericImage::new("postgres", "17")
                     .with_exposed_port(5432.tcp())
                     .with_entrypoint("bash")
-                    .with_wait_for(WaitFor::message_on_either_std(
-                        "database system is ready to accept connections",
+                    // Initialization starts a Unix-socket server first. Only the second ready
+                    // message belongs to the TCP/TLS server the published endpoints address.
+                    .with_wait_for(WaitFor::log(
+                        LogWaitStrategy::stdout_or_stderr(
+                            "database system is ready to accept connections",
+                        )
+                        .with_times(2),
                     ))
                     .with_env_var("POSTGRES_USER", "postgres")
                     .with_env_var("POSTGRES_PASSWORD", "nervix")
                     .with_env_var("POSTGRES_DB", "postgres")
+                    // SQLx derives a SCRAM-SHA-256 key in as many rounds as the server's verifier
+                    // names and yields to the scheduler after every fifth, so the image's 4096
+                    // rounds poll an establishing connection more than 800 times. On the busy
+                    // scenario runtime each poll waits for a worker's whole run queue, and one
+                    // connection took longer to establish than the 30-second pool wait. One round
+                    // keeps SCRAM authentication and establishes in a few polls.
+                    .with_env_var("POSTGRES_INITDB_ARGS", "--set scram_iterations=1")
                     .with_copy_to("/certs/ca.pem", tls.ca_pem.clone())
                     .with_copy_to("/certs/node.pem", tls.node_pem.clone())
                     .with_copy_to(
@@ -714,6 +785,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             POSTGRES_TLS_ADDR,
             format!("postgresql://postgres:nervix@localhost:{port}/postgres?sslmode=verify-full"),
         );
+        self.postgres_clients = Some(PostgresClients::open(&self.endpoints).await?);
         self.containers.push(RunningContainer::Generic(container));
         Ok(())
     }
@@ -782,6 +854,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                     .with_exposed_port(27017.tcp())
                     .with_entrypoint("bash")
                     .with_wait_for(WaitFor::message_on_either_std("Waiting for connections"))
+                    .with_env_var("GLIBC_TUNABLES", "glibc.pthread.rseq=1")
                     .with_env_var("MONGO_INITDB_ROOT_USERNAME", "root")
                     .with_env_var("MONGO_INITDB_ROOT_PASSWORD", "nervix")
                     .with_copy_to("/certs/ca.pem", tls.ca_pem.clone())
@@ -802,6 +875,72 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         self.endpoints.insert(
             MONGODB_TLS_ADDR,
             format!("mongodb://root:nervix@127.0.0.1:{port}/nervix?authSource=admin&tls=true"),
+        );
+        self.containers.push(RunningContainer::Generic(container));
+        Ok(())
+    }
+
+    /// A MongoDB replica set of one member, which a client reaches directly, without
+    /// authentication or TLS.
+    ///
+    /// The member is the set's only data-bearing node, so a write concern that asks for a second
+    /// one is a write concern the set can never satisfy: the server applies the write and reports
+    /// the write concern error beside it, exactly as it answers a write its lagging members never
+    /// confirm. A standalone server refuses such a write before applying any of it instead.
+    pub async fn start_mongodb_replica_set(&mut self) -> io::Result<()> {
+        if !self.mark_starting("mongodb-replica-set").await? {
+            return Ok(());
+        }
+        let container = self
+            .start_container(
+                "mongodb-replica-set",
+                27017.tcp(),
+                "MongoDB replica set",
+                || {
+                    GenericImage::new("mongo", "8.2")
+                        .with_exposed_port(27017.tcp())
+                        .with_wait_for(WaitFor::message_on_either_std("Waiting for connections"))
+                        .with_env_var("GLIBC_TUNABLES", "glibc.pthread.rseq=1")
+                        .with_cmd(["mongod", "--bind_ip_all", "--replSet", "nervix"])
+                        .with_startup_timeout(STARTUP_TIMEOUT)
+                },
+            )
+            .await?;
+        // A reused container's set is already initiated. Either way, its member must have become
+        // the writable primary within the startup budget before a scenario writes to it.
+        let election = format!(
+            "try {{ void rs.status(); }} catch (error) {{ if (error.codeName !== \
+             'NotYetInitialized') {{ throw error; }} void rs.initiate({{ _id: 'nervix', members: \
+             [{{ _id: 0, host: '127.0.0.1:27017' }}] }}); }} const deadline = Date.now() + {}; \
+             while (!db.hello().isWritablePrimary) {{ if (Date.now() > deadline) {{ throw new \
+             Error('the only member of the replica set did not become its primary'); }} \
+             sleep(100); }}",
+            STARTUP_TIMEOUT.as_millis()
+        );
+        let mut elected = container
+            .exec(
+                ExecCommand::new(["mongosh", "--quiet", "--eval", election.as_str()])
+                    .with_cmd_ready_condition(CmdWaitFor::exit()),
+            )
+            .await
+            .map_err(testcontainers_error("MongoDB replica set primary election"))?;
+        let exit_code = elected
+            .exit_code()
+            .await
+            .map_err(testcontainers_error("MongoDB replica set primary election"))?;
+        if exit_code != Some(0) {
+            let output = elected.stderr_to_vec().await.map_err(testcontainers_error(
+                "MongoDB replica set primary election output",
+            ))?;
+            return Err(io::Error::other(format!(
+                "MongoDB replica set primary election exited with {exit_code:?}: {}",
+                String::from_utf8_lossy(&output)
+            )));
+        }
+        let port = mapped_port(&container, 27017, "MongoDB replica set").await?;
+        self.endpoints.insert(
+            MONGODB_REPLICA_SET_ADDR,
+            format!("mongodb://127.0.0.1:{port}/nervix?directConnection=true"),
         );
         self.containers.push(RunningContainer::Generic(container));
         Ok(())
@@ -989,7 +1128,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
         let tls = self.ensure_tls()?.clone();
         let workspace_root = workspace_root();
-        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "domain-cadence")
+        let image = GenericBuildableImage::new("nervix-cucumber-mock-server", "prometheus-vectors")
             .with_dockerfile(workspace_root.join("docker/mock-server/Dockerfile"))
             .with_file(
                 workspace_root.join("docker/mock-server/app.py"),
@@ -1251,32 +1390,16 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             OTEL_COLLECTOR_HTTP_ADDR,
             format!("http://127.0.0.1:{http_port}"),
         );
-        self.containers
-            .push(RunningContainer::OtelCollector(container));
+        self.otel_collector_output = Some(CollectorFollower::start(&container));
+        self.containers.push(RunningContainer::Generic(container));
         Ok(())
     }
 
-    pub async fn otel_collector_logs(&self) -> io::Result<String> {
-        let container = self
-            .containers
-            .iter()
-            .find_map(RunningContainer::otel_collector)
-            .ok_or_else(|| io::Error::other("OpenTelemetry Collector is not running"))?;
-        let stdout = container
-            .stdout_to_vec()
-            .await
-            .map_err(testcontainers_error("OpenTelemetry Collector stdout"))?;
-        let stderr = container
-            .stderr_to_vec()
-            .await
-            .map_err(testcontainers_error("OpenTelemetry Collector stderr"))?;
-        let mut logs = String::from_utf8_lossy(&stdout).into_owned();
-        logs.push_str(&String::from_utf8_lossy(&stderr));
-        Ok(logs)
-    }
-
-    pub async fn otel_collector_contains(&self, needle: &str) -> io::Result<bool> {
-        Ok(self.otel_collector_logs().await?.contains(needle))
+    /// The OpenTelemetry Collector's followed output, once the Collector started.
+    pub fn otel_collector_output(&self) -> Option<CollectorOutput> {
+        self.otel_collector_output
+            .as_ref()
+            .map(CollectorFollower::output)
     }
 
     pub async fn start_jaeger(&mut self) -> io::Result<()> {
@@ -1421,23 +1544,35 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         }
     }
 
-    pub async fn shutdown(&mut self) -> Vec<String> {
-        let mut errors = Vec::new();
+    /// Stops following the Collector's output, then stops and removes every container this
+    /// environment started, then its Ryuk cleanup container. A container that fails to tear down
+    /// does not stop the others from being torn down, and its failure is kept with the rest.
+    pub async fn shutdown(&mut self) -> Result<(), TeardownFailures> {
+        if let Some(clients) = self.postgres_clients.take() {
+            clients.close().await;
+        }
+        if let Some(follower) = self.otel_collector_output.take() {
+            follower.stop().await;
+        }
+        let mut failures = Vec::new();
         for container in std::mem::take(&mut self.containers).into_iter().rev() {
             if self.mode.is_reusable() {
                 drop(container);
             } else if let Err(error) = container.stop_and_remove().await {
-                errors.push(format!("{error:#}"));
+                failures.push(error);
             }
         }
         self.running.clear();
         self.endpoints = DependencyEndpoints::default();
         self.tls = None;
         self.tls_configuration_hash = None;
-        if let Err(error) = self.reaper.shutdown(errors.is_empty()).await {
-            errors.push(error.to_string());
+        if let Err(error) = self.reaper.shutdown(failures.is_empty()).await {
+            failures.push(error);
         }
-        errors
+        match TeardownFailures::of(failures) {
+            None => Ok(()),
+            Some(failures) => Err(failures),
+        }
     }
 
     async fn mark_starting(&mut self, dependency: &'static str) -> io::Result<bool> {
@@ -2036,19 +2171,10 @@ fn run_openssl(arguments: Vec<OsString>, operation: &str) -> io::Result<()> {
 enum RunningContainer {
     Generic(ContainerAsync<GenericImage>),
     Kafka(ContainerAsync<KafkaImage>),
-    OtelCollector(ContainerAsync<GenericImage>),
     Sentry(ContainerAsync<GenericImage>),
 }
 
 impl RunningContainer {
-    fn otel_collector(&self) -> Option<&ContainerAsync<GenericImage>> {
-        if let Self::OtelCollector(container) = self {
-            Some(container)
-        } else {
-            None
-        }
-    }
-
     fn sentry(&self) -> Option<&ContainerAsync<GenericImage>> {
         if let Self::Sentry(container) = self {
             Some(container)
@@ -2059,18 +2185,14 @@ impl RunningContainer {
 
     fn id(&self) -> String {
         match self {
-            Self::Generic(container) | Self::OtelCollector(container) | Self::Sentry(container) => {
-                container.id().to_string()
-            }
+            Self::Generic(container) | Self::Sentry(container) => container.id().to_string(),
             Self::Kafka(container) => container.id().to_string(),
         }
     }
 
     async fn stop_and_remove(self) -> error_stack::Result<(), ContainerTeardownError> {
         match self {
-            Self::Generic(container) | Self::OtelCollector(container) | Self::Sentry(container) => {
-                stop_and_remove(container).await
-            }
+            Self::Generic(container) | Self::Sentry(container) => stop_and_remove(container).await,
             Self::Kafka(container) => stop_and_remove(container).await,
         }
     }
@@ -2079,11 +2201,54 @@ impl RunningContainer {
 /// Why a test container could not be torn down. Removal is attempted even when the stop fails, so
 /// one teardown can report both.
 #[derive(Debug, Error)]
-enum ContainerTeardownError {
+pub enum ContainerTeardownError {
     #[error("failed to stop test container {container}")]
     Stop { container: String },
     #[error("failed to remove test container {container}")]
     Remove { container: String },
+    #[error("failed to remove Ryuk container {container}")]
+    RemoveReaper { container: String },
+}
+
+/// What a teardown failed to do: the report of each container that would not stop or be removed,
+/// in the order the teardown met them. It holds at least one.
+#[derive(Debug)]
+pub struct TeardownFailures(Vec<Report<ContainerTeardownError>>);
+
+impl TeardownFailures {
+    /// The failures among `reports`, or none when the teardown failed nothing.
+    fn of(reports: Vec<Report<ContainerTeardownError>>) -> Option<Self> {
+        if reports.is_empty() {
+            None
+        } else {
+            Some(Self(reports))
+        }
+    }
+
+    /// The report of every failure, in the order the teardown met them.
+    pub fn reports(&self) -> &[Report<ContainerTeardownError>] {
+        &self.0
+    }
+}
+
+impl From<Report<ContainerTeardownError>> for TeardownFailures {
+    fn from(failure: Report<ContainerTeardownError>) -> Self {
+        Self(vec![failure])
+    }
+}
+
+impl fmt::Display for TeardownFailures {
+    /// Every failure with each cause beneath it, the failures separated by semicolons, so a
+    /// teardown is reported on one line however many containers failed.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, failure) in self.0.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str("; ")?;
+            }
+            write!(formatter, "{failure:#}")?;
+        }
+        Ok(())
+    }
 }
 
 async fn stop_and_remove<I: Image>(
@@ -2342,16 +2507,54 @@ mod tests {
     use std::{ffi::OsStr, num::NonZeroUsize};
 
     use clap::{CommandFactory as _, Parser as _};
+    use error_stack::Report;
 
     use super::{
-        ClientError, DockerError, KafkaImage, TEST_CONCURRENCY_FACTOR_ENV, TestParallelism,
-        TestParallelismArgs, TestcontainersError, host_port_bind_conflict,
+        ClientError, ContainerTeardownError, DockerError, KafkaImage, TEST_CONCURRENCY_FACTOR_ENV,
+        TeardownFailures, TestParallelism, TestParallelismArgs, TestcontainersError,
+        host_port_bind_conflict,
     };
 
     #[derive(clap::Parser)]
     struct TestCli {
         #[command(flatten)]
         parallelism: TestParallelismArgs,
+    }
+
+    #[test]
+    fn a_teardown_reports_every_failure_with_its_cause_on_one_line() {
+        assert!(TeardownFailures::of(Vec::new()).is_none());
+
+        let mut kafka = Report::new(std::io::Error::other("stop timed out")).change_context(
+            ContainerTeardownError::Stop {
+                container: "kafka".to_string(),
+            },
+        );
+        kafka.extend_one(
+            Report::new(std::io::Error::other("container is running")).change_context(
+                ContainerTeardownError::Remove {
+                    container: "kafka".to_string(),
+                },
+            ),
+        );
+        let reaper = Report::new(std::io::Error::other("no such container")).change_context(
+            ContainerTeardownError::RemoveReaper {
+                container: "ryuk".to_string(),
+            },
+        );
+        let failures =
+            TeardownFailures::of(vec![kafka, reaper]).expect("a teardown with failures keeps them");
+
+        assert_eq!(failures.reports().len(), 2);
+        assert!(matches!(
+            failures.reports()[1].current_context(),
+            ContainerTeardownError::RemoveReaper { container } if container == "ryuk"
+        ));
+        assert_eq!(
+            failures.to_string(),
+            "failed to stop test container kafka: stop timed out: failed to remove test container \
+             kafka: container is running; failed to remove Ryuk container ryuk: no such container"
+        );
     }
 
     #[test]

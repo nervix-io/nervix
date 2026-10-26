@@ -3,16 +3,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_reference_enricher;
       UPLOAD RESOURCE wasm_reference_enricher VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event (
         value I32,
@@ -43,8 +43,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY enriched_events SCHEMA enriched_event BRANCHED BY by_tenant;
       CREATE VHOST edge wasm-reference-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO raw_events
         INHERIT ALL
@@ -97,16 +97,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_uninitialized_guest;
       UPLOAD RESOURCE wasm_uninitialized_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA wasm_input_event (
         value I32
@@ -126,8 +126,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY wasm_output_events SCHEMA wasm_output_event UNBRANCHED;
       CREATE VHOST edge wasm-uninitialized-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR wasm_input_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR wasm_input_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wasm_input_codec
         TO wasm_input_events
         INHERIT ALL
@@ -174,16 +174,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has a WASM fixture returning an uninitialized column to relay "required_output" in resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_uninitialized_required_guest;
       UPLOAD RESOURCE wasm_uninitialized_required_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA required_event (
         value I32
@@ -198,8 +198,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY required_output SCHEMA required_event UNBRANCHED;
       CREATE VHOST edge wasm-required-uninitialized-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR required_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR required_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING required_event_codec
         TO required_input
         INHERIT ALL
@@ -227,7 +227,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      Column 'value' is declared as non-nullable but contains null values
+      wasm_processor 'emit_uninitialized_required' general error in domain '{{domain}}': wasm processor 'emit_uninitialized_required' output emission failed (unbranched, resource 'wasm_uninitialized_required_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_read_emit'): failed to build WASM output batch for relay 'required_output': Invalid argument error: Column 'value' is declared as non-nullable but contains null values
       """
 
     Examples:
@@ -239,16 +239,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_filter;
       UPLOAD RESOURCE wasm_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
 
 
@@ -274,8 +274,8 @@ Feature: WASM processor runtime behavior
         PATH '/metrics'
         TYPE HTTP;
 
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -310,7 +310,7 @@ Feature: WASM processor runtime behavior
       """
       "value":2
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE WASM PROCESSOR filter_even_rows;
       """
@@ -352,16 +352,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_growing_buffer;
       UPLOAD RESOURCE wasm_growing_buffer VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA buffered_metric (
         value I32,
@@ -378,8 +378,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY filtered_buffered_metrics SCHEMA buffered_metric UNBRANCHED;
       CREATE VHOST edge wasm-buffer-growth-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR buffered_metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR buffered_metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING buffered_metric_codec
         TO raw_buffered_metrics
         INHERIT ALL
@@ -417,16 +417,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "<limit>" failing WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_limited_guest;
       UPLOAD RESOURCE wasm_limited_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA limited_input_event (
         tenant STRING,
@@ -449,8 +449,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-limits-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR limited_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR limited_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
@@ -485,7 +485,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'limited_guest' batch processing failed (branch {"tenant":"alpha"}, resource 'wasm_limited_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: <expected_error>
+      wasm processor 'limited_guest' batch processing failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_limited_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: <expected_error>
       """
     When http payload is posted to host "wasm-limits-{{test_id}}.example.com" path "/events"
       """
@@ -509,16 +509,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "state restore" failing WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_restoring_guest;
       UPLOAD RESOURCE wasm_restoring_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -530,8 +530,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-restore-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR limited_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR limited_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
@@ -568,7 +568,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'restoring_guest' batch processing failed (branch {"tenant":"alpha"}, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest exhausted MAX FUEL 100000
+      wasm processor 'restoring_guest' batch processing failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest exhausted MAX FUEL 100000
       """
     When http payload is posted to host "wasm-restore-{{test_id}}.example.com" path "/events"
       """
@@ -577,7 +577,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'restoring_guest' application state restoration failed (branch {"tenant":"alpha"}, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
+      wasm processor 'restoring_guest' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
       """
     When http payload is posted to host "wasm-restore-{{test_id}}.example.com" path "/events"
       """
@@ -590,7 +590,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'restoring_guest' application state restoration failed (branch {"tenant":"alpha"}, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
+      wasm processor 'restoring_guest' application state restoration failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_restoring_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_load_state', saved state revision 1): wasm guest rejected the application state in its saved snapshot: guest refuses its saved counters
       """
     And within "10s" the relay subscription receives payloads containing all fragments
       """
@@ -606,16 +606,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "initialization" failing WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_refusing_guest;
       UPLOAD RESOURCE wasm_refusing_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -627,8 +627,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-init-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR limited_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR limited_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
@@ -666,7 +666,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'refusing_guest' initialization failed (branch {"tenant":"init-refused"}, resource 'wasm_refusing_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_init'): wasm guest initialization failed: wasm guest reported global error: guest refuses its branch configuration
+      wasm processor 'refusing_guest' initialization failed (branch f505a5499591d0f12928e183f6c96c162e679705bc73095e70535685437a1630, resource 'wasm_refusing_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_init'): wasm guest initialization failed: wasm guest reported global error: guest refuses its branch configuration
       """
     And the last server error does not contain
       """
@@ -683,20 +683,86 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: WASM processor names a branch with a sensitive key by its fingerprint
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has "initialization" failing WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_refusing_guest;
+      UPLOAD RESOURCE wasm_refusing_guest VERSION '{{wasm_processor}}';
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA secret_input_event ( tenant STRING SENSITIVE, message STRING );
+      CREATE SCHEMA secret_output_event ( note STRING OPTIONAL );
+      CREATE WIRE JSON SCHEMA secret_input_wire MODE STRICT ( tenant string, message string );
+      CREATE CODEC secret_input_codec FROM WIRE JSON SCHEMA secret_input_wire TO SCHEMA secret_input_event;
+      CREATE SCHEMA secret_branch_key ( tenant STRING SENSITIVE );
+      CREATE BRANCH by_secret_tenant SCHEMA secret_branch_key TTL 5m;
+      CREATE RELAY secret_input_events SCHEMA secret_input_event BRANCHED BY by_secret_tenant;
+      CREATE RELAY secret_events SCHEMA secret_output_event BRANCHED BY by_secret_tenant;
+      CREATE VHOST edge wasm-secret-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR secret_source
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING secret_input_codec
+        TO secret_input_events
+        INHERIT ALL
+        BRANCHED BY by_secret_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR refusing_guest FROM secret_input_events
+        USING RESOURCE wasm_refusing_guest VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 1MiB
+        BRANCHED BY by_secret_tenant
+        TO secret_events
+        SET note = coalesce(note, "ok")
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to host "wasm-secret-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"init-refused","message":"refused"}
+      """
+    Then within "10s" the active session observes a server error
+    And the last server error contains
+      """
+      wasm processor 'refusing_guest' initialization failed (branch f505a5499591d0f12928e183f6c96c162e679705bc73095e70535685437a1630, resource 'wasm_refusing_guest' version 1 file 'processors/filter_even.wasm', export 'nervix_init'): wasm guest initialization failed: wasm guest reported global error: guest refuses its branch configuration
+      """
+    And the last server error does not contain
+      """
+      init-refused
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: WASM processor reports failed guest callbacks and state snapshots for one branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "<failure>" failing WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_failing_guest;
       UPLOAD RESOURCE wasm_failing_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA limited_input_event ( tenant STRING, message STRING );
       CREATE SCHEMA limited_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -708,8 +774,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY limited_events SCHEMA limited_output_event BRANCHED BY by_limited_tenant;
       CREATE VHOST edge wasm-callback-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR limited_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR limited_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING limited_input_codec
         TO limited_input_events
         INHERIT ALL
@@ -744,7 +810,7 @@ Feature: WASM processor runtime behavior
     Then within "10s" the active session observes a server error
     And the last server error contains
       """
-      wasm processor 'failing_guest' <stage> failed (branch {"tenant":"alpha"}, resource 'wasm_failing_guest' version 1 file 'processors/filter_even.wasm', export '<export>'): wasm guest <stage> failed: wasm guest reported global error: <reason>
+      wasm processor 'failing_guest' <stage> failed (branch 40238306d5ebf339fe640ae723e4705c5bb1743e39d0ec207ed8de19fead54b1, resource 'wasm_failing_guest' version 1 file 'processors/filter_even.wasm', export '<export>'): wasm guest <stage> failed: wasm guest reported global error: <reason>
       """
     When http payload is posted to host "wasm-callback-{{test_id}}.example.com" path "/events"
       """
@@ -769,16 +835,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_route_filter;
       UPLOAD RESOURCE wasm_route_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric_input (
         value I32,
@@ -820,8 +886,8 @@ Feature: WASM processor runtime behavior
         PATH '/metrics'
         TYPE HTTP;
 
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -882,16 +948,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_route_timing_filter;
       UPLOAD RESOURCE wasm_route_timing_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric (
         value I32
@@ -921,8 +987,8 @@ Feature: WASM processor runtime behavior
         PATH '/metrics'
         TYPE HTTP;
 
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1012,16 +1078,16 @@ Feature: WASM processor runtime behavior
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_filter_restart;
       UPLOAD RESOURCE wasm_filter_restart VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
 
 
@@ -1051,8 +1117,8 @@ Feature: WASM processor runtime behavior
         PATH '/metrics'
         TYPE HTTP;
 
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1087,7 +1153,7 @@ Feature: WASM processor runtime behavior
     Then the relay subscription does not receive a payload within "1500ms"
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -1120,22 +1186,22 @@ Feature: WASM processor runtime behavior
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-1;
       CORDON NODE node-3;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_counting_guest;
       UPLOAD RESOURCE wasm_counting_guest VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA counted_input_event ( tenant STRING, sequence I32 );
       CREATE SCHEMA counted_output_event ( tenant STRING OPTIONAL, note STRING OPTIONAL );
@@ -1147,8 +1213,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY counted_events SCHEMA counted_output_event BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR counted_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR counted_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING counted_input_codec
         TO counted_input_events
         INHERIT ALL
@@ -1170,7 +1236,7 @@ Feature: WASM processor runtime behavior
         ON GLOBAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-1;
       SHOW CLUSTER STATUS;
@@ -1180,7 +1246,7 @@ Feature: WASM processor runtime behavior
       - domain={{domain}} kind=wasm_processor name=counting_guest owner=node-2
       """
     And the last cluster status owner for scheduled "wasm_processor" "counting_guest" is saved as placeholder "former_owner"
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
       """
@@ -1228,7 +1294,7 @@ Feature: WASM processor runtime behavior
       key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
       """
     When node "node-2" is started
-    And these NSPL commands are executed on node "node-2"
+    And these Plexus commands are executed on node "node-2"
       """
       CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
       """
@@ -1271,16 +1337,16 @@ Feature: WASM processor runtime behavior
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_checkpointed_filter;
       UPLOAD RESOURCE wasm_checkpointed_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -1291,8 +1357,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1341,7 +1407,7 @@ Feature: WASM processor runtime behavior
       """
     Then within "10s" the active session observes a server error containing
       """
-      wasm processor 'filter_even_rows' state snapshot failed (branch {"tenant":"acme"}, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_dump_state'): wasm guest state snapshot failed: wasm guest reported global error: guest cannot serialize its state for value -400
+      wasm processor 'filter_even_rows' state snapshot failed (branch 0b81df3a911f3064575542ffb49387d11eb8958d1ba91bfeb77d99929d0c00c5, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_dump_state'): wasm guest state snapshot failed: wasm guest reported global error: guest cannot serialize its state for value -400
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
       """
@@ -1349,11 +1415,11 @@ Feature: WASM processor runtime behavior
       """
     Then within "10s" the active session observes a server error containing
       """
-      wasm processor 'filter_even_rows' batch processing failed (branch {"tenant":"beta"}, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest reported global error: guest error state for value -300
+      wasm processor 'filter_even_rows' batch processing failed (branch a55dd7bc3c92ed26aff8b1647f0451bd90f8b8e5ea415e490fba33d1c5a19cb9, resource 'wasm_checkpointed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_process_batch'): wasm guest batch processing failed: wasm guest reported global error: guest error state for value -300
       """
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -1393,16 +1459,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_timeout_filter;
       UPLOAD RESOURCE wasm_timeout_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
 
       CREATE SCHEMA metric ( value I32 );
@@ -1412,8 +1478,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1456,16 +1522,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "go" WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_go_filter;
       UPLOAD RESOURCE wasm_go_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
 
       CREATE SCHEMA metric ( value I32 );
@@ -1475,8 +1541,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1519,18 +1585,18 @@ Feature: WASM processor runtime behavior
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "rust" example WASM processor resource directory "rust_wasm_processor"
     And node "node-1" has "go" example WASM processor resource directory "go_wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE rust_wasm_filter;
       UPLOAD RESOURCE rust_wasm_filter VERSION '{{rust_wasm_processor}}';
       CREATE RESOURCE go_wasm_filter;
       UPLOAD RESOURCE go_wasm_filter VERSION '{{go_wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
 
       CREATE SCHEMA metric ( value I32 );
@@ -1541,8 +1607,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1613,18 +1679,18 @@ Feature: WASM processor runtime behavior
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "rust" example WASM processor resource directory "rust_wasm_processor"
     And node "node-1" has "go" example WASM processor resource directory "go_wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE rust_wasm_filter;
       UPLOAD RESOURCE rust_wasm_filter VERSION '{{rust_wasm_processor}}';
       CREATE RESOURCE go_wasm_filter;
       UPLOAD RESOURCE go_wasm_filter VERSION '{{go_wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
 
       CREATE SCHEMA metric ( value I32 );
@@ -1635,8 +1701,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY go_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1698,16 +1764,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has "rust" example WASM processor resource directory "rust_wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE rust_wasm_filter;
       UPLOAD RESOURCE rust_wasm_filter VERSION '{{rust_wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
 
       CREATE SCHEMA metric ( value I32 );
@@ -1717,8 +1783,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY rust_filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1755,16 +1821,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_filter_message_error;
       UPLOAD RESOURCE wasm_filter_message_error VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32 );
       CREATE SCHEMA error_record (
@@ -1781,8 +1847,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY error_stream SCHEMA error_record UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1831,16 +1897,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_filter_global_error;
       UPLOAD RESOURCE wasm_filter_global_error VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
@@ -1849,8 +1915,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1890,16 +1956,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_filter_error_state;
       UPLOAD RESOURCE wasm_filter_error_state VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
@@ -1908,8 +1974,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -1949,16 +2015,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has trapping WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_trapping_filter;
       UPLOAD RESOURCE wasm_trapping_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32 );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
@@ -1967,8 +2033,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -2009,16 +2075,16 @@ Feature: WASM processor runtime behavior
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has invalid WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_invalid_filter;
       UPLOAD RESOURCE wasm_invalid_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands fail with "wasm processor 'filter_even_rows' module compilation failed (resource 'wasm_invalid_filter' version 1 file 'processors/filter_even.wasm'): failed to compile wasm module"
+    And these Plexus commands fail with "wasm processor 'filter_even_rows' module compilation failed (resource 'wasm_invalid_filter' version 1 file 'processors/filter_even.wasm'): failed to compile wasm module"
       """
 
       CREATE SCHEMA metric ( value I32 );
@@ -2028,8 +2094,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -2056,20 +2122,85 @@ Feature: WASM processor runtime behavior
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario: Malformed WASM processor output reports a runtime error
+  Scenario Outline: A WASM processor output whose generated column <defect> reports a runtime error
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
-    And a 1 node nervix cluster is started
-    And node "node-1" has malformed-output WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has a WASM fixture generating a column that <defect> for relay "generated_metrics" in resource directory "wasm_processor"
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_overreaching_generator;
+      UPLOAD RESOURCE wasm_overreaching_generator VERSION '{{wasm_processor}}';
+      """
+    And these Plexus commands are executed on the leader node
+      """
+      CREATE SCHEMA metric ( value I64 );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+      CREATE RELAY generated_metrics SCHEMA metric UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR overreaching_generator FROM raw_metrics
+        USING RESOURCE wasm_overreaching_generator VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        UNBRANCHED
+        TO generated_metrics
+        SET value = value
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION generated_metrics_subscription TO generated_metrics;
+      START;
+      """
+    When http payload is posted to host "http-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":1}
+      """
+    Then within "10s" the active session observes a server error
+    And the last server error contains
+      """
+      WASM output group has invalid generated Arrow IPC: <reported>
+      """
+
+    Examples:
+      | cluster_size | defect                                        | reported                                                                            |
+      | 1            | reaches past its body                         | the IPC stream does not decode                                                      |
+      | 3            | reaches past its body                         | the IPC stream does not decode                                                      |
+      | 1            | is an integer of 7 bits                       | generated field 0 declares an integer of 7 bits, which no Nervix type is carried as |
+      | 3            | is an integer of 7 bits                       | generated field 0 declares an integer of 7 bits, which no Nervix type is carried as |
+      | 1            | counts a null its validity bitmap cannot hold | the IPC stream does not decode                                                      |
+      | 3            | counts a null its validity bitmap cannot hold | the IPC stream does not decode                                                      |
+      | 1            | declares a body longer than its stream        | the IPC stream does not decode                                                      |
+      | 3            | declares a body longer than its stream        | the IPC stream does not decode                                                      |
+
+  Scenario Outline: Malformed WASM processor output reports a runtime error
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has a WASM fixture emitting a <length> byte malformed envelope in resource directory "wasm_processor"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_malformed_filter;
       UPLOAD RESOURCE wasm_malformed_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
 
       CREATE SCHEMA metric ( value I32 );
@@ -2079,8 +2210,8 @@ Feature: WASM processor runtime behavior
       CREATE RELAY filtered_metrics SCHEMA metric UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
-      CREATE INGESTOR metric_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR metric_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO raw_metrics
         INHERIT ALL
@@ -2110,3 +2241,14 @@ Feature: WASM processor runtime behavior
       """
       wasm processor 'filter_even_rows' output emission failed (unbranched, resource 'wasm_malformed_filter' version 1 file 'processors/filter_even.wasm', export 'nervix_read_emit'): wasm guest batch processing failed: wasm guest emitted an output envelope the host cannot decode
       """
+
+    Examples:
+      | cluster_size | length |
+      | 1            | 1      |
+      | 1            | 4      |
+      | 1            | 8      |
+      | 1            | 11     |
+      | 3            | 1      |
+      | 3            | 4      |
+      | 3            | 8      |
+      | 3            | 11     |

@@ -1,17 +1,52 @@
 //! Schemas, wire schemas and user-defined functions: the typed field lists Models declare.
 
-use std::{collections::BTreeSet, fmt::Debug, str::FromStr};
+use std::{collections::BTreeSet, num::NonZeroU32, str::FromStr as _};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    AvroType, CreateAvroWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf, JsonType,
-    SchemaField, UdfArgument, UdfLanguage, UdfReturn, WireSchemaField, WireSchemaStrictness,
+    AvroType, CreateAvroWireSchema, CreateJsonWireSchema, CreateSchema, CreateUdf, FieldName,
+    JsonType, ParseAsType, SchemaField, UdfArgument, UdfLanguage, UdfReturn, WireSchemaField,
+    WireSchemaStrictness,
 };
 
-use crate::Arbitrary;
+use crate::{Arbitrary, text::GeneratedName};
 
 /// The most fields a generated schema or argument list declares.
 const FIELDS: usize = 5;
+
+/// One field of every declared type: each scalar, a list of it, and a fixed-length array of such
+/// lists at the shortest and the longest length, with the optional and sensitive flags cycling
+/// through their four combinations. A property that must carry every type on every run sends this
+/// list, so that no type is left to its random cases.
+pub fn fields_of_every_type() -> Vec<SchemaField> {
+    let mut fields = Vec::new();
+    for scalar in ParseAsType::scalar_variants() {
+        let list = ParseAsType::Vec {
+            element: Box::new(scalar.clone()),
+        };
+        let length = if fields.len().is_multiple_of(2) {
+            NonZeroU32::MIN
+        } else {
+            NonZeroU32::MAX
+        };
+        let array = ParseAsType::Array {
+            element: Box::new(list.clone()),
+            len: length,
+        };
+        for ty in [scalar.clone(), list, array] {
+            let position = fields.len();
+            let name = FieldName::from_str(&format!("field_{position}"))
+                .assured("a name of letters, an underscore and digits is a field name");
+            fields.push(SchemaField {
+                name,
+                ty,
+                optional: position % 2 == 1,
+                sensitive: position % 4 >= 2,
+            });
+        }
+    }
+    fields
+}
 
 const JSON_TYPES: [JsonType; 19] = [
     JsonType::String,
@@ -53,11 +88,41 @@ const AVRO_TYPES: [AvroType; 13] = [
 
 impl Arbitrary<'_> {
     /// Between `minimum` and `maximum` names, none repeated, in the order they were drawn.
-    pub fn distinct_names<N>(&mut self, minimum: usize, maximum: usize) -> Vec<N>
-    where
-        N: FromStr,
-        N::Err: Debug,
-    {
+    pub fn distinct_names<N: GeneratedName>(&mut self, minimum: usize, maximum: usize) -> Vec<N> {
+        self.distinct_names_refusing(minimum, maximum, &[])
+    }
+
+    /// Between `minimum` and `maximum` names, none repeated, that in the Plexus domain spell none of
+    /// `refused`, for a list whose position refuses more words than its kind of name does.
+    pub fn distinct_names_refusing<N: GeneratedName>(
+        &mut self,
+        minimum: usize,
+        maximum: usize,
+        refused: &[&str],
+    ) -> Vec<N> {
+        self.distinct_drawn(minimum, maximum, |arbitrary| {
+            arbitrary.name_text_refusing::<N>(refused)
+        })
+    }
+
+    /// Between `minimum` and `maximum` names, none repeated, as an expression or a route
+    /// construction writes them.
+    pub fn distinct_expression_names<N: GeneratedName>(
+        &mut self,
+        minimum: usize,
+        maximum: usize,
+    ) -> Vec<N> {
+        self.distinct_drawn(minimum, maximum, Self::expression_name_text::<N>)
+    }
+
+    /// Between `minimum` and `maximum` names whose text `draw` builds, none repeated, in the order
+    /// they were drawn.
+    fn distinct_drawn<N: GeneratedName>(
+        &mut self,
+        minimum: usize,
+        maximum: usize,
+        mut draw: impl FnMut(&mut Self) -> String,
+    ) -> Vec<N> {
         let extra = maximum
             .checked_sub(minimum)
             .assured("a list's minimum never exceeds its maximum");
@@ -67,7 +132,7 @@ impl Arbitrary<'_> {
         let mut seen = BTreeSet::new();
         let mut names = Vec::with_capacity(wanted);
         for _ in 0..wanted {
-            let drawn = self.name_text();
+            let drawn = draw(self);
             let text = if seen.contains(&drawn) {
                 Self::unused_name(&seen)
             } else {

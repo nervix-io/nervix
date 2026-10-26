@@ -10,6 +10,7 @@ mod fixtures;
 mod frames;
 mod impact;
 mod producers;
+mod properties;
 mod replies;
 mod requests;
 mod resources;

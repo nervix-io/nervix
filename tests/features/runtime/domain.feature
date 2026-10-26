@@ -2,11 +2,11 @@ Feature: Domain lifecycle
   Scenario Outline: Explicit transactions execute multiple commands as one request
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       BEGIN;
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
@@ -19,7 +19,7 @@ Feature: Domain lifecycle
       """
       quiesce level: DYNAMIC
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE RELAY notifications
       """
@@ -27,7 +27,7 @@ Feature: Domain lifecycle
       """
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 1;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       SHOW CREATE SCHEMA notification
       """
@@ -37,7 +37,7 @@ Feature: Domain lifecycle
         user_id I64
       );
       """
-    When this NSPL command request is executed on the leader node
+    When this Plexus command request is executed on the leader node
       """
       BEGIN;
       CREATE SCHEMA zip_code (
@@ -71,12 +71,12 @@ Feature: Domain lifecycle
   Scenario Outline: Domain commands isolate session context and drive a replicated clock
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 200ms SKEW 1s;
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -89,13 +89,13 @@ Feature: Domain lifecycle
         user_id I64
       );
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       START AT '2026-04-07T00:00:00Z' TIME RATE 4.0;
       """
     Then node "node-1" eventually reports status containing "{{domain}} status=Running"
     And node "node-1" eventually reports status containing "{{domain}} status=Running pace=PACED period=200ms skew=1s"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       STOP;
       """
@@ -110,12 +110,12 @@ Feature: Domain lifecycle
   Scenario Outline: Unpaced domains ingest without a domain clock
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -134,8 +134,8 @@ Feature: Domain lifecycle
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -153,7 +153,7 @@ Feature: Domain lifecycle
       """
     Then the relay subscription does not receive a payload within "1s"
     And node "node-1" eventually reports status containing "{{domain}} status=Stopped pace=UNPACED"
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       START;
       """
@@ -178,12 +178,12 @@ Feature: Domain lifecycle
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -197,14 +197,13 @@ Feature: Domain lifecycle
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -232,12 +231,12 @@ Feature: Domain lifecycle
   Scenario Outline: Stopped unpaced domains do not start implicitly from websocket traffic
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -256,8 +255,8 @@ Feature: Domain lifecycle
         ON edge
         PATH '/ws'
         TYPE WEBSOCKETS;
-        CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -285,7 +284,7 @@ Feature: Domain lifecycle
   Scenario Outline: Stopping without an active domain is rejected instead of aborting the request
     Given a <cluster_size> node nervix cluster is started
     And the active domain is ""
-    When these NSPL commands fail with "no active domain selected"
+    When these Plexus commands fail with "no active domain selected"
       """
       STOP
       """

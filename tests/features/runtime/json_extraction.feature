@@ -2,11 +2,11 @@ Feature: Typed JSON extraction
   Scenario Outline: JSON_VALUE reads declared scalar and collection types from one document
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_event (
         id STRING,
@@ -40,8 +40,8 @@ Feature: Typed JSON extraction
       CREATE RELAY extraction_errors SCHEMA extraction_error UNBRANCHED;
       CREATE VHOST edge json-extraction-{{test_id}}.example.com;
       CREATE ENDPOINT event_ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR event_source
-        FROM ENDPOINT event_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR event_source
+        FROM event_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_event_batch_codec
         TO raw_events
           INHERIT ALL
@@ -98,11 +98,11 @@ Feature: Typed JSON extraction
   Scenario Outline: Strict extraction names each defect and TRY_JSON_VALUE yields a typed null
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA raw_document (
         id STRING,
@@ -137,8 +137,8 @@ Feature: Typed JSON extraction
       CREATE RELAY reading_errors SCHEMA reading_error UNBRANCHED;
       CREATE VHOST edge json-defects-{{test_id}}.example.com;
       CREATE ENDPOINT document_ingress ON edge PATH '/documents' TYPE HTTP;
-      CREATE INGESTOR document_source
-        FROM ENDPOINT document_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR document_source
+        FROM document_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_document_batch_codec
         TO raw_documents
           INHERIT ALL
@@ -210,11 +210,11 @@ Feature: Typed JSON extraction
   Scenario Outline: A conditional arm reads only the documents of the messages that select it
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA routed_document (
         id STRING,
@@ -239,8 +239,8 @@ Feature: Typed JSON extraction
       CREATE RELAY routed_errors SCHEMA routed_error UNBRANCHED;
       CREATE VHOST edge json-arms-{{test_id}}.example.com;
       CREATE ENDPOINT routed_ingress ON edge PATH '/routed-documents' TYPE HTTP;
-      CREATE INGESTOR routed_document_source
-        FROM ENDPOINT routed_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR routed_document_source
+        FROM routed_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING routed_document_batch_codec
         TO routed_documents
           INHERIT ALL
@@ -287,7 +287,7 @@ Feature: Typed JSON extraction
 
   Scenario Outline: A JSON extraction keeps the type and sensitivity contract of its statement
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands fail with "<error>"
+    When these Plexus commands fail with "<error>"
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA raw_document (

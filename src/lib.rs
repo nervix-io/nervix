@@ -7,7 +7,7 @@
 //!   coordinating the cluster, and serving the session, HTTP, cluster and metrics surfaces. It is
 //!   the composition root, and the only crate that names every connector.
 //! - **Depends on.** The vocabulary, the engines, and the language layer at its session edge alone.
-//! - **Must not know.** NSPL syntax outside the session adapter, and the harnesses that drive it.
+//! - **Must not know.** Plexus syntax outside the session adapter, and the harnesses that drive it.
 //!   Nothing sits above this crate, so its only boundaries are the ones its modules declare.
 //!
 //! Connectors follow one rule. A connector crate is an engine driven by this crate's data plane,
@@ -21,6 +21,14 @@
 //! its own crate under `crates/connectors/` behind the `nervix-connector` contract, leaving this
 //! crate to compose them. Until then the module headers are where the boundary is written down.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "server composition defaults to coordination; modules declare their inner or \
+                  edge boundary"
+    )
+)]
 #![recursion_limit = "256"]
 
 #[cfg(all(feature = "testing", not(debug_assertions)))]
@@ -30,6 +38,11 @@ compile_error!(
 );
 
 pub mod application;
+#[cfg(test)]
+mod archive_allocation_tests;
+pub mod capacity;
+#[cfg(test)]
+mod captured_logs;
 pub mod cluster;
 mod domain_clock_authority;
 mod emitter_execution_plan;
@@ -51,7 +64,10 @@ pub mod subscription_row;
 pub(crate) mod task_shutdown;
 
 #[cfg(feature = "testing")]
-pub use fault_injection::{FaultInjection, WasmCheckpointWindow, WasmStateResetRequestError};
+pub use fault_injection::{
+    BackupCutBoundary, DomainResumeBoundary, FaultInjection, ModelPublicationRefusalKind,
+    StandaloneTransactionBoundary, WasmCheckpointWindow, WasmStateResetRequestError,
+};
 #[cfg(feature = "testing")]
 pub use registry::SchedulerMode;
 

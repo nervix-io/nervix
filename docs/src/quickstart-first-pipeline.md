@@ -1,5 +1,7 @@
 # Your First Pipeline: Kafka To Redis
 
+*Plexus, the Nervix graph definition language.*
+
 The first graph is deliberately trivial: JSON order records arrive on a Kafka topic, Nervix
 decodes them, and an emitter publishes them to a Redis Pub/Sub channel. Along the way you meet
 every building block that later steps reuse: domains, schemas, codecs, relays, clients, ingestors,
@@ -19,7 +21,7 @@ docker exec broker /opt/kafka/bin/kafka-topics.sh \
 Every entity in Nervix lives in an explicit domain — there is no implicit default. Open
 `nervix-cli` and create one, then switch the session to it:
 
-```nspl
+```plexus
 CREATE UNPACED DOMAIN quickstart;
 
 USE quickstart;
@@ -33,9 +35,9 @@ client-local statement that scopes the rest of your session to the domain.
 
 Submitting more than one model statement at a time requires a transaction, and it is also how a
 graph is assembled atomically — nothing takes effect until `COMMIT;`. See
-[NSPL Overview](nspl-overview.md) for the statement surface.
+[Plexus Overview](plexus-overview.md) for the statement surface.
 
-```nspl
+```plexus
 BEGIN;
 ```
 
@@ -48,7 +50,7 @@ The internal schema is exact-typed; the wire schema describes the JSON payload i
 format's own type names; the codec bridges the two. See
 [Schemas And Codecs](schemas-and-codecs.md#internal-schemas).
 
-```nspl
+```plexus
 CREATE SCHEMA order_record (
   order_id STRING,
   customer STRING,
@@ -81,7 +83,7 @@ Nervix, so the codec is the only place where wire values become typed internal v
 Relays are the named streams that connect runtime nodes. Each relay carries records of exactly one
 schema. See [Streams And State](relay.md).
 
-```nspl
+```plexus
 CREATE RELAY orders SCHEMA order_record UNBRANCHED;
 ```
 
@@ -94,15 +96,13 @@ Connection endpoints never live on ingestors or emitters; they are named `CLIENT
 nodes reference. Kafka client config is passed through to the Kafka driver, so
 `bootstrap.servers` uses its familiar key.
 
-```nspl
-CREATE CLIENT kafka_local
-  TYPE KAFKA
+```plexus
+CREATE KAFKA CLIENT kafka_local
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9092'
   };
 
-CREATE CLIENT redis_local
-  TYPE REDIS
+CREATE REDIS CLIENT redis_local
   POOL SIZE MIN 1 MAX 4
   CONFIG {
     'addr' = 'redis://127.0.0.1:6379/'
@@ -114,11 +114,11 @@ CREATE CLIENT redis_local
 An ingestor brings external data into the graph. It decodes each payload with the codec and routes
 the result to a relay:
 
-```nspl
-CREATE INGESTOR kafka_orders
-  FROM KAFKA kafka_local
-  TOPIC orders
-  OFFSET BY CONSUMER GROUP quickstart
+```plexus
+CREATE KAFKA TOPIC INGESTOR kafka_orders
+  FROM kafka_local
+  TOPIC 'orders'
+  OFFSET BY CONSUMER GROUP 'quickstart'
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING order_codec
   TO orders
@@ -131,6 +131,9 @@ CREATE INGESTOR kafka_orders
 
 Reading top to bottom:
 
+- `KAFKA TOPIC INGESTOR` names the connector and the entity the ingestor reads. `FROM` names the
+  `KAFKA CLIENT`, and the topic and consumer group are string literals sent to Kafka exactly
+  as written.
 - `OFFSET BY CONSUMER GROUP` tracks progress in Kafka; `MODE ACK SEQUENTIAL` acknowledges records
   in order. The full Kafka source grammar is in
   [Supported Ingestor Types](ingestors.md#supported-ingestor-types).
@@ -141,19 +144,19 @@ Reading top to bottom:
   `FLUSH IMMEDIATE`. There are no hidden defaults.
 - `ON MESSAGE ERROR LOG` is the route's per-record error policy;
   `ON GENERAL ERROR LOG` is the node-wide policy
-  ([Runtime Node Error Policies](nspl-overview.md#runtime-node-error-policies)).
+  ([Runtime Node Error Policies](plexus-overview.md#runtime-node-error-policies)).
 
 ## Emit To Redis
 
 An emitter drains a relay out of the graph. The Redis integration is Pub/Sub
-([Supported Emitter Sinks](emitters.md#supported-emitter-sinks)), and the same codec that decoded
+([Supported Emitter Emitters](emitters.md#supported-emitter-emitters)), and the same codec that decoded
 the input encodes it back to JSON:
 
-```nspl
-CREATE EMITTER redis_orders
+```plexus
+CREATE REDIS PUBSUB EMITTER redis_orders
   FROM orders
-  TO REDIS PUBSUB redis_local CHANNEL orders_out
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_local CHANNEL 'orders_out'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -161,7 +164,7 @@ CREATE EMITTER redis_orders
   ON GENERAL ERROR LOG;
 ```
 
-Redis Pub/Sub exposes no delivery confirmation, so `MODE NO_ACK` names server acceptance as the
+Redis Pub/Sub exposes no delivery confirmation, so `MODE NO ACK` names server acceptance as the
 publish boundary. The required retry policy paces connection and other infrastructure failures;
 it does not turn subscriber presence into an acknowledgment.
 
@@ -171,7 +174,7 @@ it does not turn subscriber presence into an acknowledgment.
 Nothing processes data yet — that is the job of `START;`, the domain lifecycle command that begins
 actual work ([Start And Stop](domains-and-time.md#start-and-stop)):
 
-```nspl
+```plexus
 COMMIT;
 
 START;
@@ -179,7 +182,7 @@ START;
 
 ## The Complete Script
 
-```nspl
+```plexus
 CREATE UNPACED DOMAIN quickstart;
 
 USE quickstart;
@@ -208,23 +211,21 @@ CREATE CODEC order_codec
 
 CREATE RELAY orders SCHEMA order_record UNBRANCHED;
 
-CREATE CLIENT kafka_local
-  TYPE KAFKA
+CREATE KAFKA CLIENT kafka_local
   CONFIG {
     'bootstrap.servers' = '127.0.0.1:9092'
   };
 
-CREATE CLIENT redis_local
-  TYPE REDIS
+CREATE REDIS CLIENT redis_local
   POOL SIZE MIN 1 MAX 4
   CONFIG {
     'addr' = 'redis://127.0.0.1:6379/'
   };
 
-CREATE INGESTOR kafka_orders
-  FROM KAFKA kafka_local
-  TOPIC orders
-  OFFSET BY CONSUMER GROUP quickstart
+CREATE KAFKA TOPIC INGESTOR kafka_orders
+  FROM kafka_local
+  TOPIC 'orders'
+  OFFSET BY CONSUMER GROUP 'quickstart'
   MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
   ON QUIESCE SUSPEND DECODE USING order_codec
   TO orders
@@ -234,10 +235,10 @@ CREATE INGESTOR kafka_orders
     ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 
-CREATE EMITTER redis_orders
+CREATE REDIS PUBSUB EMITTER redis_orders
   FROM orders
-  TO REDIS PUBSUB redis_local CHANNEL orders_out
-    MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  TO redis_local CHANNEL 'orders_out'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
     ENCODE USING order_codec
   INHERIT ALL
   FLUSH EACH 100ms MAX BATCH SIZE 1MiB

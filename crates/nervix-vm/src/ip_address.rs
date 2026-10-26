@@ -7,8 +7,16 @@
 //!   with fixed-width integer operations.
 //! - **Depends on.** Arrow binary, string and primitive columns, the standard library's address
 //!   parsers and formatters, and the VM's row errors.
-//! - **Must not know.** NSPL syntax, routes, schemas or connectors. It never resolves a name or
+//! - **Must not know.** Plexus syntax, routes, schemas or connectors. It never resolves a name or
 //!   reaches the network.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
 
 use std::{
     fmt::Write as _,
@@ -281,6 +289,14 @@ impl FromStr for IpNetwork {
 
 /// Why text is not a network in CIDR notation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "CIDR conversion defects are semantic input outcomes reported on their selected \
+                  row"
+    )
+)]
 pub enum NetworkDefect {
     #[error("is not written as address/prefix")]
     NotAddressAndPrefix,

@@ -12,14 +12,14 @@ Feature: Emitter batch payloads through acknowledgements and retries
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "retried_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "retried_out_{{test_id}}" exists with 1 partitions
     And Kafka topic "retried_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event ( seq I64, error_code STRING );
@@ -29,13 +29,13 @@ Feature: Emitter batch payloads through acknowledgements and retries
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_events
-        FROM KAFKA kafka_main TOPIC retried_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP retried_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_events
+        FROM kafka_main TOPIC 'retried_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'retried_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING ingest_codec
         TO events
@@ -44,8 +44,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER retried FROM events
-        TO KAFKA kafka_main TOPIC retried_out_{{test_id}}
+      CREATE ATTACHED KAFKA TOPIC EMITTER retried FROM events
+        TO kafka_main TOPIC 'retried_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 3s MAX 3s
           ENCODE USING event_codec
         INHERIT ALL
@@ -62,7 +62,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
     # The broker confirms the first payload and stops answering: the emitter never learns whether
     # the next two landed. The retry waits three seconds, longer than the source's one-second ACK
     # TIMEOUT, so the source keeps its message only while the emitter keeps its members alive.
-    When the sink of emitter "retried" stalls after resolving 1 record of its next publish
+    When the emitter of emitter "retried" stalls after resolving 1 record of its next publish
     And Kafka message is published to topic "retried_in_{{test_id}}"
       """
       [{"seq":1,"note":"a"},{"seq":2,"note":"b"},{"seq":3,"note":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},{"seq":4,"note":"d"},{"seq":5,"note":"e"},{"seq":6,"note":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},{"seq":7,"note":"g"},{"seq":8,"note":"h"}]
@@ -96,14 +96,14 @@ Feature: Emitter batch payloads through acknowledgements and retries
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "detached_retried_in_{{test_id}}" exists with 1 partitions
     And Kafka topic "detached_retried_out_{{test_id}}" exists with 1 partitions
     And Kafka topic "detached_retried_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
@@ -111,13 +111,13 @@ Feature: Emitter batch payloads through acknowledgements and retries
         WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_main CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR kafka_events
-        FROM KAFKA kafka_main TOPIC detached_retried_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP detached_retried_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR kafka_events
+        FROM kafka_main TOPIC 'detached_retried_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'detached_retried_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING ingest_codec
         TO events
@@ -126,8 +126,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED EMITTER detached_retried FROM events
-        TO KAFKA kafka_main TOPIC detached_retried_out_{{test_id}}
+      CREATE DETACHED KAFKA TOPIC EMITTER detached_retried FROM events
+        TO kafka_main TOPIC 'detached_retried_out_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 10s MAX 10s
           ENCODE USING event_codec
         INHERIT ALL
@@ -138,7 +138,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
       START;
       """
     Then Kafka consumer group "detached_retried_group_{{test_id}}" eventually has 1 consumers
-    When the sink of emitter "detached_retried" stalls after resolving 0 records of its next publish
+    When the emitter of emitter "detached_retried" stalls after resolving 0 records of its next publish
     And Kafka message is published to topic "detached_retried_in_{{test_id}}"
       """
       [{"seq":1,"note":"a"},{"seq":2,"note":"b"}]
@@ -167,13 +167,13 @@ Feature: Emitter batch payloads through acknowledgements and retries
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "refused_{{test_id}}" exists with 1 partitions
     And Kafka topic "refused_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64, note STRING );
       CREATE SCHEMA rejected_event (
@@ -190,8 +190,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
       CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
       CREATE VHOST edge refused-{{test_id}}.example.com;
       CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR http_events
-        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_events
+        FROM events_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO events
         INHERIT ALL
@@ -199,12 +199,12 @@ Feature: Emitter batch payloads through acknowledgements and retries
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_small_messages TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_small_messages CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'message.max.bytes' = '1000'
       };
-      CREATE EMITTER refused FROM events
-        TO KAFKA kafka_small_messages TOPIC refused_{{test_id}}
+      CREATE KAFKA TOPIC EMITTER refused FROM events
+        TO kafka_small_messages TOPIC 'refused_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
           ENCODE USING event_codec
         INHERIT ALL
@@ -246,12 +246,12 @@ Feature: Emitter batch payloads through acknowledgements and retries
     Given MongoDB is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And MongoDB collection "retried_mongodb_{{test_id}}" rejecting poison actions exists
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification ( user_id I64, action STRING );
       CREATE SCHEMA emitter_error ( error_code STRING, source_user_id I64 );
@@ -261,8 +261,8 @@ Feature: Emitter batch payloads through acknowledgements and retries
       CREATE RELAY emitter_errors SCHEMA emitter_error UNBRANCHED;
       CREATE VHOST edge mongodb-retried-{{test_id}}.example.com;
       CREATE ENDPOINT notifications_endpoint ON edge PATH '/notifications' TYPE HTTP;
-      CREATE INGESTOR http_notifications
-        FROM ENDPOINT notifications_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING ingest_codec
         TO notifications
         INHERIT ALL
@@ -270,18 +270,16 @@ Feature: Emitter batch payloads through acknowledgements and retries
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT mongodb_client TYPE MONGODB POOL SIZE MIN 2 MAX 8 CONFIG {
+      CREATE MONGODB CLIENT mongodb_client POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = '{{mongodb_addr}}',
         'database' = 'nervix'
       };
-      CREATE EMITTER to_mongodb FROM notifications
-        TO MONGODB mongodb_client INSERT TO COLLECTION retried_mongodb_{{test_id}}
-        VALUES {
+      CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications
+        TO mongodb_client COLLECTION 'retried_mongodb_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s VALUES {
           "mongodb_user_id" = input.user_id,
           "mongodb_action" = LOWER(input.action)
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
-        BATCH MAX MESSAGES 10 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 10 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO emitter_errors
           SET error_code = error.code,
@@ -293,7 +291,7 @@ Feature: Emitter batch payloads through acknowledgements and retries
     # MongoDB answers for every document of the bulk write, but the emitter learns only the answers
     # for the first two: the delivered first document and the poison document it rejected. The two
     # documents whose answers were lost are the only ones written again.
-    When the sink of emitter "to_mongodb" stalls after resolving 2 records of its next publish
+    When the emitter of emitter "to_mongodb" stalls after resolving 2 records of its next publish
     And http payload is posted to host "mongodb-retried-{{test_id}}.example.com" path "/notifications"
       """
       [{"user_id":1,"action":"HEALTHY_A"},{"user_id":2,"action":"POISON"},{"user_id":3,"action":"HEALTHY_B"},{"user_id":4,"action":"HEALTHY_C"}]

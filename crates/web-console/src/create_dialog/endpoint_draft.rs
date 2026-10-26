@@ -6,6 +6,11 @@
 //! - **Depends on.** Current endpoint Models and typed selected references.
 //! - **Must not know.** Listener routing or WebSocket handshake execution.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_models::{
@@ -130,12 +135,16 @@ pub(super) enum EndpointDraftError {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         CreateStatement, EndpointType, Model, ModelKind, ModelName, NodeRef, Statement,
     };
-    use nervix_nspl::client_statement::{ClientStatement, parse_client_statement};
+    use nervix_plexus::client_statement::{ClientStatement, parse_client_statement};
 
     use super::{EndpointDraft, EndpointDraftError};
 
@@ -172,7 +181,7 @@ mod tests {
             Box::new(Model::Endpoint(endpoint)),
             false,
         ));
-        let source = statement.to_canonical_nspl().assured("endpoint renders");
+        let source = statement.to_canonical_plexus().assured("endpoint renders");
         assert!(source.contains("TYPE WEBSOCKETS WITH SIGNALING PROTOCOL handshake"));
         assert_eq!(
             parse_client_statement(&source).assured("endpoint parses"),

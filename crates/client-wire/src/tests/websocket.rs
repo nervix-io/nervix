@@ -2,14 +2,22 @@
 
 use bytes::Bytes;
 use meticulous::ResultExt as _;
+use nervix_models::{ArchiveDigest, RestoreArchive};
 
 use super::{
-    fixtures::{checked, limits, request, settings, size},
-    samples::client_messages,
+    fixtures::{checked, limits, non_zero, reference, request, settings, size},
+    samples::{client_messages, command_outcome},
 };
 use crate::{
-    ClientMessage, ClientRequest, ServerMessage, SessionLimitSettings,
-    websocket::{ClientWebSocketCodec, ServerWebSocketCodec, WebSocketData, WebSocketError},
+    BackupArchiveStart, BackupDownloadMessage, BackupDownloadRequest, ClientMessage, ClientRequest,
+    CommandDisposition, RestoreDisposition, RestoreMessage, RestoreReply, RestoreStart,
+    ServerMessage, SessionLimitSettings,
+    restore::RestoreChunk,
+    websocket::{
+        ClientBackupDownloadWebSocketCodec, ClientRestoreWebSocketCodec, ClientWebSocketCodec,
+        ServerBackupDownloadWebSocketCodec, ServerRestoreWebSocketCodec, ServerWebSocketCodec,
+        WebSocketData, WebSocketError,
+    },
 };
 
 #[test]
@@ -96,4 +104,106 @@ fn non_frame_messages_end_the_connection_with_a_close_code() {
         .decode(WebSocketData::Binary(payload))
         .expect_err("a message above the frame limit");
     assert_eq!(WebSocketError::close_code(&error), 1009);
+}
+
+#[test]
+fn a_console_download_carries_its_request_and_its_answer_one_frame_per_message() {
+    let console = ClientBackupDownloadWebSocketCodec::new(limits());
+    let server = ServerBackupDownloadWebSocketCodec::new(limits());
+    let request = BackupDownloadRequest {
+        execution_reference: reference("0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44"),
+    };
+    let payload = console.encode(request.encode(&limits()).assured("a request fits"));
+    let frame = server
+        .decode(WebSocketData::Binary(payload))
+        .assured("the request decodes on the server");
+    assert_eq!(
+        BackupDownloadRequest::decode(&frame).assured("the request frame decodes"),
+        request
+    );
+
+    let start = BackupArchiveStart {
+        total_bytes: non_zero(6),
+        digest: ArchiveDigest::from_bytes([7; 32]),
+    };
+    let answer = [
+        BackupDownloadMessage::encode_start(&start, &limits()).assured("a start fits"),
+        BackupDownloadMessage::encode_chunk(b"bytes!", &limits()).assured("a chunk fits"),
+        BackupDownloadMessage::encode_complete(&limits()).assured("a completion fits"),
+    ];
+    let mut received = Vec::new();
+    for frame in answer {
+        let frame = console
+            .decode(WebSocketData::Binary(server.encode(frame)))
+            .assured("every answer frame decodes in the console");
+        received.push(BackupDownloadMessage::decode(&frame).assured("the frame decodes"));
+    }
+    assert!(matches!(&received[0], BackupDownloadMessage::Start(decoded) if *decoded == start));
+    assert!(
+        matches!(&received[1], BackupDownloadMessage::Chunk(chunk) if chunk.bytes() == b"bytes!")
+    );
+    assert!(matches!(&received[2], BackupDownloadMessage::Complete));
+}
+
+#[test]
+fn a_console_restore_carries_its_stream_and_its_reply_one_frame_per_message() {
+    let console = ClientRestoreWebSocketCodec::new(limits());
+    let server = ServerRestoreWebSocketCodec::new(limits());
+    let start = RestoreStart {
+        request_id: request(1),
+        execution_reference: reference("0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44"),
+        statement: "RESTORE DOMAIN tenant AS tenant_copy FROM 'tenant.nvxb' DRY RUN;".to_string(),
+        archive: RestoreArchive {
+            total_bytes: non_zero(6),
+            digest: ArchiveDigest::from_bytes([5; 32]),
+        },
+    };
+    let stream = [
+        start.encode(&limits()).assured("a start fits"),
+        RestoreChunk::encode(b"tenant", &limits()).assured("a chunk fits"),
+    ];
+    let mut received = Vec::new();
+    for frame in stream {
+        let frame = server
+            .decode(WebSocketData::Binary(console.encode(frame)))
+            .assured("every restore frame decodes on the server");
+        received.push(RestoreMessage::decode(&frame).assured("the frame decodes"));
+    }
+    assert!(matches!(&received[0], RestoreMessage::Start(decoded) if *decoded == start));
+    assert!(matches!(&received[1], RestoreMessage::Chunk(chunk) if chunk.bytes() == b"tenant"));
+
+    let reply = RestoreReply {
+        request_id: Some(request(1)),
+        disposition: RestoreDisposition::Outcome(Box::new(command_outcome(
+            CommandDisposition::Failed,
+        ))),
+    };
+    let payload = server.encode(reply.encode(&limits()).assured("a reply fits"));
+    let frame = console
+        .decode(WebSocketData::Binary(payload))
+        .assured("the reply decodes in the console");
+    assert_eq!(
+        RestoreReply::decode(&frame).assured("the reply frame decodes"),
+        reply
+    );
+}
+
+#[test]
+fn each_console_websocket_refuses_the_frames_of_another_call() {
+    let session = ClientWebSocketCodec::new(limits());
+    let session_payload = session.encode(
+        client_messages()[0]
+            .encode(&limits())
+            .assured("a request fits"),
+    );
+    let download = ServerBackupDownloadWebSocketCodec::new(limits());
+    let error = download
+        .decode(WebSocketData::Binary(session_payload.clone()))
+        .expect_err("a session frame is not a download request");
+    assert_eq!(WebSocketError::close_code(&error), 1007);
+    let restore = ServerRestoreWebSocketCodec::new(limits());
+    let error = restore
+        .decode(WebSocketData::Binary(session_payload))
+        .expect_err("a session frame is not a restore frame");
+    assert_eq!(WebSocketError::close_code(&error), 1007);
 }

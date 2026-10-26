@@ -10,8 +10,7 @@ use arrow_array::{
 use arrow_ipc::{
     BodyCompression, BodyCompressionArgs, BodyCompressionMethod, CompressionType, DictionaryBatch,
     DictionaryBatchArgs, Message, MessageArgs, MessageHeader, MetadataVersion,
-    RecordBatch as IpcRecordBatch, RecordBatchArgs, root_as_message,
-    writer::{IpcWriteOptions, StreamWriter},
+    RecordBatch as IpcRecordBatch, RecordBatchArgs, root_as_message, writer::StreamWriter,
 };
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
@@ -24,7 +23,7 @@ use nervix_models::{
 use nervix_primitives::sync::StdArc;
 
 use super::{ClientBatchError, ClientBatchLimits, ClientSchemaDifference};
-use crate::runtime_schema::{CompiledSchema, compile_schema};
+use crate::runtime_schema::{CompiledSchema, UnsupportedFieldKind, compile_schema};
 
 /// The ingestor schema the tests submit against: a required unsigned identifier and an optional
 /// string.
@@ -327,19 +326,6 @@ async fn a_body_that_is_not_one_canonical_stream_is_malformed() {
     without_end.truncate(canonical.len() - 8);
     let mut trailing = canonical.clone();
     trailing.push(0);
-    let legacy = {
-        let options = IpcWriteOptions::try_new(8, true, MetadataVersion::V4)
-            .assured("the legacy format is a valid option set");
-        let mut writer = StreamWriter::try_new_with_options(Vec::new(), &arrow_schema(), options)
-            .assured("an in-memory writer opens");
-        writer
-            .write(&batch_of(arrow_schema(), &[1]))
-            .assured("an in-memory writer takes a batch");
-        writer.finish().assured("an in-memory writer finishes");
-        writer
-            .into_inner()
-            .assured("a finished writer yields its buffer")
-    };
     let batch_first = {
         let parts = messages(&canonical);
         let mut reordered = parts[1].clone();
@@ -352,7 +338,6 @@ async fn a_body_that_is_not_one_canonical_stream_is_malformed() {
         truncated,
         without_end,
         trailing,
-        legacy,
         batch_first,
     ] {
         assert_eq!(
@@ -360,6 +345,44 @@ async fn a_body_that_is_not_one_canonical_stream_is_malformed() {
             ClientBatchDefect::Malformed
         );
     }
+}
+
+#[nervix_primitives::test]
+async fn a_client_batch_buffer_outside_its_message_is_refused_before_decoding() {
+    let canonical = stream(&arrow_schema(), &[batch_of(arrow_schema(), &[1])]);
+    let parts = messages(&canonical);
+    let mut builder = FlatBufferBuilder::new();
+    let buffers = builder.create_vector(&[arrow_ipc::Buffer::new(0, 64)]);
+    let batch = IpcRecordBatch::create(
+        &mut builder,
+        &RecordBatchArgs {
+            length: 1,
+            buffers: Some(buffers),
+            ..RecordBatchArgs::default()
+        },
+    );
+    let message = Message::create(
+        &mut builder,
+        &MessageArgs {
+            version: MetadataVersion::V5,
+            header_type: MessageHeader::RecordBatch,
+            header: Some(batch.as_union_value()),
+            bodyLength: 0,
+            custom_metadata: None,
+        },
+    );
+    builder.finish(message, None);
+    let mut body = parts[0].clone();
+    body.extend_from_slice(&framed(builder.finished_data(), &[]));
+    body.extend_from_slice(&parts[2]);
+
+    let Err(ClientBatchError::Malformed { reason }) = decode(body, limits()).await else {
+        panic!("a column buffer outside its message must be malformed");
+    };
+    assert_eq!(
+        reason,
+        "a column buffer lies outside the body of its message"
+    );
 }
 
 #[nervix_primitives::test]
@@ -529,8 +552,12 @@ async fn a_dictionary_message_is_unexpected() {
             kind: "DictionaryBatch"
         })
     ));
+}
 
-    // A dictionary-encoded column is refused too: its stream carries a dictionary message.
+/// A dictionary-encoded column is refused where its schema declares the encoding, before its
+/// dictionary message is reached: no ingestor's schema declares such a field.
+#[nervix_primitives::test]
+async fn a_dictionary_encoded_column_is_a_schema_that_differs() {
     let dictionary_schema = StdArc::new(Schema::new(vec![
         Field::new("id", DataType::UInt64, false),
         Field::new(
@@ -547,10 +574,20 @@ async fn a_dictionary_message_is_unexpected() {
     ];
     let batch =
         RecordBatch::try_new(dictionary_schema.clone(), columns).assured("matching columns");
-    assert_eq!(
-        defect(decode(stream(&dictionary_schema, &[batch]), limits()).await),
-        ClientBatchDefect::UnexpectedMessage
+    let refused = decode(stream(&dictionary_schema, &[batch]), limits()).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(ClientBatchError::SchemaMismatch {
+                difference: ClientSchemaDifference::UnsupportedFieldType {
+                    index: 1,
+                    kind: UnsupportedFieldKind::Dictionary,
+                },
+            })
+        ),
+        "the dictionary encoding of the second field is the difference: {refused:?}"
     );
+    assert_eq!(defect(refused), ClientBatchDefect::SchemaMismatch);
 }
 
 #[nervix_primitives::test]

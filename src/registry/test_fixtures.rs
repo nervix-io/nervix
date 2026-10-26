@@ -1,3 +1,10 @@
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "test fixture construction remains outside product execution"
+    )
+)]
 //! Fixtures the registry's unit tests share.
 //!
 //! A fixture lives here only when tests in more than one registry module build the
@@ -10,19 +17,20 @@ use std::{fs, num::NonZeroU64, path::PathBuf};
 use nervix_models::{
     AckMode, Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BranchSelection,
     ClientConfigEntry, ClientName, CodecEncoding, CodecEncodingRule, CodecJaqFormat,
-    CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat, ConsumerGroupName,
+    CodecJaqTransformations, CodecName, CodecProtobufConfig, CodecWireFormat,
     CorrelationTimeoutAction, CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch,
     CreateClientKafka, CreateClientSyslog, CreateCodec, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
     CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWasmProcessor, CreateWindowProcessor,
-    CreateWireSchema, DeduplicatorName, DomainName, DomainSchedule, EmitSink, EmitterName,
-    EmitterPublishingMode, EndpointName, ErrorPolicies, Expression, FieldName, FieldReference,
-    FieldScope, FlushPolicy, GeneralErrorPolicy, IngestSource, Inheritance, JsonType, JunctionName,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, Model, ModelIndex,
-    ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, PlacementPolicy, ProcessorInputs,
-    ProcessorOutputs, ReingestorName, RelayBranching, RelayName, ResolvedBranching, RetryPolicy,
-    ScheduledNode, ScheduledNodes, SchemaField, SchemaFingerprint, SchemaName,
-    SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, TopicName,
+    CreateWireSchema, DeduplicatorName, DomainName, DomainSchedule, EmitterEntity, EmitterName,
+    EndpointName, ErrorPolicies, Expression, FieldName, FieldReference, FieldScope, FlushPolicy,
+    GeneralErrorPolicy, IngestorEntity, Inheritance, JsonType, JunctionName, KafkaConfigEntry,
+    KafkaConsumerGroupName, KafkaEmitter, KafkaIngestMode, KafkaIngestor, KafkaOffsetMode,
+    KafkaTopicEmitter, KafkaTopicIngestor, KafkaTopicName, MaterializedRelayState, Model,
+    ModelIndex, ModelKind, ModelName, NodeRef, OutputBranch, ParseAsType, PlacementPolicy,
+    ProcessorInputs, ProcessorOutputs, ReingestorName, RelayBranching, RelayName,
+    ResolvedBranching, RetryPolicy, ScheduledNode, ScheduledNodes, SchemaField, SchemaFingerprint,
+    SchemaName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
     VhostName, WindowBound, WindowProcessorName, WireSchemaField, WireSchemaName,
 };
 use nonzero_ext::nonzero;
@@ -363,10 +371,16 @@ pub(in crate::registry) fn syslog_client(name: &str) -> Model {
     Model::ClientSyslog(CreateClientSyslog {
         name: named(name),
         mount: None,
-        config: vec![ClientConfigEntry {
-            key: "protocol".to_string(),
-            value: "udp".to_string(),
-        }],
+        config: vec![
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: "127.0.0.1:514".to_string(),
+            },
+            ClientConfigEntry {
+                key: "protocol".to_string(),
+                value: "udp".to_string(),
+            },
+        ],
     })
 }
 
@@ -498,11 +512,11 @@ pub(in crate::registry) fn ingestor_statement(
             branch,
         ),
         input: nervix_models::IngestorInput::Transport(nervix_models::TransportIngestorInput {
-            source: IngestSource::Kafka {
+            source: IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
                 client: ClientName::parse(client).expect("valid identifier"),
-                topic: TopicName::parse("notifications").expect("valid identifier"),
+                topic: nervix_models::KafkaTopicName::parse("notifications").expect("valid topic"),
                 offset_mode: KafkaOffsetMode::ConsumerGroup(
-                    ConsumerGroupName::parse("cg").expect("valid consumer group"),
+                    KafkaConsumerGroupName::parse("cg").expect("valid consumer group"),
                 ),
                 instances: nonzero!(1u64),
                 mode: KafkaIngestMode::AckSequential {
@@ -513,7 +527,7 @@ pub(in crate::registry) fn ingestor_statement(
                     },
                 },
                 quiesce: nervix_models::IngestQuiesceMode::Suspend,
-            },
+            })),
             codec: named(codec),
         }),
         timestamp_source: None,
@@ -596,7 +610,7 @@ pub(in crate::registry) fn wasm_processor(name: &str, from_relay: &str, into_rel
         output_routes: {
             let mut outputs = ProcessorOutputs::single(named(into_relay));
             outputs.routes[0].construction =
-                nervix_nspl::parse_route_construction("SET value = value")
+                nervix_plexus::parse_route_construction("SET value = value")
                     .expect("generated route construction must parse");
             outputs
         },
@@ -641,7 +655,7 @@ pub(in crate::registry) fn unbranched_correlator(
             max_batch_size: "1MiB".to_string(),
         });
     output_routes.routes[0].construction =
-        nervix_nspl::parse_route_construction("SET value = left.value")
+        nervix_plexus::parse_route_construction("SET value = left.value")
             .expect("route construction must parse");
     Model::Correlator(CreateCorrelator {
         name: named(name),
@@ -649,7 +663,7 @@ pub(in crate::registry) fn unbranched_correlator(
         right: ProcessorInputs::single(named(right_relay)),
         output_routes,
         branched_by: BranchSelection::unbranched(),
-        correlate_where: nervix_nspl::parse_expression("left.value = right.value")
+        correlate_where: nervix_plexus::parse_expression("left.value = right.value")
             .expect("correlator expression must parse"),
         match_policy: CorrelatorMatchPolicy::Earliest,
         max_time: "5s".to_string(),
@@ -671,7 +685,7 @@ pub(in crate::registry) fn window_processor(
 ) -> Model {
     let mut output_routes =
         ProcessorOutputs::single(RelayName::parse(into_relay).expect("valid identifier"));
-    output_routes.routes[0].construction = nervix_nspl::parse_route_construction(construction)
+    output_routes.routes[0].construction = nervix_plexus::parse_route_construction(construction)
         .expect("window route construction must parse");
     Model::WindowProcessor(CreateWindowProcessor {
         name: WindowProcessorName::parse(name).expect("valid identifier"),
@@ -740,7 +754,7 @@ pub(in crate::registry) fn deduplicator(
         }),
         branched_by: BranchSelection::branched_by(branch_name_for_relay(from_relay)),
         deduplicate_on: vec![
-            nervix_nspl::parse_expression(&field.replace(&format!("{from_relay}."), "input."))
+            nervix_plexus::parse_expression(&field.replace(&format!("{from_relay}."), "input."))
                 .expect("deduplicate expression must parse"),
         ],
         max_time: max_time.to_string(),
@@ -803,16 +817,18 @@ pub(in crate::registry) fn emitter(
         body: nervix_models::EmitterBody::Codec {
             codec: CodecName::parse(codec).expect("valid identifier"),
         },
-        sink: Box::new(EmitSink::Kafka {
-            client: ClientName::parse(client).expect("valid identifier"),
-            topic: TopicName::parse("topic").expect("valid topic identifier"),
-        }),
-        publishing_mode: EmitterPublishingMode::NoAck {
-            retry_policy: RetryPolicy {
-                backoff: "250ms".to_string(),
-                max_backoff: "30s".to_string(),
+        connector: Box::new(EmitterEntity::Kafka(KafkaEmitter::Topic(
+            KafkaTopicEmitter {
+                mode: nervix_models::KafkaTopicPublishingMode::NoAck {
+                    retry_policy: RetryPolicy {
+                        backoff: "250ms".to_string(),
+                        max_backoff: "30s".to_string(),
+                    },
+                },
+                client: ClientName::parse(client).expect("valid identifier"),
+                topic: KafkaTopicName::parse("topic").expect("valid topic identifier"),
             },
-        },
+        ))),
         batch: None,
         flush_policy: FlushPolicy::Each {
             interval: "100ms".to_string(),
@@ -910,34 +926,36 @@ pub(in crate::registry) fn example_graph_models(
     name: &str,
     source: &str,
 ) -> (DomainName, Vec<nervix_models::Model>) {
-    let statements = nervix_nspl::client_statement::parse_client_statement_sources(source)
+    let statements = nervix_plexus::client_statement::parse_client_statement_sources(source)
         .unwrap_or_else(|error| panic!("{name} example should parse: {error:?}"));
     let mut domain = DomainName::parse("default").expect("valid domain");
     let mut models = Vec::new();
 
     for parsed in statements {
         match parsed.statement {
-            nervix_nspl::client_statement::ClientStatement::UseDomain(next) => {
+            nervix_plexus::client_statement::ClientStatement::UseDomain(next) => {
                 domain = next;
             }
-            nervix_nspl::client_statement::ClientStatement::UploadResource(_)
-            | nervix_nspl::client_statement::ClientStatement::BeginTransaction
-            | nervix_nspl::client_statement::ClientStatement::CommitTransaction
-            | nervix_nspl::client_statement::ClientStatement::RevertTransaction
-            | nervix_nspl::client_statement::ClientStatement::CreateSubscription(_)
-            | nervix_nspl::client_statement::ClientStatement::DeleteSubscription(_) => {}
-            nervix_nspl::client_statement::ClientStatement::Server(statement) => match statement {
-                nervix_models::Statement::CreateDomain(create) => {
-                    domain = create.body.id;
+            nervix_plexus::client_statement::ClientStatement::UploadResource(_)
+            | nervix_plexus::client_statement::ClientStatement::BeginTransaction
+            | nervix_plexus::client_statement::ClientStatement::CommitTransaction
+            | nervix_plexus::client_statement::ClientStatement::RevertTransaction
+            | nervix_plexus::client_statement::ClientStatement::CreateSubscription(_)
+            | nervix_plexus::client_statement::ClientStatement::DeleteSubscription(_) => {}
+            nervix_plexus::client_statement::ClientStatement::Server(statement) => {
+                match statement {
+                    nervix_models::Statement::CreateDomain(create) => {
+                        domain = create.body.id;
+                    }
+                    nervix_models::Statement::Create(create) => {
+                        models.push(pinned_test_model(*create.body));
+                    }
+                    nervix_models::Statement::CreateResource(_)
+                    | nervix_models::Statement::UploadResource(_)
+                    | nervix_models::Statement::StartDomain(_) => {}
+                    other => panic!("unexpected {name} example statement: {other:?}"),
                 }
-                nervix_models::Statement::Create(create) => {
-                    models.push(pinned_test_model(*create.body));
-                }
-                nervix_models::Statement::CreateResource(_)
-                | nervix_models::Statement::UploadResource(_)
-                | nervix_models::Statement::StartDomain(_) => {}
-                other => panic!("unexpected {name} example statement: {other:?}"),
-            },
+            }
             other => panic!("unexpected {name} example client statement: {other:?}"),
         }
     }

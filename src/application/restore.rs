@@ -18,7 +18,17 @@
 //! and never applies a recorded step twice. Only the node a client streamed the archive to holds
 //! it; a leader without it waits for the client to send it again.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 mod archives;
+mod branch_state;
+mod materialized;
 mod prepare;
 mod runner;
 #[cfg(all(test, feature = "shuttle"))]
@@ -31,11 +41,13 @@ use arch_into::ArchInto as _;
 use error_stack::Report;
 use futures_util::Stream;
 use meticulous::OptionExt as _;
+use nervix_backup::DescribedRuntimeState;
 use nervix_consensus::{CommandExecution, RestoreExecution};
 use nervix_models::{
-    CommandExecutionReference, DomainName, Restore, RestoreArchive, RestoreMode, RestoreReport,
-    RestoreScope, RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain,
-    RestoredUsers, Timestamp, UserName,
+    ClusterSchedule, CommandExecutionReference, DomainName, ModelKind, NodeRef, Restore,
+    RestoreArchive, RestoreLifecycle, RestoreMode, RestoreReport, RestoreScope, RestoreState,
+    RestoreStep, RestoreStepOutcome, RestoreStepReport, RestoredDomain, RestoredUsers,
+    SchemaFingerprint, Timestamp, UserName,
 };
 use tracing::info;
 
@@ -60,7 +72,10 @@ use super::{
     session_service::SessionServiceImpl,
     subscription::SessionSubscriptions,
 };
-use crate::{registry::RestorePlan, runtime::StagedArtifact};
+use crate::{
+    registry::{RestorePlan, WindowStateSkip},
+    runtime::StagedArtifact,
+};
 
 /// The archives this node's restores read, as the server stages them.
 pub(in crate::application) type ServerRestoreArchives = RestoreArchives<VerifiedArchive>;
@@ -157,7 +172,9 @@ impl SessionServiceImpl {
         let plan = self
             .plan_restore(&request.restore, verified, &BTreeSet::new())
             .await?;
-        let impacts = self.plan_model_runs(&plan, user).await?;
+        let impacts = self
+            .plan_model_runs(&plan, user, verified, request.restore.state)
+            .await?;
         let mut domains = Vec::with_capacity(plan.domains.len());
         for (domain, planned_models) in plan.domains.values().zip(impacts) {
             domains.push(RestoredDomain {
@@ -165,6 +182,8 @@ impl SessionServiceImpl {
                 domain: domain.target.clone(),
                 resource_versions: count(domain.versions.len()),
                 models: count(domain.models.len()),
+                status: domain.activation.status.clone(),
+                start_version: domain.activation.start_version,
                 planned_models,
             });
         }
@@ -333,7 +352,8 @@ impl SessionServiceImpl {
         let plan = self
             .plan_restore(restore, verified, &BTreeSet::new())
             .await?;
-        self.plan_model_runs(&plan, user).await?;
+        self.plan_model_runs(&plan, user, verified, restore.state)
+            .await?;
         Ok(plan)
     }
 
@@ -491,6 +511,7 @@ impl SessionServiceImpl {
             execution,
             plan: &plan,
             archive: &archive,
+            state: restore.restore.state,
         };
         let run = run_restore_steps(&steps, restore.completed_steps(), &effects).await;
         let outcomes = run.steps;
@@ -505,6 +526,8 @@ impl SessionServiceImpl {
         }
         let restored = self.restored_users(&execution.reference).await;
         let report = restore_report(&restore, &plan, &archive, restored, outcomes);
+        let schedule = self.inner.consensus.current_schedule().await;
+        let warnings = restore_state_warnings(&plan, &archive, &schedule, restore.restore.state);
         let message = restore_message(&restore.restore, &report);
         info!(
             execution_reference = %execution.reference,
@@ -513,6 +536,7 @@ impl SessionServiceImpl {
         );
         CommandResult {
             restore: Some(Box::new(report)),
+            diagnostics: warnings,
             ..command_ok(message)
         }
     }
@@ -554,6 +578,8 @@ fn restore_report(
             domain: domain.target.clone(),
             resource_versions: count(domain.versions.len()),
             models: count(domain.models.len()),
+            status: domain.activation.status.clone(),
+            start_version: domain.activation.start_version,
             planned_models: None,
         })
         .collect();
@@ -564,6 +590,112 @@ fn restore_report(
         users,
         domains,
         steps: outcomes,
+    }
+}
+
+/// Skips are a successful restore outcome, but the operator must see which state was not
+/// installed. Derive the diagnostics from the verified archive and published schedule so a
+/// resumed command reports the same warnings even when its state step was already recorded.
+fn restore_state_warnings(
+    plan: &RestorePlan,
+    archive: &VerifiedArchive,
+    schedule: &ClusterSchedule,
+    state: RestoreState,
+) -> Vec<CommandDiagnostic> {
+    if state == RestoreState::ConfigurationOnly {
+        return Vec::new();
+    }
+    let mut warnings = Vec::new();
+    for domain in plan.domains.values() {
+        let mut lifecycles = Vec::new();
+        for archived in archive.states_for(&domain.source) {
+            if let DescribedRuntimeState::BranchLifecycle { lifecycle, .. } = archived {
+                lifecycles.push(lifecycle);
+            }
+        }
+        for skipped in archive.skipped_state_for(&domain.source) {
+            if state == RestoreState::WithoutSourceOffsets
+                && skipped.path.as_str().contains("/state/kafka_offset/")
+            {
+                continue;
+            }
+            warnings.push(CommandDiagnostic::unlocated(format!(
+                "warning: skipped state section '{}' while restoring domain '{}': {}",
+                skipped.path, domain.target, skipped.reason,
+            )));
+        }
+        for archived in archive.states_for(&domain.source) {
+            let (kind, entity, schema) = match archived {
+                DescribedRuntimeState::Wasm { descriptor, .. } => (
+                    ModelKind::WasmProcessor,
+                    &descriptor.entity,
+                    Some(descriptor.schema),
+                ),
+                DescribedRuntimeState::KafkaOffsets { offsets, .. } => {
+                    if state == RestoreState::WithoutSourceOffsets {
+                        continue;
+                    }
+                    (ModelKind::Ingestor, &offsets.entity, Some(offsets.schema))
+                }
+                DescribedRuntimeState::Materialized { descriptor, .. } => (
+                    ModelKind::Relay,
+                    &descriptor.entity,
+                    Some(descriptor.schema),
+                ),
+                DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => (
+                    lifecycle.owner_kind,
+                    &lifecycle.entity,
+                    Some(lifecycle.schema),
+                ),
+                DescribedRuntimeState::Deduplicator { descriptor, .. } => (
+                    ModelKind::Deduplicator,
+                    &descriptor.entity,
+                    Some(descriptor.schema),
+                ),
+                DescribedRuntimeState::Window { descriptor, .. } => (
+                    ModelKind::WindowProcessor,
+                    &descriptor.entity,
+                    Some(descriptor.schema),
+                ),
+            };
+            let node = schedule
+                .domain(&domain.target)
+                .and_then(|scheduled| scheduled.nodes.get(&NodeRef::new(kind, entity.clone())));
+            let mut reason = state_skip_reason(schema, node.map(|node| node.schema_fingerprint));
+            if let DescribedRuntimeState::Window { descriptor, .. } = archived
+                && let Some(window) = domain.branch_state_schemas.window(&descriptor.entity)
+                && let Some(skip) = window.skip_of(descriptor, lifecycles.iter().copied())
+            {
+                // A window's schema fingerprint covers its model, so a changed model also fails
+                // the generic schema check; the model is the more precise reason to report.
+                let model_changed = skip == WindowStateSkip::ModelChanged;
+                if model_changed || reason.is_none() {
+                    reason = Some(skip.reason());
+                }
+            }
+            if let Some(reason) = reason {
+                warnings.push(CommandDiagnostic::unlocated(format!(
+                    "warning: skipped {} state '{}' in domain '{}': {reason}",
+                    kind.as_str(),
+                    entity,
+                    domain.target,
+                )));
+            }
+        }
+    }
+    warnings
+}
+
+fn state_skip_reason(
+    archived: Option<SchemaFingerprint>,
+    published: Option<SchemaFingerprint>,
+) -> Option<&'static str> {
+    match published {
+        None => Some("the entity is absent from the restored schedule"),
+        Some(published) if archived.is_some_and(|archived| archived != published) => {
+            Some("the archived schema fingerprint does not match the restored schedule")
+        }
+        Some(_) => None,
     }
 }
 
@@ -637,8 +769,12 @@ fn report_counts(report: &RestoreReport) -> String {
 }
 
 fn restore_message(restore: &Restore, report: &RestoreReport) -> String {
+    let lifecycle = match restore.lifecycle {
+        RestoreLifecycle::Stopped => "stopped",
+        RestoreLifecycle::Resume => "running at their archived lifecycle",
+    };
     format!(
-        "restored {} from '{}': {}; restored domains are stopped",
+        "restored {} from '{}': {}; restored domains are {lifecycle}",
         scope_label(restore),
         restore.source,
         report_counts(report)
@@ -652,4 +788,25 @@ fn dry_run_message(restore: &Restore, report: &RestoreReport) -> String {
         restore.source,
         report_counts(report)
     )
+}
+
+#[cfg(test)]
+mod backup_state_warning_tests {
+    use super::*;
+
+    #[test]
+    fn a_restore_reports_only_state_the_schedule_will_skip() {
+        let archived = SchemaFingerprint::from_digest([1; 32]);
+        let published = SchemaFingerprint::from_digest([2; 32]);
+        assert_eq!(
+            state_skip_reason(Some(archived), None),
+            Some("the entity is absent from the restored schedule")
+        );
+        assert_eq!(
+            state_skip_reason(Some(archived), Some(published)),
+            Some("the archived schema fingerprint does not match the restored schedule")
+        );
+        assert_eq!(state_skip_reason(Some(archived), Some(archived)), None);
+        assert_eq!(state_skip_reason(None, Some(published)), None);
+    }
 }

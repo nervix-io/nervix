@@ -1,6 +1,8 @@
 # VM Functions
 
-Every NSPL expression runs through one expression VM. That covers a route's `SET`, `WHERE`, and
+*Plexus, the Nervix graph definition language.*
+
+Every Plexus expression runs through one expression VM. That covers a route's `SET`, `WHERE`, and
 `INVOKE`, a source or processor filter, a key or ordering expression, an emitter mapping, and a
 window aggregate's arguments. This chapter is the implementation reference for that VM and its
 function catalog. It covers:
@@ -38,13 +40,17 @@ Five rules hold throughout:
 
 ## Ownership By Layer
 
+The predicate capability and its execution entry point keep paired supported and rejection
+Rustdoc examples beside their APIs. `just test-capability-docs` runs them in normal tests and CI,
+separately from [execution and concurrency evidence](./execution-primitives.md#verification-contracts).
+
 | Layer | Owner | What it owns |
 | --- | --- | --- |
 | Vocabulary | Expression Models in `nervix-models` | `Expression`, `RouteConstruction`, `Assignment`, `Invocation`, and `JsonPath`. A builtin name is a validated `BuiltinFunctionName` identifier, not a closed set, and a UDF name is a `UdfName`. |
-| Language | `nervix-nspl` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion emits a typed builtin or UDF expectation at a call position. |
+| Language | `nervix-plexus` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion emits a typed builtin or UDF expectation at a call position. |
 | Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, window aggregate lowering and route compilation, and where an execution runs: inline, or admitted through the node's bounded executor onto its data or extension workers. |
 | Engines and infrastructure | `nervix-roto` | Compiling a typed UDF program on the node's bulk workers, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
-| Decisions | Registry validation and resource planning | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, then selecting scheduled UDF programs and lowering generator and emitter routes, source filters, HTTP fields, ordering groups and sink mappings against their declared scopes. |
+| Decisions | Registry validation and resource planning | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, then selecting scheduled UDF programs and lowering generator and emitter routes, source filters, HTTP fields, ordering groups and emitter mappings against their declared scopes. |
 | Data plane | Runtime plan binding and hosts | Binding runtime programs against installed schemas once per typed node revision, projecting carrier batches into VM input, supplying the execution context and injectors, turning row errors into structured message errors, and owning branch-local window accumulators. |
 | Control plane | Subscriptions | Compiling a session subscription's `WHERE` into a read-only predicate when the subscription is created. |
 
@@ -52,18 +58,27 @@ The VM compiler, batch constructors, runtime, and `FunctionInjector` return `err
 reports with their semantic `CompileError` or `RuntimeError` context. A compile error retains a
 typed code, its existing stable code spelling through `code()`, the operation span, and a safe
 message. Registry validation adds the owning model and route while retaining the VM report.
-Runtime plan binding likewise adds its operation above the original VM report. Roto UDF setup
+Runtime plan binding likewise adds its operation above the original VM report: a
+`RuntimeVmCompileError` names the program and its node, such as a filter, a FILTER-MAP route, an
+output branch construction or a generator output, and its caller names the domain above that. A
+lowering, `LOOKUP_HASH_MAP` or materialized-state binding failure stays beneath the same program
+context instead of being rendered into its text. Roto UDF setup
 returns `UdfError` reports; its injected calls return VM runtime reports, retaining an underlying
 Arrow failure when one caused the call to fail. Jaq compilation, evaluation, and format conversion
 return their own typed reports to the codec or signaling caller. These reports are batch or setup
 failures; selected-row execution and `SideError` values remain the row-failure channel.
 
+The compiler failure-contract gate reads source-owned outcome classifications on
+`SideErrorReason`, CIDR `NetworkDefect` and JSON `JsonTargetDefect`. These are row or pure type
+conversion outcomes; their callers establish the operation report when a whole batch or setup
+fails. [Errors And Diagnostics](errors-and-diagnostics.md) owns those compiler contracts.
+
 For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted
 builtin spellings, including datetime names and accepted aliases. That list excludes injected
 calls and `write_header`; it is a candidate catalog, while VM lowering and registry validation
-still decide whether a call is valid for its arguments. The parser carries the source or sink kind
+still decide whether a call is valid for its arguments. The parser carries the source or emitter kind
 with header-function expectations. The resolver adds `read_header` and `read_headers` only for a
-source that can read headers, and `write_header` only for a sink that can write them. UDF candidates
+source that can read headers, and `write_header` only for an emitter that can write them. UDF candidates
 come from the selected domain's Models after the session's queued transaction changes.
 
 Registry planning converts the validated scheduled Models into typed processor specifications.
@@ -78,7 +93,7 @@ Each representation is produced once, at its boundary, and the next stage consum
 
 ```mermaid
 flowchart LR
-    Text["NSPL text"] -->|parsed once| Model["Expression Models"]
+    Text["Plexus text"] -->|parsed once| Model["Expression Models"]
     Model -->|lowered once| Program["VM Program"]
     Program -->|"types, sensitivity, folding, sharing, registers"| Compiled["CompiledProgram"]
     Compiled -->|"executed per batch"| Result["ExecutionResult"]
@@ -89,7 +104,7 @@ flowchart LR
 
 Models are persisted; programs are not. A compiled program and everything prepared inside it, such
 as a compiled regular expression or an `IN` set, live in memory beside the runtime node that runs
-it. Nothing prepared at compile time ever enters a stored Model, and no executable NSPL text is
+it. Nothing prepared at compile time ever enters a stored Model, and no executable Plexus text is
 stored for a runtime to parse again.
 
 ### Lowering
@@ -137,7 +152,7 @@ A span in the VM is an operation ordinal, not a source offset: the i-th assignme
 runtime maps a span back to the node, route, operation, operation index, and fields that a
 structured message error reports.
 
-The VM never parses NSPL in production code. `nervix-nspl` is a development dependency that only
+The VM never parses Plexus in production code. `nervix-plexus` is a development dependency that only
 its tests and benchmarks use to build Models from text.
 
 ### The Semantic Catalog
@@ -184,7 +199,7 @@ The compiler in `compiler.rs` infers every expression's type from its input bind
 catalog. Argument types match by Arrow `DataType` equality. No numeric widening, parsing,
 stringification, or datetime–text interchange happens unless the program spells it out as a cast,
 `TRY_CAST`, or `JSON_VALUE`. Messages name types by their Arrow names, which the
-[reference](./filter-map-functions.md#errors) maps back to NSPL names. A result is optional when
+[reference](./filter-map-functions.md#errors) maps back to Plexus names. A result is optional when
 any argument is, unless the catalog or `expr_may_be_null` records an exception. The exceptions are
 listed in [Function Properties](./filter-map-functions.md#function-properties).
 
@@ -401,7 +416,14 @@ and invocation argument.
    names its fields.
 4. It passes every remaining row on as output. The rows it exports are set in a filter bitmap
    directly from their indices.
-5. A returned `RuntimeError` fails the whole batch through the node's general error handling.
+5. A returned `RuntimeError` fails the whole batch through the node's general error handling. The
+   host keeps its report beneath a `PlannedGeneralError` that names the program by its clause and
+   the step that failed, and hands back the acknowledgements of every message of the batch with
+   it; the report is rendered only when the error policy reports the failure.
+
+A branch construction program keeps the same split: a row whose branch `SET` recorded an error keeps
+that `SideError` as its own typed outcome, which its route's error handling formats only if it
+reports the row, while a `RuntimeError` fails the whole batch.
 
 ## Implementation Map
 
@@ -443,13 +465,38 @@ All paths are relative to the repository root.
 | `src/runtime/ingest_metadata.rs`, `lookup_hash_map.rs` | The header injector and hash-map lookup calls |
 | `src/runtime/message_error.rs` | Structured message errors, the rows whose required outputs are missing, and execution of prepared error-record programs |
 | `src/runtime/window_processor.rs`, `window_accumulator/`, `window_state.rs` | Branch-local windows, their aggregate structures, and their snapshots |
+| `benches/window_sketches.rs` | The cost of admitting retained rows into pane sketches, from a new pane for every row to a thousand rows per pane |
+| `src/runtime/window_archive.rs` | A captured window as bounded archive Arrow groups, and the window snapshot rebuilt from them |
 | `src/runtime/subscription_predicate.rs` | Session subscription filters |
+
+Window checkpoints nest two Arrow containers of the shared snapshot codec, the retained input rows
+and their argument columns, behind a header that counts the rows and both containers' bytes. A
+window whose retained rows fit one 8 MiB snapshot section is encoded in memory under the window's
+complete-payload admission; replica synchronization and ownership handoff use that resident
+encoding, which refuses a window whose rows exceed the whole bulk budget before it encodes a
+section. A larger window persists through the same container sealed in bounded pieces: each group
+of rows is sealed and staged on quota-owned disk as soon as it is encoded, the header is placed
+first once the groups are counted, and the pieces are concatenated one 64 KiB chunk at a time and
+published as a segmented checkpoint. Each bounded typed section of delayed histogram removals is
+encoded, staged and released before the next, so the removals never hold more than one section of
+the bulk budget. The two encodings are byte-identical for the same window.
+A backup restore seals an archived window the same way, one archived section at a time and a
+group's input rows before its argument columns, keeping each archived Arrow section whenever its
+rows' identities fit one identity record. A section whose sealing fails stages nothing and leaves
+the checkpoint as it was, so a restore the node refused only for room seals the same section again.
+
+Retained input keys may repeat, and argument rows are unbranched. The relay restore boundary
+applies one-record-per-concrete-branch validation after this shared decoder; that relay invariant
+does not restrict retained window rows. A relay's restored row views stay within its 8 MiB metadata
+ceiling, while a branch reopening its window charges the row views of every retained row to the
+independent `state_read` memory class, whose capacity equals the relay pool's, so a window retaining more rows than that ceiling reopens after a restart or a
+restore. Relay snapshot transfers use quota-owned files independently of the window's encoding.
 
 ## Worked Example: `clamp`
 
 This example traces one assignment from its declaration to its execution:
 
-```nspl,ignore
+```plexus,ignore
 SET bounded = clamp(input.latency_ms, 0, input.budget_ms)
 ```
 
@@ -513,9 +560,9 @@ A `TypedArray` has one variant per scalar register type, plus these:
 - `Generic`, for lists
 - `Uninitialized`, for an output no assignment has written yet
 
-Each NSPL type has one Arrow representation, and the VM executes over all of them:
+Each Plexus type has one Arrow representation, and the VM executes over all of them:
 
-| NSPL type | Arrow type |
+| Plexus type | Arrow type |
 | --- | --- |
 | `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` | The matching unsigned or signed integer type |
 | `F32`, `F64` | `Float32`, `Float64` |
@@ -719,8 +766,8 @@ bodies are encoded and decoded on, their whole capacity.
 
 Admission can refuse. A class whose wait queue is full refuses the execution with
 `RuntimeError::ExecutionNotAdmitted`, and a job that panics on its worker returns
-`RuntimeError::ExecutionPanicked`. Both are batch errors, which a processor's general error policy
-handles like any other.
+`RuntimeError::ExecutionPanicked`. Both are batch errors, which reach the node's error policy as
+the report of the planned step that ran the program, like any other batch failure.
 
 An inline execution never yields and has no cancellation point: it runs every instruction over
 its batch to completion, and the batch's size and the limits above bound that work. An admitted
@@ -732,6 +779,10 @@ batch iteration, not the VM. A UDF adds its own watchdog, described
 [below](#extension-boundaries).
 
 ## Kernels
+
+[SIMD Kernels](./simd-kernels.md) owns the primitives boundary, dispatch and build targets,
+caller catalog, exact buffer results, scalar/level qualification, and measured evidence. This
+chapter owns how the VM selects those operations, masks nulls and failures, and reports errors.
 
 ### Kernel Classes
 
@@ -749,11 +800,11 @@ about vector instructions it supports.
 ### Arrow Kernel Reuse
 
 The VM reuses Arrow kernels from `arrow-arith`, `arrow-ord`, `arrow-select`, `arrow-string`, and
-`arrow-cast` wherever their semantics are exactly NSPL's. It deliberately avoids them in these
+`arrow-cast` wherever their semantics are exactly Plexus's. It deliberately avoids them in these
 cases:
 
 - **Numeric comparisons.** Arrow's comparison kernels order floats by the IEEE 754 total order.
-  NSPL comparison is IEEE 754 equality and ordering, in which NaN equals nothing and the two zeros
+  Plexus comparison is IEEE 754 equality and ordering, in which NaN equals nothing and the two zeros
   are equal. `numeric::Comparison` evaluates every numeric comparison, integers included, over the
   value buffers. `IS DISTINCT FROM`, `nullif`, list `contains`, `IN`, `greatest`, `least`, and
   `clamp` apply the same float rules.
@@ -846,28 +897,22 @@ These are three different claims, and the implementation makes them separately:
   executes this way, including the irregular ones.
 - **Compiler vectorization.** A buffer loop is written so that LLVM *can* widen it to the vector
   instructions of the CPU the binary targets, and its result is the same whether or not it does.
-  A local build without `RUSTFLAGS` target tuning uses the compiler's baseline target. The Docker
+  The effective compiler flags determine the baseline: local `target-cpu=native` builds use the
+  compiling host's features, while untuned builds use the compiler target's baseline. The Debian
   image builds its x86-64 payloads for `x86-64-v3` through cargo-sonic. A
   compiler-vectorized loop needs inspection of the generated instructions for the particular build
   before claiming a specific instruction set.
-- **Explicit SIMD.** The VM still uses library dispatch for simd-json, base64-simd, faster-hex,
-  and sha2; xxhash chooses when the binary is built. `nervix-simd-kernels` uses `fearless_simd` to
-  select supported instructions at run time, with a scalar fallback. Outside the VM it serves the
-  schemaful JSON emission classifier and the delivery-latency fold, which reads a batch's ingestion
-  watermarks once to find its latest watermark and bucket every row's latency. Inside the VM it packs
-  the failure bytes of the checked lanes into bitmap words, with the same word at every level, and
-  computes the [explicit integer lanes](#checked-buffer-kernels).
-- **Dispatch.** The kernel crate resolves one `fearless_simd` level per process from the CPU's
-  features, never below what the build's target already guarantees. An x86-64 build selects
-  AVX-512, AVX2, SSE4.2, or SSE2, so the Docker image's `x86-64-v3` payload runs the AVX2 arm, or
-  the AVX-512 arm on a CPU that has it. An AArch64 build runs NEON, and the scalar fallback runs only
-  where no level is available. Each kernel call enters the selected level once through
-  `dispatch!`, which enables that level's target features for small `#[inline(always)]` functions
-  generic over `S: Simd`, and computes its whole run there. Every level gives every lane the same
-  value and failure bit, and the kernel tests compare every level the host offers, and the forced
-  fallback, against a scalar reference. The VM itself names no instruction set: it hands buffers to
-  the kernel crate, its other lane operations remain compiler-vectorized, and it uses no
-  `std::arch` or `target_feature` of its own.
+- **Explicit SIMD.** The VM hands typed buffers to `nervix-simd-kernels` for failure packing and
+  [checked integer operations](#checked-buffer-kernels). The
+  [caller catalog](./simd-kernels.md#kernel-and-caller-catalog) also covers JSON, delivery latency,
+  domain/window admission, selections, and text codecs. Library-dispatched functions retain the
+  library's selection; xxhash chooses when the binary is built.
+- **Dispatch.** The kernel crate caches one `fearless_simd` level per process and enters it once
+  per buffer operation. The [build-target matrix](./simd-kernels.md#dispatch-and-build-targets)
+  defines SSE2, SSE4.2, AVX2, Ice Lake class AVX-512, NEON, WASM SIMD, and forced fallback, including
+  the ambient baseline that can coalesce lower test tokens into a higher backend. Every integer
+  lane and failure bit is exact. The VM names no instruction set and uses no `std::arch` or
+  `target_feature` of its own.
 
 The [VM functions measurement report](https://github.com/nervix-io/nervix/blob/main/benches/reports/vm-functions-18.md)
 records what the measurements establish, and
@@ -934,7 +979,10 @@ The reference owns each family's contract. These notes describe its implementati
 
 - **Numeric.** Checked lanes cover arithmetic, comparison, `abs`, `sign`, and rounding.
   - `round(value, digits)` rounds exactly, with halves away from zero, using integer arithmetic on
-    the significand. Integer rounding to negative digits computes in 128 bits.
+    the significand. Its unchanged-value shortcut checks the distance to both neighbors: a normal
+    power of two has a neighbor toward zero only half a unit away. A decimal step near that gap
+    uses the exact decimal expansion, for positive and negative digit counts alike. Integer
+    rounding to negative digits computes in 128 bits.
   - Bit operations reuse Arrow's `binary` and `unary` for `and`, `or`, `xor`, and `not`, and
     branch-free lanes for shifts.
   - Classification never fails.
@@ -1019,7 +1067,9 @@ type or row count, or a side error that names a row outside the call, is a batch
 The injectors:
 
 - **Header reads.** `IngestHeaderFunctionInjector` answers header reads from the ingest metadata of
-  one execution.
+  one execution. Outbound WebSockets supply their connection's captured response headers, including
+  after quiesce replay; the metadata builder writes the retained frame kind into a typed STRING
+  column before VM execution.
 - **Window aggregates.** `WindowAggregateResults` answers window aggregates from the accumulators at
   emission.
 - **UDFs.** `nervix-roto`'s `UdfExecutor` answers UDF calls:
@@ -1092,10 +1142,12 @@ For each batch, the task works through these steps:
 4. For each run, every structure reads one typed value slice and validity bitmap from the shared
    argument columns. Counts use bitmap popcounts; integer sums use exact high and low lane halves;
    float sums use per-lane TwoSum; moments use a compensated mean pass and a centered second pass,
-   falling back to a weighted mean when summing finite inputs overflows before division, then one
+   normalizing by the largest contributing magnitude when summing finite inputs overflows before division, then one
    Chan merge into the branch's aggregate. Histogram indexes are computed for the run and
    scattered into bucket counts. Each retained
    row holds its sequence, its timestamp, and a row view of the Arc'd input and argument batches.
+   The normalized mean is clamped to its operand range before rescaling; a constant finite run
+   keeps its exact mean and zero M2 and cross moment even when its sum overflows.
 5. It emits while the width is met, and then steps the window. Stepped rows are acknowledged.
 
 Tumbling and sliding windows use this same path, with different `WIDTH` and `STEP`.
@@ -1140,6 +1192,12 @@ At emission the window merges every live pane into a fresh sketch:
 - Misra-Gries adds weighted counts.
 
 Each top-k value is sliced from the earliest retained row with that key.
+
+The first row admitted into a pane creates its sketch, found or inserted by one search of the
+window's ordered pane map; every later row of the pane updates that sketch in place. A row whose
+argument is absent admits nothing, so a pane holding only such rows keeps no sketch.
+`just bench-window-sketches` measures admission at one, 16 and 1,024 rows per pane for each
+sketch.
 
 A sketch cannot subtract a row. When a window steps, every pane is cleared, and every surviving row
 is admitted again. This rebuilds the whole window rather than one pane, so a row that left the
@@ -1210,12 +1268,27 @@ that every row belongs to this branch. It then re-admits every row in order. Tha
 exact structure and every sketch pane from the rows themselves, then reapplies any delayed
 removals.
 
+The argument columns of a snapshot have one schema, which the window compiler derives from the
+route's aggregate demands: one nullable column per argument of every demand, in demand order.
+Native snapshots and backup archives both use it, and a reader opens a sealed snapshot only
+against that schema and the window's input relay schema.
+
+A [backup](./backup-and-restore.md) archives the same publication in a public form. Each window
+branch becomes an rkyv descriptor holding the retained rows' admission sequences and watermarks,
+the branch incarnation, the window model digest and every histogram's delayed removals, together
+with bounded groups of the retained input rows and their argument columns as Arrow IPC. A restore
+converts those groups back into a native snapshot, which the branch task restores as it restores
+any other: every row is re-admitted in order, and the histograms take their delayed removals back.
+The window model digest is the BLAKE3 hash of the window processor's canonical Plexus, so a window
+whose `WIDTH`, `STEP`, state limit or aggregates changed starts empty instead.
+
 How each ending treats the window:
 
 | Ending | Effect on the window |
 | --- | --- |
 | Handoff or detach | Flushes a window whose width is met, then publishes what remains. |
 | Eviction | Resets the window first, so its final publication is empty and a later branch with the same key starts fresh. |
+| Quiesced backup cut | Publishes any change since the window's last publication when the cut's lifecycle checkpoint asks. The retained rows' acknowledgement shares stay parked, so they do not hold the cut open; the cut captures them as window state. |
 | A task aborted after its shutdown grace period | Loses the changes made after its last publication. |
 
 Snapshot transfer between nodes follows the bulk transfer rules of the [Cluster
@@ -1260,7 +1333,7 @@ Treat this as the checklist for a new builtin, or for a new family.
    Otherwise the compiler shares it and gives it no selection, so the errors of unselected `CASE`
    arms would leak into error handling.
 5. **Choose the kernel.**
-   - Reuse an Arrow kernel when its semantics are exactly NSPL's, including float ordering,
+   - Reuse an Arrow kernel when its semantics are exactly Plexus's, including float ordering,
      overflow, and null rules.
    - Otherwise write one pass over value buffers with the checked lanes, pushing failures from a
      bitmap.
@@ -1287,6 +1360,9 @@ Treat this as the checklist for a new builtin, or for a new family.
    - a public Cucumber scenario outline on one and three nodes that proves values and failures
      through a graph and a session subscription, run with `just test-scenarios --input <feature>`
    - a row in the [qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/vm-function-qualification.md)
+   - for a kernel with an independent reference, a registered Bolero property over its column
+     kernel, as `round(value, digits)` has in `vm-decimal-rounding-floats` and
+     `vm-decimal-rounding-integers`; see [Property Testing And Fuzzing](./property-testing-and-fuzzing.md)
    - window structures also need interleaved branches, eviction, and snapshot restore
 10. **Measure it.** Add a Criterion case to `crates/nervix-vm/benches/vm.rs` or its workload
     shapes, and run it with `just bench-vm`. Use `just bench-vm-alloc` for allocation evidence, and
@@ -1297,7 +1373,7 @@ Treat this as the checklist for a new builtin, or for a new family.
 11. **Document it.**
     - Add its contract to [Expression Functions](./filter-map-functions.md), including a catalog
       row.
-    - Update the NSPL skill only where its routing or checks change, then regenerate the book.
+    - Update the Plexus skill only where its routing or checks change, then regenerate the book.
     - Update this chapter when the function changes a mechanism rather than adding an instance of
       one.
 

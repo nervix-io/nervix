@@ -18,7 +18,7 @@ Suppose the partner posts this envelope:
 A JAQ codec replaces the wire schema entirely — it goes straight from the format to the internal
 schema, with the program inline:
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE CODEC partner_order_codec
@@ -47,13 +47,13 @@ internal schema, and surplus keys in the program's output are silently dropped.
 
 Reuse the vhost from [HTTP Ingestion](./quickstart-http-ingestion.md) with a second path:
 
-```nspl
+```plexus
 CREATE RELAY partner_orders SCHEMA order_record UNBRANCHED;
 
 CREATE ENDPOINT partner_ingress ON edge PATH '/partner-orders' TYPE HTTP;
 
-CREATE INGESTOR partner_order_source
-  FROM ENDPOINT partner_ingress MODE NO_ACK SEQUENTIAL
+CREATE HTTP ENDPOINT INGESTOR partner_order_source
+  FROM partner_ingress MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING partner_order_codec
   TO partner_orders
     INHERIT ALL
@@ -86,7 +86,7 @@ A partner that sends several orders in one body needs no second endpoint. Every 
 yields becomes its own message, so a program that iterates an array unfolds one POST into one
 record per element:
 
-```nspl
+```plexus
 CREATE CODEC partner_batch_codec
   FROM JSON
   TO SCHEMA order_record

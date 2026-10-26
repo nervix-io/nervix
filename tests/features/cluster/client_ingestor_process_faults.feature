@@ -2,30 +2,30 @@
 Feature: Client producers across real node process faults
   Every scenario runs three real nervix-server processes. The producer's session is served by one
   node, the client ingestor it publishes to executes on a second, and the ingestor's relay and its
-  acknowledging HTTP emitter run on the leader, so a fault in either of the first two leaves the
-  sink and the cluster's quorum running.
+  acknowledging HTTP REQUEST emitter run on the leader, so a fault in either of the first two leaves the
+  emitter and the cluster's quorum running.
 
   Scenario: Killing an ingestor owner leaves admitted batches uncertain and restores the producer
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "hold response until released"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "hold response until released"
     And a 3 node nervix-server process cluster is started
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING, amount I64);
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+      CREATE HTTP CLIENT sink_api CONFIG {
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -37,7 +37,7 @@ Feature: Client producers across real node process faults
     And the server process cluster leader is saved as placeholder "leader"
     And a server process cluster node other than placeholder "leader" is saved as placeholder "owner"
     And a server process cluster node other than placeholders "leader" and "owner" is saved as placeholder "entry"
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       RELOCATE RELAY orders ONTO NODE {{leader}} IGNORE PREFERENCES;
@@ -55,7 +55,7 @@ Feature: Client producers across real node process faults
     And producer "orders" submits batch "second" with rows
       | region | order_id | amount |
       | eu     | o-2      | 2      |
-    Then HTTP receiver "sink" eventually receives at least 1 request
+    Then HTTP receiver "emitter" eventually receives at least 1 request
     # The window of two is full, so the owner queues the next two batches without admitting them.
     When producer "orders" submits batch "third" with rows
       | region | order_id | amount |
@@ -76,9 +76,11 @@ Feature: Client producers across real node process faults
     And batch "second" has an unknown outcome because "owner_lost"
     And batch "third" is not admitted because "producer ended"
     And batch "fourth" is not admitted because "producer ended"
-    When HTTP receiver "sink" releases its held responses with "respond 200"
+    When HTTP receiver "emitter" releases its held responses with "respond 200"
+    # The restart ends once every node reaches the restarted process, so the leader the relocation
+    # reaches already counts the owner as a live voter.
     And server process node "{{owner}}" restarts from its existing database
-    And these NSPL commands are executed on the server process cluster
+    And these Plexus commands are executed on the server process cluster
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       """
@@ -90,38 +92,38 @@ Feature: Client producers across real node process faults
       | region | order_id | amount |
       | us     | o-5      | 5      |
     Then batch "fifth" completes
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/eu/o-1
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/us/o-5
       """
-    And HTTP receiver "sink" captured no request with request line "POST /orders/us/o-3"
-    And HTTP receiver "sink" captured no request with request line "POST /orders/us/o-4"
+    And HTTP receiver "emitter" captured no request with request line "POST /orders/us/o-3"
+    And HTTP receiver "emitter" captured no request with request line "POST /orders/us/o-4"
 
   Scenario: Killing a forwarding node leaves its batches uncertain while the producer restores
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "hold response until released"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "hold response until released"
     And a 3 node nervix-server process cluster is started
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING, amount I64);
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+      CREATE HTTP CLIENT sink_api CONFIG {
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -133,7 +135,7 @@ Feature: Client producers across real node process faults
     And the server process cluster leader is saved as placeholder "leader"
     And a server process cluster node other than placeholder "leader" is saved as placeholder "owner"
     And a server process cluster node other than placeholders "leader" and "owner" is saved as placeholder "entry"
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       RELOCATE RELAY orders ONTO NODE {{leader}} IGNORE PREFERENCES;
@@ -151,7 +153,7 @@ Feature: Client producers across real node process faults
     And producer "orders" submits batch "second" with rows
       | region | order_id | amount |
       | eu     | o-2      | 2      |
-    Then HTTP receiver "sink" eventually receives at least 1 request
+    Then HTTP receiver "emitter" eventually receives at least 1 request
     When producer "orders" submits batch "third" with rows
       | region | order_id | amount |
       | us     | o-3      | 3      |
@@ -174,9 +176,9 @@ Feature: Client producers across real node process faults
       outstanding batches: 0
       admitted batches: 2
       """
-    # Both admitted batches still reach the sink and leave the window.
-    When HTTP receiver "sink" releases its held responses with "respond 200"
-    Then HTTP receiver "sink" eventually receives at least 2 requests
+    # Both admitted batches still reach the emitter and leave the window.
+    When HTTP receiver "emitter" releases its held responses with "respond 200"
+    Then HTTP receiver "emitter" eventually receives at least 2 requests
     And within "30s" the server process cluster describes ingestor "orders_in" with
       """
       admitted batches: 0
@@ -185,41 +187,41 @@ Feature: Client producers across real node process faults
       | region | order_id | amount |
       | us     | o-4      | 4      |
     Then batch "fourth" completes
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/eu/o-1
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/eu/o-2
       """
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/us/o-4
       """
-    And HTTP receiver "sink" captured no request with request line "POST /orders/us/o-3"
+    And HTTP receiver "emitter" captured no request with request line "POST /orders/us/o-3"
 
   Scenario: Freezing an ingestor owner makes admitted batches uncertain and restores the producer
-    Given HTTP receiver "sink" is running
-    And HTTP receiver "sink" answers unscripted requests with "hold response until released"
+    Given HTTP receiver "emitter" is running
+    And HTTP receiver "emitter" answers unscripted requests with "hold response until released"
     And a 3 node nervix-server process cluster is started
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA order_in (region STRING, order_id STRING, amount I64);
       CREATE RELAY orders SCHEMA order_in UNBRANCHED;
-      CREATE INGESTOR orders_in
-        FROM CLIENT SCHEMA order_in
+      CREATE CLIENT PRODUCER INGESTOR orders_in
+        FROM SCHEMA order_in
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 60s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND
         TIMESTAMP NOW
         TO orders INHERIT ALL UNBRANCHED FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT sink_api TYPE HTTP CONFIG {
-        'endpoint' = '{{http_receiver.sink}}', 'timeout_ms' = 60000
+      CREATE HTTP CLIENT sink_api CONFIG {
+        'endpoint' = '{{http_receiver.emitter}}', 'timeout_ms' = 60000
       };
-      CREATE EMITTER published FROM orders
-        TO HTTP sink_api
+      CREATE HTTP REQUEST EMITTER published FROM orders
+        TO sink_api
           METHOD 'POST' PATH concat('/orders/', input.region, '/', input.order_id)
           MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
           WITHOUT BODY
@@ -231,7 +233,7 @@ Feature: Client producers across real node process faults
     And the server process cluster leader is saved as placeholder "leader"
     And a server process cluster node other than placeholder "leader" is saved as placeholder "owner"
     And a server process cluster node other than placeholders "leader" and "owner" is saved as placeholder "entry"
-    And the server process cluster is configured with these NSPL commands
+    And the server process cluster is configured with these Plexus commands
       """
       RELOCATE INGESTOR orders_in ONTO NODE {{owner}} IGNORE PREFERENCES;
       RELOCATE RELAY orders ONTO NODE {{leader}} IGNORE PREFERENCES;
@@ -249,7 +251,7 @@ Feature: Client producers across real node process faults
     And producer "orders" submits batch "second" with rows
       | region | order_id | amount |
       | eu     | o-2      | 2      |
-    Then HTTP receiver "sink" eventually receives at least 1 request
+    Then HTTP receiver "emitter" eventually receives at least 1 request
     When producer "orders" submits batch "third" with rows
       | region | order_id | amount |
       | us     | o-3      | 3      |
@@ -266,7 +268,7 @@ Feature: Client producers across real node process faults
     And batch "second" has an unknown outcome because "owner_lost"
     And batch "third" is not admitted because "producer ended"
     When server process node "{{owner}}" receives SIGCONT
-    And HTTP receiver "sink" releases its held responses with "respond 200"
+    And HTTP receiver "emitter" releases its held responses with "respond 200"
     Then within "60s" the server process cluster describes ingestor "orders_in" with
       """
       producers: 0
@@ -276,8 +278,8 @@ Feature: Client producers across real node process faults
       | region | order_id | amount |
       | us     | o-4      | 4      |
     Then batch "fourth" completes
-    And HTTP receiver "sink" captured one request that is
+    And HTTP receiver "emitter" captured one request that is
       """
       POST /orders/us/o-4
       """
-    And HTTP receiver "sink" captured no request with request line "POST /orders/us/o-3"
+    And HTTP receiver "emitter" captured no request with request line "POST /orders/us/o-3"

@@ -5,8 +5,12 @@
 //! - **Owns.** Installing committed mappings, observing progress, following installations for
 //!   client attachments, and adapting clock arithmetic to runtime lifecycle decisions.
 //! - **Depends on.** Vocabulary clock models and branch-local runtime state.
-//! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
+//! - **Must not know.** Plexus parsing, consensus decisions or clock-authority selection.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -404,6 +408,13 @@ impl DomainClockLifecycle {
     #[cfg(test)]
     pub(in crate::runtime) fn stop(&self, generation: u64) {
         self.replace(DomainClockInstallation::Stopped { generation });
+    }
+
+    /// The receivers this clock's replacements wake: one for every logical deadline a bound handle
+    /// is waiting for, and one for every observer.
+    #[cfg(test)]
+    pub(in crate::runtime) fn notification_receivers(&self) -> usize {
+        self.inner.changes.receiver_count()
     }
 
     pub(in crate::runtime) fn mark_missing(&self) {
@@ -1048,6 +1059,16 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_domain_clock_authority_proposal_rejection(
+        &self,
+        node: &nervix_models::ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .fault_injection
+            .take_domain_clock_authority_proposal_rejection(node)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) fn mark_domain_clock_progress_delivered(
         &self,
         domain: &DomainName,
@@ -1193,6 +1214,10 @@ impl Runtime {
 mod tests;
 
 #[cfg(all(test, feature = "shuttle"))]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod shuttle_lifecycle_tests {
     use std::collections::BTreeMap;
 
@@ -1317,9 +1342,10 @@ mod shuttle_lifecycle_tests {
             publish_model_tick(&publishing, &published_name, 1, 1);
             thread::yield_now();
             publish_model_tick(&publishing, &published_name, 1, 2);
-            publishing.sync_committed_domains(&domains, &BTreeMap::new());
+            publishing.sync_committed_domains(2, &domains, &BTreeMap::new());
             thread::yield_now();
             publishing.sync_committed_domains(
+                3,
                 &domains,
                 &BTreeMap::from([(published_name.clone(), test_domain_clock_authority())]),
             );
@@ -1868,7 +1894,7 @@ mod shuttle_lifecycle_tests {
             let name = domain(MODEL_DOMAIN);
             let domains = BTreeMap::from([(name.clone(), running_generation(1, ORIGIN))]);
             let authorities = BTreeMap::from([(name, test_domain_clock_authority())]);
-            installing.sync_committed_domains(&domains, &authorities);
+            installing.sync_committed_domains(1, &domains, &authorities);
         });
         shuttle::future::block_on(runtime.committed_domains_installed());
         let Some(observer) = runtime.observe_domain_clock(&domain(MODEL_DOMAIN)) else {

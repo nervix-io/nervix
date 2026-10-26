@@ -31,6 +31,20 @@ container_running() {
     [[ "$(run_bounded 20 docker inspect --format '{{.State.Running}}' "${container_id}")" == true ]]
 }
 
+# Prints why the stopped load container CONTAINER_ID no longer runs. A load that reached the end of
+# its fixture exits 0, and FIXTURE_ADVICE says how to lengthen that fixture. A load whose kcat could
+# not deliver a record exits with a nonzero status.
+stopped_load_reason() {
+    local container_id="$1" fixture_advice="$2"
+    local exit_code
+    exit_code="$(run_bounded 20 docker inspect --format '{{.State.ExitCode}}' "${container_id}")" || return 1
+    if [[ "${exit_code}" == 0 ]]; then
+        printf 'it reached the end of its fixture; %s' "${fixture_advice}"
+    else
+        printf 'kcat could not deliver a record and the load exited %s; its log is in diagnostics/compose.log' "${exit_code}"
+    fi
+}
+
 check_support_containers() {
     local service
     for service in broker load observer; do
@@ -39,7 +53,7 @@ check_support_containers() {
         if ! container_running "${container_id}"; then
             failure_category=setup
             if [[ "${service}" == load ]]; then
-                rolling_fail 'load fixture ended before fault verification; increase --records'
+                rolling_fail "the load stopped before fault verification: $(stopped_load_reason "${container_id}" 'increase --records')"
                 return 1
             fi
             rolling_fail "${service} stopped during fault traffic"
@@ -342,6 +356,15 @@ restart_one_node() {
         "${round_dir}/shutdown.log"
     grep -E 'shutdown (admission|drain-support|terminal-teardown) phase finished' \
         "${round_dir}/shutdown.log" >"${round_dir}/phase-outcomes.txt"
+    if [[ "${node_count}" == "3" ]]; then
+        # The other two nodes were settled, uncordoned voters when the stop began, so the stopped
+        # node had a live replacement and must have handed its work over rather than leaving it
+        # to fail over.
+        if ! "${script_dir}/verify-drain-evidence.sh" "${target}" "${round_dir}/shutdown.log"; then
+            failure_category=product
+            rolling_fail "${target} did not complete its graceful drain while a live replacement node existed"
+        fi
+    fi
     check_support_containers
     check_other_nodes "${target}"
     local observer_id

@@ -9,6 +9,11 @@
 //! - **Depends on.** The zone module and jiff as the reference for offsets and transitions.
 //! - **Must not know.** Arrow arrays, formats, or row errors.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::str::FromStr as _;
 
 use jiff::{Timestamp, civil::date, tz::Offset};

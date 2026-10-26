@@ -27,6 +27,25 @@ pub struct StateReplicationBenchmark {
 }
 
 impl StateReplicationBenchmark {
+    /// Deliver one replica acknowledgement through the runtime's frame router, independently of
+    /// the source task and the offset commit it wakes.
+    pub fn acknowledgement_frame(&self) {
+        self.runtime.handle_state_replication_ack(
+            &self.replica,
+            StateSyncAck {
+                placement: self.offsets_placement.clone(),
+                lsm: 1,
+            },
+        );
+    }
+
+    /// Route a checkpoint notification to its held state. This isolates state selection and
+    /// wakeup from wire decoding, authentication and the network.
+    pub fn announcement_frame(&self) {
+        self.runtime
+            .with_placement_replication(&self.offsets_placement, CheckpointReplication::announced);
+    }
+
     /// A runtime whose replica branch lifecycle names `branches` deduplicator branches.
     pub fn new(branches: usize) -> Self {
         let runtime = Runtime::new();
@@ -40,6 +59,20 @@ impl StateReplicationBenchmark {
             identifier: ModelName::parse("source").assured("the benchmark ingestor name is valid"),
             branch_key: None,
         };
+        runtime.publish_state_assignment(
+            offsets_placement.entity(),
+            ScheduledStateAssignment {
+                identity: ScheduledStateIdentity {
+                    schema_fingerprint: SchemaFingerprint::from_digest([7; 32]),
+                    wasm_state_generations: None,
+                },
+                checkpoint_owners: Some(CheckpointOwners {
+                    primary: Some(owner.clone()),
+                    executors: BTreeSet::from([owner.clone()]),
+                    replicas: BTreeSet::from([replica.clone()]),
+                }),
+            },
+        );
         let mut assignment = runtime
             .replicated_kafka_offset_state(
                 offsets_placement.clone(),
@@ -212,7 +245,7 @@ impl StateOwner for InProcessStateOwner {
     ) -> error_stack::Result<Option<PersistedRuntimeStateEntry>, StateReplicationError> {
         self.requests.fetch_add(1, AtomicOrdering::Relaxed);
         self.runtime
-            .handle_state_sync_request(placement, after_lsm)
+            .capture_state_checkpoint(placement, after_lsm)
             .await
     }
 
@@ -263,6 +296,7 @@ impl ReplicaCatchUpBenchmark {
                 None,
             )
             .assured("the published identity places the branch lifecycle");
+        let lifecycle = replica.replicated_branch_lifecycle(&branch_lru);
         let tenant = FieldName::parse("tenant").assured("the benchmark branch field is valid");
         let mut entries = Vec::with_capacity(branches);
         for branch in 0..branches {
@@ -286,7 +320,7 @@ impl ReplicaCatchUpBenchmark {
             let checkpoint = state
                 .latest_snapshot()
                 .assured("an empty deduplicator state encodes");
-            replica.hold_passive_state_replica_snapshot(&placement, checkpoint);
+            lifecycle.hold_passive_checkpoint(&placement, checkpoint);
             entries.push(BranchInstanceSnapshotEntry {
                 key: Some(key),
                 last_ingestion: Timestamp::from_unix_nanos(1),
@@ -301,7 +335,6 @@ impl ReplicaCatchUpBenchmark {
         owner
             .replicated_branch_lifecycle(&branch_lru)
             .publish(lifecycle_snapshot.clone());
-        let lifecycle = replica.replicated_branch_lifecycle(&branch_lru);
         replica
             .install_replica_branch_lru_snapshot(&branch_lru, &lifecycle, lifecycle_snapshot)
             .assured("the benchmark branch lifecycle installs");

@@ -7,6 +7,11 @@
 //! - **Depends on.** The active graph it reads and the placement plan that constrains it.
 //! - **Must not know.** How an assignment is applied or executed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
 use std::cmp::Reverse;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
@@ -22,6 +27,20 @@ use crate::registry::{
     graph::{ActiveGraph, ActiveNode, EdgeKind, is_schedulable_model, schedulable_depth},
     placement::{PlacementPair, ResolvedPlacementPair},
 };
+
+/// Server intakes follow live membership even when a node cannot receive placed work.
+pub(crate) fn assign_server_listener_nodes(
+    schedule: &mut DomainSchedule,
+    live_nodes: &[ClusterNodeName],
+) {
+    let live_nodes = SortedSet::from_unsorted(live_nodes.to_vec()).into_vec();
+    for node in schedule.nodes.values_mut() {
+        if node.config.executes_on_every_cluster_node() {
+            node.primary_node = live_nodes.first().cloned();
+            node.assigned_nodes = live_nodes.clone();
+        }
+    }
+}
 #[cfg(feature = "testing")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerMode {
@@ -532,7 +551,9 @@ mod tests {
     use nervix_models::ModelName;
     use nervix_models::{
         AckMode, BranchSelection, CodecName, CreateIngestor, CreateJunction, EndpointName,
-        GeneralErrorPolicy, IngestSource, IngestorName, ModelKind, ProcessorInputs,
+        GeneralErrorPolicy, HttpEndpointIngestor, HttpIngestor, IngestorEntity, IngestorName,
+        ModelKind, ProcessorInputs, SyslogIngestor, SyslogListenerIngestor,
+        WebsocketsEndpointIngestor, WebsocketsIngestor,
     };
     use nonzero_ext::nonzero;
 
@@ -918,10 +939,12 @@ mod tests {
         let nervix_models::IngestorInput::Transport(transport) = &mut ingestor.input else {
             panic!("the full graph's ingestor reads a transport");
         };
-        transport.source = IngestSource::Syslog {
-            client: named("syslog_listener"),
-            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-        };
+        transport.source =
+            IngestorEntity::Syslog(SyslogIngestor::Listener(SyslogListenerIngestor {
+                client: named("syslog_listener"),
+                mode: nervix_models::SyslogIngestMode::NoAck,
+                quiesce: nervix_models::IngestQuiesceMode::Suspend,
+            }));
         models.push(syslog_client("syslog_listener"));
         registry
             .apply_batch(&domain, models)
@@ -1094,14 +1117,16 @@ mod tests {
                         output_routes: unbranched_transforming_outputs("notifications"),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Endpoint {
-                                    endpoint: EndpointName::parse("ingest_http")
-                                        .expect("valid identifier"),
-                                    mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                        max_size: "1MiB".to_string(),
+                                source: IngestorEntity::Http(HttpIngestor::Endpoint(
+                                    HttpEndpointIngestor {
+                                        endpoint: EndpointName::parse("ingest_http")
+                                            .expect("valid identifier"),
+                                        mode: nervix_models::EndpointIngestMode::NoAck,
+                                        quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                            max_size: "1MiB".to_string(),
+                                        },
                                     },
-                                },
+                                )),
                                 codec: CodecName::parse("event_codec").expect("valid identifier"),
                             },
                         ),
@@ -1137,6 +1162,25 @@ mod tests {
             ]
         );
 
+        let live_nodes = [named("node-1"), named("node-2"), named("node-3")];
+        for eligible in [Vec::new(), vec![named("node-2")]] {
+            let mut schedule =
+                graph.schedule_for_domain(&domain, &eligible, 0, PlacementPolicy::Neutral);
+            super::assign_server_listener_nodes(&mut schedule, &live_nodes);
+            let listener = scheduled_node(&schedule, ModelKind::Ingestor, "http_ing");
+            assert_eq!(listener.assigned_nodes, live_nodes);
+            assert!(live_nodes.iter().all(|node| listener.executes_on(node)));
+            assert_eq!(
+                scheduled_node(&schedule, ModelKind::Relay, "notifications").assigned_nodes,
+                eligible
+            );
+            super::assign_server_listener_nodes(&mut schedule, &live_nodes[..2]);
+            assert_eq!(
+                scheduled_node(&schedule, ModelKind::Ingestor, "http_ing").assigned_nodes,
+                live_nodes[..2]
+            );
+        }
+
         let _ = fs::remove_dir_all(path);
     }
 
@@ -1166,14 +1210,16 @@ mod tests {
                         output_routes: unbranched_transforming_outputs("notifications"),
                         input: nervix_models::IngestorInput::Transport(
                             nervix_models::TransportIngestorInput {
-                                source: IngestSource::Endpoint {
-                                    endpoint: EndpointName::parse("ingest_ws")
-                                        .expect("valid identifier"),
-                                    mode: nervix_models::EndpointIngestMode::NoAckSequential,
-                                    quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
-                                        max_size: "1MiB".to_string(),
+                                source: IngestorEntity::Websockets(WebsocketsIngestor::Endpoint(
+                                    WebsocketsEndpointIngestor {
+                                        endpoint: EndpointName::parse("ingest_ws")
+                                            .expect("valid identifier"),
+                                        mode: nervix_models::EndpointIngestMode::NoAck,
+                                        quiesce: nervix_models::IngestQuiesceMode::EndpointBuffer {
+                                            max_size: "1MiB".to_string(),
+                                        },
                                     },
-                                },
+                                )),
                                 codec: CodecName::parse("event_codec").expect("valid identifier"),
                             },
                         ),

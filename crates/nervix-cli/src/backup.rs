@@ -3,32 +3,50 @@
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** Turning the subcommand's arguments into a `BACKUP` statement, delivering its archive
-//!   to a file or to standard output, reporting the backup as text or JSON, and describing a local
-//!   archive as text or JSON.
+//! - **Owns.** Turning the subcommand's arguments into a `BACKUP` statement, refusing a standard
+//!   output that would discard the archive, delivering the archive to a file or to standard output,
+//!   keeping an archive whose delivery to standard output failed, reporting the backup as text or
+//!   JSON, and describing a local archive as text or JSON.
 //! - **Depends on.** The client core, which runs the backup and downloads its archive, the archive
 //!   format's reader, and the vocabulary.
 //! - **Must not know.** How the server assembles or retains an archive.
 //!
 //! A backup whose archive goes to standard output keeps standard output for the archive alone, so
 //! its report goes to standard error. Every failure ends the process with a nonzero status.
+//!
+//! A standard output that would discard the archive is refused before the backup is taken. An
+//! archive bound for any other standard output is downloaded into a staging directory first, and
+//! its complete download releases the server's copy. A delivery that fails after that keeps the
+//! staged archive, the only copy left, and reports it under the backup's execution reference.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
 
 use std::{
     fs::File,
-    io::{self, BufReader},
+    io::{self, BufReader, Read as _, Write},
+    os::{
+        fd::AsFd as _,
+        unix::fs::{FileTypeExt as _, MetadataExt as _},
+    },
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use error_stack::{Report as StackReport, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_backup::{
-    ArchiveDescription, ArchiveScope, DescribedDomain, DescribedResourceVersion, DescribedSection,
-    ResourceVersionState, describe_archive,
+    ArchiveDescription, ArchiveScope, DescribedDomain, DescribedResourceVersion,
+    DescribedRuntimeState, DescribedSection, ResourceVersionState, describe_archive,
 };
 use nervix_client_core::{BackupArchiveSummary, Client, CommandOutcome, ConnectOptions};
 use nervix_models::{
-    Backup, BackupResources, BackupScope, DescribeBackup, DomainName, DomainPace, InspectionFormat,
+    Backup, BackupCapture, BackupResources, BackupScope, CommandExecutionReference, DescribeBackup,
+    DomainName, DomainPace, InspectionFormat,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
 use serde_json::{Value, json};
 
 use super::{ClientError, expand_user_path};
@@ -60,6 +78,10 @@ pub(super) struct BackupRequest {
     pub(super) domain: Option<DomainName>,
     pub(super) output: String,
     pub(super) without_resources: bool,
+    pub(super) without_state: bool,
+    pub(super) without_pause: bool,
+    pub(super) timeout: Option<Duration>,
+    pub(super) execution_reference: Option<CommandExecutionReference>,
     pub(super) format: CliReportFormat,
 }
 
@@ -67,28 +89,40 @@ pub(super) struct BackupRequest {
 enum ArchiveOutput {
     /// A file the operator named.
     File(PathBuf),
-    /// Standard output, through a private file the download is verified in first.
+    /// Standard output, through a staging directory the download is verified in first.
     Stdout {
-        staging: tempfile::TempDir,
-        archive: PathBuf,
+        staged: StagedArchive,
+        stdout: StandardOutput,
     },
 }
+
+/// The name of the archive in its staging directory.
+const STAGED_ARCHIVE: &str = "backup.nvxb";
+
+/// The archive bytes one read of the staged archive hands to standard output, a Linux pipe's
+/// default capacity.
+const DELIVERY_CHUNK_BYTES: usize = 64 * 1024;
+
+/// The device that keeps nothing written to it.
+const NULL_DEVICE: &str = "/dev/null";
 
 impl ArchiveOutput {
     fn from_argument(output: &str) -> Result<Self, StackReport<ClientError>> {
         if output != "-" {
             return Ok(Self::File(PathBuf::from(output)));
         }
-        let staging = tempfile::tempdir().change_context(ClientError::WriteArchive)?;
-        let archive = staging.path().join("backup.nvxb");
-        Ok(Self::Stdout { staging, archive })
+        // Standard output is taken before the archive is staged, so a standard output that would
+        // discard the archive leaves nothing behind.
+        let stdout = StandardOutput::take()?;
+        let staged = StagedArchive::create()?;
+        Ok(Self::Stdout { staged, stdout })
     }
 
     /// The file the download writes.
-    fn download_path(&self) -> &Path {
+    fn download_path(&self) -> PathBuf {
         match self {
-            Self::File(path) => path,
-            Self::Stdout { archive, .. } => archive,
+            Self::File(path) => path.clone(),
+            Self::Stdout { staged, .. } => staged.path(),
         }
     }
 
@@ -101,15 +135,168 @@ impl ArchiveOutput {
     }
 
     /// Hands a downloaded archive to its output. A file is already in place.
-    fn deliver(self) -> Result<(), StackReport<ClientError>> {
-        let Self::Stdout { staging, archive } = self else {
-            return Ok(());
-        };
-        let mut file = File::open(&archive).change_context(ClientError::WriteArchive)?;
-        let mut stdout = io::stdout().lock();
-        io::copy(&mut file, &mut stdout).change_context(ClientError::WriteArchive)?;
-        drop(file);
-        staging.close().change_context(ClientError::WriteArchive)
+    fn deliver(self) -> Result<(), DeliveryFailure> {
+        match self {
+            Self::File(_) => Ok(()),
+            Self::Stdout { staged, mut stdout } => staged.deliver(&mut stdout),
+        }
+    }
+}
+
+/// Standard output as the destination of an archive: a descriptor of the CLI's own for the file
+/// standard output has open, written without a buffer, so every write reaches the operating system
+/// and every failure is reported.
+///
+/// The null device takes every byte and keeps none, so an archive written to it would be lost
+/// while every write succeeds. A process started with standard output closed finds the null device
+/// there, because the standard library opens it before `main`, and cannot tell that from a
+/// redirection to it. Standard output that is the null device therefore cannot receive an archive.
+struct StandardOutput {
+    file: File,
+}
+
+impl StandardOutput {
+    /// Takes standard output for an archive, unless it would discard it.
+    fn take() -> Result<Self, StackReport<ClientError>> {
+        let descriptor = io::stdout()
+            .as_fd()
+            .try_clone_to_owned()
+            .change_context(ClientError::InspectStandardOutput)?;
+        Self::receiving(File::from(descriptor))
+    }
+
+    /// `file` as the destination of an archive, unless it is the null device.
+    fn receiving(file: File) -> Result<Self, StackReport<ClientError>> {
+        let opened = file
+            .metadata()
+            .change_context(ClientError::InspectStandardOutput)?;
+        let null_device = std::fs::metadata(NULL_DEVICE)
+            .change_context(ClientError::IdentifyNullDevice)
+            .change_context(ClientError::InspectStandardOutput)?;
+        // A device is identified by its type and number, whichever node opened it.
+        if opened.file_type().is_char_device() && opened.rdev() == null_device.rdev() {
+            return Err(StackReport::new(ClientError::DiscardingStandardOutput));
+        }
+        Ok(Self { file })
+    }
+}
+
+impl Write for StandardOutput {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.file.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
+/// An archive bound for standard output, downloaded into a private staging directory and verified
+/// there before a byte of it is delivered.
+struct StagedArchive {
+    staging: tempfile::TempDir,
+}
+
+impl StagedArchive {
+    fn create() -> Result<Self, StackReport<ClientError>> {
+        let staging = tempfile::tempdir().change_context(ClientError::StageArchive)?;
+        Ok(Self { staging })
+    }
+
+    /// The file the archive is staged in.
+    fn path(&self) -> PathBuf {
+        self.staging.path().join(STAGED_ARCHIVE)
+    }
+
+    /// Copies the staged archive to `stdout`.
+    ///
+    /// The archive's complete download released the server's copy, so the staged archive is the
+    /// only one left: a delivery that does not flush every byte to `stdout` keeps it, and only a
+    /// complete delivery removes its staging directory.
+    fn deliver(self, stdout: &mut impl Write) -> Result<(), DeliveryFailure> {
+        let copied = self.copy(stdout);
+        if let Err(report) = copied {
+            let kept = self.staging.keep();
+            return Err(DeliveryFailure::NotDelivered {
+                archive: kept.join(STAGED_ARCHIVE),
+                report,
+            });
+        }
+        let directory = self.staging.path().to_path_buf();
+        match self.staging.close() {
+            Ok(()) => Ok(()),
+            Err(error) => Err(DeliveryFailure::StagingRemains {
+                staging: directory,
+                report: StackReport::new(error).change_context(ClientError::RemoveStaging),
+            }),
+        }
+    }
+
+    /// Copies the staged archive to `stdout` and flushes it, so a writer that buffers hands on the
+    /// archive's last bytes, and reports their failure, before the delivery counts as complete.
+    fn copy(&self, stdout: &mut impl Write) -> Result<(), StackReport<ClientError>> {
+        let mut file = File::open(self.path()).change_context(ClientError::ReadStagedArchive)?;
+        let mut chunk = vec![0_u8; DELIVERY_CHUNK_BYTES];
+        loop {
+            let read = match file.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(
+                        StackReport::new(error).change_context(ClientError::ReadStagedArchive)
+                    );
+                }
+            };
+            stdout
+                .write_all(&chunk[..read])
+                .change_context(ClientError::WriteArchive)?;
+        }
+        stdout.flush().change_context(ClientError::WriteArchive)
+    }
+}
+
+/// Why a downloaded archive did not reach standard output cleanly.
+#[derive(Debug)]
+enum DeliveryFailure {
+    /// Standard output did not receive the whole archive. The archive stays at `archive`, the only
+    /// copy left once its complete download released the server's.
+    NotDelivered {
+        archive: PathBuf,
+        report: StackReport<ClientError>,
+    },
+    /// Standard output received the whole archive, but the directory it was staged in stays at
+    /// `staging`.
+    StagingRemains {
+        staging: PathBuf,
+        report: StackReport<ClientError>,
+    },
+}
+
+impl DeliveryFailure {
+    /// The failure's report as `format` prints it, naming the backup's durable `reference`.
+    fn rendered(&self, format: CliReportFormat, reference: &CommandExecutionReference) -> String {
+        match self {
+            Self::NotDelivered { archive, report } => failure_report(
+                format,
+                "WRITE_FAILED",
+                &format!("{report:#}"),
+                Some(Recovery::KeptArchive { reference, archive }),
+            ),
+            Self::StagingRemains { staging, report } => failure_report(
+                format,
+                "CLEANUP_FAILED",
+                &format!("{report:#}"),
+                Some(Recovery::RemoveStaging { reference, staging }),
+            ),
+        }
+    }
+
+    /// The error the process ends with.
+    fn into_report(self) -> StackReport<ClientError> {
+        match self {
+            Self::NotDelivered { report, .. } | Self::StagingRemains { report, .. } => report,
+        }
     }
 }
 
@@ -131,7 +318,22 @@ impl ReportStream {
 /// Runs one backup and delivers its archive.
 pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport<ClientError>> {
     let format = request.format;
-    let output = ArchiveOutput::from_argument(&request.output)?;
+    let output = match ArchiveOutput::from_argument(&request.output) {
+        Ok(output) => output,
+        Err(error) => {
+            // Only an archive bound for standard output takes standard output and is staged, so the
+            // report goes to standard error. No backup was admitted yet, so it names no execution
+            // reference.
+            report_failure(
+                ReportStream::Stderr,
+                format,
+                "WRITE_FAILED",
+                &format!("{error:#}"),
+                None,
+            );
+            return Err(error);
+        }
+    };
     let report = output.report();
     let scope = match (request.scope, request.domain) {
         (CliBackupScope::Cluster, None) => BackupScope::Cluster,
@@ -139,16 +341,29 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
             let error = ClientError::BackupArguments {
                 reason: "a cluster backup covers every domain and names none",
             };
-            report_failure(report, format, "INVALID_ARGUMENTS", &error.to_string());
+            report_failure(
+                report,
+                format,
+                "INVALID_ARGUMENTS",
+                &error.to_string(),
+                None,
+            );
             return Err(StackReport::new(error));
         }
         (CliBackupScope::Domain, domain) => BackupScope::Domain(domain),
     };
-    let Some(destination) = output.download_path().to_str() else {
+    let download_path = output.download_path();
+    let Some(destination) = download_path.to_str() else {
         let error = ClientError::BackupArguments {
             reason: "the archive's path must be valid UTF-8",
         };
-        report_failure(report, format, "INVALID_ARGUMENTS", &error.to_string());
+        report_failure(
+            report,
+            format,
+            "INVALID_ARGUMENTS",
+            &error.to_string(),
+            None,
+        );
         return Err(StackReport::new(error));
     };
     let resources = if request.without_resources {
@@ -156,10 +371,20 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
     } else {
         BackupResources::Included
     };
+    let capture = if request.without_state {
+        BackupCapture::ConfigurationOnly
+    } else if request.without_pause {
+        BackupCapture::Live
+    } else {
+        BackupCapture::Quiesced {
+            timeout: request.timeout,
+        }
+    };
     let backup = Backup {
         scope,
         destination: destination.to_string(),
         resources,
+        capture,
     };
     let client = match Client::connect_with_options(
         &request.server,
@@ -170,21 +395,48 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
     {
         Ok(client) => client,
         Err(error) => {
-            report_failure(report, format, "CONNECTION_FAILED", &error.to_string());
-            return Err(StackReport::new(ClientError::from(error)));
+            report_failure(
+                report,
+                format,
+                "CONNECTION_FAILED",
+                &format!("{error:#}"),
+                None,
+            );
+            return Err(error.change_context(ClientError::Connect));
         }
     };
-    let outcome = match client.execute(backup.to_canonical_nspl()).await {
+    let execution = match request.execution_reference {
+        Some(reference) => {
+            client
+                .prepare_backup_with_reference(&backup, &reference)
+                .await
+        }
+        None => client.prepare_execution(backup.to_canonical_plexus()).await,
+    };
+    let outcome = match client.execute_prepared(&execution).await {
         Ok(outcome) => outcome,
         Err(error) => {
-            report_failure(report, format, "BACKUP_FAILED", &error_chain(&error));
-            return Err(StackReport::new(ClientError::from(error)));
+            let recovery = match error.current_context() {
+                nervix_client_core::ClientError::UncertainCommand { reference }
+                | nervix_client_core::ClientError::BackupDownload { reference } => {
+                    Some(Recovery::Rerun { reference })
+                }
+                _ => None,
+            };
+            report_failure(
+                report,
+                format,
+                "BACKUP_FAILED",
+                &format!("{error:#}"),
+                recovery,
+            );
+            return Err(error.change_context(ClientError::Request));
         }
     };
     let summary = match (outcome.succeeded(), outcome.backup.as_deref()) {
         (true, Some(summary)) => summary.clone(),
         (true, None) | (false, _) => {
-            report_failure(report, format, "BACKUP_REFUSED", &outcome.message);
+            report_failure(report, format, "BACKUP_REFUSED", &outcome.message, None);
             return Err(StackReport::new(ClientError::BackupFailed {
                 message: outcome.message,
             }));
@@ -194,9 +446,10 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
         ArchiveOutput::File(path) => path.display().to_string(),
         ArchiveOutput::Stdout { .. } => "-".to_string(),
     };
-    if let Err(error) = output.deliver() {
-        report_failure(report, format, "WRITE_FAILED", &format!("{error:#}"));
-        return Err(error);
+    let delivered = output.deliver();
+    if let Err(failure) = delivered {
+        report.print(&failure.rendered(format, execution.reference()));
+        return Err(failure.into_report());
     }
     match format {
         CliReportFormat::Text => report.print(&outcome.message),
@@ -207,24 +460,98 @@ pub(super) async fn run_backup(request: BackupRequest) -> Result<(), StackReport
     Ok(())
 }
 
-/// The error and every cause behind it, as one line.
-fn error_chain(error: &nervix_client_core::ClientError) -> String {
-    let mut message = error.to_string();
-    let mut cause = std::error::Error::source(error);
-    while let Some(current) = cause {
-        message.push_str(": ");
-        message.push_str(&current.to_string());
-        cause = current.source();
-    }
-    message
+/// What a failure report tells the operator to do about a backup the server admitted, under its
+/// durable reference.
+#[derive(Clone, Copy)]
+enum Recovery<'a> {
+    /// Run the backup again under its reference, which returns the backup's outcome and downloads
+    /// its archive for as long as the server retains it.
+    Rerun {
+        reference: &'a CommandExecutionReference,
+    },
+    /// Take the archive the CLI kept: the backup completed and its complete download released the
+    /// server's copy, which running it again cannot download.
+    KeptArchive {
+        reference: &'a CommandExecutionReference,
+        archive: &'a Path,
+    },
+    /// Remove the staging directory of an archive that reached standard output.
+    RemoveStaging {
+        reference: &'a CommandExecutionReference,
+        staging: &'a Path,
+    },
 }
 
-fn report_failure(report: ReportStream, format: CliReportFormat, code: &str, message: &str) {
+impl Recovery<'_> {
+    /// The line a text report ends with.
+    fn text(self) -> String {
+        match self {
+            Self::Rerun { reference } => format!(
+                "recover using --execution-reference {reference} with the same domain and capture \
+                 options"
+            ),
+            Self::KeptArchive { reference, archive } => format!(
+                "recover backup {reference} from its verified archive at '{}'; its complete \
+                 download released the server's copy",
+                archive.display()
+            ),
+            Self::RemoveStaging { reference, staging } => format!(
+                "backup {reference} reached standard output; remove its staging directory '{}'",
+                staging.display()
+            ),
+        }
+    }
+
+    /// Adds what the recovery needs to a JSON report's `error` object.
+    fn describe(self, error: &mut Value) {
+        match self {
+            Self::Rerun { reference } => {
+                error["execution_reference"] = json!(reference.as_str());
+            }
+            Self::KeptArchive { reference, archive } => {
+                error["execution_reference"] = json!(reference.as_str());
+                error["archive"] = json!(archive.display().to_string());
+            }
+            Self::RemoveStaging { reference, staging } => {
+                error["execution_reference"] = json!(reference.as_str());
+                error["staging"] = json!(staging.display().to_string());
+            }
+        }
+    }
+}
+
+fn report_failure(
+    report: ReportStream,
+    format: CliReportFormat,
+    code: &str,
+    message: &str,
+    recovery: Option<Recovery<'_>>,
+) {
+    report.print(&failure_report(format, code, message, recovery));
+}
+
+/// A failure's report as `format` prints it.
+fn failure_report(
+    format: CliReportFormat,
+    code: &str,
+    message: &str,
+    recovery: Option<Recovery<'_>>,
+) -> String {
     match format {
-        CliReportFormat::Text => report.print(&format!("error: {message}")),
+        CliReportFormat::Text => {
+            let mut text = format!("error: {message}");
+            if let Some(recovery) = recovery {
+                text.push('\n');
+                text.push_str(&recovery.text());
+            }
+            text
+        }
         CliReportFormat::Json => {
-            let document = json!({ "error": { "code": code, "message": message } });
-            report.print(&document.to_string());
+            let mut error = json!({ "code": code, "message": message });
+            if let Some(recovery) = recovery {
+                recovery.describe(&mut error);
+            }
+            json!({ "error": error }).to_string()
         }
     }
 }
@@ -239,6 +566,7 @@ fn backup_report_json(
         domains.push(json!({
             "domain": domain.domain.as_str(),
             "revision": domain.revision,
+            "cut": cut_json(domain.cut),
             "sections": domain.sections,
             "section_bytes": domain.section_bytes,
         }));
@@ -378,19 +706,147 @@ fn domain_text(domain: &DescribedDomain) -> Vec<String> {
             pace_text(&record.pace),
             record.start_version,
         ),
-        format!(
-            "  models: bytes={} blake3={}",
-            domain.models.length, domain.models.digest
-        ),
-        "  resource_versions:".to_string(),
+        format!("  start_point: {:?}", record.start_point),
     ];
+    if let Some(mapping) = &record.clock {
+        lines.push(format!(
+            "  clock: wall_started_at={} logical_start={} time_rate={}",
+            mapping.wall_started_at(),
+            mapping.logical_start(),
+            mapping.time_rate()
+        ));
+    }
+    if let Some(frontier) = record.logical_frontier {
+        lines.push(format!("  logical_frontier: {frontier}"));
+    }
+    lines.push(format!(
+        "  models: bytes={} blake3={}",
+        domain.models.length, domain.models.digest
+    ));
+    lines.push(format!("  cut: {}", domain.capture.cut.kind().as_str()));
+    if let nervix_models::BackupCut::Quiesced {
+        engaged_at,
+        released_at,
+        quiesce,
+    } = domain.capture.cut
+    {
+        lines.push(format!(
+            "  cut_times: engaged_at={} released_at={} buffered_records={} buffered_bytes={} \
+             dropped_records={} rejected_records={}",
+            engaged_at,
+            released_at,
+            quiesce.buffered_records,
+            quiesce.buffered_bytes,
+            quiesce.dropped_records,
+            quiesce.rejected_records,
+        ));
+    }
+    lines.push("  resource_versions:".to_string());
     if domain.resource_versions.is_empty() {
         lines.push("  - none".to_string());
     }
     for version in &domain.resource_versions {
         lines.push(resource_version_text(version));
     }
+    lines.push("  runtime_state:".to_string());
+    if domain.state.is_empty() {
+        lines.push("  - none".to_string());
+    }
+    for state in &domain.state {
+        lines.push(runtime_state_text(state));
+    }
     lines
+}
+
+fn runtime_state_text(state: &DescribedRuntimeState) -> String {
+    match state {
+        DescribedRuntimeState::Wasm {
+            descriptor, guest, ..
+        } => format!(
+            "  - wasm_processor={} branch={} generation={} revision={} bytes={} blake3={}",
+            descriptor.entity,
+            branch_text(descriptor.branch_fingerprint.as_ref()),
+            u64::from(descriptor.generation),
+            descriptor.revision,
+            guest.length,
+            guest.digest,
+        ),
+        DescribedRuntimeState::KafkaOffsets { offsets, .. } => format!(
+            "  - kafka_ingestor={} partitions={} revision={}",
+            offsets.entity,
+            offsets.offsets.len(),
+            offsets.revision,
+        ),
+        DescribedRuntimeState::Materialized {
+            descriptor, groups, ..
+        } => format!(
+            "  - materialized_relay={} records={} groups={} revision={} fence={} \
+             branch_generation={} schema_fingerprint={}",
+            descriptor.entity,
+            descriptor.record_count,
+            groups.len(),
+            descriptor.revision,
+            descriptor.fence,
+            descriptor.branch_generation,
+            digest_hex(descriptor.schema.as_digest()),
+        ),
+        DescribedRuntimeState::BranchLifecycle { lifecycle, .. } => format!(
+            "  - branch_lifecycle={} branches={} revision={}",
+            lifecycle.entity,
+            lifecycle.branches.len(),
+            lifecycle.revision,
+        ),
+        DescribedRuntimeState::Deduplicator {
+            descriptor, groups, ..
+        } => format!(
+            "  - deduplicator={} branch={} keys={} groups={} revision={} schema_fingerprint={}",
+            descriptor.entity,
+            branch_text(descriptor.branch_fingerprint.as_ref()),
+            descriptor.keys,
+            groups.len(),
+            descriptor.revision,
+            digest_hex(descriptor.schema.as_digest()),
+        ),
+        DescribedRuntimeState::Window {
+            descriptor, groups, ..
+        } => format!(
+            "  - window_processor={} branch={} rows={} groups={} incarnation={} next_sequence={} \
+             delayed_removals={} revision={} schema_fingerprint={} model={}",
+            descriptor.entity,
+            branch_text(descriptor.branch_fingerprint.as_ref()),
+            descriptor.rows.len(),
+            groups.len(),
+            descriptor.incarnation,
+            descriptor.next_sequence,
+            delayed_removals(&descriptor.accumulators),
+            descriptor.revision,
+            digest_hex(descriptor.schema.as_digest()),
+            digest_hex(descriptor.model.as_digest()),
+        ),
+    }
+}
+
+/// A branch fingerprint as hexadecimal, or `unbranched`.
+fn branch_text(branch: Option<&nervix_models::BranchKeyFingerprint>) -> String {
+    match branch {
+        Some(fingerprint) => digest_hex(fingerprint.fingerprint()),
+        None => "unbranched".to_string(),
+    }
+}
+
+/// How many stepped rows the window's histograms still count.
+fn delayed_removals(accumulators: &[nervix_backup::WindowAccumulatorRecord]) -> usize {
+    let mut count = 0_usize;
+    for accumulator in accumulators {
+        if let nervix_backup::WindowAccumulatorRecord::LinearHistogram { delayed_removals } =
+            accumulator
+        {
+            count = count
+                .checked_add(delayed_removals.len())
+                .assured("removals a verified archive holds in memory count below usize::MAX");
+        }
+    }
+    count
 }
 
 fn resource_version_text(version: &DescribedResourceVersion) -> String {
@@ -474,17 +930,140 @@ fn domain_json(domain: &DescribedDomain) -> Value {
     for version in &domain.resource_versions {
         versions.push(resource_version_json(version));
     }
+    let state = domain
+        .state
+        .iter()
+        .map(runtime_state_json)
+        .collect::<Vec<_>>();
     json!({
         "domain": domain.capture.domain.as_str(),
         "revision": domain.capture.revision,
         "raft_term": domain.capture.raft_log.term,
         "raft_index": domain.capture.raft_log.index,
+        "cut": cut_json(domain.capture.cut),
         "status": record.status.as_ref(),
         "pace": pace_text(&record.pace),
         "start_version": record.start_version,
+        "start_point": record.start_point,
+        "clock": record.clock,
+        "logical_frontier": record.logical_frontier,
         "models": section_json(&domain.models),
         "resource_versions": versions,
+        "runtime_state": state,
     })
+}
+
+fn runtime_state_json(state: &DescribedRuntimeState) -> Value {
+    match state {
+        DescribedRuntimeState::Wasm {
+            descriptor,
+            record,
+            guest,
+        } => json!({
+            "kind": "wasm_processor",
+            "entity": descriptor.entity.as_str(),
+            "schema_fingerprint": digest_hex(descriptor.schema.as_digest()),
+            "branch_fingerprint": descriptor.branch_fingerprint.as_ref().map(|fingerprint| digest_hex(fingerprint.fingerprint())),
+            "generation": u64::from(descriptor.generation),
+            "revision": descriptor.revision,
+            "descriptor": section_json(record),
+            "guest": section_json(guest),
+        }),
+        DescribedRuntimeState::KafkaOffsets { offsets, record } => json!({
+            "kind": "kafka_offsets",
+            "entity": offsets.entity.as_str(),
+            "schema_fingerprint": digest_hex(offsets.schema.as_digest()),
+            "revision": offsets.revision,
+            "positions": offsets.offsets.iter().map(|offset| json!({
+                "topic": offset.topic,
+                "partition": offset.partition,
+                "next_offset": offset.next_offset,
+            })).collect::<Vec<_>>(),
+            "record": section_json(record),
+        }),
+        DescribedRuntimeState::Materialized {
+            descriptor,
+            record,
+            groups,
+        } => json!({
+            "kind": "materialized_relay", "entity": descriptor.entity.as_str(),
+            "schema_fingerprint": digest_hex(descriptor.schema.as_digest()), "revision": descriptor.revision,
+            "fence": descriptor.fence, "branch_generation": descriptor.branch_generation,
+            "record_count": descriptor.record_count, "descriptor": section_json(record),
+            "groups": groups.iter().map(|group| json!({"record_count": group.record_count, "identities": section_json(&group.identities), "columns": section_json(&group.columns)})).collect::<Vec<_>>(),
+        }),
+        DescribedRuntimeState::BranchLifecycle { lifecycle, record } => json!({
+            "kind": "branch_lifecycle",
+            "owner_kind": lifecycle.owner_kind.as_str(),
+            "entity": lifecycle.entity.as_str(),
+            "schema_fingerprint": digest_hex(lifecycle.schema.as_digest()),
+            "revision": lifecycle.revision,
+            "branches": lifecycle.branches.len(),
+            "record": section_json(record),
+        }),
+        DescribedRuntimeState::Deduplicator {
+            descriptor,
+            record,
+            groups,
+        } => json!({
+            "kind": "deduplicator",
+            "entity": descriptor.entity.as_str(),
+            "schema_fingerprint": digest_hex(descriptor.schema.as_digest()),
+            "branch_fingerprint": descriptor.branch_fingerprint.as_ref().map(|fingerprint| digest_hex(fingerprint.fingerprint())),
+            "revision": descriptor.revision,
+            "keys": descriptor.keys,
+            "descriptor": section_json(record),
+            "groups": groups.iter().map(section_json).collect::<Vec<_>>(),
+        }),
+        DescribedRuntimeState::Window {
+            descriptor,
+            record,
+            groups,
+        } => json!({
+            "kind": "window_processor",
+            "entity": descriptor.entity.as_str(),
+            "schema_fingerprint": digest_hex(descriptor.schema.as_digest()),
+            "model_digest": digest_hex(descriptor.model.as_digest()),
+            "branch_fingerprint": descriptor.branch_fingerprint.as_ref().map(|fingerprint| digest_hex(fingerprint.fingerprint())),
+            "revision": descriptor.revision,
+            "incarnation": descriptor.incarnation,
+            "first_sequence": descriptor.first_sequence,
+            "next_sequence": descriptor.next_sequence,
+            "rows": descriptor.rows.len(),
+            "delayed_removals": delayed_removals(&descriptor.accumulators),
+            "descriptor": section_json(record),
+            "groups": groups.iter().map(|group| json!({"input": section_json(&group.input), "arguments": section_json(&group.arguments)})).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn digest_hex(bytes: &[u8; 32]) -> String {
+    let mut hex = String::with_capacity(64);
+    for byte in bytes {
+        let byte = *byte;
+        hex.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        hex.push(char::from(b"0123456789abcdef"[usize::from(byte & 15)]));
+    }
+    hex
+}
+
+fn cut_json(cut: nervix_models::BackupCut) -> Value {
+    match cut {
+        nervix_models::BackupCut::Quiesced {
+            engaged_at,
+            released_at,
+            quiesce,
+        } => json!({
+            "kind": "quiesced",
+            "engaged_at": engaged_at.to_string(),
+            "released_at": released_at.to_string(),
+            "buffered_records": quiesce.buffered_records,
+            "buffered_bytes": quiesce.buffered_bytes,
+            "dropped_records": quiesce.dropped_records,
+            "rejected_records": quiesce.rejected_records,
+        }),
+        other => json!({ "kind": other.kind().as_str() }),
+    }
 }
 
 fn resource_version_json(version: &DescribedResourceVersion) -> Value {
@@ -512,4 +1091,415 @@ fn resource_version_json(version: &DescribedResourceVersion) -> Value {
         "published": published,
         "archive": archive,
     })
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    use std::os::fd::OwnedFd;
+
+    use meticulous::ResultExt as _;
+
+    use super::*;
+
+    /// Archive bytes that end in a partial line, which a line-buffered standard output holds back
+    /// until it is flushed.
+    const ARCHIVE: &[u8] = b"NVXB\narchive bytes\nand a tail without a newline";
+
+    fn reference() -> CommandExecutionReference {
+        CommandExecutionReference::parse("0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44")
+            .assured("the test reference is a hyphenated UUID")
+    }
+
+    /// An archive bound for standard output whose staged copy holds `bytes`, as a complete
+    /// download leaves it.
+    fn staged(bytes: &[u8]) -> StagedArchive {
+        let staged = StagedArchive::create()
+            .assured("the test stages its archive in the system's temporary directory");
+        std::fs::write(staged.path(), bytes).assured("the test writes the staged archive");
+        staged
+    }
+
+    /// The directory an archive bound for standard output is staged in.
+    fn staging_directory(staged: &StagedArchive) -> PathBuf {
+        staged
+            .path()
+            .parent()
+            .assured("a staged archive lies in its staging directory")
+            .to_path_buf()
+    }
+
+    /// Removes the staging directory a failed delivery kept.
+    fn remove_kept(archive: &Path) {
+        let staging = archive
+            .parent()
+            .assured("a kept archive lies in its staging directory");
+        std::fs::remove_dir_all(staging).assured("the test removes what the delivery kept");
+    }
+
+    /// A standard output whose reader closes after it has read `capacity` bytes.
+    struct ClosingReader {
+        received: Vec<u8>,
+        capacity: usize,
+    }
+
+    impl Write for ClosingReader {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let room = self
+                .capacity
+                .checked_sub(self.received.len())
+                .verified("the reader never receives more than its capacity");
+            if room == 0 {
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+            }
+            let accepted = bytes.len().min(room);
+            self.received.extend_from_slice(&bytes[..accepted]);
+            Ok(accepted)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A standard output that takes every write but fails to flush, as a buffered output does when
+    /// its last bytes meet a full disk.
+    struct FailingFlush {
+        received: Vec<u8>,
+    }
+
+    impl Write for FailingFlush {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.received.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::StorageFull))
+        }
+    }
+
+    /// A standard output whose writes remove the archive's staging directory behind the CLI.
+    struct RemovingStaging {
+        staging: PathBuf,
+        received: Vec<u8>,
+    }
+
+    impl Write for RemovingStaging {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.staging.exists() {
+                std::fs::remove_dir_all(&self.staging)?;
+            }
+            self.received.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_complete_delivery_flushes_every_byte_and_removes_the_staging_directory() {
+        let staged = staged(ARCHIVE);
+        let staging = staging_directory(&staged);
+        // A writer that buffers by line holds the archive's last partial line until it is
+        // flushed, so a delivery that did not flush would leave it in the buffer.
+        let mut stdout = io::LineWriter::new(Vec::new());
+        staged
+            .deliver(&mut stdout)
+            .assured("a reader that reads everything takes the whole archive");
+        assert_eq!(stdout.get_ref().as_slice(), ARCHIVE);
+        assert!(!staging.exists(), "a delivered archive leaves no staging");
+    }
+
+    #[test]
+    fn an_archive_written_to_a_file_is_already_delivered() {
+        let output = ArchiveOutput::from_argument("cluster.nvxb")
+            .assured("an archive bound for a file needs no staging");
+        output
+            .deliver()
+            .assured("the download already wrote the file");
+    }
+
+    #[test]
+    fn the_null_device_cannot_receive_an_archive() {
+        let null_device = File::options()
+            .write(true)
+            .open(NULL_DEVICE)
+            .assured("a Unix system has a null device");
+        match StandardOutput::receiving(null_device) {
+            Err(report) => assert!(
+                matches!(
+                    report.current_context(),
+                    ClientError::DiscardingStandardOutput
+                ),
+                "{report:?}"
+            ),
+            Ok(_) => panic!("the null device would discard the archive"),
+        }
+    }
+
+    #[test]
+    fn a_file_on_standard_output_receives_the_whole_archive() {
+        let directory = tempfile::tempdir()
+            .assured("the test creates a directory in the system's temporary directory");
+        let received = directory.path().join("received.nvxb");
+        let file = File::create(&received).assured("the test creates the file it delivers to");
+        let stdout = StandardOutput::receiving(file).assured("a file keeps what it receives");
+        let staged = staged(ARCHIVE);
+        let staging = staging_directory(&staged);
+        ArchiveOutput::Stdout { staged, stdout }
+            .deliver()
+            .assured("a file takes the whole archive");
+        let delivered = std::fs::read(&received).assured("the test reads the delivered archive");
+        assert_eq!(delivered.as_slice(), ARCHIVE);
+        assert!(!staging.exists(), "a delivered archive leaves no staging");
+    }
+
+    #[test]
+    fn a_pipe_on_standard_output_receives_the_whole_archive() {
+        let (mut reader, writer) = io::pipe().assured("the test creates a pipe");
+        let stdout = StandardOutput::receiving(File::from(OwnedFd::from(writer)))
+            .assured("a pipe hands what it receives to its reader");
+        // The archive is smaller than a pipe's capacity, so the whole delivery fits in the pipe
+        // before the test reads it, and delivering it closes the pipe's only writer.
+        ArchiveOutput::Stdout {
+            staged: staged(ARCHIVE),
+            stdout,
+        }
+        .deliver()
+        .assured("a pipe takes the whole archive");
+        let mut delivered = Vec::new();
+        reader
+            .read_to_end(&mut delivered)
+            .assured("the test reads the pipe to its end");
+        assert_eq!(delivered.as_slice(), ARCHIVE);
+    }
+
+    #[test]
+    fn a_closed_standard_output_keeps_the_verified_archive() {
+        let staged = staged(ARCHIVE);
+        let staged_archive = staged.path();
+        let mut stdout = ClosingReader {
+            received: Vec::new(),
+            capacity: 5,
+        };
+        match staged.deliver(&mut stdout) {
+            Err(DeliveryFailure::NotDelivered { archive, report }) => {
+                assert!(
+                    matches!(report.current_context(), ClientError::WriteArchive),
+                    "{report:?}"
+                );
+                assert_eq!(archive, staged_archive);
+                assert_eq!(stdout.received.as_slice(), &ARCHIVE[..5]);
+                let kept = std::fs::read(&archive).assured("the delivery keeps its archive");
+                assert_eq!(kept.as_slice(), ARCHIVE, "the kept archive is complete");
+                remove_kept(&archive);
+            }
+            other => panic!("a closed reader leaves the archive undelivered: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_flush_keeps_the_verified_archive() {
+        let staged = staged(ARCHIVE);
+        let mut stdout = FailingFlush {
+            received: Vec::new(),
+        };
+        match staged.deliver(&mut stdout) {
+            Err(DeliveryFailure::NotDelivered { archive, report }) => {
+                assert!(
+                    matches!(report.current_context(), ClientError::WriteArchive),
+                    "{report:?}"
+                );
+                let kept = std::fs::read(&archive).assured("the delivery keeps its archive");
+                assert_eq!(kept.as_slice(), ARCHIVE, "the kept archive is complete");
+                remove_kept(&archive);
+            }
+            other => panic!("an unflushed archive is undelivered: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_missing_staged_archive_is_a_read_failure_that_keeps_its_staging() {
+        let staged = staged(ARCHIVE);
+        let staged_archive = staged.path();
+        std::fs::remove_file(&staged_archive).assured("the test removes the staged archive");
+        let mut stdout = Vec::new();
+        match staged.deliver(&mut stdout) {
+            Err(DeliveryFailure::NotDelivered { archive, report }) => {
+                assert!(
+                    matches!(report.current_context(), ClientError::ReadStagedArchive),
+                    "{report:?}"
+                );
+                assert_eq!(archive, staged_archive);
+                assert!(stdout.is_empty(), "nothing reached standard output");
+                remove_kept(&archive);
+            }
+            other => panic!("an archive that cannot be opened is undelivered: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_archive_that_fails_to_read_is_a_read_failure() {
+        let staged = StagedArchive::create()
+            .assured("the test stages its archive in the system's temporary directory");
+        // A directory opens for reading on Unix, and every read of it fails.
+        std::fs::create_dir(staged.path())
+            .assured("the test puts a directory where the archive belongs");
+        let mut stdout = Vec::new();
+        match staged.deliver(&mut stdout) {
+            Err(DeliveryFailure::NotDelivered { archive, report }) => {
+                assert!(
+                    matches!(report.current_context(), ClientError::ReadStagedArchive),
+                    "{report:?}"
+                );
+                assert!(stdout.is_empty(), "nothing reached standard output");
+                remove_kept(&archive);
+            }
+            other => panic!("an archive that cannot be read is undelivered: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_staging_directory_that_cannot_be_removed_follows_a_complete_delivery() {
+        let staged = staged(ARCHIVE);
+        let staging = staging_directory(&staged);
+        // Unix keeps an open file readable after its directory is removed, so standard output
+        // receives every byte and only the removal of the staging directory fails.
+        let mut stdout = RemovingStaging {
+            staging: staging.clone(),
+            received: Vec::new(),
+        };
+        match staged.deliver(&mut stdout) {
+            Err(DeliveryFailure::StagingRemains {
+                staging: remaining,
+                report,
+            }) => {
+                assert!(
+                    matches!(report.current_context(), ClientError::RemoveStaging),
+                    "{report:?}"
+                );
+                assert_eq!(remaining, staging);
+                assert_eq!(stdout.received.as_slice(), ARCHIVE);
+            }
+            other => panic!("a delivered archive reports the staging it left: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_undelivered_archive_is_reported_with_its_reference_and_kept_copy() {
+        let reference = reference();
+        let failure = DeliveryFailure::NotDelivered {
+            archive: PathBuf::from("/tmp/staging/backup.nvxb"),
+            report: StackReport::new(io::Error::from(io::ErrorKind::BrokenPipe))
+                .change_context(ClientError::WriteArchive),
+        };
+        let message = "the backup archive could not be written to standard output: broken pipe";
+        assert_eq!(
+            failure.rendered(CliReportFormat::Text, &reference),
+            format!(
+                "error: {message}\nrecover backup {reference} from its verified archive at \
+                 '/tmp/staging/backup.nvxb'; its complete download released the server's copy"
+            )
+        );
+        let json: Value =
+            serde_json::from_str(&failure.rendered(CliReportFormat::Json, &reference))
+                .assured("a JSON report is one JSON document");
+        assert_eq!(
+            json,
+            json!({ "error": {
+                "code": "WRITE_FAILED",
+                "message": message,
+                "execution_reference": reference.as_str(),
+                "archive": "/tmp/staging/backup.nvxb",
+            } })
+        );
+    }
+
+    #[test]
+    fn a_staging_directory_left_after_delivery_is_reported_apart_from_an_undelivered_archive() {
+        let reference = reference();
+        let failure = DeliveryFailure::StagingRemains {
+            staging: PathBuf::from("/tmp/staging"),
+            report: StackReport::new(io::Error::from(io::ErrorKind::PermissionDenied))
+                .change_context(ClientError::RemoveStaging),
+        };
+        let message = "the backup archive reached standard output, but its staging directory \
+                       could not be removed: permission denied";
+        assert_eq!(
+            failure.rendered(CliReportFormat::Text, &reference),
+            format!(
+                "error: {message}\nbackup {reference} reached standard output; remove its staging \
+                 directory '/tmp/staging'"
+            )
+        );
+        let json: Value =
+            serde_json::from_str(&failure.rendered(CliReportFormat::Json, &reference))
+                .assured("a JSON report is one JSON document");
+        assert_eq!(
+            json,
+            json!({ "error": {
+                "code": "CLEANUP_FAILED",
+                "message": message,
+                "execution_reference": reference.as_str(),
+                "staging": "/tmp/staging",
+            } })
+        );
+    }
+
+    #[test]
+    fn an_uncertain_backup_is_reported_with_the_reference_that_runs_it_again() {
+        let reference = reference();
+        let recovery = Some(Recovery::Rerun {
+            reference: &reference,
+        });
+        assert_eq!(
+            failure_report(CliReportFormat::Text, "BACKUP_FAILED", "unknown", recovery),
+            format!(
+                "error: unknown\nrecover using --execution-reference {reference} with the same \
+                 domain and capture options"
+            )
+        );
+        let json: Value = serde_json::from_str(&failure_report(
+            CliReportFormat::Json,
+            "BACKUP_FAILED",
+            "unknown",
+            recovery,
+        ))
+        .assured("a JSON report is one JSON document");
+        assert_eq!(
+            json,
+            json!({ "error": {
+                "code": "BACKUP_FAILED",
+                "message": "unknown",
+                "execution_reference": reference.as_str(),
+            } })
+        );
+    }
+
+    #[test]
+    fn a_failure_before_admission_names_no_reference() {
+        assert_eq!(
+            failure_report(CliReportFormat::Text, "WRITE_FAILED", "no staging", None),
+            "error: no staging"
+        );
+        let json: Value = serde_json::from_str(&failure_report(
+            CliReportFormat::Json,
+            "WRITE_FAILED",
+            "no staging",
+            None,
+        ))
+        .assured("a JSON report is one JSON document");
+        assert_eq!(
+            json,
+            json!({ "error": { "code": "WRITE_FAILED", "message": "no staging" } })
+        );
+    }
 }

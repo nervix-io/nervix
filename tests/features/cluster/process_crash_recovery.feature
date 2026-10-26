@@ -5,7 +5,7 @@ Feature: Real process crash recovery
     Given Postgres is running
     And a nervix-server process is started with state snapshot interval "50ms"
     And Postgres table "process_window_{{test_id}}" exists
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA window_input (tenant STRING, value I64);
@@ -18,8 +18,8 @@ Feature: Real process crash recovery
       CREATE RELAY window_outputs SCHEMA window_output BRANCHED BY by_window_tenant;
       CREATE VHOST window_edge window-crash-{{test_id}}.example.com;
       CREATE ENDPOINT window_ingress ON window_edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR window_source
-        FROM ENDPOINT window_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR window_source
+        FROM window_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
         TO window_inputs INHERIT ALL BRANCHED BY by_window_tenant
         SET tenant = message.tenant
@@ -29,20 +29,18 @@ Feature: Real process crash recovery
         TO window_outputs
           SET tenant = FIRST(input.tenant), samples = COUNT(input.value)
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT crash_postgres TYPE POSTGRES
+      CREATE POSTGRES CLIENT crash_postgres
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
-      CREATE EMITTER window_output FROM window_outputs
-        TO POSTGRES crash_postgres INSERT TO TABLE process_window_{{test_id}}
-        VALUES {
+      CREATE POSTGRES TABLE EMITTER window_output FROM window_outputs
+        TO crash_postgres TABLE 'process_window_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s VALUES {
           "postgres_user_id" = input.samples,
           "postgres_now" = NOW() AS STRING,
           "postgres_action" = input.tenant
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
-        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
@@ -86,11 +84,126 @@ Feature: Real process crash recovery
     When the server process receives SIGTERM
     Then the server process exits with status 0
 
+  Scenario: SIGKILL restores every open window of a window processor that restarts beside other processors
+    Given Postgres is running
+    And a nervix-server process is started with state snapshot interval "50ms"
+    And Postgres table "process_open_windows_{{test_id}}" exists
+    And the server process is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA reading (tenant STRING, value I64);
+      CREATE SCHEMA reading_window (tenant STRING, samples I64, total I64);
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT (tenant string, value integer);
+      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE SCHEMA reading_tenant (tenant STRING);
+      CREATE BRANCH by_reading_tenant SCHEMA reading_tenant TTL 5m;
+      CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant;
+      CREATE RELAY reading_windows SCHEMA reading_window BRANCHED BY by_reading_tenant;
+      CREATE RELAY unique_readings SCHEMA reading BRANCHED BY by_reading_tenant;
+      CREATE RELAY copied_readings SCHEMA reading BRANCHED BY by_reading_tenant;
+      CREATE VHOST reading_edge readings-{{test_id}}.example.com;
+      CREATE ENDPOINT reading_ingress ON reading_edge PATH '/events' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR reading_source
+        FROM reading_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        TO readings INHERIT ALL BRANCHED BY by_reading_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR aggregate_readings FROM readings
+        WIDTH 3 MESSAGES STEP 3 MESSAGES BRANCHED BY by_reading_tenant
+        TO reading_windows
+          SET tenant = FIRST(input.tenant), samples = COUNT(input.value), total = SUM(input.value)
+          ON MESSAGE ERROR LOG;
+      CREATE JUNCTION copy_reading FROM readings BRANCHED BY by_reading_tenant
+        TO copied_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE DEDUPLICATOR unique_reading FROM readings
+        DEDUPLICATE ON input.value
+        MAX TIME 10m
+        BRANCHED BY by_reading_tenant
+        TO unique_readings INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE POSTGRES CLIENT reading_postgres
+        POOL SIZE MIN 1 MAX 4
+        CONFIG {
+          'addr' = '{{postgres_addr}}'
+        };
+      CREATE POSTGRES TABLE EMITTER copied_output FROM copied_readings
+        TO reading_postgres TABLE 'process_open_windows_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s VALUES {
+          "postgres_user_id" = input.value,
+          "postgres_now" = NOW() AS STRING,
+          "postgres_action" = concat('copied:', input.tenant)
+        } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE POSTGRES TABLE EMITTER unique_output FROM unique_readings
+        TO reading_postgres TABLE 'process_open_windows_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s VALUES {
+          "postgres_user_id" = input.value,
+          "postgres_now" = NOW() AS STRING,
+          "postgres_action" = concat('unique:', input.tenant)
+        } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE POSTGRES TABLE EMITTER window_output FROM reading_windows
+        TO reading_postgres TABLE 'process_open_windows_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s VALUES {
+          "postgres_user_id" = input.total,
+          "postgres_now" = NOW() AS STRING,
+          "postgres_action" = concat('window:', input.tenant)
+        } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    When http payload is posted to the server process with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","value":10}
+      """
+    And http payload is posted to the server process with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":100}
+      """
+    Then the Postgres table eventually contains a row
+      """
+      {"postgres_user_id":10,"postgres_action":"unique:alpha"}
+      """
+    And the Postgres table eventually contains a row
+      """
+      {"postgres_user_id":100,"postgres_action":"unique:beta"}
+      """
+    When physical time passes for "3s"
+    And the server process receives SIGKILL
+    Then the server process is terminated by SIGKILL within "10s" of the last signal
+    When the server process is restarted from its existing database
+    And the server process eventually accepts http payload with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","value":20}
+      """
+    And http payload is posted to the server process with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":200}
+      """
+    And http payload is posted to the server process with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","value":30}
+      """
+    And http payload is posted to the server process with host "readings-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":300}
+      """
+    Then the Postgres table eventually contains a row
+      """
+      {"postgres_user_id":60,"postgres_action":"window:alpha"}
+      """
+    And the Postgres table eventually contains a row
+      """
+      {"postgres_user_id":600,"postgres_action":"window:beta"}
+      """
+    When the server process receives SIGTERM
+    Then the server process exits with status 0
+
   Scenario: SIGKILL during interleaved traffic preserves only checkpoints durable before the crash
     Given Postgres is running
     And a nervix-server process is started with state snapshot interval "50ms"
     And Postgres table "process_crash_{{test_id}}" exists
-    And the server process is configured with these NSPL commands
+    And the server process is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA crash_event (
@@ -112,8 +225,8 @@ Feature: Real process crash recovery
       CREATE RELAY crash_unique SCHEMA crash_event BRANCHED BY by_crash_tenant;
       CREATE VHOST crash_edge crash-{{test_id}}.example.com;
       CREATE ENDPOINT crash_ingress ON crash_edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR crash_source
-        FROM ENDPOINT crash_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR crash_source
+        FROM crash_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING crash_event_codec
         TO crash_input
           INHERIT ALL
@@ -130,20 +243,18 @@ Feature: Real process crash recovery
           INHERIT ALL
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
-      CREATE CLIENT crash_postgres TYPE POSTGRES
+      CREATE POSTGRES CLIENT crash_postgres
         POOL SIZE MIN 1 MAX 4
         CONFIG {
           'addr' = '{{postgres_addr}}'
         };
-      CREATE EMITTER crash_output FROM crash_unique
-        TO POSTGRES crash_postgres INSERT TO TABLE process_crash_{{test_id}}
-        VALUES {
+      CREATE POSTGRES TABLE EMITTER crash_output FROM crash_unique
+        TO crash_postgres TABLE 'process_crash_{{test_id}}'
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s VALUES {
           "postgres_user_id" = input.user_id,
           "postgres_now" = NOW() AS STRING,
           "postgres_action" = input.tenant
-        }
-        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
-        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
+        } BATCH MAX MESSAGES 64 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

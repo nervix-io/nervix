@@ -10,6 +10,12 @@
 //! - **Must not know.** How a validated node runs. No Tokio task, no Arrow batch, no connector and
 //!   no branch-local state belongs here, and a decision must be computable without a cluster.
 //!
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(decisions, reason = "owns the decisions boundary declared above")
+)]
+
+mod branch_state_schemas;
 mod creation_order;
 mod domain_activation_plan;
 mod domain_state;
@@ -29,12 +35,16 @@ mod resource_plan;
 mod restore_plan;
 mod schedule_delta;
 mod scheduler;
+pub(crate) use scheduler::assign_server_listener_nodes;
 mod storage;
 #[cfg(test)]
 mod test_fixtures;
 mod transaction;
 mod validation;
 
+pub(crate) use branch_state_schemas::{
+    BranchStateSchemas, WindowAccumulatorShape, WindowStateSchemas, WindowStateSkip,
+};
 pub(crate) use creation_order::creation_order;
 pub(crate) use domain_activation_plan::{
     DomainActivationPlan, PlannedCodec, PlannedCodecWireFormat, PlannedRelayRetention,
@@ -42,7 +52,8 @@ pub(crate) use domain_activation_plan::{
 };
 pub(crate) use entity_gate::{
     EntityGatePlan, entity_pause_relays_for_schedule, gate_boundary,
-    ownership_handoff_relays_for_schedule, scheduled_impact_coverage,
+    ownership_handoff_gate_participants, ownership_handoff_relays_for_schedule,
+    scheduled_impact_coverage,
 };
 #[cfg(test)]
 pub(crate) use entrypoint_plan::EntrypointPlanError;
@@ -60,12 +71,18 @@ pub(crate) use execution_revision::{
 };
 pub(crate) use graph::{ActiveGraph, EdgeKind};
 pub(crate) use ingestor_plan::{
-    ClientIngestorStartPlan, EndpointIngestorStartPlan, HttpIngestorStartPlan, IngestorInputPlan,
-    IngestorSpec, IngestorStartPlan, KafkaDomainOffsetPlacement, KafkaIngestorStartPlan,
-    KafkaOffsetPlan, MqttIngestorStartPlan, NatsIngestorStartPlan, PrometheusIngestorStartPlan,
-    PulsarIngestorStartPlan, RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan,
-    SourceStartPlan, SqsIngestorStartPlan, SyslogIngestorStartPlan, TransportInputPlan,
-    WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan,
+    ClientIngestorStartPlan, EndpointIntakeStartPlan, EndpointRequestPlan,
+    HttpEndpointIngestorStartPlan, HttpIngestorStartPlan, HttpRequestIngestorStartPlan,
+    IngestorConnectorPlan, IngestorInputPlan, IngestorSpec, IngestorStartPlan,
+    KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, KafkaOffsetPlan,
+    KafkaTopicIngestorStartPlan, MqttIngestorStartPlan, MqttTopicIngestorStartPlan,
+    NatsIngestorStartPlan, NatsSubjectIngestorStartPlan, PrometheusIngestorStartPlan,
+    PrometheusQueryIngestorStartPlan, PulsarIngestorStartPlan, PulsarTopicIngestorStartPlan,
+    RabbitMqIngestorStartPlan, RabbitMqQueueIngestorStartPlan, RedisIngestorStartPlan,
+    RedisPubSubIngestorStartPlan, SqsIngestorStartPlan, SqsQueueIngestorStartPlan,
+    SyslogIngestorStartPlan, SyslogListenerIngestorStartPlan, TransportInputPlan,
+    WebsocketsConnectionIngestorStartPlan, WebsocketsEndpointIngestorStartPlan,
+    WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan, ZeroMqPullIngestorStartPlan,
 };
 #[cfg(test)]
 pub(crate) use message_error_plan::MessageErrorRouteSpec;
@@ -83,9 +100,7 @@ pub(crate) use processor_plan::{
 #[cfg(test)]
 pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
 pub(crate) use reingestor_plan::{ReingestorInputPlan, ReingestorPlan};
-pub(crate) use relocation::{
-    RelocationCoverage, RelocationMemberReason, RelocationPlanError, RelocationUnit,
-};
+pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
 pub(crate) use resource_plan::{
     GeneratorExecutionPlan, GeneratorRoutePlan, LookupResourcePlan, ResourceExecutionPlans,
     WasmModulePlan, udf_program,

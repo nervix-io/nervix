@@ -2,16 +2,34 @@
 
 Nervix publishes a rolling multi-architecture Debian image to
 `ghcr.io/nervix-io/nervix:debian-latest`. The image contains `nervix-server`, `nervix-cli`, and
-`nervix-nspl-format`. The examples on this page create a three-node cluster for local evaluation.
+`nervix-plexus-format`. The examples on this page create a three-node cluster for local evaluation.
 
 For a reproducible or production deployment, replace the rolling tag with a reviewed timestamped
 tag or image digest. Use TLS, a secret manager, and a client-reachable advertise hostname instead
 of the local-development defaults shown here.
 
+## CUDA Images
+
+Build a local CUDA image from a repository checkout with `just docker-build-cuda`; the build
+requirements are in [Developing Nervix](developing-nervix.md#build-container-images). The image
+uses the `cuda` target in `Dockerfile.debian`; the CPU image uses the `cpu` target. Both copy
+the same Nervix binaries from one shared builder stage. The CUDA image
+contains ONNX Runtime 1.30.0's CUDA 13 provider, CUDA 13.2.2, and cuDNN 9.25.1. It supports Linux
+AMD64 and pins the Debian base to `debian:trixie-20260918-slim` and its image digest. CUDA and
+cuDNN occupy one layer directly above that base. The next layer updates and upgrades Debian
+packages while holding CUDA and cuDNN at their pinned versions. Nervix's layers follow and
+reuse that CUDA layer across application builds.
+
+To expose an NVIDIA GPU, install a host driver supporting CUDA 13.2 and the NVIDIA Container
+Toolkit, set `NERVIX_IMAGE=nervix:cuda`, and add `--gpus all` to the `docker run` commands below.
+The container toolkit supplies the host driver; CUDA and cuDNN are supplied by the image.
+
 ## Run Three Nodes With Docker
 
 Choose the image and initial password. The password environment variable is expanded by the shell
-and passed only to the bootstrap node:
+and passed only to the bootstrap node, which creates the default user with it. The other nodes need
+no password: they read that user from the cluster, and a node that stops gracefully asks the leader
+to drain it under its node certificate.
 
 ```bash
 export NERVIX_IMAGE=ghcr.io/nervix-io/nervix:debian-latest
@@ -79,7 +97,9 @@ Keep each node's named data volume across restarts. Once the three nodes have jo
 membership retains the advertised interconnect names. If `nervix-1` stops while the other nodes
 continue, it uses those names to find a survivor when it restarts; it does not need a second
 configured bootstrap host. The joining nodes still use `NERVIX_CLUSTER_BOOTSTRAP_HOST` for their
-first contact with a fresh cluster.
+first contact with a fresh cluster. Once they have recovered Raft peer endpoints from their volumes,
+they can restart while that bootstrap host does not resolve and rejoin through another peer whose
+name resolves. Keep the other members' advertised names resolvable to the restarting node.
 
 ```bash
 docker run --detach \

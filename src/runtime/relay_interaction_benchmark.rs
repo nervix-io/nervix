@@ -8,9 +8,9 @@ use std::{num::NonZeroUsize, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ClusterNodeName, CreateSchema, DomainClockAuthority, DomainConfig, DomainName, DomainPace,
-    DomainStartPoint, DomainState, DomainStatus, FieldName, ModelKind, ModelName, ParseAsType,
-    PlacementPolicy, RelayName, SchemaName, Timestamp,
+    BranchKeyFingerprint, ClusterNodeName, CreateSchema, DomainClockAuthority, DomainConfig,
+    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, FieldName, ModelKind,
+    ModelName, ParseAsType, PlacementPolicy, RelayName, SchemaName, Timestamp,
 };
 use nervix_primitives::{
     sync::{mpsc, watch},
@@ -305,7 +305,9 @@ impl DeliveryObservationBenchmark {
             &node,
             &relay,
             Some(&physical_node),
-            Some(r#"{"tenant":"acme"}"#),
+            Some(BranchKeyFingerprint::of_canonical_text(
+                r#"{"tenant":"acme"}"#,
+            )),
         );
         let delivered_at = Timestamp::from_unix_nanos(1_790_000_000_000_000_000);
         Self {

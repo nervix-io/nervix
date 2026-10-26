@@ -1,5 +1,7 @@
 # HTTP Emitter Architecture
 
+*Plexus, the Nervix graph definition language.*
+
 An HTTP emitter turns each eligible relay record into one outbound request. Its method, target,
 application headers, and optional codec body are evaluated for that record. Complete, valid final
 `2xx` response headers are the external delivery boundary. The endpoint can still apply a request
@@ -7,26 +9,26 @@ whose response Nervix never receives, so delivery is not an exactly-once externa
 
 This chapter follows the implemented HTTP path across the language, decision layer, emitter host,
 and HTTP connector. The [Emitters manual](./emitters.md#http-request-configuration) owns the public
-NSPL contract and field-level rules. The [Connector Crates And The Connector Contract](./connector-contract.md)
+Plexus contract and field-level rules. The [Connector Crates And The Connector Contract](./connector-contract.md)
 chapter owns the shared host and connector boundary; [Control Plane](./control-plane.md),
 [Domain Clock](./domain-clock.md), [Resource Versions And Bindings](./resource-versions.md), and
 [Shutdown And Recovery](./shutdown.md) remain authoritative for their respective lifecycle,
 time, binding, and recovery rules. The [HTTP emitter acceptance ledger](https://github.com/nervix-io/nervix/blob/main/tests/http-emitter-acceptance-ledger.md#http-emitter-09-qualification)
 records the public qualification evidence summarized below.
 
-## From NSPL to an active sink
+## From Plexus to an active emitter
 
 The language parses `TO HTTP` and its ordered `METHOD`, `PATH`, `MODE ACK RETRY POLICY`, and body
 selection into semantic Models. The registry validates the complete candidate against the same
-domain's `TYPE HTTP` client, codec, exact expression types, available scopes, sensitivity, source
+domain's `HTTP CLIENT`, codec, exact expression types, available scopes, sensitivity, source
 branches, and error route. The decision layer lowers the validated model into a typed execution
-plan. A running data-plane task receives that plan; it does not read a Model or reparse NSPL.
+plan. A running data-plane task receives that plan; it does not read a Model or reparse Plexus.
 The server composes the HTTP connector with the emitter host. These conversions and their
 installation boundary are described in [Execution Plans](./execution-plans.md).
 
-The sink has one request/response mode, with an explicit retry policy and exactly one body choice:
+The emitter has one request/response mode, with an explicit retry policy and exactly one body choice:
 
-```nspl,ignore
+```plexus,ignore
 TO HTTP <client>
   METHOD <string_expression>
   PATH <string_expression>
@@ -35,10 +37,10 @@ TO HTTP <client>
 ```
 
 `METHOD` and `PATH` are structured expressions, not client settings. HTTP `MODE ACK` has no ACK
-window or `ACK TIMEOUT`; `NO_ACK`, parallel publication, and the optional emitter `BATCH` clause
+window or `ACK TIMEOUT`; `NO ACK`, parallel publication, and the optional emitter `BATCH` clause
 are unavailable. The emitter still requires a route-local `FLUSH` policy. `COLLECT FOR` may gather
 input records before execution, while `FLUSH` governs when prepared work is released. Neither
-merges several records into one HTTP body. The `TYPE HTTP` client's polling `method` setting has
+merges several records into one HTTP body. The `HTTP CLIENT`'s polling `method` setting has
 no effect on the emitter's required method expression.
 
 ### A request with a codec body
@@ -48,15 +50,15 @@ Here `outgoing` and `event_body_codec` are already declared in the domain. The c
 operator-provisioned destination; an input with method `PATCH` and path
 `/v1/events/42?notify=true` sends that method and target. Its tenant stays outside the body.
 
-```nspl
-CREATE CLIENT api TYPE HTTP CONFIG {
+```plexus
+CREATE HTTP CLIENT api CONFIG {
   'endpoint' = 'https://api.example.com',
   'timeout_ms' = 5000
 };
 
-CREATE ATTACHED EMITTER deliver_event
+CREATE ATTACHED HTTP REQUEST EMITTER deliver_event
   FROM outgoing
-  TO HTTP api
+  TO api
     METHOD input.request_method
     PATH input.request_path
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -84,10 +86,10 @@ This alternative uses the same relay and client. `WITHOUT BODY` uses the source 
 `input`, `message`, and bare fields. There is no output schema, encoded input copy, or dummy body.
 It allows route `WHERE` and header invocations, but not `INHERIT`, `SET`, or `VALUES`.
 
-```nspl
-CREATE EMITTER delete_event
+```plexus
+CREATE HTTP REQUEST EMITTER delete_event
   FROM outgoing WHERE input.request_method = 'DELETE'
-  TO HTTP api
+  TO api
     METHOD 'DELETE'
     PATH input.request_path
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -98,10 +100,13 @@ CREATE EMITTER delete_event
   ON GENERAL ERROR LOG;
 ```
 
-The receiver gets zero content octets. HTTP framing may omit `Content-Length` for this request;
-the transport supplies it when a body is present. `GET` and `HEAD`, in any ASCII case, require
-`WITHOUT BODY`, including when the method is computed at runtime. `CONNECT` and `TRACE` are
-unavailable in any ASCII case. Other valid methods retain their evaluated spelling.
+The receiver gets zero content octets. Whether the request declares that empty content depends on
+its evaluated method. A bodyless `POST`, `PUT` or `PATCH`, in any ASCII case, carries
+`Content-Length: 0`. RFC 9110 asks a client to send a length when its method defines a meaning
+for request content, and an endpoint that requires one may refuse a request without it with `411`.
+Any other bodyless method, such as this `DELETE`, carries no `Content-Length`. `GET` and `HEAD`, in
+any ASCII case, require `WITHOUT BODY`, including when the method is computed at runtime. `CONNECT`
+and `TRACE` are unavailable in any ASCII case. Other valid methods retain their evaluated spelling.
 
 ### Scopes, order, and sensitivity
 
@@ -139,8 +144,8 @@ The connector uses the node's configured resolver, verifies HTTPS trust and host
 load a CA and a paired client certificate and key from the HTTP client's resource mount. A
 client can, for example, bind already uploaded TLS files as follows:
 
-```nspl
-CREATE CLIENT secure_api TYPE HTTP
+```plexus
+CREATE HTTP CLIENT secure_api
   MOUNT api_tls VERSION 3
   CONFIG {
     'endpoint' = 'https://api.example.com',
@@ -171,7 +176,7 @@ it does not create a row-map payload. The HTTP connector receives a typed, alrea
 request containing the validated method, normalized target, application headers, and either exact
 codec bytes or no body. It owns HTTP connection and TLS handling, transport-generated fields,
 response parsing, `Retry-After` interpretation, and per-request outcomes. It sees neither graph
-branches nor upstream ACKs. The [connector chapter's HTTP sink boundary](./connector-contract.md#sink-boundary)
+branches nor upstream ACKs. The [connector chapter's HTTP emitter boundary](./connector-contract.md#emitter-boundary)
 defines the shared contract and host loop in detail.
 
 One HTTP request is prepared for each eligible source record, even when `COLLECT FOR` or `FLUSH`
@@ -187,15 +192,42 @@ one flush preserve their publication order, and unresolved work stays ahead of l
 is no total order across independent executions, relays, or branches, nor an ordering promise for
 effects an endpoint applies after a connection is lost. Each attempt uses a fresh HTTP/1.1
 connection, closed after final headers, so an unread response body cannot become the next
-response. The client's physical timeout covers DNS, connect, TLS, send, interim heads, and the
-complete final head; queue time and backoff do not consume the next attempt's timeout.
+response. The client's physical `timeout_ms` covers DNS, connect, TLS, send, interim heads, and
+the complete final head; queue time and backoff do not consume the next attempt's timeout.
 
-The transport generates `Host`, `Connection: close`, and `Content-Length` for a present body. It
-adds `Accept: */*` only if the application did not write `Accept`. It adds no `Accept-Encoding` or
-`Content-Type`. It does not store response cookies, issue a second request for an authentication
-challenge, follow a redirect, or retry independently of the host. The codec's bytes are the entire
-body: there is no added wrapper, newline, form encoding, or compression. Writing
-`Content-Encoding` describes bytes the codec already produced and does not transform them.
+One operation budget divides each attempt's `timeout_ms`, counted from the attempt's start. Its
+steps run in this order:
+
+1. The connector resolves the endpoint's host through the node resolver. The lookup takes at most
+   half of `timeout_ms`, whatever the name servers do, so a lookup that answers leaves at least
+   half of the timeout for the steps after it.
+2. It dials the resolved addresses one at a time, in resolution order. An address receives what is
+   left of the budget when its attempt starts, divided equally among the addresses not yet tried,
+   itself included. An address that refuses at once leaves its unused share to the addresses after
+   it, and one whose handshake never completes ends its attempt with its own share, leaving theirs.
+3. Once an address accepts, TLS for an `https` endpoint, the request send, interim heads, and the
+   complete final head share what remains of the budget.
+
+A step that runs out of its time fails the attempt as an infrastructure failure. The request stays
+pending, and `DESCRIBE EMITTER` names the step that ran out:
+
+| Step that ran out | Transient error |
+| --- | --- |
+| The lookup's half | `HTTP DNS resolution failed: resolving '<host>' failed: no answer arrived in time` |
+| The share of the last address tried | `HTTP connection failed: no connection was accepted within the address's share of timeout_ms` |
+| What remained after an address accepted | `HTTP request timed out before complete final response headers` |
+
+When no address accepts a connection, the failure of the last address tried describes the attempt.
+[Name Resolution](./name-resolution.md#dialling-the-answers) owns the resolver, its lookup bounds,
+and the dialling order this connector shares with the other callers that dial for themselves.
+
+The transport generates `Host`, `Connection: close`, and `Content-Length`. The length is that of a
+present body, or `0` for a bodyless `POST`, `PUT` or `PATCH`; any other bodyless request carries
+no `Content-Length`. It adds `Accept: */*` only if the application did not write `Accept`. It adds
+no `Accept-Encoding` or `Content-Type`. It does not store response cookies, issue a second request
+for an authentication challenge, follow a redirect, or retry independently of the host. The codec's
+bytes are the entire body: there is no added wrapper, newline, form encoding, or compression.
+Writing `Content-Encoding` describes bytes the codec already produced and does not transform them.
 
 ### Validation and supported bounds
 
@@ -212,7 +244,7 @@ cannot contain CR, LF, NUL, DEL, or other disallowed ASCII controls.
 | Target | Origin-relative, exactly one leading `/`; normalized path and query at most 8 KiB encoded | Literal: candidate rejected; dynamic: message error before send |
 | Application headers | At most 128 after replacement and 32 KiB of UTF-8 name and value bytes in total; each invocation also has the 32 KiB bound | Invalid literal: candidate rejected; dynamic violation: message error before send |
 | Response headers | At most 128 fields and 64 KiB of field-name and value bytes in **each** interim or final block | Attempt remains unresolved and retries |
-| Attempt | One request awaiting final headers per execution; positive, schedulable client `timeout_ms` | Attempt failure retains work; timeout is physical |
+| Attempt | One request awaiting final headers per execution; positive, schedulable client `timeout_ms`, of which the lookup takes at most half | Attempt failure retains work; timeout is physical |
 | Body | No extra HTTP-specific fixed encoded-body size bound | Encoded bytes remain under node memory pressure until resolved; endpoint `413` rejects the record |
 
 The target is parsed relative to the client's origin and cannot change its scheme, host, or port.
@@ -274,7 +306,7 @@ Nervix supplies no idempotency key. The application can send a stable event iden
 `Idempotency-Key` invocation above does, and arrange endpoint-side deduplication. A generated
 value is stable during a *local* retry because preparation is retained; source replay after a
 restart may evaluate it again. [ACK Semantics And Effective Delivery](./emitters.md#ack-semantics-and-effective-delivery)
-defines the wider source/sink combinations.
+defines the wider source/emitter combinations.
 
 ## Errors and inspection
 
@@ -306,9 +338,9 @@ Method, target, headers, and response bytes are not payload bytes or metric-labe
 
 ## Replacement, drain, and recovery
 
-Changing the sink's method, path, client reference, body selection, or retry mode takes an
+Changing the emitter's method, path, client reference, body selection, or retry mode takes an
 `ENTITY_PAUSE`; a `FLUSH`-only change is `DYNAMIC`. Changing source membership or a client
-definition has its existing `DOMAIN_PAUSE` contract. `ALTER EMITTER ... SET TO HTTP` restates the
+definition has its existing `DOMAIN_PAUSE` contract. `ALTER HTTP REQUEST EMITTER ... SET TO` restates the
 complete method, path, mode, and body selection. `SET CLIENT`, `SET MODE`, and `SET ENCODE USING`
 retain their current meanings. `DROP ENCODE` cannot select no body; use `SET TO ... WITHOUT BODY`.
 The whole retained construction and error scope must validate against that selection. For
@@ -319,9 +351,9 @@ inside one transaction. A bad candidate or refused commit leaves the active emit
 For example, this replacement changes the first emitter's method and path without replacing its
 codec construction or header invocations:
 
-```nspl
-ALTER EMITTER deliver_event
-  SET TO HTTP api
+```plexus
+ALTER HTTP REQUEST EMITTER deliver_event
+  SET TO api
     METHOD 'POST'
     PATH '/v1/events'
     MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
@@ -375,7 +407,7 @@ the ledger gives the exact scenario names, example counts, and receiver controls
 | 10. Terminal rejection | `http_emitter_responses.feature`, `http_emitter_retries.feature` | `101`, redirects, `400`, `404`, `409` and `413` route safe status errors with original input, state and branch; `Location` receives no request. |
 | 11. TLS and mTLS | `http_emitter_transport.feature` | Mounted client identity succeeds; untrusted, wrong-host and missing-certificate handshakes acknowledge nothing. |
 | 12. Relay and branch isolation | `http_emitter.feature`, `http_emitter_transport.feature` | Two relays and two branches retain their own request values and error branches behind collection. |
-| 13. Inspection and replacement | `http_emitter_lifecycle.feature`, `http_emitter.feature`, `tools/nspl_format.feature` | Both body modes round-trip; failed ALTER and COMMIT preserve the active emitter; admitted requests drain to their original destination. |
+| 13. Inspection and replacement | `http_emitter_lifecycle.feature`, `http_emitter.feature`, `tools/plexus_format.feature` | Both body modes round-trip; failed ALTER and COMMIT preserve the active emitter; admitted requests drain to their original destination. |
 | 14. Drain and replay | `http_emitter_lifecycle.feature`, `http_emitter_retries.feature` | Graceful shutdown force-flushes; forced ending leaves a Kafka offset for replay; a lost response permits the same effect twice. |
 
 The receiver's high-water mark stayed at one request awaiting a final head for one emitter serving
@@ -392,3 +424,21 @@ suites passed another **168 scenarios and 1,764 steps**. The ledger records the 
 focused unit and Shuttle results, documentation build, validation, and an earlier saturated
 cluster run whose three-node setup commands met leadership changes. These results qualify the
 implemented behavior and its stated limits; the ledger remains the detailed evidence record.
+
+Two outlines added after that run qualify the attempt budget and the bodyless framing described
+above, each on one-node and three-node clusters:
+
+- `@http_emitter_bodyless_length` in `http_emitter.feature` sends a bodyless `POST`, `PUT`,
+  `PATCH` and `DELETE` to a receiver that answers `411` to a `POST`, `PUT` or `PATCH` declaring
+  no length. The first three arrive with `Content-Length: 0`, and the `DELETE` arrives without
+  the header.
+- `@http_emitter_address_share` in `http_emitter_transport.feature` resolves the endpoint's name
+  to an address whose handshake never completes, followed by the receiver's address. The request
+  reaches the receiver, and `DESCRIBE EMITTER` then shows no transient error.
+
+Paused-clock unit tests of the HTTP emitter end a silent name server's lookup after its half of
+`timeout_ms` and before the whole of it, and end the attempt of an only address that never
+connects with its share; each checks the transient error listed above. A third unit test delivers
+the request through the second address within one attempt when the first never connects. The
+`http-request-heads` Bolero property checks that the request head the emitter writes carries every
+prepared field and declares the length the transport rules above require.

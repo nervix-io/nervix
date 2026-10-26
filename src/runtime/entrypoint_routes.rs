@@ -8,9 +8,14 @@
 //!   bound route gives its records their branch key.
 //! - **Depends on.** Decision-layer entrypoint plans, the installed domain surfaces, the VM
 //!   bindings and the runtime planner that parses route cadences.
-//! - **Must not know.** NSPL text, the schedule, registry validation, or placement. Flush and
+//! - **Must not know.** Plexus text, the schedule, registry validation, or placement. Flush and
 //!   input-collection cadences and materialized-state dependencies still arrive as their declared
 //!   Model values, which the decisions layer does not yet type.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 
 use error_stack::ResultExt as _;
 
@@ -196,10 +201,7 @@ impl ExecutionBuildDeps<'_> {
             }));
         };
         let program = bind_output_branch_program(
-            RuntimeCompileTarget {
-                domain: self.domain,
-                identifier: target.node,
-            },
+            target.node,
             lowered.program(),
             input,
             output,
@@ -207,7 +209,7 @@ impl ExecutionBuildDeps<'_> {
             context,
         )
         .map_err(|error| {
-            Report::new(error).change_context(target.compile_failure(EntrypointProgram::Branch {
+            error.change_context(target.compile_failure(EntrypointProgram::Branch {
                 relay: relay.clone(),
             }))
         })?;
@@ -226,10 +228,6 @@ impl ExecutionBuildDeps<'_> {
             kind: ModelKind::Ingestor,
             node: &identifier,
         };
-        let compile_target = RuntimeCompileTarget {
-            domain: self.domain,
-            identifier: &identifier,
-        };
         let input = RuntimeVmSchema {
             schema: input_schema.arrow_schema(),
             sensitivity: input_schema.vm_sensitivity(),
@@ -238,7 +236,7 @@ impl ExecutionBuildDeps<'_> {
         let filter_where = match ingestor.filter_where.as_ref() {
             Some(filter) => Some(
                 bind_scoped_filter_program(
-                    compile_target,
+                    &identifier,
                     filter.program(),
                     input.clone(),
                     MessageErrorOperation::FilterWhere,
@@ -250,8 +248,7 @@ impl ExecutionBuildDeps<'_> {
                     },
                 )
                 .map_err(|error| {
-                    Report::new(error)
-                        .change_context(target.compile_failure(EntrypointProgram::FilterWhere))
+                    error.change_context(target.compile_failure(EntrypointProgram::FilterWhere))
                 })?,
             ),
             None => None,
@@ -265,8 +262,8 @@ impl ExecutionBuildDeps<'_> {
                 sensitivity: output_schema.vm_sensitivity(),
             };
             let program = bind_ingestor_filter_map_program(
-                compile_target,
-                ingestor.metadata_kind(),
+                &identifier,
+                ingestor.metadata_scope(),
                 ingestor.reads_headers(),
                 &route.construction,
                 RuntimeVmSchemaPair {
@@ -278,11 +275,9 @@ impl ExecutionBuildDeps<'_> {
                 self.compile_context(&unbranched),
             )
             .map_err(|error| {
-                Report::new(error).change_context(target.compile_failure(
-                    EntrypointProgram::Route {
-                        relay: relay.clone(),
-                    },
-                ))
+                error.change_context(target.compile_failure(EntrypointProgram::Route {
+                    relay: relay.clone(),
+                }))
             })?;
             let branch = self.bind_route_branch(
                 target,
@@ -318,10 +313,6 @@ impl ExecutionBuildDeps<'_> {
             kind: ModelKind::Reingestor,
             node: &identifier,
         };
-        let compile_target = RuntimeCompileTarget {
-            domain: self.domain,
-            identifier: &identifier,
-        };
         let input_schema = self.relay_schema(target, &input.relay)?;
         let input_vm = RuntimeVmSchema {
             schema: input_schema.arrow_schema(),
@@ -341,7 +332,7 @@ impl ExecutionBuildDeps<'_> {
         let from_where = match input.from_where.as_ref() {
             Some(filter) => Some(
                 bind_scoped_filter_program(
-                    compile_target,
+                    &identifier,
                     filter.program(),
                     input_vm.clone(),
                     MessageErrorOperation::SourceWhere,
@@ -349,11 +340,9 @@ impl ExecutionBuildDeps<'_> {
                     source_scope,
                 )
                 .map_err(|error| {
-                    Report::new(error).change_context(target.compile_failure(
-                        EntrypointProgram::SourceWhere {
-                            relay: input.relay.clone(),
-                        },
-                    ))
+                    error.change_context(target.compile_failure(EntrypointProgram::SourceWhere {
+                        relay: input.relay.clone(),
+                    }))
                 })?,
             ),
             None => None,
@@ -361,7 +350,7 @@ impl ExecutionBuildDeps<'_> {
         let filter_where = match reingestor.filter_where.as_ref() {
             Some(filter) => Some(
                 bind_scoped_filter_program(
-                    compile_target,
+                    &identifier,
                     filter.program(),
                     input_vm.clone(),
                     MessageErrorOperation::FilterWhere,
@@ -369,8 +358,7 @@ impl ExecutionBuildDeps<'_> {
                     source_scope,
                 )
                 .map_err(|error| {
-                    Report::new(error)
-                        .change_context(target.compile_failure(EntrypointProgram::FilterWhere))
+                    error.change_context(target.compile_failure(EntrypointProgram::FilterWhere))
                 })?,
             ),
             None => None,
@@ -385,7 +373,7 @@ impl ExecutionBuildDeps<'_> {
             };
             let set_operations = route.construction.set_operations();
             let program = bind_processor_output_filter_map_program(
-                compile_target,
+                &identifier,
                 std::slice::from_ref(&input.relay),
                 relay,
                 RouteProgram {
@@ -402,11 +390,9 @@ impl ExecutionBuildDeps<'_> {
                 self.compile_context(current_branching),
             )
             .map_err(|error| {
-                Report::new(error).change_context(target.compile_failure(
-                    EntrypointProgram::Route {
-                        relay: relay.clone(),
-                    },
-                ))
+                error.change_context(target.compile_failure(EntrypointProgram::Route {
+                    relay: relay.clone(),
+                }))
             })?;
             let branch = self.bind_route_branch(
                 target,
@@ -506,11 +492,16 @@ struct RouteBranchSchemas {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_models::{
         AckMode, CreateClientZeroMq, CreateIngestor, CreateReingestor, FlushPolicy,
-        GeneralErrorPolicy, IngestQuiesceMode, IngestSource, Model, OutputBranch, ParseAsType,
-        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, ZeroMqIngestMode,
+        GeneralErrorPolicy, IngestQuiesceMode, IngestorEntity, Model, OutputBranch, ParseAsType,
+        ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, ZeroMqIngestMode, ZeroMqIngestor,
+        ZeroMqPullIngestor,
     };
 
     use super::*;
@@ -577,11 +568,11 @@ mod tests {
                     .with_branch(branched_by("keyed", &["tenant"])),
                 input: nervix_models::IngestorInput::Transport(
                     nervix_models::TransportIngestorInput {
-                        source: IngestSource::ZeroMq {
+                        source: IngestorEntity::ZeroMq(ZeroMqIngestor::Pull(ZeroMqPullIngestor {
                             client: named("zmq"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
+                            mode: ZeroMqIngestMode::NoAck,
                             quiesce: IngestQuiesceMode::Suspend,
-                        },
+                        })),
                         codec: named("payload_codec"),
                     },
                 ),
@@ -688,7 +679,17 @@ mod tests {
                 ..
             } if relay == &named::<RelayName>("keyed")
         ));
-        assert!(error.contains::<RuntimeError>());
+        assert!(
+            matches!(
+                error.downcast_ref::<RuntimeVmCompileError>(),
+                Some(RuntimeVmCompileError::CompileFilterMap { node }) if node.as_str() == "source"
+            ),
+            "the runtime binding must name the route's FILTER-MAP beneath the program: {error:#}"
+        );
+        assert!(
+            error.contains::<nervix_vm::CompileError>(),
+            "the VM's own compile failure must stay beneath the binding: {error:#}"
+        );
     }
 
     fn repartitioning_domain() -> EntrypointTestDomain<'static> {
@@ -937,5 +938,52 @@ mod tests {
         ));
         assert_eq!(relays.incoming_consumers(), 0);
         assert_eq!(shutdown_tx.receiver_count(), 0);
+    }
+
+    #[test]
+    fn a_reingestor_program_that_does_not_compile_on_this_node_names_the_program() {
+        let fixture = repartitioning_domain();
+        let domain = domain("default");
+        let plan = fixture.plan_reingestor(&domain, filtering_reingestor("100ms", "25ms"));
+        // Each node surface no longer carries a field one of the planned programs reads.
+        let cases = [
+            (
+                "incoming",
+                test_schema(&[("value", ParseAsType::I64)]),
+                EntrypointProgram::SourceWhere {
+                    relay: named("incoming"),
+                },
+            ),
+            (
+                "incoming",
+                test_schema(&[("tenant", ParseAsType::String)]),
+                EntrypointProgram::FilterWhere,
+            ),
+            (
+                "outgoing",
+                test_schema(&[("tenant", ParseAsType::String)]),
+                EntrypointProgram::Route {
+                    relay: named("outgoing"),
+                },
+            ),
+        ];
+        for (relay, schema, expected) in cases {
+            let mut surfaces = NodeSurfaces::of(&fixture);
+            surfaces.relay_schemas.insert(named(relay), schema);
+            let error = surfaces
+                .deps(&domain)
+                .bind_reingestor_input(&plan, &plan.inputs[0])
+                .err()
+                .assured("a program that does not compile must not bind");
+            let EntrypointBindingError::CompileProgram { program, .. } = error.current_context()
+            else {
+                panic!("the binding must name the program that did not compile: {error:#}");
+            };
+            assert_eq!(program, &expected);
+            assert!(
+                error.contains::<nervix_vm::CompileError>(),
+                "the VM's own compile failure must stay beneath the binding: {error:#}"
+            );
+        }
     }
 }

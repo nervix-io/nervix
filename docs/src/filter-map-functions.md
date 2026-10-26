@@ -1,11 +1,13 @@
 # Expression Functions
 
-This chapter is the reference for NSPL expressions: the operators, conversions, builtin functions,
+*Plexus, the Nervix graph definition language.*
+
+This chapter is the reference for Plexus expressions: the operators, conversions, builtin functions,
 and window aggregates they can use, with each one's exact types, null handling, errors, and limits.
 Expressions appear on ingestors, processors, routes, and emitters, most often in route
 construction:
 
-```nspl,ignore
+```plexus,ignore
 [INHERIT ...]
 [SET <field> = <expr>, ...]
 [WHERE <expr>]
@@ -171,17 +173,22 @@ The sections below name the kind and message of every failure. A failed message 
 the failed operation, and the message then takes its context's error handling:
 
 - A failure in route construction (`INHERIT`, `SET`, route `WHERE`, and `INVOKE`), in an ingestor's
-  `FILTER WHERE`, in a generator route, and in an emitter's `FROM ... WHERE`, route, or `VALUES`
-  hands the message to the route's `ON MESSAGE ERROR` policy; an ingestor `FILTER WHERE` failure
-  goes to the policy of every route. `SET` runs before route `WHERE`, so a `SET` failure is
-  reported even for a message that `WHERE` would drop.
+  `FILTER WHERE` or `BRANCHED BY ... SET`, in a generator route, and in an emitter's
+  `FROM ... WHERE`, route, or `VALUES` hands the message to the route's `ON MESSAGE ERROR` policy;
+  an ingestor `FILTER WHERE` failure goes to the policy of every route. `SET` runs before route
+  `WHERE`, so a `SET` failure is reported even for a message that `WHERE` would drop. A failed
+  branch `SET` reports the `set` operation and the message `branch SET failed with`, the kind, the
+  reason and the operation's range, and the error route reads the route's finalized output as
+  `partial_output`.
 - A failure in a processor's `FROM ... WHERE` or `FILTER WHERE`, or in the argument of a window
   aggregate, is logged, and the message is not acknowledged.
 - A failure in a session subscription's `WHERE` skips the record, and the session is told how many
   records the filter skipped.
 - Deduplication keys, reorderer `BY` expressions, `CORRELATE WHERE` conditions, inferencer `INPUTS`
-  mappings, and `BRANCHED BY ... SET` have no message-error route. Keep expressions that can fail
-  out of them, or guard them with a conditional, `TRY_CAST`, or `TRY_JSON_VALUE`.
+  mappings, and a reingestor's `BRANCHED BY ... SET` have no message-error route. A reingestor whose
+  branch construction fails for one message fails every message of that batch: the failure is
+  logged, and none of them is acknowledged. Keep expressions that can fail out of them, or guard
+  them with a conditional, `TRY_CAST`, or `TRY_JSON_VALUE`.
 
 In an `ON MESSAGE ERROR SEND TO ... SET`, a function failure has the `error` scope below. Every
 failure an expression reports has the code `evaluation`; the kind appears in the message, which
@@ -210,7 +217,7 @@ A statement whose expression does not type-check is rejected when it is applied,
 such as `function 'trim' requires Utf8 input, found Int64`. These messages name types by their Arrow
 names:
 
-| NSPL type | Name in messages |
+| Plexus type | Name in messages |
 | --- | --- |
 | `U8` through `I64` | `UInt8`, `Int8`, `UInt16`, `Int16`, `UInt32`, `Int32`, `UInt64`, `Int64` |
 | `F32`, `F64` | `Float32`, `Float64` |
@@ -275,29 +282,49 @@ arguments of a call, the elements of an `IN` set, and the elements of `[...]`.
 
 ### Reserved Words
 
-These words are reserved in expressions, including after a field scope such as `input.<field>`:
-`WHERE`, `SET`, `INHERIT`, `ALL`, `EXCEPT`, `LEAK`, `SENSITIVE`, `INVOKE`, `AS`, `TRY_CAST`,
-`JSON_VALUE`, `TRY_JSON_VALUE`, `JSON_EXISTS`, `AND`, `OR`, `NOT`, `TRUE`, `FALSE`, `NULL`, `IF`,
-`CASE`, `WHEN`, `THEN`, `ELSE`, `END`, `IN`, `BETWEEN`, `IS`, `DISTINCT`, `FROM`, and `UDF`. A schema
-may declare one of these field names, but an NSPL expression cannot reference it.
+These words are reserved in expressions: `WHERE`, `SET`, `INHERIT`, `ALL`, `EXCEPT`, `LEAK`,
+`SENSITIVE`, `INVOKE`, `AS`, `TRY_CAST`, `JSON_VALUE`, `TRY_JSON_VALUE`, `JSON_EXISTS`, `AND`, `OR`,
+`NOT`, `TRUE`, `FALSE`, `NULL`, `IF`, `CASE`, `WHEN`, `THEN`, `ELSE`, `END`, `IN`, `BETWEEN`, `IS`,
+`DISTINCT`, `FROM`, and `UDF`. Wherever a keyword could stand, a reserved word reads as that
+keyword, so a bare field, a call, or a `SET`, `DEFAULT` or `INHERIT` field named with one is written
+between backticks: `` SET `end` = input.end ``. After a field scope such as `input.` and after
+`udf::`, no keyword can stand, so the name is written as it is: `input.end`, `left.from` and
+`udf::case(input.value)` read without backticks.
+
+Every other word, including a statement keyword such as `to`, `on`, `by`, or `max`, is an ordinary
+name wherever an expression writes one: `SET to = input.to` writes a field named `to`.
+
+Inside an expression, a name between backticks may hold any character a name may, such as `-`, `~`,
+`.`, or a leading digit, which a bare word cannot: `` input.`user-id` ``. Canonical Plexus, as
+`SHOW CREATE` and `nervix-plexus-format` write it, puts a name between backticks exactly where the
+name would not read back otherwise. It also quotes a bare field named like an `ALTER` operation
+keyword, `ADD`, `DROP`, `ALTER`, `REPLACE`, or `RENAME`, because inside an `ALTER` statement a comma
+before such a word begins the next operation.
 
 ### Expressions Inside Statements
 
-A statement reads an expression it embeds up to the keyword that begins its next clause, such as
-`TO`, `MAX TIME`, or a correlator's `RIGHT FROM`, so an expression needs no parentheses to end. A
-builtin or a field scope whose name is also such a keyword belongs to the expression wherever it is
-written: followed by `(` it is a call, and followed by `.` it is the scope of a field, never the
-start of a clause. In `DEDUPLICATE ON max(input.readings) MAX TIME 10m` the first `max` is a call
-and the second begins the next clause, a correlator's left input can test `right(left.name, 2)`
-before its `RIGHT FROM`, and an `ALTER` operation can call `replace(...)` after a comma inside its
-expression.
+A statement reads an expression it embeds for as long as the expression can go on, and the
+statement's next clause begins where it cannot, so an expression needs no parentheses to end. After
+`WHERE input.total > 10`, a `TO`, `MAX TIME`, or correlator `RIGHT FROM` continues no expression,
+so it begins the next clause. A word written where an operand, a call, or a field belongs is part of
+the expression, whatever keyword it spells: in `DEDUPLICATE ON max(input.readings), max MAX TIME 10m`
+the first `max` is a call, the second a field, and the third begins `MAX TIME`, and a correlator's
+left input can test `right(left.name, 2) = right` before its `RIGHT FROM`.
+
+When the expression goes on with a token and then cannot finish, as an `IN (` that is never closed
+cannot, the statement is rejected where the expression fails rather than read as a shorter
+expression. Inside an `ALTER` statement, a comma followed by a bare operation keyword begins the next
+operation, while a comma inside a call's parentheses never does, so
+`SET FILTER WHERE concat(input.kind, replace)` holds one expression.
 
 A statement reads the expression it embeds from its own words, with the same lexer and grammar that
 read an expression in a web console form, in `nervix-cli subscribe --where`, and through the client
 library. Keywords, literals, comments, and spacing therefore mean the same wherever an expression is
 written: text one of them accepts reads as the same expression in all of them, and text one of them
 rejects all of them reject. A rejected expression is reported at the word of the statement where it
-went wrong, with the message a web console form shows for the same text.
+went wrong. When the expression itself cannot finish, the message is the one a web console form shows
+for the same text; when a complete expression is followed by a word no clause of the statement
+expects, the statement names the clauses it expected there.
 
 ## Logical Operators
 
@@ -320,7 +347,7 @@ result: `input.divisor != 0 AND input.total / input.divisor > 10` reports `divis
 message whose divisor is `0`. Guard such an operand with a conditional, which evaluates it only for
 the messages that select it:
 
-```nspl,ignore
+```plexus,ignore
 WHERE CASE WHEN input.divisor = 0 THEN FALSE ELSE input.total / input.divisor > 10 END
 ```
 
@@ -329,9 +356,9 @@ And requires matching operand types, found Int64 and Boolean` for operands of tw
 
 ## Conditional Expressions
 
-NSPL provides three self-delimited conditional forms:
+Plexus provides three self-delimited conditional forms:
 
-```nspl,ignore
+```plexus,ignore
 IF <bool-condition> THEN <result> ELSE <result> END
 
 CASE
@@ -405,7 +432,7 @@ There is no `IS NULL` operator: test for null with `is_null(x)` and `NOT is_null
 `<value> NOT IN (<element>, ...)` is its negation. `<value> BETWEEN <low> AND <high>` tests whether a
 value lies in an inclusive range, and `<value> NOT BETWEEN <low> AND <high>` is its negation.
 
-```nspl,ignore
+```plexus,ignore
 input.status IN ('open', 'held')
 input.priority NOT IN (1 AS I32, 2 AS I32)
 input.weight BETWEEN 1.0 AND 50.0
@@ -520,7 +547,7 @@ explicitly. A null operand is not a failure: it converts to a typed null in both
 `input.amount AS I64` over a message without an `amount` yields null and reports nothing. Test the
 operand to tell a missing value from one that did not convert:
 
-```nspl,ignore
+```plexus,ignore
 SET amount = TRY_CAST(input.amount AS I64),
     amount_state = CASE
       WHEN is_null(input.amount) THEN 'missing'
@@ -602,7 +629,7 @@ in all three forms and reports nothing. `<path>` is a string literal in single o
 parsed and checked when the statement is parsed, so a malformed path rejects the statement; see
 [Paths](#paths). `JSON_VALUE`, `TRY_JSON_VALUE`, and `JSON_EXISTS` are [reserved](#reserved-words).
 
-```nspl,ignore
+```plexus,ignore
 SET customer_id = JSON_VALUE(input.payload, '$.customer.id' AS I64),
     tags = JSON_VALUE(input.payload, '$.tags' AS VEC<STRING>),
     first_quantity = TRY_JSON_VALUE(input.payload, '$.items[0].qty' AS U32),
@@ -702,7 +729,7 @@ value from the document, so it can be reported for a sensitive document.
 JSON null; `JSON_EXISTS` tells the two apart. Test the forms together to classify a document without
 failing the message:
 
-```nspl,ignore
+```plexus,ignore
 SET amount = TRY_JSON_VALUE(input.payload, '$.amount' AS F64),
     amount_state = CASE
       WHEN is_null(input.payload) THEN 'no document'
@@ -829,19 +856,24 @@ another instant instead.
 | `write_header(name, value)` | nothing | Emitter-only side effect. Valid only as a top-level call in the final `INVOKE` block |
 
 Header names may be dynamic `STRING` expressions, and a name matches exactly, letter case included,
-the names the connector recorded. A null name reads as absent. Header reads are available on
-Endpoint (HTTP and WebSocket), HTTP client, Kafka, NATS, Pulsar, RabbitMQ, and SQS ingestors, in
-their `FILTER WHERE` and route construction, and in an error route's construction for a failure on
-such an ingestor. Header writes are available on HTTP, Kafka, NATS, Pulsar, RabbitMQ, and SQS
-emitters. Anywhere else a statement is rejected when it is validated, with a message such as
-`function 'read_header' is only available to ingestors whose connector supports headers`, `MQTT
-ingestors do not support read_header or read_headers`, or `MQTT emitters do not support
-write_header`.
+the names the connector recorded. A null name reads as absent. Each ingestor and emitter declares a
+[header model](connector-contract.md#header-models): what a repeated name keeps, the order names
+travel in, and whether names are recorded in lowercase, as HTTP field names are. Header reads are available on
+`HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, `WEBSOCKETS CONNECTION`, `HTTP REQUEST`, `KAFKA TOPIC`, `NATS SUBJECT`,
+`PULSAR TOPIC`, `RABBITMQ QUEUE`, and `SQS QUEUE` ingestors, in their `FILTER WHERE` and route
+construction, and in an error route's construction for a failure on such an ingestor. Header writes
+are available on HTTP, Kafka, NATS, Pulsar, RabbitMQ, and SQS emitters. Anywhere else a statement
+is rejected when it is validated, with a message such as `function 'read_header' is only available
+to ingestors whose connector supports headers`, `MQTT TOPIC ingestors do not support read_header or
+read_headers`, or `MQTT emitters do not support write_header`.
 
 `write_header` arguments must be statically non-null `STRING` expressions, and a sensitive argument
 requires `leak_sensitive(...)`. They are evaluated after payload construction and route filtering.
 Calls are staged in source order in a route-local envelope; if any call fails, no payload or partial
-header envelope is published. See [Emitters](emitters.md) for each sink's header rules.
+header envelope is published. Where the emitter keeps one value per name, a second call whose name is a
+string literal equal, as the emitter compares names, to an earlier literal one is refused when the
+statement is validated. See [Header invocations](emitters.md#header-invocations) for each emitter's
+header model.
 
 ## Lookups And UDF Calls
 
@@ -1146,7 +1178,7 @@ To route malformed text explicitly instead of failing the message, test it first
 messages that hold an address and is null for the others. Address functions keep the sensitivity
 of their arguments, so whether a sensitive address lies in a network is sensitive.
 
-```nspl,ignore
+```plexus,ignore
 SET client = ip_from_string(input.client_ip),
     client_subnet = ip_to_string(ip_trunc(output.client, IF ip_family(output.client) = 4 THEN 24 ELSE 48 END)),
     internal = ip_in_network(ip_unmap(output.client), '10.0.0.0/8')
@@ -1236,7 +1268,7 @@ can make a component longer than the text it came from, and like the results of 
 component that does not fit in what its `STRING` column has left reports an `overflow` error. URL
 functions keep the sensitivity of their arguments, so the host of a sensitive URL is sensitive.
 
-```nspl,ignore
+```plexus,ignore
 SET scheme = url_scheme(input.referrer),
     referrer_host = url_host(input.referrer),
     campaign = url_query_value(input.referrer, 'utm_campaign'),
@@ -1342,6 +1374,9 @@ literal is the nearest binary float, which can lie on either side of a decimal t
 - `round(2.675, 2)` is `2.67`, because the `F64` nearest to `2.675` is slightly below it.
 - An `F32` rounds its own stored value: the `F32` nearest to `0.15` is slightly above `0.15`, so
   `round(x, 1)` of that `F32` is `0.2`.
+- At a power of two the adjacent float toward zero can be closer than the adjacent float away
+  from zero. For the `F64` value `5.0321474762477604e-234`, rounding to 249 places returns the
+  adjacent value toward zero, `5.03214747624776e-234`.
 
 A float result that is zero keeps the sign of `x`, as `round(-0.004, 2)` is `-0.0`. Rounding to a
 multiple of a power of ten can exceed the largest finite value, as `round(1.7976931348623157e308,
@@ -1501,7 +1536,7 @@ The error's message names the function, such as `date_add result is outside the 
 `date_diff result does not fit I64`, or
 `parse_datetime local time is ambiguous in America/New_York`.
 
-```nspl,ignore
+```plexus,ignore
 SET hour = date_part('hour', input.occurred_at),
     local_hour = date_part('hour', input.occurred_at, 'America/New_York'),
     quarter_hour = date_bin('minute', 15, input.occurred_at, from_unix('second', 0)),
@@ -1985,7 +2020,7 @@ between batches. A UDF has its own watchdog; see [User-Defined Functions](udfs.m
 ## Measured Performance
 
 Execution is columnar, so a batch pays a fixed cost once and each message pays for its own work.
-Two measured facts, from the [VM batch-size sweep](nspl-overview.md) and from the VM function
+Two measured facts, from the [VM batch-size sweep](plexus-overview.md) and from the VM function
 workloads below, shape what an expression costs:
 
 - Per-message cost falls steeply up to about a thousand messages per batch and then flattens.
@@ -2121,7 +2156,7 @@ a junction describes each one with the address, URL, JSON, datetime, conditional
 functions, and a window processor summarizes latency with exact and approximate aggregates. Create
 the domain and select it:
 
-```nspl
+```plexus
 CREATE UNPACED DOMAIN functions_example;
 
 USE functions_example;
@@ -2129,7 +2164,7 @@ USE functions_example;
 
 Then declare the graph:
 
-```nspl
+```plexus
 BEGIN;
 
 CREATE SCHEMA access_event (
@@ -2187,8 +2222,8 @@ CREATE ENDPOINT access_ingress
   PATH '/access'
   TYPE HTTP;
 
-CREATE INGESTOR access_intake
-  FROM ENDPOINT access_ingress MODE NO_ACK SEQUENTIAL
+CREATE HTTP ENDPOINT INGESTOR access_intake
+  FROM access_ingress MODE NO ACK
   ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING access_codec
   TO access_events
     INHERIT ALL
@@ -2245,7 +2280,7 @@ extraction shares one parse of each payload. `local_hour` reads the local hour i
 
 Start the domain, subscribe to both outputs, each in its own terminal, and post three records:
 
-```nspl
+```plexus
 START;
 ```
 

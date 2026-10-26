@@ -2,11 +2,11 @@ Feature: Typed array and vector expressions
   Scenario Outline: An ordinary route constructs a typed array from input columns
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA numbers (id STRING, first I64, second I64);
       CREATE SCHEMA result (id STRING, items <items_type>, vec_items <vec_type>, empty_items <vec_type>, item_count I64);
@@ -15,8 +15,8 @@ Feature: Typed array and vector expressions
       CREATE RELAY results SCHEMA result UNBRANCHED;
       CREATE VHOST edge arrays-{{test_id}}.example.com;
       CREATE ENDPOINT numbers_ingress ON edge PATH '/numbers' TYPE HTTP;
-      CREATE INGESTOR numbers_source
-        FROM ENDPOINT numbers_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR numbers_source
+        FROM numbers_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING numbers_codec
         TO numbers
           INHERIT ALL
@@ -55,11 +55,11 @@ Feature: Typed array and vector expressions
   Scenario Outline: Vector kernels transform ragged and empty child columns
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA source (id STRING, items <items_type> OPTIONAL, other <items_type> OPTIONAL, needle I64);
       CREATE SCHEMA result (
@@ -81,8 +81,8 @@ Feature: Typed array and vector expressions
       CREATE RELAY vector_errors SCHEMA vector_error UNBRANCHED;
       CREATE VHOST edge vectors-{{test_id}}.example.com;
       CREATE ENDPOINT source_ingress ON edge PATH '/vectors' TYPE HTTP;
-      CREATE INGESTOR source_node
-        FROM ENDPOINT source_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_node
+        FROM source_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
         TO sources
           INHERIT ALL
@@ -132,11 +132,11 @@ Feature: Typed array and vector expressions
   Scenario Outline: Fixed arrays retain their width through construction and concatenation
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA source (id STRING, first I64, second I64, secret I64 SENSITIVE);
       CREATE SCHEMA result (
@@ -159,8 +159,8 @@ Feature: Typed array and vector expressions
       CREATE RELAY unsafe_results SCHEMA unsafe_result UNBRANCHED;
       CREATE VHOST edge fixed-arrays-{{test_id}}.example.com;
       CREATE ENDPOINT source_ingress ON edge PATH '/fixed-arrays' TYPE HTTP;
-      CREATE INGESTOR source_node
-        FROM ENDPOINT source_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source_node
+        FROM source_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING source_codec
         TO sources
           INHERIT ALL
@@ -169,21 +169,21 @@ Feature: Typed array and vector expressions
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """
-    And these NSPL commands fail with "SET field 'exposed' would store sensitive data in a non-sensitive output field"
+    And these Plexus commands fail with "SET field 'exposed' would store sensitive data in a non-sensitive output field"
       """
       CREATE JUNCTION unsafe_arrays FROM sources UNBRANCHED
         TO unsafe_results
           SET id = input.id, exposed = [input.secret, input.first]
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
-    And these NSPL commands fail with "requires exact matching element types"
+    And these Plexus commands fail with "requires exact matching element types"
       """
       CREATE JUNCTION mixed_arrays FROM sources UNBRANCHED
         TO unsafe_results
           SET id = input.id, exposed = [input.first, input.second AS I32]
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE JUNCTION fixed_arrays FROM sources UNBRANCHED
         TO results

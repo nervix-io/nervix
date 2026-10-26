@@ -918,6 +918,10 @@ impl RuntimeTensorSchema for InferencerTensorSchema {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use nervix_execution::{CpuClass, Executor};
     use nervix_models::{

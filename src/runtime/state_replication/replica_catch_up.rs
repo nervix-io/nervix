@@ -4,8 +4,12 @@
 //! May depend on: the branch lifecycle a replica keeps, the replica's record of the entity's branch
 //! checkpoints, replica installation and the interconnect dispatcher.
 //! Must not know: how an owner answers a request or keeps its catalog, what a checkpoint holds,
-//! NSPL parsing, or control-plane transactions.
+//! Plexus parsing, or control-plane transactions.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -15,7 +19,9 @@
     )
 )]
 
-use nervix_interconnect::{BranchCheckpointCursor, BranchCheckpointListingRequest};
+use nervix_interconnect::{
+    BranchCheckpointCursor, BranchCheckpointListingRequest, StateSyncRequest,
+};
 
 use super::*;
 use crate::runtime::branch_lifecycle_state::NamedBranches;
@@ -65,20 +71,11 @@ pub(in crate::runtime) trait StateOwner: Send + Sync {
 pub(in crate::runtime) struct RemoteStateOwner {
     runtime: Runtime,
     node: ClusterNodeName,
-    response_timeout: Duration,
 }
 
 impl RemoteStateOwner {
-    pub(in crate::runtime) fn new(
-        runtime: Runtime,
-        node: ClusterNodeName,
-        response_timeout: Duration,
-    ) -> Self {
-        Self {
-            runtime,
-            node,
-            response_timeout,
-        }
+    pub(in crate::runtime) fn new(runtime: Runtime, node: ClusterNodeName) -> Self {
+        Self { runtime, node }
     }
 }
 
@@ -97,7 +94,7 @@ impl StateOwner for RemoteStateOwner {
                 &self.node,
                 placement,
                 after_lsm,
-                self.response_timeout,
+                StateSyncRequest::TIMEOUT,
             )
             .await
     }
@@ -124,10 +121,10 @@ impl StateOwner for RemoteStateOwner {
                     lifecycle: lifecycle.to_remote(),
                     after,
                 },
-                self.response_timeout,
+                BranchCheckpointListingRequest::TIMEOUT,
             )
             .await
-            .map_err(|reason| Report::new(request_failed()).attach_printable(reason))?;
+            .change_context_lazy(request_failed)?;
         let listing = response.result.map_err(|failure| {
             Report::new(StateReplicationError::RemoteFailure {
                 target: self.node.clone(),
@@ -191,7 +188,7 @@ impl Runtime {
                 Ok(named) => named,
                 Err(error) => {
                     warn!(
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to decode replicated branch lifecycle checkpoint"
                     );
                     return;
@@ -237,7 +234,7 @@ impl Runtime {
         let fetched = match owner.checkpoint_after(branch_lru, after_lsm).await {
             Ok(fetched) => fetched,
             Err(error) => {
-                warn!(error = %error, "failed to sync replicated branch lifecycle state");
+                warn!(error = %format_args!("{error:#}"), "failed to sync replicated branch lifecycle state");
                 return;
             }
         };
@@ -257,7 +254,7 @@ impl Runtime {
                 .acknowledge_durable_state_replica(owner.node(), branch_lru, held.lsm())
                 .await
             {
-                warn!(error = %error, "failed to acknowledge replicated branch lifecycle checkpoint");
+                warn!(error = %format_args!("{error:#}"), "failed to acknowledge replicated branch lifecycle checkpoint");
             }
             return;
         };
@@ -265,7 +262,7 @@ impl Runtime {
             .install_replica_branch_lifecycle(owner.node(), branch_lru, snapshot, lifecycle)
             .await
         {
-            warn!(error = %error, "failed to install replicated branch lifecycle checkpoint");
+            warn!(error = %format_args!("{error:#}"), "failed to install replicated branch lifecycle checkpoint");
             return;
         }
         let Some(current) = lifecycle.latest() else {
@@ -275,7 +272,7 @@ impl Runtime {
             Ok(current) => current,
             Err(error) => {
                 warn!(
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to decode replicated branch lifecycle checkpoint"
                 );
                 return;
@@ -305,7 +302,7 @@ impl Runtime {
             {
                 Ok(listing) => listing,
                 Err(error) => {
-                    warn!(error = %error, "failed to read the owner's branch checkpoint catalog");
+                    warn!(error = %format_args!("{error:#}"), "failed to read the owner's branch checkpoint catalog");
                     return;
                 }
             };
@@ -336,7 +333,7 @@ impl Runtime {
             identifier: branch_lru.identifier.clone(),
             branch_key: step.branch.clone(),
         };
-        if !self.runtime_state_placement_is_current(&placement) {
+        if !lifecycle.placement_is_current(&placement) {
             return StepOutcome::Stale;
         }
         let held = match step.held {
@@ -346,12 +343,12 @@ impl Runtime {
                     nervix::lifecycle_call,
                     "a replica task reads what this node holds of a branch once, when it first \
                      looks at the branch, and keeps that record itself from then on",
-                    self.held_branch_checkpoint(&placement)
+                    self.held_branch_checkpoint(&placement, lifecycle)
                 );
                 match held {
                     Ok(held) => held,
                     Err(error) => {
-                        warn!(error = %error, "failed to read replicated branch state progress");
+                        warn!(error = %format_args!("{error:#}"), "failed to read replicated branch state progress");
                         return StepOutcome::Failed(None);
                     }
                 }
@@ -364,7 +361,7 @@ impl Runtime {
                     .acknowledge_durable_state_replica(owner.node(), &placement, lsm)
                     .await
             {
-                warn!(error = %error, "failed to acknowledge replicated branch state checkpoint");
+                warn!(error = %format_args!("{error:#}"), "failed to acknowledge replicated branch state checkpoint");
                 return StepOutcome::Failed(Some(held));
             }
             return StepOutcome::Settled(held);
@@ -373,7 +370,7 @@ impl Runtime {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => return StepOutcome::Settled(held),
             Err(error) => {
-                warn!(error = %error, "failed to sync replicated branch state");
+                warn!(error = %format_args!("{error:#}"), "failed to sync replicated branch state");
                 return StepOutcome::Failed(Some(held));
             }
         };
@@ -383,7 +380,7 @@ impl Runtime {
         {
             Ok(installed) => StepOutcome::Settled(installed),
             Err(error) => {
-                warn!(error = %error, "failed to install replicated branch state checkpoint");
+                warn!(error = %format_args!("{error:#}"), "failed to install replicated branch state checkpoint");
                 StepOutcome::Failed(Some(held))
             }
         }
@@ -393,3 +390,7 @@ impl Runtime {
 #[cfg(test)]
 #[path = "replica_catch_up_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "remote_owner_tests.rs"]
+mod remote_owner_tests;

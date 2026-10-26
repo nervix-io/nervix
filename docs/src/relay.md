@@ -4,7 +4,7 @@
 has one primary owner. Only that owner instantiates the relay buffer, concrete branch presence,
 relay metrics, subscription fan-out, and optional materialized state.
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS RELAY notifications
   SCHEMA notification
   UNBRANCHED
@@ -37,7 +37,7 @@ stored relay's canonical declaration, which always states its capacity. See
 
 Relays select an explicit branch or declare unbranched execution:
 
-```nspl
+```plexus
 CREATE RELAY notifications SCHEMA notification BRANCHED BY by_tenant_user;
 CREATE RELAY global_notifications SCHEMA notification UNBRANCHED;
 ```
@@ -47,7 +47,7 @@ CREATE RELAY global_notifications SCHEMA notification UNBRANCHED;
 `ALTER RELAY` accepts one or more comma-separated operations. Operations execute in written order,
 so later operations may replace values set earlier in the same statement:
 
-```nspl
+```plexus
 ALTER RELAY notifications
   SET CAPACITY 8,
   SET SCHEMA notification_v2,
@@ -90,7 +90,7 @@ Runtime branch rules:
 - output routes and forwarders send records to downstream relay names inside the same branch
 - stateful processors keep branch-local state for that group
 - a `REINGESTOR` may consume across a branch boundary and start new downstream branches through `BRANCHED BY <branch>`
-- an `EMITTER` consumes records across the whole input relay and terminates the branch at an external sink
+- an `EMITTER` consumes records across the whole input relay and terminates the branch at an external emitter
 
 `branch` is a reserved namespace, so a relay cannot be named `branch`. Expressions inside a
 concrete branch may read its immutable key with `branch.<key>`. Bare fields never resolve to branch
@@ -141,7 +141,12 @@ state, when enabled, is the only replicated part of the relay; it is not a secon
 `CAPACITY <n>` controls the single buffer on the relay owner. It is one cluster-wide
 backpressure boundary, not a per-producer, per-consumer, or per-branch capacity. If downstream
 runtime consumers cannot drain the relay quickly enough, upstream dispatch waits once the owner
-buffer and the fixed dispatch slots leading to it are occupied.
+buffer and the fixed dispatch slots leading to it are occupied. A producer on another node also
+waits while the owner has no relay memory left for the acknowledgement watches of the rows it
+sends, until the owner has reported enough earlier rows, or for the grant of its next delivery, and
+while its own node has no relay memory left to store the acknowledgements of the rows it sends; see
+[Capacity Planning](./capacity-planning.md) and
+[Held Deliveries](./interconnect.md#held-deliveries).
 
 The capacity is a positive integer, through `18446744073709551615` on native 64-bit targets.
 Creation and `ALTER RELAY ... SET CAPACITY` retain the exact accepted value in storage, replicated
@@ -159,7 +164,7 @@ These fixed slots do not scale with the number of runtime consumers or subscript
 
 The capacity can be changed after creation:
 
-```nspl
+```plexus
 ALTER RELAY notifications SET CAPACITY 5;
 ```
 
@@ -195,8 +200,15 @@ Expiration semantics:
 - a branch's idle time is measured from the time at which its last input was accepted. A relay
   owner or processor that spends a long time waiting for input does not spend that wait out of the
   branch's TTL, so every branch receives its complete declared lifetime from its own last record
-- every relay owner and processor using the branch applies that branch's TTL to its own
-  branch-local runtime state
+- idle time counts every reason a branch receives no input. When a stalled source or a stalled
+  upstream delivery holds a branch's input back for longer than the TTL, every relay owner and
+  processor that holds the branch releases it at its next scan, and a window processor drops the
+  rows it retained for that branch
+- every relay owner, processor, ingestor and reingestor using the branch applies that branch's TTL
+  to its own branch-local runtime state. Releasing the branch ends only that entity's branch-local
+  state and the relay delivery channels it owns or publishes through for the branch. Another relay
+  or processor that holds a branch with the same key, under this branch or another branch of the
+  same schema, keeps its branch and the deliveries in flight on it
 - relay TTL and `MAX INSTANCES ... EVICT LRU` are enforced once by the relay owner across all
   producers in the cluster
 
@@ -210,7 +222,7 @@ the TTL in real time without changing the scan interval.
 
 Materialized relay state is enabled with:
 
-```nspl
+```plexus
 CREATE IF NOT EXISTS RELAY notifications
   SCHEMA notification
   UNBRANCHED
@@ -233,14 +245,26 @@ Operational notes:
 - `STOP` preserves persisted materialized state
 - `START` clears materialized state for the active domain before new execution proceeds
 - after a crash, Nervix restores persisted materialized entries from Fjall
-- per-group TTL metadata is not yet persisted, so crash recovery does not currently perform a startup sweep of stale materialized entries
+- a backup captures fresh materialized rows, exact schemas, typed branch keys and watermarks;
+  `RESTORE ... RESUME` installs them on owners and replicas before generators start, retaining
+  the archived domain start generation. A default stopped restore followed by `START` clears them.
+  See [Backup And Restore](backup-and-restore.md#what-a-restore-recreates).
+- Materialized branch activity times are not persisted. Restoring a materialized relay starts
+  each restored branch's idle lifetime at that relay's activation time in the domain clock.
+  Preserved row event watermarks still select `LAST BY TIMESTAMP`; they do not supply branch
+  activity or an expiry deadline. The first maintenance scan therefore retains restored rows
+  until their full TTL has elapsed from activation, even when their event timestamps are in the
+  distant past or future.
 
 Materialized state is also the readable snapshot surface for `GENERATOR` nodes. A generator declares exactly one materialized relay with `USING MATERIALIZED STATE <relay>` and reads it through `relay_state.<relay>.<field>`.
 
 `SHOW RELAY <relay> MATERIALIZED STATE` reports `kind: RELAY`, the relay owner, and its
 scheduler-selected state replicas before the materialized entries or empty-state message. Each
 entry keeps its typed branch key through collection and renders it at this reporting boundary;
-unbranched entries render as `key=(root)`.
+unbranched entries render as `key=(root)`. An entry's payload is written as JSON, which has no
+number for a NaN or an infinity, so a float field holding one is written as the string `NaN`,
+`Infinity` or `-Infinity`. A record holds one when a payload's number rounds past its `F32` field's
+range, or when an Avro payload or a producer's Arrow batch carries one.
 
 `DESCRIBE RELAY <relay>` reports the owner and state replicas immediately after `kind: RELAY`, then
 the logical definition and owner buffer-utilization metrics. An ordinary relay reports

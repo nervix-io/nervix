@@ -2,26 +2,38 @@
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** The domain lifecycle commands, the pause and drain an alteration needs, and the
-//!   rollback when one of its steps fails.
+//! - **Owns.** The domain lifecycle commands, the pause and drain an alteration or backup needs,
+//!   and the rollback when one of its steps fails.
 //! - **Depends on.** Consensus for the domain record, the registry for its models, and the entity
 //!   gate to hold the domain while it changes.
 //! - **Must not know.** How the domain's graph is scheduled or executed.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        control_plane,
+        reason = "owns the control plane boundary declared above"
+    )
+)]
+
 use std::time::Duration;
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_consensus::{ConsensusError, DomainMutationLease};
-use nervix_interconnect::DomainDrainStatusEnvelope;
+use nervix_interconnect::{
+    DomainDrainStatusEnvelope, RemoteOperationFailure,
+    backup::{BackupDrainAction, BackupDrainStatus, BackupDrainStatusRequest},
+};
 use nervix_models::{
-    AlterDomain, ClusterNodeName, CreateDomain, CreateStatement, DomainClockState, DomainName,
-    DomainStartPoint, DomainState, DomainStatus, QuiesceLevel, StartDomain, StopDomain,
-    TimestampError,
+    AlterDomain, ClusterNodeName, CoordinationIdentity, CreateDomain, CreateStatement,
+    DomainClockState, DomainName, DomainStartPoint, DomainState, DomainStatus, QuiesceLevel,
+    StartDomain, StopDomain, TimestampError,
 };
 use nervix_primitives::time::interval;
 use thiserror::Error;
 
 use super::{
+    backup::cut_reach::CutReach,
     command_result::CommandResult,
     domain_clock::current_timestamp,
     entity_gate::DrainOutstanding,
@@ -38,6 +50,19 @@ pub(in crate::application) enum DomainAlterError {
     ConcurrentAlter { domain: DomainName },
     #[error("{outstanding}")]
     QuiesceTimeout { outstanding: DrainOutstanding },
+    #[error("timed out draining domain '{domain}' for backup: {details}")]
+    BackupQuiesceTimeout { domain: DomainName, details: String },
+    #[error("failed to read backup drain status of domain '{domain}' on node '{node}'")]
+    BackupDrainRequest {
+        domain: DomainName,
+        node: ClusterNodeName,
+    },
+    #[error("backup drain status of domain '{domain}' on node '{node}' failed: {failure}")]
+    BackupDrainRemote {
+        domain: DomainName,
+        node: ClusterNodeName,
+        failure: RemoteOperationFailure,
+    },
     #[error(
         "timed out draining domain '{domain}' for {operation}: pending_node={pending_node}, \
          relay_buffers={buffered_relay_batches}, node_work_items={node_work_items}, \
@@ -58,21 +83,67 @@ pub(in crate::application) enum DomainAlterError {
         operation: &'static str,
         reason: String,
     },
-    #[error("failed to pause domain '{domain}' for model alteration: {reason}")]
-    PauseDomain { domain: DomainName, reason: String },
-    #[error("failed to stop ingestion in domain '{domain}' for model alteration: {reason}")]
-    StopIngestion { domain: DomainName, reason: String },
-    #[error("failed to resume domain '{domain}' after model alteration: {reason}")]
-    ResumeDomain { domain: DomainName, reason: String },
-    #[error("failed to restore ingestion in domain '{domain}' after model alteration: {reason}")]
-    RestoreIngestion { domain: DomainName, reason: String },
+    /// The consensus report of the pause is beneath.
+    #[error("failed to pause domain '{domain}' for model alteration")]
+    PauseDomain { domain: DomainName },
+    /// The runtime's report of the cluster state it could not apply is beneath.
+    #[error("failed to stop ingestion in domain '{domain}' for model alteration")]
+    StopIngestion { domain: DomainName },
+    /// The consensus report of the resume is beneath.
+    #[error("failed to resume domain '{domain}' after model alteration")]
+    ResumeDomain { domain: DomainName },
+    /// The runtime's report of the cluster state it could not apply is beneath.
+    #[error("failed to restore ingestion in domain '{domain}' after model alteration")]
+    RestoreIngestion { domain: DomainName },
+    /// The alteration failed after its domain paused, and resuming the domain failed too. Both
+    /// reports are beneath: the alteration's failure, then the resume's.
+    #[error("failed to resume domain '{domain}' after its model alteration was abandoned")]
+    ResumeAfterAbandonedAlter { domain: DomainName },
     #[error("failed to roll back model alteration in domain '{domain}': {reason}")]
     Rollback { domain: DomainName, reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::application) enum DomainDrainMode {
+    Alteration,
+    Backup,
 }
 
 pub(in crate::application) struct ResolvedDomainStart {
     pub(in crate::application) concrete_start: DomainStartPoint,
     pub(in crate::application) clock: DomainClockState,
+}
+
+/// The retained log cap, in bytes, a test build's saturated-log refusal reports.
+#[cfg(feature = "testing")]
+const REFUSED_WRITE_LOG_CAP_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The retained log a test build's saturated-log refusal reports: one byte past its cap.
+#[cfg(feature = "testing")]
+const REFUSED_WRITE_RETAINED_LOG_BYTES: u64 = REFUSED_WRITE_LOG_CAP_BYTES + 1;
+
+/// The wait for reclamation a test build's saturated-log refusal reports.
+#[cfg(feature = "testing")]
+const REFUSED_WRITE_RECLAMATION_WAIT: Duration = Duration::from_secs(5);
+
+/// The error a leader's consensus refuses a write with, before appending it, when a test build
+/// armed a model publication refusal of this kind.
+#[cfg(feature = "testing")]
+impl From<crate::fault_injection::ModelPublicationRefusalKind> for ConsensusError {
+    fn from(refusal: crate::fault_injection::ModelPublicationRefusalKind) -> Self {
+        match refusal {
+            crate::fault_injection::ModelPublicationRefusalKind::LapsedLease => {
+                Self::LeadershipLost { leader_id: None }
+            }
+            crate::fault_injection::ModelPublicationRefusalKind::SaturatedLog => {
+                Self::LogRetentionSaturated {
+                    retained: REFUSED_WRITE_RETAINED_LOG_BYTES,
+                    cap: REFUSED_WRITE_LOG_CAP_BYTES,
+                    waited: REFUSED_WRITE_RECLAMATION_WAIT,
+                }
+            }
+        }
+    }
 }
 
 impl SessionServiceImpl {
@@ -100,7 +171,7 @@ impl SessionServiceImpl {
                     )),
                 },
                 Err(error) => command_error(format!(
-                    "domain '{}' exists, but its stopped state is not usable everywhere: {error}",
+                    "domain '{}' exists, but its stopped state is not usable everywhere: {error:#}",
                     state.id.as_str()
                 )),
             };
@@ -132,7 +203,7 @@ impl SessionServiceImpl {
         }
         if let Err(error) = self.apply_current_cluster_state().await {
             return command_error(format!(
-                "created domain '{}', but its stopped state failed to become usable: {error}",
+                "created domain '{}', but its stopped state failed to become usable: {error:#}",
                 state.id.as_str()
             ));
         }
@@ -151,6 +222,24 @@ impl SessionServiceImpl {
         mutation: Option<&DomainMutationLease>,
         impact: Option<&TransactionStepImpactRecorder>,
     ) -> Result<Option<QuiescenceAttempt>, Report<DomainAlterError>> {
+        self.pause_and_drain_domain_for_alter_with_timeout(
+            domain,
+            mutation,
+            impact,
+            self.inner.runtime.domain_drain_timeout(),
+            DomainDrainMode::Alteration,
+        )
+        .await
+    }
+
+    pub(in crate::application) async fn pause_and_drain_domain_for_alter_with_timeout(
+        &self,
+        domain: &DomainName,
+        mutation: Option<&DomainMutationLease>,
+        impact: Option<&TransactionStepImpactRecorder>,
+        timeout: Duration,
+        mode: DomainDrainMode,
+    ) -> Result<Option<QuiescenceAttempt>, Report<DomainAlterError>> {
         let attempt = impact.map(|impact| {
             impact.request(nervix_models::PauseRequirement::Domain {
                 domain: domain.clone(),
@@ -162,25 +251,24 @@ impl SessionServiceImpl {
             .pause_domain(domain.clone(), mutation)
             .await
         {
-            let reason = ConsensusError::report_message(&error);
             if let (Some(impact), Some(attempt)) = (impact, attempt) {
+                let reason = ConsensusError::report_message(&error);
                 if matches!(error.current_context(), ConsensusError::Conflict(_)) {
                     impact.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Quiescence,
-                        reason.clone(),
+                        reason,
                     );
                 } else {
                     impact.uncertain(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Quiescence,
-                        reason.clone(),
+                        reason,
                     );
                 }
             }
             return Err(error.change_context(DomainAlterError::PauseDomain {
                 domain: domain.clone(),
-                reason,
             }));
         }
         if let (Some(impact), Some(attempt)) = (impact, attempt) {
@@ -192,30 +280,32 @@ impl SessionServiceImpl {
                 impact.fail(
                     attempt,
                     nervix_models::ImpactDiagnosticKind::Quiescence,
-                    error.to_string(),
+                    format!("{error:#}"),
                 );
             }
+            let stopped = error.change_context(DomainAlterError::StopIngestion {
+                domain: domain.clone(),
+            });
             return Err(self
-                .abort_domain_alter_pause(
-                    domain,
-                    mutation,
-                    impact.zip(attempt),
-                    Report::new(DomainAlterError::StopIngestion {
-                        domain: domain.clone(),
-                        reason: error.to_string(),
-                    }),
-                )
+                .abort_domain_alter_pause(domain, mutation, impact.zip(attempt), stopped)
                 .await);
         }
 
-        match self.wait_for_paused_domain_drain(domain).await {
+        let drained = match mode {
+            DomainDrainMode::Alteration => {
+                self.wait_for_paused_domain_drain_with_timeout(domain, timeout)
+                    .await
+            }
+            DomainDrainMode::Backup => self.wait_for_backup_domain_drain(domain, timeout).await,
+        };
+        match drained {
             Ok(()) => Ok(attempt),
             Err(reason) => {
                 if let (Some(impact), Some(attempt)) = (impact, attempt) {
                     impact.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Quiescence,
-                        reason.to_string(),
+                        format!("{reason:#}"),
                     );
                 }
                 Err(self
@@ -225,9 +315,168 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Drains a pause this transaction engaged for its current step before the coordinator that
+    /// engaged it stopped. That coordinator may have stopped before its drain finished, and this
+    /// node, a new leader among them, may not have installed the paused state yet.
+    pub(in crate::application) async fn drain_adopted_domain_pause(
+        &self,
+        domain: &DomainName,
+    ) -> Result<(), Report<DomainAlterError>> {
+        self.apply_current_cluster_state()
+            .await
+            .change_context_lazy(|| DomainAlterError::StopIngestion {
+                domain: domain.clone(),
+            })?;
+        self.wait_for_paused_domain_drain(domain).await
+    }
+
     pub(in crate::application) async fn wait_for_paused_domain_drain(
         &self,
         domain: &DomainName,
+    ) -> Result<(), Report<DomainAlterError>> {
+        self.wait_for_paused_domain_drain_with_timeout(
+            domain,
+            self.inner.runtime.domain_drain_timeout(),
+        )
+        .await
+    }
+
+    async fn backup_drain_status_on_node(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        coordination: &CoordinationIdentity,
+        action: BackupDrainAction,
+    ) -> error_stack::Result<BackupDrainStatus, DomainAlterError> {
+        let request = BackupDrainStatusRequest {
+            coordination: coordination.clone(),
+            domain: domain.clone(),
+            action,
+        };
+        let result = if node == self.inner.consensus.local_node_id() {
+            self.handle_backup_drain_status_request(node, request).await
+        } else {
+            self.inner
+                .interconnect
+                .request(node, request)
+                .await
+                .change_context(DomainAlterError::BackupDrainRequest {
+                    domain: domain.clone(),
+                    node: node.clone(),
+                })?
+        };
+        result.map_err(|failure| {
+            Report::new(DomainAlterError::BackupDrainRemote {
+                domain: domain.clone(),
+                node: node.clone(),
+                failure,
+            })
+        })
+    }
+
+    /// Uses the shutdown drain's admitted-work view. After every node is quiet, a separate
+    /// cluster-wide confirming flush catches work moving between status reads.
+    async fn wait_for_backup_domain_drain(
+        &self,
+        domain: &DomainName,
+        timeout: Duration,
+    ) -> Result<(), Report<DomainAlterError>> {
+        let coordination = self
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .map_err(|error| {
+                Report::new(DomainAlterError::BackupQuiesceTimeout {
+                    domain: domain.clone(),
+                    details: error.to_string(),
+                })
+            })?;
+        // Beside the live nodes, the drain observes every node the schedule assigns the domain's
+        // work to, so a scheduled node that stops answering holds the round open instead of
+        // leaving its admitted work unobserved.
+        let schedule = self.inner.consensus.current_schedule().await;
+        let reach = CutReach::of(schedule.domain(domain));
+        let mut nodes = self.cut_live_nodes().await;
+        nodes.extend(reach.executors().cloned());
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
+        let mut polling = interval(Duration::from_millis(50));
+        polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
+        let mut confirming = false;
+        loop {
+            nervix_primitives::task::consume_budget().await;
+            polling.tick().await;
+            let action = if confirming {
+                BackupDrainAction::Observe
+            } else {
+                BackupDrainAction::FlushIfIdle
+            };
+            let mut quiet = true;
+            let mut flushes_complete = true;
+            let mut details = Vec::new();
+            for node in &nodes {
+                match self
+                    .backup_drain_status_on_node(node, domain, &coordination, action)
+                    .await
+                {
+                    Ok(status) => {
+                        if status.holds_admitted_work() {
+                            quiet = false;
+                        }
+                        if status.force_flush_obligations != 0 {
+                            flushes_complete = false;
+                        }
+                        if status.holds_admitted_work() || status.force_flush_obligations != 0 {
+                            details.push(format!("node={node} {status:?}"));
+                        }
+                    }
+                    Err(error) => {
+                        quiet = false;
+                        details.push(format!("node={node} status_error={error}"));
+                    }
+                }
+            }
+            if quiet {
+                if confirming && flushes_complete {
+                    return Ok(());
+                }
+                if !confirming {
+                    let mut confirmed = true;
+                    for node in &nodes {
+                        if let Err(error) = self
+                            .backup_drain_status_on_node(
+                                node,
+                                domain,
+                                &coordination,
+                                BackupDrainAction::Confirm,
+                            )
+                            .await
+                        {
+                            confirmed = false;
+                            details.push(format!("node={node} confirm_error={error}"));
+                        }
+                    }
+                    confirming = confirmed;
+                }
+            } else {
+                confirming = false;
+            }
+            if nervix_primitives::time::Instant::now() >= deadline {
+                return Err(Report::new(DomainAlterError::BackupQuiesceTimeout {
+                    domain: domain.clone(),
+                    details: if details.is_empty() {
+                        "confirming flush did not finish".to_string()
+                    } else {
+                        details.join("; ")
+                    },
+                }));
+            }
+        }
+    }
+
+    pub(in crate::application) async fn wait_for_paused_domain_drain_with_timeout(
+        &self,
+        domain: &DomainName,
+        timeout: Duration,
     ) -> Result<(), Report<DomainAlterError>> {
         let mut nodes = self.inner.cluster.live_node_ids().await;
         if !nodes
@@ -255,8 +504,7 @@ impl SessionServiceImpl {
             }));
         }
 
-        let deadline =
-            nervix_primitives::time::Instant::now() + self.inner.runtime.domain_drain_timeout();
+        let deadline = nervix_primitives::time::Instant::now() + timeout;
         let mut polling = interval(Duration::from_millis(50));
         polling.set_missed_tick_behavior(nervix_primitives::time::MissedTickBehavior::Skip);
         let mut last_pending = None::<(ClusterNodeName, DomainDrainStatusEnvelope)>;
@@ -342,13 +590,13 @@ impl SessionServiceImpl {
                     impact.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Recovery,
-                        resume_error.to_string(),
+                        format!("{resume_error:#}"),
                     );
                 }
-                let reason = format!("{reason}; automatic resume failed: {resume_error}");
-                resume_error.change_context(DomainAlterError::Rollback {
+                let mut abandoned = reason;
+                abandoned.extend_one(resume_error);
+                abandoned.change_context(DomainAlterError::ResumeAfterAbandonedAlter {
                     domain: domain.clone(),
-                    reason,
                 })
             }
         }
@@ -359,23 +607,45 @@ impl SessionServiceImpl {
         domain: &DomainName,
         mutation: Option<&DomainMutationLease>,
     ) -> Result<(), Report<DomainAlterError>> {
-        self.inner
+        #[cfg(feature = "testing")]
+        Box::pin(self.inner.runtime.pause_domain_resume_if_armed(
+            self.inner.consensus.local_node_id(),
+            domain,
+            crate::fault_injection::DomainResumeBoundary::Proposal,
+        ))
+        .await;
+        // A test build can make the leader refuse the release that follows a refused model step
+        // publication, the same way it refused that publication: before appending it.
+        #[cfg(feature = "testing")]
+        if let Some(refusal) = self.inner.runtime.take_model_pause_release_refusal(domain) {
+            return Err(Report::new(ConsensusError::from(refusal)).change_context(
+                DomainAlterError::ResumeDomain {
+                    domain: domain.clone(),
+                },
+            ));
+        }
+        let resumed = self
+            .inner
             .consensus
             .resume_domain(domain.clone(), mutation)
+            .await;
+        #[cfg(feature = "testing")]
+        if resumed.is_err() {
+            Box::pin(self.inner.runtime.pause_domain_resume_if_armed(
+                self.inner.consensus.local_node_id(),
+                domain,
+                crate::fault_injection::DomainResumeBoundary::Failure,
+            ))
+            .await;
+        }
+        resumed.change_context_lazy(|| DomainAlterError::ResumeDomain {
+            domain: domain.clone(),
+        })?;
+        self.apply_current_cluster_state()
             .await
-            .map_err(|error| {
-                let reason = error.to_string();
-                error.change_context(DomainAlterError::ResumeDomain {
-                    domain: domain.clone(),
-                    reason,
-                })
-            })?;
-        self.apply_current_cluster_state().await.map_err(|error| {
-            Report::new(DomainAlterError::RestoreIngestion {
+            .change_context_lazy(|| DomainAlterError::RestoreIngestion {
                 domain: domain.clone(),
-                reason: error.to_string(),
             })
-        })
     }
 
     pub(in crate::application) async fn resume_domain_after_alter_with_impact(
@@ -389,7 +659,7 @@ impl SessionServiceImpl {
                 impact.fail(
                     attempt,
                     nervix_models::ImpactDiagnosticKind::Recovery,
-                    error.to_string(),
+                    format!("{error:#}"),
                 );
             }
             return Err(error);
@@ -417,7 +687,7 @@ impl SessionServiceImpl {
             failures.push(format!("stopping it again failed: {error}"));
         }
         if let Err(error) = self.apply_current_cluster_state().await {
-            failures.push(format!("reapplying the cluster state failed: {error}"));
+            failures.push(format!("reapplying the cluster state failed: {error:#}"));
         }
         if failures.is_empty() {
             return String::new();
@@ -489,7 +759,7 @@ impl SessionServiceImpl {
                     },
                     Err(error) => command_error(format!(
                         "domain '{}' exists, but its stopped state is not usable everywhere: \
-                         {error}",
+                         {error:#}",
                         create.id.as_str()
                     )),
                 };
@@ -510,7 +780,7 @@ impl SessionServiceImpl {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     return command_error(format!(
                         "created domain '{}', but its stopped state failed to become usable: \
-                         {error}",
+                         {error:#}",
                         create.id.as_str()
                     ));
                 }
@@ -569,7 +839,7 @@ impl SessionServiceImpl {
                 )),
                 Err(error) => command_error(format!(
                     "domain '{}' already has placement {}, but it is not usable everywhere: \
-                     {error}",
+                     {error:#}",
                     domain.as_str(),
                     alter.policy.as_ref()
                 )),
@@ -582,29 +852,32 @@ impl SessionServiceImpl {
             .await;
         let live_voters = planning.live_voters();
         let cluster_nodes = planning.cluster_nodes();
-        let mut next_schedule = self.inner.registry.active_graph(domain).map(|graph| {
-            #[cfg(feature = "testing")]
-            let mut schedule = graph.schedule_for_domain_with_mode(
-                domain,
-                cluster_nodes,
-                self.inner.replica_count,
-                alter.policy,
-                self.inner.runtime.scheduler_mode(),
-            );
-            #[cfg(not(feature = "testing"))]
-            let mut schedule = graph.schedule_for_domain(
-                domain,
-                cluster_nodes,
-                self.inner.replica_count,
-                alter.policy,
-            );
-            Self::merge_existing_schedule_data(
-                &mut schedule,
-                previous_schedule.as_ref(),
-                live_voters,
-            );
-            schedule
-        });
+        let mut next_schedule = match self.inner.registry.active_graph(domain) {
+            Some(graph) => {
+                #[cfg(feature = "testing")]
+                let mut schedule = graph.schedule_for_domain_with_mode(
+                    domain,
+                    cluster_nodes,
+                    self.inner.replica_count,
+                    alter.policy,
+                    self.inner.runtime.scheduler_mode(),
+                );
+                #[cfg(not(feature = "testing"))]
+                let mut schedule = graph.schedule_for_domain(
+                    domain,
+                    cluster_nodes,
+                    self.inner.replica_count,
+                    alter.policy,
+                );
+                Self::merge_existing_schedule_data(
+                    &mut schedule,
+                    previous_schedule.as_ref(),
+                    live_voters,
+                );
+                Some(schedule)
+            }
+            None => None,
+        };
         if let Some(next_schedule) = next_schedule.as_mut() {
             mark_complete_ownership_transitions(previous_schedule.as_ref(), next_schedule);
         }
@@ -674,7 +947,7 @@ impl SessionServiceImpl {
             }
             return command_error(format!(
                 "committed placement and schedule for domain '{}', but the destination failed to \
-                 activate: {error}",
+                 activate: {error:#}",
                 domain.as_str()
             ));
         }
@@ -685,7 +958,7 @@ impl SessionServiceImpl {
         {
             return command_error(format!(
                 "committed placement and schedule for domain '{}', but ownership state activation \
-                 did not complete: {error}",
+                 did not complete: {error:#}",
                 domain.as_str()
             ));
         }
@@ -801,7 +1074,7 @@ impl SessionServiceImpl {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     let rollback = self.roll_back_started_domain(domain_id).await;
                     return command_error(format!(
-                        "failed to start domain '{}': {error}{rollback}",
+                        "failed to start domain '{}': {error:#}{rollback}",
                         domain_id.as_str()
                     ));
                 }
@@ -840,7 +1113,7 @@ impl SessionServiceImpl {
             Ok(()) => {
                 if let Err(error) = self.apply_current_cluster_state().await {
                     return command_error(format!(
-                        "stopped domain '{}', but remote stopping did not complete: {error}",
+                        "stopped domain '{}', but remote stopping did not complete: {error:#}",
                         domain_id.as_str()
                     ));
                 }

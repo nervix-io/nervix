@@ -8,6 +8,11 @@
 //! - **Depends on.** The numeric kernels and Arrow arrays.
 //! - **Must not know.** Programs, registers or how the runtime records a failed lane.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "owns the test harness boundary declared above")
+)]
+
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, FRAC_PI_6, PI};
 
 use arrow_array::{

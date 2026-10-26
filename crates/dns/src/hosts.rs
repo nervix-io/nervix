@@ -6,6 +6,14 @@
 //! - **Depends on.** Hickory's hosts-file grammar.
 //! - **Must not know.** DNS, the search list, or who resolves the name.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{fs::File, net::IpAddr, path::Path};
 
 use error_stack::Report;

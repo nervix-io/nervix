@@ -8,8 +8,16 @@
 //! - **Depends on.** The vocabulary for processor limits and timestamps, `nervix-wasm-protocol`
 //!   for the envelopes it exchanges with a guest, and the node's bounded executor, whose bulk
 //!   workers compile a module.
-//! - **Must not know.** NSPL, the registry, the execution graph, or where a guest's output is
+//! - **Must not know.** Plexus, the registry, the execution graph, or where a guest's output is
 //!   routed. It calls a guest and returns what the guest produced.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
 
 use std::{
     convert::Infallible,
@@ -48,6 +56,9 @@ const DEFAULT_EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(1);
 const DEFAULT_EPOCH_DEADLINE_TICKS: u64 = 1;
 const DEFAULT_MAX_GUEST_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 pub const ABI_SERIALIZATION_NAME: &str = protocol::SERIALIZATION_NAME;
+
+#[cfg(test)]
+mod properties;
 
 nervix_primitives::unmodeled::task_local! {
     static INVOCATION_NOW: Timestamp;
@@ -4669,6 +4680,31 @@ mod tests {
             right.timeout_requests()[0].requested_at,
             Timestamp::from_unix_nanos(200)
         );
+
+        // Coordinated reset drops the selected live instance. Its replacement starts with a
+        // fresh store; the sibling keeps its own armed request throughout that transition.
+        drop(left);
+        let fresh_context = WasmExecutionContext::new(Timestamp::from_unix_nanos(2_000_100));
+        let mut fresh = compiled
+            .instantiate_branch(limits(), init(), fresh_context, None)
+            .await
+            .expect("the fresh branch must instantiate");
+        assert!(fresh.timeout_requests().is_empty());
+        fresh
+            .process_batch_in_context(b"fresh batch", fresh_context)
+            .await
+            .expect("the fresh branch accepts its first batch");
+
+        let prior_deadline = Timestamp::from_unix_nanos(5_000_100);
+        assert!(fresh.take_due_timeout_requests(prior_deadline).is_empty());
+        let sibling_due = right.take_due_timeout_requests(Timestamp::from_unix_nanos(5_000_200));
+        assert_eq!(sibling_due.len(), 1);
+        assert_eq!(sibling_due[0].requested_at, right_context.now());
+        assert_eq!(fresh.timeout_requests().len(), 1);
+        let fresh_due = fresh.take_due_timeout_requests(Timestamp::from_unix_nanos(7_000_100));
+        assert_eq!(fresh_due.len(), 1);
+        assert_eq!(fresh_due[0].requested_at, fresh_context.now());
+        assert!(right.timeout_requests().is_empty());
     }
 
     #[nervix_primitives::test]

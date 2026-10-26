@@ -1,0 +1,217 @@
+// Smart-factory IoT telemetry demo.
+//
+// The graph ingests device telemetry from MQTT, normalizes a few fields at the
+// ingestor boundary, routes quality/lifecycle events by site branch, repartitions
+// clean telemetry by concrete device branch, then routes anomalies with ordered
+// conditions. Critical device alerts are reingested back to the site branch for
+// operations-level consumers.
+
+CREATE UNPACED DOMAIN iot_demo;
+
+USE iot_demo;
+
+BEGIN;
+
+CREATE SCHEMA iot_telemetry (
+  site STRING,
+  line STRING,
+  device_id STRING,
+  sensor STRING,
+  value F64,
+  unit STRING,
+  warn_high F64,
+  critical_high F64,
+  battery_pct F64,
+  status STRING,
+  ts DATETIME,
+  seq U64
+);
+
+CREATE WIRE JSON SCHEMA iot_telemetry_wire MODE STRICT (
+  site STRING,
+  line STRING,
+  device_id STRING,
+  sensor STRING,
+  value NUMBER,
+  unit STRING,
+  warn_high NUMBER,
+  critical_high NUMBER,
+  battery_pct NUMBER,
+  status STRING,
+  ts STRING,
+  seq INTEGER
+);
+
+CREATE CODEC iot_telemetry_codec
+  FROM WIRE JSON SCHEMA iot_telemetry_wire
+  TO SCHEMA iot_telemetry
+  ENCODE ts AS RFC3339;
+
+CREATE IF NOT EXISTS SCHEMA site_branch (
+  site STRING
+);
+
+CREATE IF NOT EXISTS SCHEMA device_branch (
+  site STRING,
+  line STRING,
+  device_id STRING
+);
+
+CREATE BRANCH by_site SCHEMA site_branch TTL 5m;
+
+CREATE RELAY telemetry_by_site SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
+CREATE RELAY telemetry_rejected SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
+CREATE RELAY battery_alerts SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
+CREATE RELAY telemetry_clean SCHEMA iot_telemetry BRANCHED BY by_site CAPACITY 2;
+
+CREATE BRANCH by_device SCHEMA device_branch TTL 5m;
+CREATE RELAY telemetry_by_device SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+CREATE RELAY telemetry_ordered SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+CREATE RELAY critical_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+CREATE RELAY thermal_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+CREATE RELAY maintenance_alerts SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+CREATE RELAY normal_telemetry SCHEMA iot_telemetry BRANCHED BY by_device CAPACITY 2;
+
+CREATE BRANCH by_site_critical SCHEMA site_branch TTL 5m;
+CREATE RELAY site_critical_alerts SCHEMA iot_telemetry BRANCHED BY by_site_critical CAPACITY 2;
+
+CREATE MQTT CLIENT mqtt_edge
+  CONFIG {
+    'addr' = 'mqtt://127.0.0.1:1883',
+    'client_id' = 'nervix-iot-demo-{{instance}}'
+  };
+
+CREATE REDIS CLIENT redis_alerts
+  POOL SIZE MIN 1 MAX 4
+  CONFIG {
+    'addr' = 'redis://127.0.0.1:6379/'
+  };
+
+CREATE MQTT TOPIC INGESTOR mqtt_telemetry
+  FROM mqtt_edge TOPIC 'factory_telemetry' INSTANCES 4 MODE NO ACK ON QUIESCE DROP
+  DECODE USING iot_telemetry_codec
+  TIMESTAMP AT ts
+  TO telemetry_by_site
+    INHERIT ALL
+    SET status = lower(trim(message.status)),
+        sensor = lower(trim(message.sensor)),
+        unit = lower(trim(message.unit))
+    BRANCHED BY by_site SET site = message.site
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR quality_gate
+  FROM telemetry_by_site
+  DEDUPLICATE ON input.site, input.device_id, input.sensor, input.ts, input.seq
+  MAX TIME 5m
+  BRANCHED BY by_site
+  TO telemetry_rejected
+    INHERIT ALL
+    WHERE device_id = '' OR sensor = '' OR status = 'offline'
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  TO battery_alerts
+    INHERIT ALL
+    WHERE battery_pct < 15.0
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  TO telemetry_clean
+    INHERIT ALL
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED REINGESTOR device_repartition
+  FROM telemetry_clean
+  TO telemetry_by_device
+    INHERIT ALL
+    BRANCHED BY by_device SET site = message.site, line = message.line, device_id = message.device_id
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED REORDERER device_event_reorderer
+  FROM telemetry_by_device
+  BY input.ts, input.seq
+  MAX TIME 5s
+  BRANCHED BY by_device
+  TO telemetry_ordered
+    INHERIT ALL
+    FLUSH EACH 500ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED DEDUPLICATOR anomaly_splitter
+  FROM telemetry_ordered
+  DEDUPLICATE ON input.site, input.line, input.device_id, input.sensor, input.ts, input.seq
+  MAX TIME 5m
+  BRANCHED BY by_device
+  TO critical_alerts
+    INHERIT ALL
+    WHERE status = 'fault' OR value >= critical_high
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  TO thermal_alerts
+    INHERIT ALL
+    WHERE sensor = 'temperature' AND value >= 80.0
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  TO maintenance_alerts
+    INHERIT ALL
+    WHERE value >= warn_high
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG
+  TO normal_telemetry
+    INHERIT ALL
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED REINGESTOR site_alert_repartition
+  FROM critical_alerts
+  TO site_critical_alerts
+    INHERIT ALL
+    BRANCHED BY by_site_critical SET site = message.site
+    FLUSH EACH 250ms MAX BATCH SIZE 10kb
+    ON MESSAGE ERROR LOG;
+
+CREATE ATTACHED REDIS PUBSUB EMITTER redis_site_critical_alerts
+  FROM site_critical_alerts
+  TO redis_alerts CHANNEL 'iot_site_critical_alerts'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING iot_telemetry_codec
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED REDIS PUBSUB EMITTER redis_battery_alerts
+  FROM battery_alerts
+  TO redis_alerts CHANNEL 'iot_battery_alerts'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING iot_telemetry_codec
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED REDIS PUBSUB EMITTER redis_thermal_alerts
+  FROM thermal_alerts
+  TO redis_alerts CHANNEL 'iot_thermal_alerts'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING iot_telemetry_codec
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED REDIS PUBSUB EMITTER redis_maintenance_alerts
+  FROM maintenance_alerts
+  TO redis_alerts CHANNEL 'iot_maintenance_alerts'
+    MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING iot_telemetry_codec
+  INHERIT ALL
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;
+
+START;

@@ -9,34 +9,39 @@ use nervix_models::{
     AlterEmitterOperation, AlterGenerator, AlterGeneratorOperation, AlterIngestor,
     AlterIngestorOperation, AlterJunction, AlterPlacement, AlterPlacementOperation,
     AlterProcessorOperation, AlterReingestor, AlterRelay, AlterRelayOperation, AlterReorderer,
-    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
-    AlterWireSchemaOperation, Backup, BackupResources, BackupScope, CordonNode, CreateDomain,
-    CreateResource, CreateStatement, CreateUser, DescribeCorrelator, DescribeDeduplicator,
-    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
-    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
-    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainConfig, DomainPace, DomainStartPoint, DomainTimeRate, DrainNode,
-    DropModel, DropNode, EmitterPublishingMode, ExistingUserPolicy, FieldName, InspectionFormat,
-    LookupQuery, ModelKind, ModelName, NodeRef, PlacementPolicy, RebindResource,
-    RebindResourceMembers, RebindResourceSelection, RelayBranching, Relocation, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore, RestoreMode, RestoreScope,
-    ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements, ShowRelayMaterializedState,
-    ShowTransactions, ShowUdfs, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionLiteral, Timestamp, TransactionInspectionRequest, TransactionInspectionTarget,
-    TransactionOperationNumber, UncordonNode, UploadResource,
+    AlterReordererOperation, AlterSchema, AlterSchemaOperation, AlterTransportIngestorOperation,
+    AlterWireSchema, AlterWireSchemaOperation, Backup, BackupCapture, BackupResources, BackupScope,
+    ClientIngestorEntity, CordonNode, CreateDomain, CreateResource, CreateStatement, CreateUser,
+    DescribeCluster, DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter,
+    DescribeEndpoint, DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement,
+    DescribeReingestor, DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction,
+    DescribeUdf, DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace,
+    DomainTimeRate, DrainNode, DropModel, DropNode, EmitterBatchLegality, EmitterBodyForm,
+    EmitterEntityKind, EmitterReferenceKind, ExistingUserPolicy, FieldName, HttpIngestorEntity,
+    IngestorAlteration, IngestorEntityKind, InspectionFormat, KafkaIngestorEntity, LookupQuery,
+    ModelKind, ModelName, MqttIngestorEntity, NatsIngestorEntity, NodeRef, PlacementPolicy,
+    PrometheusIngestorEntity, PulsarIngestorEntity, RabbitMqIngestorEntity, RebindResource,
+    RebindResourceMembers, RebindResourceSelection, RedisIngestorEntity, RelayBranching, RelayName,
+    Relocation, RelocationMember, RelocationPreferenceOverride, RelocationPreferenceStrategy,
+    RelocationSelection, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, Restore,
+    RestoreLifecycle, RestoreMode, RestoreScope, RestoreState, ShowClusterStatus, ShowCreate,
+    ShowIngestors, ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
+    SqsIngestorEntity, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionLiteral, SyslogIngestorEntity, TransactionInspectionRequest,
+    TransactionInspectionTarget, TransactionOperationNumber, UncordonNode, UploadResource,
+    WebsocketsIngestorEntity, ZeroMqIngestorEntity,
 };
 use strum::IntoEnumIterator as _;
 
 use crate::{
-    Arbitrary, Domain,
+    Arbitrary, Domain, GeneratedName,
     route::{RouteBranch, RouteFlush, RouteShape},
 };
 
 /// The most items a generated operation list, member list or binding list holds.
 const ITEMS: usize = 3;
 
-/// The kinds NSPL's `DROP` names. It has no `DROP` for a branch, generator, lookup, signaling
+/// The kinds Plexus's `DROP` names. It has no `DROP` for a branch, generator, lookup, signaling
 /// protocol, WASM processor or window processor, which the vocabulary's `DropModel` still holds.
 const DROPPABLE_KINDS: [ModelKind; 19] = [
     ModelKind::Schema,
@@ -149,6 +154,7 @@ pub enum StatementVariant {
     ShowClusterStatus,
     ShowTransactions,
     DescribeTransaction,
+    DescribeCluster,
 }
 
 impl StatementVariant {
@@ -213,8 +219,29 @@ impl StatementVariant {
             Statement::ShowClusterStatus(_) => Self::ShowClusterStatus,
             Statement::ShowTransactions(_) => Self::ShowTransactions,
             Statement::DescribeTransaction(_) => Self::DescribeTransaction,
+            Statement::DescribeCluster(_) => Self::DescribeCluster,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum EmitterOperationForm {
+    AddFrom,
+    DropFrom,
+    SetWhere,
+    DropWhere,
+    SetTo,
+    SetClient,
+    SetEncode,
+    DropEncode,
+    SetCollect,
+    DropCollect,
+    SetAttachment,
+    SetMode,
+    SetBatch,
+    DropBatch,
+    SetFlush,
+    SetCommit,
 }
 
 impl Arbitrary<'_> {
@@ -322,8 +349,17 @@ impl Arbitrary<'_> {
                     1 => BackupScope::Domain(None),
                     _ => BackupScope::Domain(Some(self.name())),
                 };
+                let capture = match self.entropy.byte() % 4 {
+                    0 => BackupCapture::Quiesced { timeout: None },
+                    1 => BackupCapture::Quiesced {
+                        timeout: Some(std::time::Duration::from_nanos(self.entropy.any_u64())),
+                    },
+                    2 => BackupCapture::Live,
+                    _ => BackupCapture::ConfigurationOnly,
+                };
                 Statement::Backup(Backup {
                     scope,
+                    capture,
                     destination: self.non_empty_string(),
                     resources: self
                         .entropy
@@ -353,19 +389,18 @@ impl Arbitrary<'_> {
                     scope,
                     source: self.non_empty_string(),
                     mode: self.entropy.pick([RestoreMode::Apply, RestoreMode::DryRun]),
+                    lifecycle: self
+                        .entropy
+                        .pick([RestoreLifecycle::Stopped, RestoreLifecycle::Resume]),
+                    state: self.entropy.pick([
+                        RestoreState::All,
+                        RestoreState::WithoutSourceOffsets,
+                        RestoreState::ConfigurationOnly,
+                    ]),
                 })
             }
             StatementVariant::StartDomain => {
-                let start = match self.entropy.byte() % 3 {
-                    0 => DomainStartPoint::Resume,
-                    1 => DomainStartPoint::Now {
-                        time_rate: self.time_rate(),
-                    },
-                    _ => DomainStartPoint::At {
-                        timestamp: Timestamp::from_unix_nanos(self.entropy.any_i64()),
-                        time_rate: self.time_rate(),
-                    },
-                };
+                let start = self.start_point();
                 Statement::StartDomain(StartDomain { start })
             }
             StatementVariant::StopDomain => Statement::StopDomain(StopDomain),
@@ -452,17 +487,23 @@ impl Arbitrary<'_> {
                 })
             }
             StatementVariant::AlterEmitter => {
-                let operations = self.operations(Self::alter_emitter_operation);
+                let kinds = EmitterEntityKind::all().collect::<Vec<_>>();
+                let count = NonZeroUsize::new(kinds.len())
+                    .assured("the vocabulary declares emitter entities");
+                let kind = kinds[self.entropy.index(count)];
+                let operations =
+                    self.operations(|arbitrary| arbitrary.alter_emitter_operation(kind));
                 Statement::AlterEmitter(AlterEmitter {
                     emitter: self.name(),
+                    kind,
                     operations,
                 })
             }
             StatementVariant::AlterIngestor => {
-                let operations = self.operations(Self::alter_ingestor_operation);
+                let alteration = self.ingestor_alteration();
                 Statement::AlterIngestor(AlterIngestor {
                     ingestor: self.name(),
-                    operations,
+                    alteration,
                 })
             }
             StatementVariant::AlterReingestor => {
@@ -488,10 +529,13 @@ impl Arbitrary<'_> {
                     operations,
                 })
             }
-            StatementVariant::Drop => Statement::Drop(DropModel {
-                kind: self.drop_kind(),
-                name: self.name(),
-            }),
+            StatementVariant::Drop => {
+                let kind = self.drop_kind();
+                Statement::Drop(DropModel {
+                    kind,
+                    name: self.model_name_of(kind),
+                })
+            }
             StatementVariant::DropNode => Statement::DropNode(DropNode {
                 node_id: self.cluster_node(),
             }),
@@ -577,10 +621,13 @@ impl Arbitrary<'_> {
                 name: self.name(),
                 key: self.subscription_literal(),
             }),
-            StatementVariant::ShowCreate => Statement::ShowCreate(ShowCreate {
-                kind: self.model_kind(),
-                name: self.name(),
-            }),
+            StatementVariant::ShowCreate => {
+                let kind = self.model_kind();
+                Statement::ShowCreate(ShowCreate {
+                    kind,
+                    name: self.model_name_of(kind),
+                })
+            }
             StatementVariant::ShowUdfs => Statement::ShowUdfs(ShowUdfs),
             StatementVariant::ShowIngestors => Statement::ShowIngestors(ShowIngestors),
             StatementVariant::ShowPlacements => Statement::ShowPlacements(ShowPlacements),
@@ -614,6 +661,7 @@ impl Arbitrary<'_> {
                     format: self.inspection_format(),
                 })
             }
+            StatementVariant::DescribeCluster => Statement::DescribeCluster(DescribeCluster),
         }
     }
 
@@ -629,7 +677,7 @@ impl Arbitrary<'_> {
         operations
     }
 
-    fn placement_policy(&mut self) -> PlacementPolicy {
+    pub(crate) fn placement_policy(&mut self) -> PlacementPolicy {
         self.entropy.pick([
             PlacementPolicy::RequireColocation,
             PlacementPolicy::PreferColocation,
@@ -640,7 +688,7 @@ impl Arbitrary<'_> {
 
     /// A positive finite time rate: any bit pattern that is one, and the values around one that a
     /// simulation typically runs at.
-    fn time_rate(&mut self) -> DomainTimeRate {
+    pub(crate) fn time_rate(&mut self) -> DomainTimeRate {
         let candidate = match self.entropy.byte() % 6 {
             0 => 1.0,
             1 => 0.5,
@@ -689,7 +737,16 @@ impl Arbitrary<'_> {
     /// A kind-qualified reference to a Model that binds a resource version.
     pub fn resource_binding_ref(&mut self) -> NodeRef {
         let kind = self.entropy.pick(RESOURCE_BINDING_KINDS);
-        NodeRef::new(kind, self.name::<ModelName>())
+        NodeRef::new(kind, self.model_name_of(kind))
+    }
+
+    /// The name of a Model of `kind`. Plexus reads a relay's name wherever it names a relay, so in
+    /// the Plexus domain the name of a relay avoids the words Plexus refuses for one.
+    fn model_name_of(&mut self, kind: ModelKind) -> ModelName {
+        match kind {
+            ModelKind::Relay => self.name_refusing::<ModelName>(RelayName::REFUSED_IN_PLEXUS),
+            _ => self.name(),
+        }
     }
 
     /// A cluster node's name, which a statement writes as a hostname. Its parts stay short enough
@@ -702,36 +759,14 @@ impl Arbitrary<'_> {
     }
 
     fn relocation_member(&mut self) -> RelocationMember {
-        RelocationMember::new(self.entropy.pick(RELOCATABLE_KINDS), self.name())
+        let kind = self.entropy.pick(RELOCATABLE_KINDS);
+        RelocationMember::new(kind, self.model_name_of(kind))
     }
 
-    /// A publishing mode written on its own, without the sink it applies to.
-    ///
-    /// NSPL spells a client acknowledgement exactly as a broker one, and an emitter applying a
-    /// standalone mode to its client sink turns one into the other, so the NSPL domain writes a
-    /// client acknowledgement as the broker acknowledgement it reads as.
-    fn standalone_publishing_mode(&self, mode: EmitterPublishingMode) -> EmitterPublishingMode {
-        match (self.domain, mode) {
-            (
-                Domain::Nspl,
-                EmitterPublishingMode::ClientAck {
-                    window,
-                    ack_timeout,
-                    retry_policy,
-                },
-            ) => EmitterPublishingMode::BrokerAck {
-                window,
-                ack_timeout,
-                retry_policy,
-            },
-            (_, mode) => mode,
-        }
-    }
-
-    /// The kind a `DROP` names: one NSPL spells, or in the vocabulary domain any kind at all.
+    /// The kind a `DROP` names: one Plexus spells, or in the vocabulary domain any kind at all.
     fn drop_kind(&mut self) -> ModelKind {
         match self.domain {
-            Domain::Nspl => self.entropy.pick(DROPPABLE_KINDS),
+            Domain::Plexus => self.entropy.pick(DROPPABLE_KINDS),
             Domain::Vocabulary => {
                 let kinds = ModelKind::iter().collect::<Vec<_>>();
                 let count = NonZeroUsize::new(kinds.len()).assured("ModelKind has variants");
@@ -992,116 +1027,213 @@ impl Arbitrary<'_> {
             .assured("a route list holds at least one route")
     }
 
-    fn alter_emitter_operation(&mut self) -> AlterEmitterOperation {
-        match self.entropy.byte() % 16 {
-            0 => AlterEmitterOperation::AddFrom {
+    fn alter_emitter_operation(&mut self, kind: EmitterEntityKind) -> AlterEmitterOperation {
+        let mut choices = vec![
+            EmitterOperationForm::AddFrom,
+            EmitterOperationForm::DropFrom,
+            EmitterOperationForm::SetWhere,
+            EmitterOperationForm::DropWhere,
+            EmitterOperationForm::SetTo,
+            EmitterOperationForm::SetCollect,
+            EmitterOperationForm::DropCollect,
+            EmitterOperationForm::SetAttachment,
+            EmitterOperationForm::SetMode,
+            EmitterOperationForm::SetFlush,
+        ];
+        let capabilities = kind.capabilities();
+        if let EmitterReferenceKind::Client(_) | EmitterReferenceKind::StorageClient(_) =
+            capabilities.reference
+        {
+            choices.push(EmitterOperationForm::SetClient);
+        }
+        if let EmitterBodyForm::Codec | EmitterBodyForm::CodecOrWithoutBody = capabilities.body {
+            choices.extend([
+                EmitterOperationForm::SetEncode,
+                EmitterOperationForm::DropEncode,
+            ]);
+        }
+        if !matches!(capabilities.batch, EmitterBatchLegality::Unavailable { .. }) {
+            choices.extend([
+                EmitterOperationForm::SetBatch,
+                EmitterOperationForm::DropBatch,
+            ]);
+        }
+        if capabilities.option("COMMIT EACH").is_some() {
+            choices.push(EmitterOperationForm::SetCommit);
+        }
+        let count = NonZeroUsize::new(choices.len())
+            .assured("every entity accepts the shared input and attachment operations");
+        match choices[self.entropy.index(count)] {
+            EmitterOperationForm::AddFrom => AlterEmitterOperation::AddFrom {
                 relay: self.name(),
                 where_clause: self.optional_expression(),
             },
-            1 => AlterEmitterOperation::DropFrom { relay: self.name() },
-            2 => AlterEmitterOperation::AlterFromSetWhere {
+            EmitterOperationForm::DropFrom => {
+                AlterEmitterOperation::DropFrom { relay: self.name() }
+            }
+            EmitterOperationForm::SetWhere => AlterEmitterOperation::AlterFromSetWhere {
                 relay: self.name(),
                 where_clause: self.expression(),
             },
-            3 => AlterEmitterOperation::AlterFromDropWhere { relay: self.name() },
-            4 => {
-                // Moving an emitter to an HTTP sink restates what the request carries, and moving
-                // it to a client consumer selects native output; every other sink keeps the
-                // emitter's own payload selection.
-                let emitter = self.create_emitter();
-                let body = match emitter.sink.as_ref() {
-                    nervix_models::EmitSink::Http { .. }
-                    | nervix_models::EmitSink::Client { .. } => Some(emitter.body),
-                    _ => None,
-                };
-                AlterEmitterOperation::SetSink {
-                    sink: emitter.sink,
-                    publishing_mode: emitter.publishing_mode,
-                    body,
+            EmitterOperationForm::DropWhere => {
+                AlterEmitterOperation::AlterFromDropWhere { relay: self.name() }
+            }
+            EmitterOperationForm::SetTo => {
+                let emitter = self.create_emitter_to(kind);
+                let construction =
+                    if emitter.construction == nervix_models::RouteConstruction::default() {
+                        None
+                    } else {
+                        Some(emitter.construction)
+                    };
+                AlterEmitterOperation::SetTo {
+                    destination: emitter.connector,
+                    body: emitter.body,
+                    construction,
                 }
             }
-            5 => AlterEmitterOperation::SetClient {
+            EmitterOperationForm::SetClient => AlterEmitterOperation::SetClient {
                 client: self.name(),
             },
-            6 => AlterEmitterOperation::SetEncodeUsing { codec: self.name() },
-            7 => AlterEmitterOperation::DropEncode,
-            8 => AlterEmitterOperation::SetCollect {
+            EmitterOperationForm::SetEncode => {
+                AlterEmitterOperation::SetEncodeUsing { codec: self.name() }
+            }
+            EmitterOperationForm::DropEncode => AlterEmitterOperation::DropEncode,
+            EmitterOperationForm::SetCollect => AlterEmitterOperation::SetCollect {
                 policy: self.collect_policy(),
             },
-            9 => AlterEmitterOperation::DropCollect,
-            10 => AlterEmitterOperation::SetAttachment {
+            EmitterOperationForm::DropCollect => AlterEmitterOperation::DropCollect,
+            EmitterOperationForm::SetAttachment => AlterEmitterOperation::SetAttachment {
                 mode: self.ack_mode(),
             },
-            11 => {
-                let emitter = self.create_emitter();
-                AlterEmitterOperation::SetPublishingMode {
-                    mode: self.standalone_publishing_mode(emitter.publishing_mode),
-                }
-            }
-            12 => {
-                let emitter = self.create_emitter();
-                match emitter.batch {
-                    Some(policy) => AlterEmitterOperation::SetBatch { policy },
-                    None => AlterEmitterOperation::DropBatch,
-                }
-            }
-            13 => AlterEmitterOperation::DropBatch,
-            14 => AlterEmitterOperation::SetFlush {
+            EmitterOperationForm::SetMode => AlterEmitterOperation::SetPublishingMode {
+                mode: self.emitter_entity_of(kind).mode_change(),
+            },
+            EmitterOperationForm::SetBatch => AlterEmitterOperation::SetBatch {
+                policy: self.batch_policy(),
+            },
+            EmitterOperationForm::DropBatch => AlterEmitterOperation::DropBatch,
+            EmitterOperationForm::SetFlush => AlterEmitterOperation::SetFlush {
                 flush_policy: self.flush_policy(),
             },
-            _ => AlterEmitterOperation::SetCommit {
+            EmitterOperationForm::SetCommit => AlterEmitterOperation::SetCommit {
                 commit_each: self.duration(),
                 max_commit_size: self.byte_size(),
             },
         }
     }
 
-    fn alter_ingestor_operation(&mut self) -> AlterIngestorOperation {
-        match self.entropy.byte() % 12 {
+    /// The operations of an `ALTER … INGESTOR` statement under the head of any connector and
+    /// entity, each `SET FROM` stating a source of that pair.
+    ///
+    /// The match is exhaustive, so a new pair does not compile until the generator is taught to
+    /// alter it.
+    pub fn ingestor_alteration(&mut self) -> IngestorAlteration {
+        match self.ingest_source_kind() {
+            IngestorEntityKind::Client(ClientIngestorEntity::Producer) => self
+                .operations(|arbitrary| {
+                    arbitrary.alter_ingestor_operation(Self::client_producer_source)
+                })
+                .into(),
+            IngestorEntityKind::Http(HttpIngestorEntity::Request) => {
+                self.transport_operations(Self::http_request_source)
+            }
+            IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => {
+                self.transport_operations(Self::http_endpoint_source)
+            }
+            IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) => {
+                self.transport_operations(Self::kafka_topic_source)
+            }
+            IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) => {
+                self.transport_operations(Self::pulsar_topic_source)
+            }
+            IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => {
+                self.transport_operations(Self::mqtt_topic_source)
+            }
+            IngestorEntityKind::Nats(NatsIngestorEntity::Subject) => {
+                self.transport_operations(Self::nats_subject_source)
+            }
+            IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) => {
+                self.transport_operations(Self::rabbitmq_queue_source)
+            }
+            IngestorEntityKind::Redis(RedisIngestorEntity::PubSub) => {
+                self.transport_operations(Self::redis_pubsub_source)
+            }
+            IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query) => {
+                self.transport_operations(Self::prometheus_query_source)
+            }
+            IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull) => {
+                self.transport_operations(Self::zeromq_pull_source)
+            }
+            IngestorEntityKind::Sqs(SqsIngestorEntity::Queue) => {
+                self.transport_operations(Self::sqs_queue_source)
+            }
+            IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
+                self.transport_operations(Self::websockets_connection_source)
+            }
+            IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => {
+                self.transport_operations(Self::websockets_endpoint_source)
+            }
+            IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener) => {
+                self.transport_operations(Self::syslog_listener_source)
+            }
+        }
+    }
+
+    /// The operations of an alteration of a transport's ingestor, whose `SET FROM` states a source
+    /// `source` builds.
+    fn transport_operations<Source>(
+        &mut self,
+        source: impl Fn(&mut Self) -> Source,
+    ) -> IngestorAlteration
+    where
+        Vec<AlterTransportIngestorOperation<Source>>: Into<IngestorAlteration>,
+    {
+        self.operations(|arbitrary| {
+            if arbitrary.entropy.byte() % 12 == 11 {
+                AlterTransportIngestorOperation::SetDecodeUsing {
+                    codec: arbitrary.name(),
+                }
+            } else {
+                AlterTransportIngestorOperation::from(arbitrary.alter_ingestor_operation(&source))
+            }
+        })
+        .into()
+    }
+
+    /// One operation every ingestor accepts, whose `SET FROM` states a source `source` builds.
+    fn alter_ingestor_operation<Source>(
+        &mut self,
+        source: impl Fn(&mut Self) -> Source,
+    ) -> AlterIngestorOperation<Source> {
+        match self.entropy.byte() % 10 {
             0 => AlterIngestorOperation::SetSource {
-                source: self.ingest_source(),
+                source: source(self),
             },
-            1 => {
-                let ingestor = self.create_ingestor();
-                match ingestor.input {
-                    nervix_models::IngestorInput::Client(source) => {
-                        AlterIngestorOperation::SetClientSource { source }
-                    }
-                    nervix_models::IngestorInput::Transport(input) => {
-                        AlterIngestorOperation::SetSource {
-                            source: input.source,
-                        }
-                    }
-                }
-            }
-            2 => {
-                let source = self.ingest_source();
-                AlterIngestorOperation::SetQuiesce {
-                    quiesce: source.quiesce().clone(),
-                }
-            }
-            3 => AlterIngestorOperation::SetDecodeUsing { codec: self.name() },
-            4 => AlterIngestorOperation::SetTimestamp {
+            1 => AlterIngestorOperation::SetQuiesce {
+                quiesce: self.quiesce_mode(),
+            },
+            2 => AlterIngestorOperation::SetTimestamp {
                 source: if self.entropy.flag() {
                     nervix_models::IngestTimestampSource::Now
                 } else {
                     nervix_models::IngestTimestampSource::At(self.name())
                 },
             },
-            5 => AlterIngestorOperation::DropTimestamp,
-            6 => AlterIngestorOperation::SetFilterWhere {
+            3 => AlterIngestorOperation::DropTimestamp,
+            4 => AlterIngestorOperation::SetFilterWhere {
                 where_clause: self.expression(),
             },
-            7 => AlterIngestorOperation::DropFilterWhere,
-            8 => AlterIngestorOperation::AddRoute {
+            5 => AlterIngestorOperation::DropFilterWhere,
+            6 => AlterIngestorOperation::AddRoute {
                 route: self.single_route(
                     RouteShape::Transforming,
                     RouteFlush::Required,
                     RouteBranch::PerRoute,
                 ),
             },
-            9 => AlterIngestorOperation::DropRoute { relay: self.name() },
-            10 => AlterIngestorOperation::ReplaceRoute {
+            7 => AlterIngestorOperation::DropRoute { relay: self.name() },
+            8 => AlterIngestorOperation::ReplaceRoute {
                 route: self.single_route(
                     RouteShape::Transforming,
                     RouteFlush::Required,

@@ -28,6 +28,11 @@
 //! control lane already holds, then the ending if the session said why it ended, and nothing after
 //! it.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use futures_util::{Stream, stream};
 use nervix_client_wire::{EncodedFrame, ServerFrame};
 use nervix_primitives::sync::{

@@ -2,12 +2,12 @@ Feature: Relay fan-out
   @relay_fanout_subscriber_loss
   Scenario Outline: Losing a relay subscriber keeps delivery flowing to the relay's other consumers
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       CREATE SCHEMA notification (
         seq I64
@@ -23,8 +23,7 @@ Feature: Relay fan-out
 
       CREATE RELAY notifications SCHEMA notification UNBRANCHED CAPACITY 1;
 
-      CREATE CLIENT zeromq_fanout
-        TYPE ZEROMQ
+      CREATE ZEROMQ CLIENT zeromq_fanout
         CONFIG {
           'addr' = '{{zeromq_emit_addr}}',
           'bind' = 'false'
@@ -33,8 +32,8 @@ Feature: Relay fan-out
       CREATE VHOST edge http-{{test_id}}-fanout.example.com;
       CREATE ENDPOINT relay_fanout_ingress ON edge PATH '/relay-fanout' TYPE HTTP;
 
-      CREATE INGESTOR relay_fanout_source
-        FROM ENDPOINT relay_fanout_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR relay_fanout_source
+        FROM relay_fanout_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -43,7 +42,7 @@ Feature: Relay fan-out
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
 
-      CREATE EMITTER zeromq_fanout_out FROM notifications TO ZEROMQ zeromq_fanout MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+      CREATE ZEROMQ PUSH EMITTER zeromq_fanout_out FROM notifications TO zeromq_fanout MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
@@ -64,7 +63,7 @@ Feature: Relay fan-out
       """
       "seq":1
       """
-    When these NSPL commands are executed on the active session
+    When these Plexus commands are executed on the active session
       """
       DELETE SUBSCRIPTION notification_view;
       """

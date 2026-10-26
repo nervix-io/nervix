@@ -1,0 +1,61 @@
+[package]
+description = "Bounded active-deadlock and potential-order evidence, local review, and diagnostic process reporting"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-deadlock"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+deloxide-order = ["deloxide", "nervix-primitives/deloxide-order"]
+deloxide-stress = ["deloxide", "nervix-primitives/deloxide-stress"]
+report-tool = ["dep:clap"]
+shuttle = [
+  "nervix-primitives/native",
+  "nervix-primitives/shuttle",
+  "nervix-model-harness/shuttle",
+]
+# The diagnostic run: in a build that selects the `deloxide` mode, install the deadlock detector and
+# record what it finds. Without it the crate reads and describes evidence other processes recorded.
+deloxide = [
+  "dep:nix",
+  "dep:signal-hook",
+  "nervix-primitives/deloxide",
+  "nervix-primitives/native",
+]
+
+[dependencies]
+clap = { workspace = true, features = ["derive"], optional = true }
+error-stack = { workspace = true }
+humantime = { workspace = true }
+meticulous = { workspace = true }
+nervix-primitives = { workspace = true }
+nix = { workspace = true, optional = true }
+rkyv = { workspace = true }
+signal-hook = { workspace = true, optional = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+alloc_count = { workspace = true }
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
+nervix-model-harness = { workspace = true }
+# The probes' watchdog kills a child that outlives its bound.
+nix = { workspace = true, features = ["signal"] }
+tempfile = { workspace = true }
+
+[[test]]
+name = "active_cycles"
+required-features = ["deloxide"]
+
+[[test]]
+name = "report_cli"
+required-features = ["report-tool"]
+
+[[bin]]
+name = "nervix-deadlock-report"
+path = "src/main.rs"
+required-features = ["report-tool"]

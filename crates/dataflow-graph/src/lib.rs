@@ -11,6 +11,11 @@
 //! This crate breaks its own contract: it names nothing in Nervix, so its domain, node and schema
 //! identities are `String` where the vocabulary already has typed names for them.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(vocabulary, reason = "owns the vocabulary boundary declared above")
+)]
+
 use std::collections::BTreeMap;
 
 use ascii_dag::{Graph, LayoutConfig, RenderMode};
@@ -138,8 +143,11 @@ impl DataflowStatistics {
     }
 }
 
+/// The statistics of one concrete branch of a node, relay or edge.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DataflowBranchStatistics {
+    /// The lowercase hexadecimal fingerprint of the branch's key. A branch's key fields may be
+    /// sensitive, so the description never carries their values.
     pub branch: String,
     pub statistics: DataflowStatistics,
 }
@@ -653,7 +661,7 @@ mod tests {
         let rendered = sample_graph().render_ascii();
         assert!(rendered.contains("KAFKA:a"), "{rendered}");
         assert!(rendered.contains("RELAY:RELAY:raw"), "{rendered}");
-        assert!(rendered.contains("EMITTER:SINK:sink"), "{rendered}");
+        assert!(rendered.contains("EMITTER:KAFKA:emitter"), "{rendered}");
     }
 
     #[test]
@@ -698,16 +706,16 @@ mod tests {
                 }]),
                 DataflowNode::new("relay:raw", "raw", DataflowNodeRole::Relay),
                 DataflowNode::new(
-                    "emitter:sink",
-                    "sink",
+                    "emitter:emitter",
+                    "emitter",
                     DataflowNodeRole::Emitter {
-                        transport: "SINK".to_string(),
+                        transport: "KAFKA".to_string(),
                     },
                 ),
             ],
             edges: vec![
                 DataflowEdge::data("ingestor:a", "relay:raw", DataflowEdgeKind::Data),
-                DataflowEdge::data("relay:raw", "emitter:sink", DataflowEdgeKind::Data),
+                DataflowEdge::data("relay:raw", "emitter:emitter", DataflowEdgeKind::Data),
             ],
         }
     }

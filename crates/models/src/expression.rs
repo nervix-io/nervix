@@ -5,7 +5,7 @@ use crate::{
     BranchName, BuiltinFunctionName, FieldName, JsonPath, ParseAsType, RelayName, UdfName,
 };
 
-/// An executable NSPL expression with parser-only spans removed.
+/// An executable Plexus expression with parser-only spans removed.
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]

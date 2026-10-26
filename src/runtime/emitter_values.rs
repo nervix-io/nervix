@@ -1,66 +1,106 @@
-//! The host projection every row sink writes from.
+//! The host projection every row emitter writes from.
 //!
 //! Layer: data plane.
 //! - **Owns.** Binding one emitter's lowered `VALUES` mapping once, evaluating it once per batch
 //!   into an Arrow batch of mapped columns, the rows each batch still has to write, handing a row
-//!   sink every run of successive projected batches of one source relay and concrete branch in one
-//!   write, and handing a row request sink each projected batch to prepare requests from, whose
-//!   prepared requests the emitter retains and hands back until the sink answers for them.
+//!   emitter every run of successive projected batches of one source relay and concrete branch in one
+//!   write, and handing a row request emitter each projected batch to prepare requests from, whose
+//!   prepared requests the emitter retains and hands back until the emitter answers for them.
 //! - **Depends on.** The VM's compile and execute API, Arrow batches, the connector contract's row
-//!   sink, row request sink and mapped-carrier value types, and the retained payloads and checked
+//!   emitter, row request emitter and mapped-carrier value types, and the retained payloads and checked
 //!   answers a write is resolved through.
 //! - **Must not know.** Which external system consumes the mapped rows, how it divides a write into
 //!   requests, or how it encodes them.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
 use async_trait::async_trait;
+use error_stack::ResultExt as _;
 use nervix_connector::{
-    MappedSinkCarrier, MappedSinkRows, RowRequestSink, RowSink, SinkAcknowledgements,
-    SinkLifecycle, SinkRecordPosition,
+    EmitterLifecycle, EmitterRecordAcknowledgements, EmitterRecordPosition, MappedEmitterCarrier,
+    MappedEmitterRows, RowEmitter, RowRequestEmitter,
 };
 
 use super::*;
 
-/// A row sink and the host projection whose mapped columns it writes.
+/// Why an emitter's `VALUES` mapping did not compile. The VM's own failure is beneath, and the
+/// emitter that starts the emitter names itself and its domain in the contexts above.
+#[derive(Debug, Error)]
+pub(in crate::runtime) enum MappedValuesError {
+    #[error("the {label} VALUES of emitter '{emitter}' failed type inference")]
+    TypeInference {
+        label: &'static str,
+        emitter: EmitterName,
+    },
+    #[error("the {label} VALUES of emitter '{emitter}' have invalid message-error metadata")]
+    ErrorSites {
+        label: &'static str,
+        emitter: EmitterName,
+    },
+    #[error("the {label} VALUES of emitter '{emitter}' did not compile")]
+    Compile {
+        label: &'static str,
+        emitter: EmitterName,
+    },
+    #[error(
+        "the {label} VALUES of emitter '{emitter}' produced {produced} columns for {mapped} \
+         mappings"
+    )]
+    ColumnCount {
+        label: &'static str,
+        emitter: EmitterName,
+        produced: usize,
+        mapped: usize,
+    },
+}
+
+/// A row emitter and the host projection whose mapped columns it writes.
 ///
-/// The mapping is evaluated here, once per batch, so the sink receives Arrow columns and the rows
+/// The mapping is evaluated here, once per batch, so the emitter receives Arrow columns and the rows
 /// it must write and never learns what produced them.
-pub(in crate::runtime) struct MappedRowSink {
-    sink: Box<dyn RowSink>,
+pub(in crate::runtime) struct MappedRowEmitter {
+    connector: Box<dyn RowEmitter>,
     projection: MappedValuesProjection,
 }
 
-impl MappedRowSink {
+impl MappedRowEmitter {
     pub(in crate::runtime) fn new(
-        sink: Box<dyn RowSink>,
+        connector: Box<dyn RowEmitter>,
         projection: MappedValuesProjection,
     ) -> Self {
-        Self { sink, projection }
+        Self {
+            connector,
+            projection,
+        }
     }
 }
 
 #[async_trait]
-impl EmitterSink for MappedRowSink {
-    fn lifecycle(&self) -> &dyn SinkLifecycle {
-        &*self.sink
+impl EmitterConnector for MappedRowEmitter {
+    fn lifecycle(&self) -> &dyn EmitterLifecycle {
+        &*self.connector
     }
 
-    fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
-        &mut *self.sink
+    fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
+        &mut *self.connector
     }
 
-    /// Writes every buffered batch, projecting each once and handing the sink each run of
+    /// Writes every buffered batch, projecting each once and handing the emitter each run of
     /// successive batches of one source relay and concrete branch in one call.
     ///
-    /// A row sink answers for each mapped row by its position, so a row it left unresolved is
+    /// A row emitter answers for each mapped row by its position, so a row it left unresolved is
     /// projected again by the next attempt and nothing is retained between attempts.
     async fn publish_batches(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()> {
         let EmitterPublication { batches, .. } = publication;
-        let acknowledgements = match self.sink.retains_acknowledgements() {
-            true => DeliveredAcknowledgements::Sink,
+        let acknowledgements = match self.connector.retains_acknowledgements() {
+            true => DeliveredAcknowledgements::Connector,
             false => DeliveredAcknowledgements::Host,
         };
         let mut open_run: Option<ProjectedRun> = None;
@@ -121,11 +161,11 @@ impl EmitterSink for MappedRowSink {
     }
 }
 
-impl MappedRowSink {
-    /// Hands the sink one write of every carrier in `run`, then applies its answers.
+impl MappedRowEmitter {
+    /// Hands the emitter one write of every carrier in `run`, then applies its answers.
     async fn publish_run(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         batches: &mut [EmitterPublishBatch],
         run: ProjectedRun,
         acknowledgements: DeliveredAcknowledgements,
@@ -133,12 +173,12 @@ impl MappedRowSink {
         let mut carriers = Vec::with_capacity(run.carriers.len());
         let mut rows = 0_usize;
         for projected in &run.carriers {
-            // A sink that resolves acknowledgements on its own commit boundary takes the ones its
+            // A emitter that resolves acknowledgements on its own commit boundary takes the ones its
             // write carries, so the host stops owning them the moment the write accepts the rows.
             let retained = match acknowledgements {
-                DeliveredAcknowledgements::Sink => {
+                DeliveredAcknowledgements::Connector => {
                     let batch = &batches[projected.batch_index];
-                    Some(SinkAcknowledgements::new(
+                    Some(EmitterRecordAcknowledgements::new(
                         batch.acks_for_rows(projected.selected_rows()),
                     ))
                 }
@@ -147,13 +187,13 @@ impl MappedRowSink {
             rows = rows
                 .checked_add(projected.selected_rows().len())
                 .assured("the rows of one write are held in memory");
-            carriers.push(projected.sink_carrier(retained));
+            carriers.push(projected.emitter_carrier(retained));
         }
-        let write = MappedSinkRows {
+        let write = MappedEmitterRows {
             target_columns: self.projection.target_columns(),
             carriers,
         };
-        let outcome = self.sink.publish(write).await;
+        let outcome = self.connector.publish(write).await;
         let outcome = context.received_outcome(rows, outcome);
         RowAnswers::from(outcome)
             .apply(context, batches, acknowledgements)
@@ -185,43 +225,46 @@ impl ProjectedRun {
     }
 }
 
-/// A row request sink and the host projection whose mapped columns it prepares requests from.
+/// A row request emitter and the host projection whose mapped columns it prepares requests from.
 ///
-/// The mapping is evaluated here, once per batch, and the sink prepares each request once. The
-/// emitter retains every prepared request with the rows it carries until the sink answers for it,
+/// The mapping is evaluated here, once per batch, and the emitter prepares each request once. The
+/// emitter retains every prepared request with the rows it carries until the emitter answers for it,
 /// so a request whose outcome the emitter did not learn is sent again exactly as it was prepared,
 /// and its rows are never mapped or prepared again.
-pub(in crate::runtime) struct MappedRequestSink {
-    sink: Box<dyn RowRequestSink>,
+pub(in crate::runtime) struct MappedRequestEmitter {
+    connector: Box<dyn RowRequestEmitter>,
     projection: MappedValuesProjection,
 }
 
-impl MappedRequestSink {
+impl MappedRequestEmitter {
     pub(in crate::runtime) fn new(
-        sink: Box<dyn RowRequestSink>,
+        connector: Box<dyn RowRequestEmitter>,
         projection: MappedValuesProjection,
     ) -> Self {
-        Self { sink, projection }
+        Self {
+            connector,
+            projection,
+        }
     }
 }
 
 #[async_trait]
-impl EmitterSink for MappedRequestSink {
-    fn lifecycle(&self) -> &dyn SinkLifecycle {
-        &*self.sink
+impl EmitterConnector for MappedRequestEmitter {
+    fn lifecycle(&self) -> &dyn EmitterLifecycle {
+        &*self.connector
     }
 
-    fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
-        &mut *self.sink
+    fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
+        &mut *self.connector
     }
 
     /// Prepares requests from every row no retained request carries yet, one projection and one
     /// preparation per batch, and sends every retained request in one write: the ones earlier
-    /// attempts prepared and the sink left unanswered, exactly as they were first sent, followed by
+    /// attempts prepared and the emitter left unanswered, exactly as they were first sent, followed by
     /// the ones prepared now.
     async fn publish_batches(
         &mut self,
-        context: &EmitterSinkContext,
+        context: &EmitterConnectorContext,
         publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()> {
         let EmitterPublication {
@@ -255,19 +298,19 @@ impl EmitterSink for MappedRequestSink {
             if projected.is_empty() {
                 continue;
             }
-            // The host checks and retains what the sink prepared batch by batch, so each
+            // The host checks and retains what the emitter prepared batch by batch, so each
             // preparation is handed exactly one carrier.
-            let carrier = projected.sink_carrier(None);
+            let carrier = projected.emitter_carrier(None);
             let occurred_at = carrier.occurred_at;
-            let rows = MappedSinkRows {
+            let rows = MappedEmitterRows {
                 target_columns: self.projection.target_columns(),
                 carriers: vec![carrier],
             };
             let preparation = self
-                .sink
+                .connector
                 .prepare(rows)
                 .await
-                .map_err(sink_publish_failure)?;
+                .map_err(emitter_publish_failure)?;
             let checked = CheckedPreparation::check(
                 preparation,
                 batch_index,
@@ -290,7 +333,7 @@ impl EmitterSink for MappedRequestSink {
         }
         let PreparedWrite { records, payloads } = row_requests.next_write();
         let request_count = records.len();
-        let outcome = self.sink.publish(records).await;
+        let outcome = self.connector.publish(records).await;
         let outcome = context.received_outcome(request_count, outcome);
         row_requests
             .answers(batches, payloads, outcome)?
@@ -333,17 +376,16 @@ impl CompiledSqlValuesProgram {
 fn compile_sql_values_program(
     label: &'static str,
     namespace: &'static str,
-    domain: &DomainName,
     emitter: &EmitterName,
     mapping: &MappedValuesPlan,
     input_schema: StdArc<arrow_schema::Schema>,
     udfs: Option<&UdfExecutor>,
-) -> error_stack::Result<CompiledSqlValuesProgram, RuntimeError> {
+) -> error_stack::Result<CompiledSqlValuesProgram, MappedValuesError> {
     let parsed = &mapping.program;
-    let empty_sink_schema =
+    let empty_emitter_schema =
         StdArc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new()));
     let infer_bindings = vec![
-        VmCompileBinding::writeonly(namespace, empty_sink_schema),
+        VmCompileBinding::writeonly(namespace, empty_emitter_schema),
         VmCompileBinding::readonly("input", input_schema.clone()),
         VmCompileBinding::readonly("message", input_schema.clone()),
     ];
@@ -352,16 +394,9 @@ fn compile_sql_values_program(
         infer_bindings,
         runtime_udf_signatures(udfs),
     )
-    .map_err(|error| {
-        let reason = format!(
-            "{label} VALUES type inference failed for '{}': {}",
-            emitter.as_str(),
-            error.current_context().message
-        );
-        error.change_context(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason,
-        })
+    .change_context_lazy(|| MappedValuesError::TypeInference {
+        label,
+        emitter: emitter.clone(),
     })?;
     let output_schema = StdArc::new(arrow_schema::Schema::new(
         inferred_fields
@@ -381,15 +416,9 @@ fn compile_sql_values_program(
         &vec![MessageErrorOperation::Values; parsed.inner.set.len()],
         None,
     )
-    .map_err(|error| {
-        let reason = format!(
-            "{label} VALUES message-error metadata for '{}' is invalid: {error}",
-            emitter.as_str()
-        );
-        error.change_context(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason,
-        })
+    .change_context_lazy(|| MappedValuesError::ErrorSites {
+        label,
+        emitter: emitter.clone(),
     })?;
     for site in error_sites.values_mut() {
         if site.operation != MessageErrorOperation::Values {
@@ -430,16 +459,9 @@ fn compile_sql_values_program(
             },
         ),
     )
-    .map_err(|error| {
-        let reason = format!(
-            "{label} VALUES compile failed for '{}': {}",
-            emitter.as_str(),
-            error.current_context().message
-        );
-        error.change_context(RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason,
-        })
+    .change_context_lazy(|| MappedValuesError::Compile {
+        label,
+        emitter: emitter.clone(),
     })?;
     Ok(CompiledSqlValuesProgram {
         program: Arc::new(compiled),
@@ -450,11 +472,10 @@ fn compile_sql_values_program(
 
 /// What one emitter's `VALUES` mapping is compiled from.
 pub(in crate::runtime) struct MappedValuesProjectionInit<'a> {
-    /// How this sink names itself in diagnostics, such as `ClickHouse`.
+    /// How this emitter names itself in diagnostics, such as `ClickHouse`.
     pub(in crate::runtime) label: &'static str,
-    /// The expression scope this sink's mapped columns are written through, such as `clickhouse`.
+    /// The expression scope this emitter's mapped columns are written through, such as `clickhouse`.
     pub(in crate::runtime) namespace: &'static str,
-    pub(in crate::runtime) domain: &'a DomainName,
     pub(in crate::runtime) emitter: &'a EmitterName,
     pub(in crate::runtime) mapping: &'a MappedValuesPlan,
     pub(in crate::runtime) input_schema: StdArc<arrow_schema::Schema>,
@@ -464,11 +485,11 @@ pub(in crate::runtime) struct MappedValuesProjectionInit<'a> {
 /// One emitter's `VALUES` mapping, compiled once at start and evaluated once per batch.
 ///
 /// The mapping is evaluated column by column: the VM writes one output column per mapped value,
-/// and the projection hands those columns to the sink under their target names together with the
+/// and the projection hands those columns to the emitter under their target names together with the
 /// rows it must write. No row of the mapped batch is ever materialized as a scalar here.
 pub(in crate::runtime) struct MappedValuesProjection {
     program: CompiledSqlValuesProgram,
-    /// The mapped columns a row sink reads, named by their target columns in mapping order and
+    /// The mapped columns a row emitter reads, named by their target columns in mapping order and
     /// nullable because a mapped expression may evaluate to a typed null.
     mapped_schema: StdArc<arrow_schema::Schema>,
     target_columns: Vec<String>,
@@ -477,36 +498,25 @@ pub(in crate::runtime) struct MappedValuesProjection {
 impl MappedValuesProjection {
     pub(in crate::runtime) fn compile(
         init: MappedValuesProjectionInit<'_>,
-    ) -> error_stack::Result<Self, RuntimeError> {
+    ) -> error_stack::Result<Self, MappedValuesError> {
         let MappedValuesProjectionInit {
             label,
             namespace,
-            domain,
             emitter,
             mapping,
             input_schema,
             udfs,
         } = init;
-        let program = compile_sql_values_program(
-            label,
-            namespace,
-            domain,
-            emitter,
-            mapping,
-            input_schema,
-            udfs,
-        )?;
+        let program =
+            compile_sql_values_program(label, namespace, emitter, mapping, input_schema, udfs)?;
         let target_columns = mapping.columns.clone();
         let output_fields = program.program.output_schema.fields();
         if output_fields.len() != target_columns.len() {
-            return Err(Report::new(RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "{label} VALUES for '{}' produced {} columns for {} mappings",
-                    emitter.as_str(),
-                    output_fields.len(),
-                    target_columns.len()
-                ),
+            return Err(Report::new(MappedValuesError::ColumnCount {
+                label,
+                emitter: emitter.clone(),
+                produced: output_fields.len(),
+                mapped: target_columns.len(),
             }));
         }
         let fields = output_fields
@@ -523,7 +533,7 @@ impl MappedValuesProjection {
         })
     }
 
-    /// The mapped columns this projection produces, for a sink that validates their exact types
+    /// The mapped columns this projection produces, for an emitter that validates their exact types
     /// before its first batch arrives.
     pub(in crate::runtime) fn mapped_schema(&self) -> &StdArc<arrow_schema::Schema> {
         &self.mapped_schema
@@ -534,10 +544,28 @@ impl MappedValuesProjection {
         &self.target_columns
     }
 
-    /// Evaluates the mapping once for `batch` and selects the rows the sink still has to write.
+    /// The mapped columns named by their target columns in mapping order, each nullable exactly
+    /// when its expression can produce a null for a row the mapping does not reject. A row whose
+    /// mapping fails holds a null in place of the value it could not produce, which is why the
+    /// mapped batch's own schema keeps every column nullable; a emitter that requires a value in a
+    /// column checks the mapping against these columns before its first batch arrives.
+    pub(in crate::runtime) fn value_schema(&self) -> StdArc<arrow_schema::Schema> {
+        let output_fields = self.program.program.output_schema.fields();
+        let mut fields = Vec::with_capacity(self.target_columns.len());
+        for (field, column) in output_fields.iter().zip(&self.target_columns) {
+            fields.push(arrow_schema::Field::new(
+                column,
+                field.data_type().clone(),
+                field.is_nullable(),
+            ));
+        }
+        StdArc::new(arrow_schema::Schema::new(fields))
+    }
+
+    /// Evaluates the mapping once for `batch` and selects the rows the emitter still has to write.
     ///
     /// A row whose mapping failed carries a side error instead of a value, so it is rejected here
-    /// with the structured message error its expression produced and never reaches the sink.
+    /// with the structured message error its expression produced and never reaches the emitter.
     pub(in crate::runtime) async fn project(
         &self,
         executor: &Executor,
@@ -562,7 +590,7 @@ impl MappedValuesProjection {
                 side_error.span
             );
             rejected.push(RejectedEmitterRecord {
-                position: SinkRecordPosition {
+                position: EmitterRecordPosition {
                     batch_index,
                     row_index: *row,
                 },
@@ -656,7 +684,7 @@ impl MappedValuesProjection {
     }
 }
 
-/// One batch of mapped columns, with the rows a row sink writes and the rows it never sees.
+/// One batch of mapped columns, with the rows a row emitter writes and the rows it never sees.
 pub(in crate::runtime) struct ProjectedValueRows {
     batch_index: usize,
     batch: RecordBatch,
@@ -676,17 +704,17 @@ impl ProjectedValueRows {
     }
 
     /// The rows this write carries, which the host reads to hand their acknowledgements over to a
-    /// sink that resolves them on its own commit boundary.
+    /// emitter that resolves them on its own commit boundary.
     pub(in crate::runtime) fn selected_rows(&self) -> &[usize] {
         &self.selected_rows
     }
 
     /// This batch as one carrier of a mapped-row write.
-    pub(in crate::runtime) fn sink_carrier(
+    pub(in crate::runtime) fn emitter_carrier(
         &self,
-        acknowledgements: Option<SinkAcknowledgements>,
-    ) -> MappedSinkCarrier<'_> {
-        MappedSinkCarrier {
+        acknowledgements: Option<EmitterRecordAcknowledgements>,
+    ) -> MappedEmitterCarrier<'_> {
+        MappedEmitterCarrier {
             batch_index: self.batch_index,
             batch: &self.batch,
             selected_rows: &self.selected_rows,
@@ -697,61 +725,30 @@ impl ProjectedValueRows {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
-    use std::collections::VecDeque;
-
     use futures_util::FutureExt as _;
-    use nervix_connector::{
-        PerRecordOutcome, PreparedRowRequest, RowRequestPreparation, SinkPublishError,
-        SinkPublishResult, SinkRecordId, SinkRowRequest,
+    use nervix_connector::EmitterRowRequest;
+    use nervix_connector_fake::{
+        CarrierSelection as RecordedCarrier, EmitterObservations, FakeEmitter, HandedRequest,
+        PublishAnswer as RequestAnswer, PublishScript, RequestPreparation, RowRequests, Rows,
     };
     use nervix_models::ClickHouseValueMapping;
     use nervix_primitives::sync::blocking::Mutex;
 
     use super::*;
     use crate::{
-        runtime::test_fixtures::{expression, input_schema, named, sink_context, test_schema},
+        runtime::test_fixtures::{emitter_context, expression, input_schema, named, test_schema},
         runtime_schema::test_runtime_row,
     };
-
-    /// One carrier of a write a row sink received: its buffered batch and the rows it selected.
-    #[derive(Debug, PartialEq, Eq)]
-    struct RecordedCarrier {
-        batch_index: usize,
-        rows: Vec<usize>,
-    }
 
     fn recorded(batch_index: usize, rows: &[usize]) -> RecordedCarrier {
         RecordedCarrier {
             batch_index,
             rows: rows.to_vec(),
-        }
-    }
-
-    /// A row sink that delivers every row it is handed and records the carriers of each write.
-    struct RecordingRowSink {
-        writes: StdArc<nervix_primitives::sync::blocking::Mutex<Vec<Vec<RecordedCarrier>>>>,
-    }
-
-    #[async_trait]
-    impl SinkLifecycle for RecordingRowSink {}
-
-    #[async_trait]
-    impl RowSink for RecordingRowSink {
-        async fn publish(
-            &mut self,
-            rows: MappedSinkRows<'_>,
-        ) -> PerRecordOutcome<SinkRecordPosition> {
-            let mut outcome = PerRecordOutcome::with_capacity(rows.member_count());
-            for member in rows.members() {
-                outcome.deliver(rows.position(member));
-            }
-            let mut write = Vec::new();
-            for carrier in &rows.carriers {
-                write.push(recorded(carrier.batch_index, carrier.selected_rows));
-            }
-            self.writes.lock().push(write);
-            outcome
         }
     }
 
@@ -771,13 +768,9 @@ mod tests {
     /// relay or branch starts the next one, so a write never mixes sources.
     #[nervix_primitives::test]
     async fn a_write_carries_successive_carriers_of_one_relay_and_branch() {
-        let writes = StdArc::new(nervix_primitives::sync::blocking::Mutex::new(Vec::new()));
-        let mut sink = MappedRowSink::new(
-            Box::new(RecordingRowSink {
-                writes: writes.clone(),
-            }),
-            test_projection(),
-        );
+        let publisher = FakeEmitter::<Rows>::new(PublishScript::Repeat(RequestAnswer::ConfirmAll));
+        let writes = publisher.observations();
+        let mut connector = MappedRowEmitter::new(Box::new(publisher), test_projection());
         let mut batches = vec![
             source_batch("orders", 2, None),
             source_batch("orders", 1, None),
@@ -788,21 +781,22 @@ mod tests {
             source_batch("orders", 1, None),
         ];
 
-        sink.publish_batches(
-            &sink_context(),
-            EmitterPublication {
-                batches: &mut batches,
-                payloads: &mut PreparedPayloads::default(),
-                client_payloads: &mut PreparedPayloads::default(),
-                requests: &mut PreparedPayloads::default(),
-                row_requests: &mut PreparedPayloads::default(),
-            },
-        )
-        .await
-        .expect("every row is delivered");
+        connector
+            .publish_batches(
+                &emitter_context(),
+                EmitterPublication {
+                    batches: &mut batches,
+                    payloads: &mut PreparedPayloads::default(),
+                    client_payloads: &mut PreparedPayloads::default(),
+                    requests: &mut PreparedPayloads::default(),
+                    row_requests: &mut PreparedPayloads::default(),
+                },
+            )
+            .await
+            .expect("every row is delivered");
 
         assert_eq!(
-            *writes.lock(),
+            writes.lock().selections(),
             vec![
                 vec![recorded(0, &[0, 1]), recorded(1, &[0])],
                 vec![recorded(2, &[0])],
@@ -826,7 +820,6 @@ mod tests {
     }
 
     fn test_projection() -> MappedValuesProjection {
-        let domain: DomainName = named("test_domain");
         let emitter: EmitterName = named("test_emitter");
         let schema = test_schema(&[("value", ParseAsType::I64), ("name", ParseAsType::String)]);
         let values = vec![
@@ -840,7 +833,6 @@ mod tests {
         MappedValuesProjection::compile(MappedValuesProjectionInit {
             label: "ClickHouse",
             namespace: "clickhouse",
-            domain: &domain,
             emitter: &emitter,
             mapping: &mapping,
             input_schema: schema.arrow_schema(),
@@ -883,7 +875,7 @@ mod tests {
             .await
             .expect("the mapping should project");
 
-        let rows = projected.sink_carrier(None);
+        let rows = projected.emitter_carrier(None);
         assert_eq!(rows.batch_index, 4);
         assert_eq!(projection.target_columns(), ["id", "label", "doubled"]);
         assert_eq!(rows.selected_rows, [0, 2]);
@@ -899,9 +891,50 @@ mod tests {
         assert_eq!(doubled.values().as_ref(), [0, 2, 4]);
     }
 
+    /// A column keeps the nullability its expression infers, while the mapped batch makes every
+    /// column nullable for the rows whose mapping fails.
+    #[test]
+    fn value_columns_are_nullable_exactly_where_their_expression_can_produce_a_null() {
+        let emitter: EmitterName = named("test_emitter");
+        let schema = test_schema(&[("value", ParseAsType::I64), ("name", ParseAsType::String)]);
+        let values = vec![
+            mapping("label", "input.name"),
+            mapping("nonzero", "nullif(input.value, 0)"),
+            mapping("doubled", "input.value * 2"),
+        ];
+        let mapping = MappedValuesPlan::decide(&emitter, "Iceberg", "iceberg", &values)
+            .expect("the mapping should lower");
+        let projection = MappedValuesProjection::compile(MappedValuesProjectionInit {
+            label: "Iceberg",
+            namespace: "iceberg",
+            emitter: &emitter,
+            mapping: &mapping,
+            input_schema: schema.arrow_schema(),
+            udfs: None,
+        })
+        .expect("the test VALUES mapping should compile");
+
+        let value_schema = projection.value_schema();
+
+        assert_eq!(
+            value_schema.as_ref(),
+            &arrow_schema::Schema::new(vec![
+                arrow_schema::Field::new("label", arrow_schema::DataType::Utf8, false),
+                arrow_schema::Field::new("nonzero", arrow_schema::DataType::Int64, true),
+                arrow_schema::Field::new("doubled", arrow_schema::DataType::Int64, false),
+            ])
+        );
+        for field in projection.mapped_schema().fields() {
+            assert!(
+                field.is_nullable(),
+                "{} is nullable in the mapped batch",
+                field.name()
+            );
+        }
+    }
+
     #[nervix_primitives::test]
     async fn a_mapping_that_fails_rejects_its_row_instead_of_selecting_it() {
-        let domain: DomainName = named("test_domain");
         let emitter: EmitterName = named("test_emitter");
         let schema = test_schema(&[("value", ParseAsType::I64), ("name", ParseAsType::String)]);
         let values = vec![mapping("ratio", "100 / input.value")];
@@ -910,7 +943,6 @@ mod tests {
         let projection = MappedValuesProjection::compile(MappedValuesProjectionInit {
             label: "ClickHouse",
             namespace: "clickhouse",
-            domain: &domain,
             emitter: &emitter,
             mapping: &mapping,
             input_schema: schema.arrow_schema(),
@@ -931,7 +963,7 @@ mod tests {
             .expect("the mapping should project");
 
         let rejected = projected.take_rejected();
-        assert_eq!(projected.sink_carrier(None).selected_rows, [1, 2]);
+        assert_eq!(projected.emitter_carrier(None).selected_rows, [1, 2]);
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0].position.row_index, 0);
         let error = rejected[0]
@@ -947,7 +979,7 @@ mod tests {
     }
 
     #[nervix_primitives::test]
-    async fn projection_failure_keeps_the_schema_report_under_sink_context() {
+    async fn projection_failure_keeps_the_schema_report_under_emitter_context() {
         let projection = test_projection();
         let schema = test_schema(&[("other", ParseAsType::I64)]);
         let batch = RelayRecordBatch::from_messages(
@@ -1019,7 +1051,7 @@ mod tests {
             narrow_projected
                 .expect("projecting a batch never waits")
                 .expect("the narrow projection should succeed")
-                .sink_carrier(None)
+                .emitter_carrier(None)
                 .selected_rows
                 .len(),
             8
@@ -1028,7 +1060,7 @@ mod tests {
             wide_projected
                 .expect("projecting a batch never waits")
                 .expect("the wide projection should succeed")
-                .sink_carrier(None)
+                .emitter_carrier(None)
                 .selected_rows
                 .len(),
             512
@@ -1041,99 +1073,6 @@ mod tests {
             (wide_allocations.alloc_calls, wide_allocations.realloc_calls),
             "projecting 64 times as many rows must cost the same allocations"
         );
-    }
-
-    /// How the scripted row request sink answers one write.
-    enum RequestAnswer {
-        /// The first request is delivered, and the sink fails before it answers for the rest.
-        DeliverFirstThenFail,
-        /// Every request of the write is delivered.
-        DeliverAll,
-    }
-
-    /// One request the scripted sink was handed: its identity and its bytes.
-    #[derive(Debug, PartialEq, Eq)]
-    struct HandedRequest {
-        id: usize,
-        body: Vec<u8>,
-    }
-
-    impl HandedRequest {
-        fn new(id: usize, body: &str) -> Self {
-            Self {
-                id,
-                body: body.as_bytes().to_vec(),
-            }
-        }
-    }
-
-    /// A row request sink that prepares one request for each pair of rows, whose bytes name the
-    /// rows and the preparation that made them, and answers every write from a script.
-    struct ScriptedRequestSink {
-        preparations: Arc<AtomicUsize>,
-        writes: Arc<Mutex<Vec<Vec<HandedRequest>>>>,
-        answers: VecDeque<RequestAnswer>,
-    }
-
-    impl SinkLifecycle for ScriptedRequestSink {}
-
-    #[async_trait]
-    impl RowRequestSink for ScriptedRequestSink {
-        async fn prepare(
-            &mut self,
-            rows: MappedSinkRows<'_>,
-        ) -> SinkPublishResult<RowRequestPreparation> {
-            let preparation = self.preparations.fetch_add(1, Ordering::SeqCst);
-            let mut prepared = RowRequestPreparation::default();
-            for carrier in &rows.carriers {
-                for pair in carrier.selected_rows.chunks(2) {
-                    let mut members = Vec::with_capacity(pair.len());
-                    for row in pair {
-                        members.push(SinkRecordPosition {
-                            batch_index: carrier.batch_index,
-                            row_index: *row,
-                        });
-                    }
-                    prepared.requests.push(PreparedRowRequest {
-                        members,
-                        body: format!("preparation {preparation} of {pair:?}").into_bytes(),
-                    });
-                }
-            }
-            Ok(prepared)
-        }
-
-        async fn publish(
-            &mut self,
-            requests: Vec<SinkRowRequest>,
-        ) -> PerRecordOutcome<SinkRecordId> {
-            self.writes.lock().push(
-                requests
-                    .iter()
-                    .map(|request| HandedRequest {
-                        id: request.id.index(),
-                        body: request.body.clone(),
-                    })
-                    .collect(),
-            );
-            let mut outcome = PerRecordOutcome::with_capacity(requests.len());
-            let answer = self
-                .answers
-                .pop_front()
-                .expect("the test scripts an answer for every write it makes");
-            match answer {
-                RequestAnswer::DeliverFirstThenFail => {
-                    outcome.deliver(requests[0].id);
-                    outcome.fail(Report::new(SinkPublishError::Publish { sink: "scripted" }));
-                }
-                RequestAnswer::DeliverAll => {
-                    for request in &requests {
-                        outcome.deliver(request.id);
-                    }
-                }
-            }
-            outcome
-        }
     }
 
     /// One buffered batch whose rows each carry an acknowledgement root of their own, and the
@@ -1160,7 +1099,6 @@ mod tests {
 
     /// The projection an OTEL-like emitter maps its one input value through.
     fn value_projection() -> MappedValuesProjection {
-        let domain: DomainName = named("test_domain");
         let emitter: EmitterName = named("test_emitter");
         let values = [mapping("value", "input.value")];
         let mapping = MappedValuesPlan::decide(&emitter, "OTEL", "otel", &values)
@@ -1168,7 +1106,6 @@ mod tests {
         MappedValuesProjection::compile(MappedValuesProjectionInit {
             label: "OTEL",
             namespace: "otel",
-            domain: &domain,
             emitter: &emitter,
             mapping: &mapping,
             input_schema: input_schema().arrow_schema(),
@@ -1177,46 +1114,39 @@ mod tests {
         .expect("the test VALUES mapping should compile")
     }
 
-    /// A scripted row request sink paired with its projection, and what the test reads back from
+    /// A scripted row request emitter paired with its projection, and what the test reads back from
     /// it: how many preparations it made, and every write it was handed.
     struct ScriptedRequests {
-        sink: MappedRequestSink,
-        preparations: Arc<AtomicUsize>,
-        writes: Arc<Mutex<Vec<Vec<HandedRequest>>>>,
+        connector: MappedRequestEmitter,
+        observations: Arc<Mutex<EmitterObservations<Vec<EmitterRowRequest>>>>,
     }
 
     fn scripted_requests(answers: impl IntoIterator<Item = RequestAnswer>) -> ScriptedRequests {
-        let preparations = Arc::new(AtomicUsize::new(0));
-        let writes = Arc::new(Mutex::new(Vec::new()));
-        let sink = ScriptedRequestSink {
-            preparations: preparations.clone(),
-            writes: writes.clone(),
-            answers: answers.into_iter().collect(),
-        };
+        let publisher =
+            FakeEmitter::<RowRequests>::new(PublishScript::Finite(answers.into_iter().collect()));
+        let observations = publisher.observations();
         ScriptedRequests {
-            sink: MappedRequestSink::new(Box::new(sink), value_projection()),
-            preparations,
-            writes,
+            connector: MappedRequestEmitter::new(Box::new(publisher), value_projection()),
+            observations,
         }
     }
 
     #[nervix_primitives::test]
     async fn a_request_whose_outcome_is_unknown_is_sent_again_unchanged_without_preparing_it_again()
     {
-        let context = sink_context();
+        let context = emitter_context();
         let ScriptedRequests {
-            mut sink,
-            preparations,
-            writes,
+            mut connector,
+            observations,
         } = scripted_requests([
             RequestAnswer::DeliverFirstThenFail,
-            RequestAnswer::DeliverAll,
+            RequestAnswer::ConfirmAll,
         ]);
         let (first, first_completions) = acknowledged_batch(&[1, 2, 3]);
         let mut batches = vec![first];
         let mut row_requests = PreparedPayloads::default();
 
-        let failed = sink
+        let failed = connector
             .publish_batches(
                 &context,
                 EmitterPublication {
@@ -1228,7 +1158,7 @@ mod tests {
                 },
             )
             .await
-            .expect_err("the sink failed before answering for its second request");
+            .expect_err("the emitter failed before answering for its second request");
         assert!(emitter_publish_error_is_retryable(&failed));
         assert_eq!(batches[0].resolved_rows(), vec![true, true, false]);
         assert!(
@@ -1240,21 +1170,22 @@ mod tests {
         // emitter kept.
         let (second, second_completions) = acknowledged_batch(&[4]);
         batches.push(second);
-        sink.publish_batches(
-            &context,
-            EmitterPublication {
-                batches: &mut batches,
-                payloads: &mut PreparedPayloads::default(),
-                client_payloads: &mut PreparedPayloads::default(),
-                requests: &mut PreparedPayloads::default(),
-                row_requests: &mut row_requests,
-            },
-        )
-        .await
-        .expect("the retry is delivered");
+        connector
+            .publish_batches(
+                &context,
+                EmitterPublication {
+                    batches: &mut batches,
+                    payloads: &mut PreparedPayloads::default(),
+                    client_payloads: &mut PreparedPayloads::default(),
+                    requests: &mut PreparedPayloads::default(),
+                    row_requests: &mut row_requests,
+                },
+            )
+            .await
+            .expect("the retry is delivered");
 
         assert_eq!(
-            *writes.lock(),
+            observations.lock().requests(),
             vec![
                 vec![
                     HandedRequest::new(0, "preparation 0 of [0, 1]"),
@@ -1268,7 +1199,7 @@ mod tests {
             "the retry sends the kept request byte for byte, ahead of the one prepared after it"
         );
         assert_eq!(
-            preparations.load(Ordering::SeqCst),
+            observations.lock().preparations,
             2,
             "each batch is prepared once"
         );
@@ -1278,58 +1209,17 @@ mod tests {
         }
     }
 
-    /// A row request sink whose preparation answers for a row it was never handed.
-    struct ForeignRowSink;
-
-    impl SinkLifecycle for ForeignRowSink {}
-
-    #[async_trait]
-    impl RowRequestSink for ForeignRowSink {
-        async fn prepare(
-            &mut self,
-            rows: MappedSinkRows<'_>,
-        ) -> SinkPublishResult<RowRequestPreparation> {
-            let carrier = rows
-                .carriers
-                .first()
-                .expect("the host hands every preparation one carrier");
-            let mut members = Vec::new();
-            for row in carrier.selected_rows {
-                members.push(SinkRecordPosition {
-                    batch_index: carrier.batch_index,
-                    row_index: *row,
-                });
-            }
-            members.push(SinkRecordPosition {
-                batch_index: carrier.batch_index,
-                row_index: carrier.batch.num_rows(),
-            });
-            Ok(RowRequestPreparation {
-                requests: vec![PreparedRowRequest {
-                    members,
-                    body: b"every row and one more".to_vec(),
-                }],
-                rejected: Vec::new(),
-            })
-        }
-
-        async fn publish(
-            &mut self,
-            _requests: Vec<SinkRowRequest>,
-        ) -> PerRecordOutcome<SinkRecordId> {
-            panic!("a preparation that breaks its contract is never sent");
-        }
-    }
-
     #[nervix_primitives::test]
     async fn a_preparation_that_breaks_its_contract_keeps_nothing_and_is_not_retried() {
-        let context = sink_context();
-        let mut sink = MappedRequestSink::new(Box::new(ForeignRowSink), value_projection());
+        let context = emitter_context();
+        let mut publisher = FakeEmitter::<RowRequests>::new([]);
+        publisher.preparation = RequestPreparation::ForeignRow;
+        let mut connector = MappedRequestEmitter::new(Box::new(publisher), value_projection());
         let (batch, _completions) = acknowledged_batch(&[1, 2]);
         let mut batches = vec![batch];
         let mut row_requests = PreparedPayloads::default();
 
-        let error = sink
+        let error = connector
             .publish_batches(
                 &context,
                 EmitterPublication {
@@ -1376,7 +1266,6 @@ mod tests {
 
     #[test]
     fn sql_value_type_failure_keeps_emitter_and_vm_compile_context() {
-        let domain: DomainName = named("test_domain");
         let emitter: EmitterName = named("test_emitter");
         let schema = test_schema(&[("value", ParseAsType::I64)]);
         let values = [mapping("external_id", "input.missing")];
@@ -1385,7 +1274,6 @@ mod tests {
         let report = MappedValuesProjection::compile(MappedValuesProjectionInit {
             label: "ClickHouse",
             namespace: "clickhouse",
-            domain: &domain,
             emitter: &emitter,
             mapping: &mapping,
             input_schema: schema.arrow_schema(),
@@ -1395,12 +1283,12 @@ mod tests {
         .assured("the mapping refers to a field absent from the declared input schema");
         assert!(matches!(
             report.current_context(),
-            RuntimeError::BuildDomainExecution { domain, reason }
-                if domain == "test_domain"
-                    && reason.contains("ClickHouse VALUES type inference failed")
-                    && reason.contains("test_emitter")
-                    && reason.contains("missing")
+            MappedValuesError::TypeInference {
+                label: "ClickHouse",
+                emitter: failed,
+            } if failed == &emitter
         ));
         assert!(report.contains::<nervix_vm::CompileError>());
+        assert!(format!("{report:#}").contains("missing"), "{report:#}");
     }
 }

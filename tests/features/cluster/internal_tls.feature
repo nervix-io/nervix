@@ -9,16 +9,16 @@ Feature: Internal TLS
         "bundle/model.bin": "hello"
       }
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE DOMAIN secure;
       CREATE RESOURCE proto;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE proto VERSION '{{resource_dir}}';
       """
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       DESCRIBE RESOURCE proto VERSION 1;
       """
@@ -59,10 +59,10 @@ Feature: Internal TLS
     Then node "node-1" eventually reports interconnect to "node-4" as "connected"
     And node "node-4" eventually reports interconnect to "node-2" as "connected"
 
-  Scenario Outline: Clients execute NSPL over HTTPS gRPC
+  Scenario Outline: Clients execute Plexus over HTTPS gRPC
     Given client grpc transport is configured with mode "https"
     And a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE UNPACED DOMAIN secure;
       """

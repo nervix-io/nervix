@@ -1,5 +1,7 @@
 # Placement Policies
 
+*Plexus, the Nervix graph definition language.*
+
 Placement policies control where a domain's schedulable work executes. Use them to keep a
 latency-sensitive processing corridor on one machine, prefer locality without forcing it, or bias
 expensive stages across machines.
@@ -14,7 +16,7 @@ A named placement rule marks the directed paths between existing runtime nodes. 
 rule keeps `feature_normalizer`, `risk_scorer`, and every runtime node on a path between them on
 one cluster node:
 
-```nspl
+```plexus
 CREATE PLACEMENT scoring_local
   FROM feature_normalizer
   TO risk_scorer
@@ -51,7 +53,7 @@ it does not randomize placement or disable the scheduler's normal heuristics.
 
 Every domain has a fallback placement policy. Declare it when creating the domain:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] UNPACED DOMAIN <domain_name>
   [PLACEMENT <policy>];
 
@@ -63,7 +65,7 @@ CREATE [IF NOT EXISTS] PACED DOMAIN <domain_name>
 `CREATE DOMAIN` remains the short spelling for `CREATE UNPACED DOMAIN` and accepts the same
 placement clause. Omitting `PLACEMENT` selects `NEUTRAL`.
 
-```nspl
+```plexus
 CREATE UNPACED DOMAIN realtime
   PLACEMENT PREFER COLOCATION;
 ```
@@ -80,7 +82,7 @@ hops. The default is deliberately per hop:
 
 Change the default for the session's active domain with the nameless `ALTER DOMAIN` statement:
 
-```nspl
+```plexus
 ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
 ```
 
@@ -93,7 +95,7 @@ migrate existing assignments.
 Create a named rule after every referenced member exists in the active domain. Placements are
 domain-owned and cannot span domains:
 
-```nspl,ignore
+```plexus,ignore
 CREATE [IF NOT EXISTS] PLACEMENT <placement_name>
   FROM <runtime_node> [, <runtime_node> ...]
   TO <runtime_node> [, <runtime_node> ...]
@@ -118,8 +120,11 @@ scheduler-selected state replicas to that relay; it does not add another placeme
 runtime-node kind. See [Materialized Relay State](processors.md#materialized-relay-state) for
 dependency behavior.
 
-Endpoint-source and Syslog ingestors execute on every cluster node and therefore cannot be
-constrained by a placement rule. Member names are unqualified; a name shared by more than one
+`HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER` ingestors execute on every cluster
+node and therefore cannot be constrained by a placement rule. An ingestor's head fixes the pair it
+reads, so altering an ingestor never changes whether it can be a placement member. Completion in
+`FROM` and `TO` offers only placement-eligible runtime nodes, applying the same exclusion to all
+three listener kinds. Member names are unqualified; a name shared by more than one
 eligible entity kind is ambiguous and must be changed before it can be used in a placement.
 
 Duplicate names on one side collapse. Both sides must contain at least one member after duplicate
@@ -194,7 +199,7 @@ effective `REQUIRE COLOCATION` chain still connects it.
 
 For example, first declare a scheduler-managed archive corridor:
 
-```nspl
+```plexus
 CREATE PLACEMENT archive_scheduler_managed
   FROM archiver
   TO cold_sink
@@ -204,7 +209,7 @@ CREATE PLACEMENT archive_scheduler_managed
 
 Then make hard colocation the domain fallback:
 
-```nspl
+```plexus
 ALTER DOMAIN SET PLACEMENT REQUIRE COLOCATION;
 ```
 
@@ -221,9 +226,9 @@ activation. A conflicting candidate is rejected before it replaces the active gr
 Every single-owner ingestor keeps its existing primary and replica assignment across schedule
 recomputation while all assigned cluster nodes are live. This includes outbound WebSocket-client
 ingestors. Model changes, cluster-node joins and uncordons, and soft placement changes therefore do
-not migrate those ingestors. Endpoint-source and Syslog ingestors are the only ingestors that
-instead follow live cluster membership, because their server listeners execute on every cluster
-node.
+not migrate those ingestors. `HTTP ENDPOINT`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER`
+ingestors are the only ingestors that instead follow live cluster membership, because their server
+listeners execute on every cluster node.
 
 When a new `REQUIRE COLOCATION` relationship becomes effective, Nervix consolidates the complete
 colocation group onto one eligible cluster node. Existing assignments are preserved only when
@@ -269,7 +274,7 @@ Placement rules constrain where the scheduler puts work. `RELOCATE` moves chosen
 cluster node you name, and `DESCRIBE RELOCATION` shows the plan a statement would execute without
 executing it:
 
-```nspl,ignore
+```plexus,ignore
 RELOCATE <selection>
   ONTO NODE <node_id>
   FOLLOW PREFERENCES | IGNORE PREFERENCES
@@ -289,11 +294,11 @@ inspected and then executed by changing one word.
 A selection is either an explicit list or a directed corridor, using the same path-gated coverage
 named placement rules use:
 
-```nspl
+```plexus
 RELOCATE JUNCTION risk_scorer ONTO NODE node-2 FOLLOW PREFERENCES;
 ```
 
-```nspl
+```plexus
 RELOCATE FROM JUNCTION feature_normalizer TO JUNCTION risk_scorer
   ONTO NODE node-2
   FOLLOW PREFERENCES
@@ -391,6 +396,14 @@ immediately. Cordon and uncordon similarly return after the eligibility state is
 drain and node removal return after resulting ownership and schedules are usable on the remaining
 live set.
 
+The leader refuses the relocation's schedule write when it lost its leadership or cannot confirm it,
+for example because its lease lapsed. Such a relocation moves nothing and is not reported as failed.
+Its outcome stays unknown until the statement is repeated under the same execution reference,
+which a client that follows the session protocol does on its own, and the leader that serves the
+repetition plans the unit again from the schedule committed by then. A relocation whose plan went
+stale before its write, for example because the schedule changed, fails, and you retry the
+statement.
+
 The reported quiesce level is `ENTITY_PAUSE` when the plan moves at least one runtime node in a
 running domain, and `DYNAMIC` when the plan moves nothing or the domain is stopped. A stopped
 domain keeps its schedule, so its runtime nodes are relocated without a hold and execute on the
@@ -419,7 +432,7 @@ unsatisfied, because Nervix never moves an existing assignment to improve a pref
 
 `ALTER PLACEMENT` accepts one or more comma-separated operations:
 
-```nspl,ignore
+```plexus,ignore
 ALTER PLACEMENT <placement>
     SET POLICY <policy>
   | SET RANK <positive_integer>
@@ -435,7 +448,7 @@ Operations execute in written order, and the complete statement is applied atomi
 ... TO ...` replaces both member lists. This makes it possible to change policy, precedence,
 membership, and name in one statement:
 
-```nspl
+```plexus
 ALTER PLACEMENT scoring_local
   SET POLICY PREFER COLOCATION,
   SET RANK 2,
@@ -457,23 +470,23 @@ transaction and quiesce behavior.
 
 Use the placement commands in the active domain:
 
-```nspl
+```plexus
 SHOW CREATE PLACEMENT scoring_local;
 ```
 
-```nspl
+```plexus
 SHOW PLACEMENTS;
 ```
 
-```nspl
+```plexus
 DESCRIBE PLACEMENT scoring_local;
 ```
 
-```nspl
+```plexus
 DESCRIBE DOMAIN;
 ```
 
-`SHOW CREATE PLACEMENT` renders the normalized stored rule as canonical NSPL and omits the
+`SHOW CREATE PLACEMENT` renders the normalized stored rule as canonical Plexus and omits the
 creation-time `IF NOT EXISTS` modifier. `SHOW PLACEMENTS` lists each rule's policy, rank, and one
 of these coverage states:
 
@@ -516,7 +529,7 @@ server-listener ingestor, an empty side, and `RANK 0`.
 
 Keep a latency-critical corridor on one cluster node:
 
-```nspl
+```plexus
 CREATE PLACEMENT fraud_scoring_local
   FROM normalize_transaction
   TO fraud_scorer
@@ -527,7 +540,7 @@ CREATE PLACEMENT fraud_scoring_local
 Keep a materialized-state owner with a reader. Here `customer_state` is a materialized relay and
 `fraud_scorer` declares `USING MATERIALIZED STATE customer_state`:
 
-```nspl
+```plexus
 CREATE PLACEMENT state_read_local
   FROM customer_state
   TO fraud_scorer
@@ -537,7 +550,7 @@ CREATE PLACEMENT state_read_local
 
 Bias a heavy archive corridor across cluster nodes without guaranteeing isolation:
 
-```nspl
+```plexus
 CREATE PLACEMENT spread_archive
   FROM archive_transform
   TO archive_emitter
@@ -546,7 +559,7 @@ CREATE PLACEMENT spread_archive
 
 Prefer locality for a corridor while retaining scheduler flexibility:
 
-```nspl
+```plexus
 CREATE PLACEMENT prefer_enrichment_local
   FROM decode_events
   TO enrich_events

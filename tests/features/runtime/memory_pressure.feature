@@ -1,14 +1,15 @@
 Feature: Memory pressure
 
+  @memory_pressure_pause @deloxide_stress
   Scenario Outline: Memory high watermark pauses scheduled ingestors
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And memory pressure is configured with high watermark "1B" and low watermark "0B"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -27,8 +28,8 @@ Feature: Memory pressure
         ON edge
         PATH '/memory-pressure'
         TYPE HTTP;
-      CREATE INGESTOR memory_pressure_source
-        FROM ENDPOINT memory_pressure_ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR memory_pressure_source
+        FROM memory_pressure_ingress MODE NO ACK
         ON QUIESCE REJECT RETRY AFTER 3s DECODE USING notification_codec
         TO notifications
         INHERIT ALL

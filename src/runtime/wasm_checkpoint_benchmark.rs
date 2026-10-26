@@ -43,8 +43,12 @@ impl WasmCheckpointBenchmark {
             .assured("a fresh benchmark directory opens as a database");
         let executor = Executor::default();
         let store = Arc::new(
-            RuntimeStateStore::from_database(database, executor.clone())
-                .assured("a fresh database opens as a runtime state store"),
+            RuntimeStateStore::from_database(
+                database,
+                executor.clone(),
+                crate::runtime::DEFAULT_RESTORE_STAGING_MAX_BYTES,
+            )
+            .assured("a fresh database opens as a runtime state store"),
         );
         let domain = DomainName::parse("benchmark").assured("the benchmark domain name is valid");
         let processor = ModelName::parse("guest").assured("the benchmark processor name is valid");

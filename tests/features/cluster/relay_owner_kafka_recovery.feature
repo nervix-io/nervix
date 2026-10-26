@@ -4,12 +4,12 @@ Feature: Kafka acknowledgements across relay-owner recovery
     Given Kafka is running
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "relay_handoff_out_{{test_id}}" is observed
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA relay_handoff_event ( event_id STRING, branch_name STRING, sequence I64 );
       CREATE WIRE JSON SCHEMA relay_handoff_wire MODE STRICT (
@@ -21,28 +21,28 @@ Feature: Kafka acknowledgements across relay-owner recovery
       CREATE BRANCH relay_handoff_branch SCHEMA relay_handoff_key TTL 5m;
       CREATE RELAY relay_handoff_records SCHEMA relay_handoff_event
         BRANCHED BY relay_handoff_branch CAPACITY 1;
-      CREATE CLIENT relay_handoff_kafka TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT relay_handoff_kafka CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest'
       };
-      CREATE INGESTOR relay_handoff_source
-        FROM KAFKA relay_handoff_kafka TOPIC relay_handoff_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP relay_handoff_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR relay_handoff_source
+        FROM relay_handoff_kafka TOPIC 'relay_handoff_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'relay_handoff_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 1s
           ON QUIESCE SUSPEND DECODE USING relay_handoff_codec
         TO relay_handoff_records INHERIT ALL
           BRANCHED BY relay_handoff_branch SET branch_name = message.branch_name
           FLUSH IMMEDIATE ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE ATTACHED EMITTER relay_handoff_sink
+      CREATE ATTACHED KAFKA TOPIC EMITTER relay_handoff_sink
         FROM relay_handoff_records
-        TO KAFKA relay_handoff_kafka TOPIC relay_handoff_out_{{test_id}}
+        TO relay_handoff_kafka TOPIC 'relay_handoff_out_{{test_id}}'
           MODE ACK PARALLEL MAX 2 ACK TIMEOUT 5s
           RETRY POLICY BACKOFF 100ms MAX 1s ENCODE USING relay_handoff_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       RELOCATE INGESTOR relay_handoff_source ONTO NODE node-1 IGNORE PREFERENCES;
       RELOCATE RELAY relay_handoff_records ONTO NODE node-2 IGNORE PREFERENCES;
@@ -104,3 +104,27 @@ Feature: Kafka acknowledgements across relay-owner recovery
       "event_id":"after-a","branch_name":"a","sequence":5
       """
     And within "30s" Kafka consumer group "relay_handoff_group_{{test_id}}" next offset for topic "relay_handoff_in_{{test_id}}" partition 0 is "at least 5"
+    When node "node-2" is restarted 1 times with a new interconnect address
+    And these Plexus commands are executed on the leader node
+      """
+      RELOCATE RELAY relay_handoff_records ONTO NODE node-2 IGNORE PREFERENCES;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      - domain={{domain}} kind=relay name=relay_handoff_records owner=node-2
+      """
+    When Kafka message is published to topic "relay_handoff_in_{{test_id}}"
+      """
+      {"event_id":"reconnected-b","branch_name":"b","sequence":6}
+      """
+    And Kafka message is published to topic "relay_handoff_in_{{test_id}}"
+      """
+      {"event_id":"reconnected-a","branch_name":"a","sequence":7}
+      """
+    Then within "30s" the observed broker receives payloads
+      """
+      "event_id":"reconnected-b","branch_name":"b","sequence":6
+      "event_id":"reconnected-a","branch_name":"a","sequence":7
+      """
+    And within "30s" Kafka consumer group "relay_handoff_group_{{test_id}}" next offset for topic "relay_handoff_in_{{test_id}}" partition 0 is "at least 7"

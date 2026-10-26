@@ -24,17 +24,17 @@ Feature: WASM guest-state qualification across crash windows
     And the production sticky scheduler is configured
     And a <cluster_size> node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "wasm_qualification_restart_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_qualification_filter;
       UPLOAD RESOURCE wasm_qualification_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -43,15 +43,15 @@ Feature: WASM guest-state qualification across crash windows
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC wasm_qualification_restart_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP wasm_qualification_restart_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'wasm_qualification_restart_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_qualification_restart_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -99,7 +99,7 @@ Feature: WASM guest-state qualification across crash windows
     And within "30s" Kafka consumer group "wasm_qualification_restart_group_{{test_id}}" next offset for topic "wasm_qualification_restart_in_{{test_id}}" partition 0 is "below 3"
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -130,28 +130,29 @@ Feature: WASM guest-state qualification across crash windows
       | 1            | 0             | after_local_durability | "value":3            |
       | 1            | 0             | before_acknowledgement | "value":3            |
 
+  @long_running
   Scenario Outline: An owner lost inside a checkpoint window continues each branch from its replica
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "wasm_qualification_failover_in_{{test_id}}" exists with 1 partitions
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-1;
       """
-    And these NSPL commands are executed through the client on the leader node
+    And these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_qualification_failover_filter;
       UPLOAD RESOURCE wasm_qualification_failover_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -160,15 +161,15 @@ Feature: WASM guest-state qualification across crash windows
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC wasm_qualification_failover_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP wasm_qualification_failover_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'wasm_qualification_failover_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_qualification_failover_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -192,13 +193,13 @@ Feature: WASM guest-state qualification across crash windows
       START;
       """
     # Keep node-1 cordoned so the surviving replica owns recovery through the output assertion.
-    And these NSPL commands are executed through the client on node "node-1"
+    And these Plexus commands are executed through the client on node "node-1"
       """
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "wasm_processor" "filter_even_rows" is saved as placeholder "failed_owner"
     And the first replica for scheduled "wasm_processor" "filter_even_rows" in the last cluster status is saved as placeholder "promoted_replica"
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -260,23 +261,24 @@ Feature: WASM guest-state qualification across crash windows
   # Stopping a node ends each processor task within its shutdown grace. A branch task still waiting
   # for its checkpoint when its processor task is ended is ended with it, so it cannot outlive its
   # node, keep the node's state store open, or settle acknowledgements after the node stopped.
+  @long_running
   Scenario: A cluster stopped while its owner holds a checkpoint ends the held branch with its node
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And node "node-1" has WASM processor fixture resource directory "wasm_processor"
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "wasm_qualification_cluster_restart_in_{{test_id}}" exists with 1 partitions
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE RESOURCE wasm_qualification_filter;
       UPLOAD RESOURCE wasm_qualification_filter VERSION '{{wasm_processor}}';
       """
-    And these NSPL commands are executed on the leader node
+    And these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA metric ( value I32, tenant STRING );
       CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
@@ -285,15 +287,15 @@ Feature: WASM guest-state qualification across crash windows
       CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
       CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
       CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
-      CREATE CLIENT kafka_ingress TYPE KAFKA CONFIG {
+      CREATE KAFKA CLIENT kafka_ingress CONFIG {
         'bootstrap.servers' = '{{kafka_addr}}',
         'auto.offset.reset' = 'earliest',
         'session.timeout.ms' = '6000',
         'heartbeat.interval.ms' = '500'
       };
-      CREATE INGESTOR metric_source
-        FROM KAFKA kafka_ingress TOPIC wasm_qualification_cluster_restart_in_{{test_id}}
-          OFFSET BY CONSUMER GROUP wasm_qualification_cluster_restart_group_{{test_id}}
+      CREATE KAFKA TOPIC INGESTOR metric_source
+        FROM kafka_ingress TOPIC 'wasm_qualification_cluster_restart_in_{{test_id}}'
+          OFFSET BY CONSUMER GROUP 'wasm_qualification_cluster_restart_group_{{test_id}}'
           MODE ACK SEQUENTIAL ACK TIMEOUT 30s
             RETRY POLICY BACKOFF 100ms MAX 1s
         ON QUIESCE SUSPEND DECODE USING metric_codec
@@ -341,7 +343,7 @@ Feature: WASM guest-state qualification across crash windows
     And within "30s" Kafka consumer group "wasm_qualification_cluster_restart_group_{{test_id}}" next offset for topic "wasm_qualification_cluster_restart_in_{{test_id}}" partition 0 is "below 3"
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
       """
@@ -411,7 +413,7 @@ Feature: WASM guest-state qualification across crash windows
       state reset reason: OPERATOR
       state reset readiness: READY
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
       """

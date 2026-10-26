@@ -3,11 +3,11 @@ Feature: Domain-paced branch buffering
   Scenario Outline: Paced branch collection and flush follow logical time while Immediate and source idle remain physical
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA timed_event (
         tenant STRING,
@@ -31,8 +31,8 @@ Feature: Domain-paced branch buffering
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR fast_buffering_source
-        FROM ENDPOINT fast_buffering_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR fast_buffering_source
+        FROM fast_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO fast_ingested
@@ -86,11 +86,11 @@ Feature: Domain-paced branch buffering
   Scenario Outline: Immediate flush keeps its physical minimum in a slow historical domain
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA timed_event (
         tenant STRING,
@@ -114,8 +114,8 @@ Feature: Domain-paced branch buffering
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR immediate_buffering_source
-        FROM ENDPOINT immediate_buffering_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR immediate_buffering_source
+        FROM immediate_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO immediate_ingested
@@ -158,11 +158,11 @@ Feature: Domain-paced branch buffering
   Scenario Outline: Reingestor collection keeps separate logical deadlines for slow branches
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA timed_event (
         tenant STRING,
@@ -186,8 +186,8 @@ Feature: Domain-paced branch buffering
         ON edge
         PATH '/events'
         TYPE HTTP;
-      CREATE INGESTOR collect_buffering_source
-        FROM ENDPOINT collect_buffering_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR collect_buffering_source
+        FROM collect_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO collect_ingested
@@ -208,16 +208,12 @@ Feature: Domain-paced branch buffering
       CREATE SUBSCRIPTION observed_subscription TO observed;
       START AT '2000-01-01T00:00:00Z' TIME RATE 0.0001;
       """
-    And http payload is posted to host "collect-buffering-{{test_id}}.example.com" path "/events"
+    And http payloads are posted concurrently to host "collect-buffering-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":1,"path":"collect"}
-      """
-    And http payload is posted to host "collect-buffering-{{test_id}}.example.com" path "/events"
-      """
       {"tenant":"beta","sequence":1,"path":"collect"}
       """
-    Then the relay subscription does not receive a payload within "300ms"
-    And within "2s" the relay subscription receives payloads
+    Then within "2s" the relay subscription receives payloads no sooner than "300ms" after they were published
       """
       {"path":"collect","sequence":1,"tenant":"alpha"}
       {"path":"collect","sequence":1,"tenant":"beta"}
@@ -232,11 +228,11 @@ Feature: Domain-paced branch buffering
   Scenario Outline: Retained task handles force-flush interleaved branches under slow domain time
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA timed_event (
         tenant STRING,
@@ -264,8 +260,8 @@ Feature: Domain-paced branch buffering
         ON edge
         PATH '/gate'
         TYPE HTTP;
-      CREATE INGESTOR held_buffering_source
-        FROM ENDPOINT held_buffering_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR held_buffering_source
+        FROM held_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO held_ingested
@@ -275,8 +271,8 @@ Feature: Domain-paced branch buffering
           FLUSH EACH 1h MAX BATCH SIZE 1MiB
           ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE INGESTOR gate_buffering_source
-        FROM ENDPOINT gate_buffering_endpoint MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR gate_buffering_source
+        FROM gate_buffering_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING timed_event_codec
         TIMESTAMP NOW
         TO gate_ingested
@@ -305,7 +301,7 @@ Feature: Domain-paced branch buffering
       """
       {"tenant":"beta","sequence":2,"path":"held"}
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE INGESTOR held_buffering_source;
       """
@@ -317,9 +313,9 @@ Feature: Domain-paced branch buffering
       """
       transient error: -
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
-      ALTER INGESTOR gate_buffering_source SET QUIESCE BUFFER MAX SIZE 2MiB;
+      ALTER HTTP ENDPOINT INGESTOR gate_buffering_source SET QUIESCE BUFFER MAX SIZE 2MiB;
       """
     Then within "10s" the relay subscription receives payloads
       """

@@ -6,6 +6,14 @@
 //! - **Depends on.** The `url` crate.
 //! - **Must not know.** Which connector dials the address, or what a scheme selects in its driver.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use error_stack::Report;
 use thiserror::Error;
 use url::Url;
@@ -40,6 +48,10 @@ impl<'a> ServiceUrl<'a> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

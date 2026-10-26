@@ -5,8 +5,12 @@
 //!   bounded retained Arrow bytes, and the application result that releases source work.
 //! - **Depends on.** Typed emitter plans, Arrow schema contracts, the execution-sensitive
 //!   primitive boundary, and physical time.
-//! - **Must not know.** Sessions, their wire format, NSPL text, or a client's transport.
+//! - **Must not know.** Sessions, their wire format, Plexus text, or a client's transport.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
 #![cfg_attr(
     nervix_lint,
     nervix::context(
@@ -199,7 +203,7 @@ pub(crate) struct ClientEmitterEndpoint {
     series: ClientEmitterSeries,
 }
 
-#[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Archive, RkyvSerialize, RkyvDeserialize)]
 pub(crate) struct ClientEmitterDescription {
     pub(crate) fields: Vec<SchemaField>,
     pub(crate) maximum_payload_bytes: u64,
@@ -286,12 +290,37 @@ impl ClientEmitterConsumer {
 }
 
 impl ClientEmitterEndpoint {
+    /// The endpoint of `emitter` in `domain`. Its delivery owner's events carry both names, so a
+    /// consumer's attachment and every attempt it was assigned can be followed in the log.
+    pub(crate) fn of_emitter(
+        domain: &DomainName,
+        emitter: &EmitterName,
+        description: ClientEmitterDescription,
+        budget: ClientEmitterBudget,
+        series: ClientEmitterSeries,
+    ) -> Self {
+        let span = tracing::debug_span!(
+            "client_emitter",
+            domain = domain.as_str(),
+            emitter = emitter.as_str()
+        );
+        Self::new_with_references(description, budget, series, Uuid::now_v7, true, span)
+    }
+
+    #[cfg(test)]
     pub(crate) fn new(
         description: ClientEmitterDescription,
         budget: ClientEmitterBudget,
         series: ClientEmitterSeries,
     ) -> Self {
-        Self::new_with_references(description, budget, series, Uuid::now_v7, true)
+        Self::new_with_references(
+            description,
+            budget,
+            series,
+            Uuid::now_v7,
+            true,
+            tracing::Span::none(),
+        )
     }
 
     fn new_with_references<R>(
@@ -300,13 +329,14 @@ impl ClientEmitterEndpoint {
         series: ClientEmitterSeries,
         references: R,
         deadline_wakes: bool,
+        span: tracing::Span,
     ) -> Self
     where
         R: FnMut() -> Uuid + Send + 'static,
     {
         series.reset_gauges();
         let (commands, receiver) = mpsc::unbounded_channel();
-        nervix_primitives::task::spawn(
+        nervix_primitives::task::spawn(tracing::Instrument::instrument(
             Owner {
                 commands: receiver,
                 deliveries: HashMap::default(),
@@ -326,7 +356,8 @@ impl ClientEmitterEndpoint {
                 deadline_wakes,
             }
             .run(),
-        );
+            span,
+        ));
         Self {
             commands,
             description,
@@ -610,6 +641,12 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
                 );
                 self.consumer_order.push_back(id);
                 self.series.attach(forwarded, max_bytes);
+                tracing::debug!(
+                    consumer = id,
+                    forwarded,
+                    max_batches,
+                    "attached a client emitter consumer"
+                );
                 if reply.send((id, receiver)).is_err() {
                     self.detach(id);
                 }
@@ -644,6 +681,11 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
                     },
                 );
                 self.pending.push_back(identity);
+                tracing::debug!(
+                    %identity,
+                    consumers = self.consumers.len(),
+                    "retained a client emitter delivery"
+                );
             }
             Command::Cancel(identity) => self.cancel(identity),
             Command::Answer {
@@ -784,11 +826,13 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
                     .then_some(*identity)
             })
             .collect::<Vec<_>>();
+        let revoked = assigned.len();
         for identity in assigned {
             self.revoke(identity);
         }
         if let Some(consumer) = self.consumers.remove(&id) {
             self.series.detach(consumer.forwarded, consumer.max_bytes);
+            tracing::debug!(consumer = id, revoked, "detached a client emitter consumer");
         }
         self.consumer_order.retain(|candidate| *candidate != id);
     }
@@ -810,6 +854,7 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
         if let Some(delivery) = self.deliveries.get(&identity)
             && let DeliveryPhase::Assigned { reference, .. } = delivery.phase
         {
+            tracing::debug!(%identity, %reference, "revoked a client emitter attempt");
             self.attempts.insert(reference, AttemptHistory::Stale);
             self.remember_result(reference);
             self.release_assignment(identity);
@@ -943,6 +988,12 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
             worker.used_bytes += bytes;
             self.series
                 .assign(delivery.payload.body.len(), worker.forwarded);
+            tracing::debug!(
+                %identity,
+                %reference,
+                consumer,
+                "assigned a client emitter attempt"
+            );
             self.attempts
                 .insert(reference, AttemptHistory::Live { identity, consumer });
             if worker.events.send(event).is_err() {
@@ -962,6 +1013,10 @@ impl<R: FnMut() -> Uuid + Send + 'static> Owner<R> {
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroU64;
 

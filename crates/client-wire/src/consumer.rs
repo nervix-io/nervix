@@ -6,6 +6,14 @@
 //! - **Depends on.** The shared session schema, frame limits, row fields, and vocabulary values.
 //! - **Must not know.** Emitter tasks, sessions, assignment, or the application processing loop.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{fmt, num::NonZeroU32, time::Duration};
 
 use bytes::Bytes;

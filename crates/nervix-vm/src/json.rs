@@ -14,6 +14,14 @@
 //! - **Depends on.** simd-json's tape, Arrow arrays and buffers, and the `JsonPath` Model.
 //! - **Must not know.** Registers, instructions, arms, or how a program is compiled.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{fmt, num::NonZeroU32};
 
 use arrow_array::{
@@ -75,6 +83,13 @@ pub enum JsonTarget {
 
 /// Why a declared type cannot be the result of a JSON extraction.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "JSON target conversion returns a pure type validation refusal"
+    )
+)]
 pub enum JsonTargetDefect {
     /// A type no JSON value holds.
     #[error("{0}, which no JSON value is; read the text as STRING and convert it explicitly")]

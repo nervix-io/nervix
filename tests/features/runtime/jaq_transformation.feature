@@ -2,11 +2,11 @@ Feature: JAQ transformation
   Scenario Outline: HTTP endpoint ingestor applies JAQ transformation before decoding
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -24,8 +24,8 @@ Feature: JAQ transformation
         ON edge
         PATH '/ingest'
         TYPE HTTP;
-        CREATE INGESTOR http_notifications
-        FROM ENDPOINT http_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR http_notifications
+        FROM http_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -57,11 +57,11 @@ Feature: JAQ transformation
     Given Kafka is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -74,14 +74,13 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_kafka_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_kafka_notifications;
-        CREATE CLIENT kafka_main
-        TYPE KAFKA
+        CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}',
           'auto.offset.reset' = 'earliest'
         };
-        CREATE INGESTOR kafka_notifications
-        FROM KAFKA kafka_main TOPIC notifications_{{test_id}} OFFSET BY CONSUMER GROUP nervix_cucumber_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE KAFKA TOPIC INGESTOR kafka_notifications
+        FROM kafka_main TOPIC 'notifications_{{test_id}}' OFFSET BY CONSUMER GROUP 'nervix_cucumber_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -114,12 +113,12 @@ Feature: JAQ transformation
     Given RabbitMQ is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And RabbitMQ queue "notifications_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -132,13 +131,12 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
-        CREATE CLIENT rabbit_main
-        TYPE RABBITMQ
+        CREATE RABBITMQ CLIENT rabbit_main
         CONFIG {
           'addr' = '{{rabbitmq_addr}}'
         };
-        CREATE INGESTOR rabbit_notifications
-        FROM RABBITMQ rabbit_main QUEUE notifications_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE RABBITMQ QUEUE INGESTOR rabbit_notifications
+        FROM rabbit_main QUEUE 'notifications_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -171,11 +169,11 @@ Feature: JAQ transformation
     Given Redis is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -188,14 +186,15 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_redis_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_redis_notifications;
-        CREATE CLIENT redis_main
-        TYPE REDIS
+        CREATE REDIS CLIENT redis_main
         POOL SIZE MIN 1 MAX 4
         CONFIG {
-          'addr' = '{{redis_addr}}'
+          'addr' = '{{redis_addr}}',
+          'subscription_buffer_messages' = '1024',
+          'idle_timeout_ms' = '30000'
         };
-        CREATE INGESTOR redis_notifications
-        FROM REDIS PUBSUB redis_main CHANNEL notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE REDIS PUBSUB INGESTOR redis_notifications
+        FROM redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -227,11 +226,11 @@ Feature: JAQ transformation
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -244,14 +243,13 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
-        CREATE CLIENT mqtt_main
-        TYPE MQTT
+        CREATE MQTT CLIENT mqtt_main
         CONFIG {
           'addr' = '{{mqtt_addr}}',
           'client_id' = 'nervix-cucumber-jaq-{{test_id}}'
         };
-        CREATE INGESTOR mqtt_notifications
-        FROM MQTT mqtt_main TOPIC notifications_{{test_id}} MODE NO_ACK SEQUENTIAL
+        CREATE MQTT TOPIC INGESTOR mqtt_notifications
+        FROM mqtt_main TOPIC 'notifications_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -283,11 +281,11 @@ Feature: JAQ transformation
     Given NATS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -300,13 +298,12 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_nats_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_nats_notifications;
-        CREATE CLIENT nats_main
-        TYPE NATS
+        CREATE NATS CLIENT nats_main
         CONFIG {
           'addr' = '{{nats_addr}}'
         };
-        CREATE INGESTOR nats_notifications
-        FROM NATS nats_main SUBJECT notifications_{{test_id}} QUEUE GROUP nats_notifications_group_{{test_id}} INSTANCES 1 MODE NO_ACK SEQUENTIAL
+        CREATE NATS SUBJECT INGESTOR nats_notifications
+        FROM nats_main SUBJECT 'notifications_{{test_id}}' QUEUE GROUP 'nats_notifications_group_{{test_id}}' INSTANCES 1 MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -337,11 +334,11 @@ Feature: JAQ transformation
   Scenario Outline: ZeroMQ ingestor applies JAQ transformation before decoding
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -354,14 +351,13 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_zeromq_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_zeromq_notifications;
-        CREATE CLIENT zeromq_main
-        TYPE ZEROMQ
+        CREATE ZEROMQ CLIENT zeromq_main
         CONFIG {
           'addr' = '{{zeromq_ingest_addr}}',
           'bind' = 'true'
         };
-        CREATE INGESTOR zeromq_notifications
-        FROM ZEROMQ zeromq_main MODE NO_ACK SEQUENTIAL
+        CREATE ZEROMQ PULL INGESTOR zeromq_notifications
+        FROM zeromq_main MODE NO ACK
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -393,12 +389,12 @@ Feature: JAQ transformation
     Given SQS is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And SQS queue "notifications_{{test_id}}" exists
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -411,14 +407,13 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_sqs_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_sqs_notifications;
-        CREATE CLIENT sqs_main
-        TYPE SQS
+        CREATE SQS CLIENT sqs_main
         CONFIG {
           'endpoint' = '{{sqs_endpoint}}',
           'region' = 'us-east-1'
         };
-        CREATE INGESTOR sqs_notifications
-        FROM SQS sqs_main QUEUE notifications_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+        CREATE SQS QUEUE INGESTOR sqs_notifications
+        FROM sqs_main QUEUE 'notifications_{{test_id}}' MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
         ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -449,11 +444,11 @@ Feature: JAQ transformation
   Scenario Outline: Websocket endpoint ingestor applies JAQ transformation before decoding
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -471,8 +466,8 @@ Feature: JAQ transformation
         ON edge
         PATH '/ws'
         TYPE WEBSOCKETS;
-        CREATE INGESTOR ws_notifications
-        FROM ENDPOINT ws_notifications_endpoint MODE NO_ACK SEQUENTIAL
+        CREATE WEBSOCKETS ENDPOINT INGESTOR ws_notifications
+        FROM ws_notifications_endpoint MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -504,11 +499,11 @@ Feature: JAQ transformation
     Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -521,16 +516,15 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
-        CREATE CLIENT http_main
-        TYPE HTTP
+        CREATE HTTP CLIENT http_main
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR http_notifications
-        FROM HTTP http_main EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING notification_codec
+        CREATE HTTP REQUEST INGESTOR http_notifications
+        FROM http_main EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -557,11 +551,11 @@ Feature: JAQ transformation
     Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64,
@@ -574,13 +568,12 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_ws_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_ws_notifications;
-        CREATE CLIENT ws_main
-        TYPE WEBSOCKETS
+        CREATE WEBSOCKETS CLIENT ws_main
         CONFIG {
           'endpoint' = '{{mock_ws_addr}}/ws/{{test_id}}'
         };
-        CREATE INGESTOR ws_notifications
-        FROM WEBSOCKETS ws_main MODE NO_ACK SEQUENTIAL
+        CREATE WEBSOCKETS CONNECTION INGESTOR ws_notifications
+        FROM ws_main MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -608,11 +601,11 @@ Feature: JAQ transformation
     Given Prometheus is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA sample (
         source STRING,
@@ -626,15 +619,14 @@ Feature: JAQ transformation
         CREATE IF NOT EXISTS SCHEMA source_branch ( source STRING );
         CREATE IF NOT EXISTS BRANCH by_prom_samples SCHEMA source_branch TTL 5m;
         CREATE RELAY samples SCHEMA sample BRANCHED BY by_prom_samples;
-        CREATE CLIENT prom_main
-        TYPE PROMETHEUS
+        CREATE PROMETHEUS CLIENT prom_main
         CONFIG {
           'addr' = '{{prometheus_addr}}',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR prom_samples
-        FROM PROMETHEUS prom_main QUERY 'label_replace(vector(42.5), "source", "local", "", "")' EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING sample_codec
+        CREATE PROMETHEUS QUERY INGESTOR prom_samples
+        FROM prom_main QUERY 'label_replace(vector(42.5), "source", "local", "", "")' EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING sample_codec
         TO samples
         INHERIT ALL
         BRANCHED BY by_prom_samples

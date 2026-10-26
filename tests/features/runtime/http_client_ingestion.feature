@@ -4,11 +4,11 @@ Feature: HTTP client ingestion
     And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
     And the HTTP mock endpoint is published under fixture DNS
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -16,14 +16,14 @@ Feature: HTTP client ingestion
       CREATE SCHEMA user_id_branch (user_id I64);
       CREATE BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
       CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
-      CREATE CLIENT http_main TYPE HTTP CONFIG {
+      CREATE HTTP CLIENT http_main CONFIG {
         'endpoint' = '{{mock_http_dns_addr}}/http/{{test_id}}',
         'method' = 'GET',
         'timeout_ms' = 5000
       };
-      CREATE INGESTOR http_notifications
-      FROM HTTP http_main EVERY 1s
-      ON QUIESCE SUSPEND DECODE USING notification_codec
+      CREATE HTTP REQUEST INGESTOR http_notifications
+      FROM http_main EVERY 1s
+      MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
       TO notifications
       INHERIT ALL
       BRANCHED BY by_http_notifications
@@ -49,11 +49,11 @@ Feature: HTTP client ingestion
     Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -67,16 +67,15 @@ Feature: HTTP client ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
-        CREATE CLIENT http_main
-        TYPE HTTP
+        CREATE HTTP CLIENT http_main
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR http_notifications
-        FROM HTTP http_main EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING notification_codec
+        CREATE HTTP REQUEST INGESTOR http_notifications
+        FROM http_main EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications
@@ -103,12 +102,12 @@ Feature: HTTP client ingestion
     Given the HTTP mock server is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     When ingestor "http_notifications" enters fault mode
-    And these NSPL commands are executed
+    And these Plexus commands are executed
       """
       CREATE SCHEMA notification (
         user_id I64
@@ -122,16 +121,15 @@ Feature: HTTP client ingestion
         CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
         CREATE IF NOT EXISTS BRANCH by_http_notifications SCHEMA user_id_branch TTL 5m;
         CREATE RELAY notifications SCHEMA notification BRANCHED BY by_http_notifications;
-        CREATE CLIENT http_main
-        TYPE HTTP
+        CREATE HTTP CLIENT http_main
         CONFIG {
           'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
           'method' = 'GET',
           'timeout_ms' = 5000
         };
-        CREATE INGESTOR http_notifications
-        FROM HTTP http_main EVERY 1s
-        ON QUIESCE SUSPEND DECODE USING notification_codec
+        CREATE HTTP REQUEST INGESTOR http_notifications
+        FROM http_main EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING notification_codec
         TO notifications
         INHERIT ALL
         BRANCHED BY by_http_notifications

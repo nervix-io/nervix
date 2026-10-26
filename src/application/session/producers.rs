@@ -22,6 +22,11 @@
 //! exceeds its credit. A batch beyond the credit is refused, and the producer is closed and ended as
 //! a protocol violation; the batches it already submitted still receive their outcomes.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(edge, reason = "owns the edges boundary declared above")
+)]
+
 use std::{collections::BTreeMap, num::NonZeroU64};
 
 use ahash::HashMap;
@@ -424,7 +429,7 @@ impl SessionProducers {
                 format!(
                     "ingestor '{}' reads {}, not client batches",
                     ingestor.as_str(),
-                    model.input.source_label()
+                    model.input.source_phrase()
                 ),
             ));
         }

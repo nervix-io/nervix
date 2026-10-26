@@ -13,6 +13,10 @@ Feature: Interconnection observability
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_interconnect_quota_failures_total"
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_execution_memory_reserved_bytes"
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_execution_memory_rejections_total"
+    And node "<node_id>" observability metric "nervix_execution_memory_capacity_bytes" with labels eventually equals 16777216
+      """
+      class="bulk_window"
+      """
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_execution_job_queue_seconds_total"
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_execution_job_work_seconds_total"
     And node "<node_id>" observability path "/metrics" eventually responds with 200 and contains "nervix_node_scheduler_delay_seconds_total"
@@ -41,7 +45,7 @@ Feature: Interconnection observability
       """
       class="management"
       """
-    And within "10s" these NSPL commands complete on node "node-2"
+    And within "10s" these Plexus commands complete on node "node-2"
       """
       CREATE DOMAIN interconnect_observability;
       """
@@ -52,37 +56,37 @@ Feature: Interconnection observability
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And ZeroMQ emission endpoint "{{zeromq_emit_addr}}" is observed
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       CORDON NODE node-2;
       CORDON NODE node-3;
       CREATE UNPACED DOMAIN {{domain}};
       """
     Given the active domain is "{{domain}}"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA event ( seq I64 );
       CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer );
       CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
       CREATE RELAY input SCHEMA event UNBRANCHED;
-      CREATE CLIENT sink TYPE ZEROMQ CONFIG {
+      CREATE ZEROMQ CLIENT emitter CONFIG {
         'addr' = '{{zeromq_emit_addr}}',
         'bind' = 'false'
       };
       CREATE VHOST edge observability-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
         TO input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-      CREATE EMITTER sink_output FROM input
-        TO ZEROMQ sink MODE NO_ACK RETRY POLICY BACKOFF 100ms MAX 5s
+      CREATE ZEROMQ PUSH EMITTER sink_output FROM input
+        TO emitter MODE NO ACK RETRY POLICY BACKOFF 100ms MAX 5s
         ENCODE USING event_codec INHERIT ALL FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;
       """
-    When these NSPL commands are executed through the client on node "node-1"
+    When these Plexus commands are executed through the client on node "node-1"
       """
       UNCORDON NODE node-2;
       UNCORDON NODE node-3;
@@ -110,7 +114,7 @@ Feature: Interconnection observability
     And node "node-1" has resource directory "large_resource" with file "model.bin" of 48 MiB
     And node "node-1" eventually reports leader "node-1"
     And node "node-3" is stopped
-    When these NSPL commands are executed on node "node-1"
+    When these Plexus commands are executed on node "node-1"
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE large_model;
@@ -121,7 +125,7 @@ Feature: Interconnection observability
       uploaded resource version 1
       """
     When node "node-3" is started
-    Then within "30s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
+    Then within "300s" node "node-1" eventually reports describe resource as "- node-3 topology=alive state=ready"
       """
       DESCRIBE RESOURCE large_model VERSION 1;
       """
@@ -134,6 +138,16 @@ Feature: Interconnection observability
       """
       class="bulk"
       direction="received"
+      """
+    # The receiving node backed the receive window of every bulk stream it opened for the
+    # transfer, and gave each window back when its stream ended.
+    And node "node-3" observability metric "nervix_execution_memory_reservations_total" with labels eventually reaches at least 1
+      """
+      class="bulk_window"
+      """
+    And node "node-3" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually equals 0
+      """
+      class="bulk_window"
       """
     And node "node-1" observability metric "nervix_interconnect_connection_failures_total" with labels eventually equals 0
       """

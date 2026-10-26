@@ -11,34 +11,53 @@ use session_service::{current_word_prefix, word_start};
 use test_fixtures::{test_addr, test_args, try_test_args};
 
 use super::*;
+use crate::memory_pressure::MemoryPressureConfigError;
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").assured("writing a byte into a String cannot fail");
+    }
+    out
+}
 
 #[test]
 fn args_parse_observability_listen_addr() {
     let args = test_args(&["--observability-listen-addr", "127.0.0.1:19090"]);
     let app = Application::try_from(args).expect("args should parse");
-    assert_eq!(app.observability_listen_addr, test_addr(19090));
+    assert_eq!(app.identity.observability_listen_addr, test_addr(19090));
 }
 
 #[test]
 fn args_default_to_the_application_shutdown_timeouts() {
     let args = test_args(&[]);
 
-    assert_eq!(args.drain_timeout, shutdown::DEFAULT_DRAIN_TIMEOUT);
-    assert_eq!(args.shutdown_timeout, shutdown::DEFAULT_SHUTDOWN_TIMEOUT);
+    assert_eq!(
+        args.settings.shutdown.drain_timeout.0,
+        shutdown::DEFAULT_DRAIN_TIMEOUT
+    );
+    assert_eq!(
+        args.settings.shutdown.shutdown_timeout.0,
+        shutdown::DEFAULT_SHUTDOWN_TIMEOUT
+    );
 }
 
 #[test]
 fn args_parse_shutdown_timeout() {
     let args = test_args(&["--shutdown-timeout", "2m"]);
 
-    assert_eq!(args.shutdown_timeout, Duration::from_secs(120));
+    assert_eq!(
+        args.settings.shutdown.shutdown_timeout.0,
+        Duration::from_secs(120)
+    );
 }
 
 #[test]
 fn args_parse_temp_dir() {
     let args = test_args(&["--temp-dir", "/tmp/nervix-temp"]);
     let app = Application::try_from(args).expect("args should parse");
-    assert_eq!(app.temp_dir, PathBuf::from("/tmp/nervix-temp"));
+    assert_eq!(app.identity.temp_dir, PathBuf::from("/tmp/nervix-temp"));
 }
 
 #[test]
@@ -53,12 +72,10 @@ fn args_parse_resource_store_limits() {
     ]);
     let app = Application::try_from(args).expect("args should parse");
 
-    assert_eq!(app.resource_store_limits.max_archive_bytes, 8 * 1024 * 1024);
-    assert_eq!(
-        app.resource_store_limits.max_extracted_bytes,
-        32 * 1024 * 1024
-    );
-    assert_eq!(app.resource_store_limits.max_file_count, 2048);
+    let limits = app.settings.resources.limits();
+    assert_eq!(limits.max_archive_bytes, 8 * 1024 * 1024);
+    assert_eq!(limits.max_extracted_bytes, 32 * 1024 * 1024);
+    assert_eq!(limits.max_file_count, 2048);
 }
 
 #[test]
@@ -74,14 +91,17 @@ fn args_parse_web_console_listen_addr() {
         "tls/dev/node-key.pem",
     ]);
     let app = Application::try_from(args).expect("args should parse");
-    assert_eq!(app.web_console_listen_addr, test_addr(17420));
-    assert_eq!(app.web_console_https_listen_addr, Some(test_addr(17443)));
+    assert_eq!(app.identity.web_console_listen_addr, test_addr(17420));
     assert_eq!(
-        app.web_console_tls_cert,
+        app.identity.web_console_https_listen_addr,
+        Some(test_addr(17443))
+    );
+    assert_eq!(
+        app.identity.web_console_tls_cert,
         Some(PathBuf::from("tls/dev/node.pem"))
     );
     assert_eq!(
-        app.web_console_tls_key,
+        app.identity.web_console_tls_key,
         Some(PathBuf::from("tls/dev/node-key.pem"))
     );
 }
@@ -112,9 +132,9 @@ fn parse_and_text_encoding_helpers_roundtrip() {
 /// Every option the node reads as a duration.
 const DURATION_OPTIONS: [&str; 12] = [
     "--node-unavailability-timeout",
+    "--gossip-interval",
+    "--clock-skew-tolerance",
     "--raft-heartbeat-interval",
-    "--raft-election-timeout-min",
-    "--raft-election-timeout-max",
     "--transaction-idle-timeout",
     "--transaction-tombstone-retention",
     "--command-retry-validity",
@@ -168,6 +188,36 @@ fn server_args_report_why_duration_text_is_malformed() {
 }
 
 #[test]
+fn a_refused_command_line_value_names_its_reason_once() {
+    let duration = parse_human_duration("oops").expect_err("the value is not a duration");
+    let ratio = parse_trace_sample_ratio("often").expect_err("the value is not a number");
+    let float_cause = "often"
+        .parse::<f64>()
+        .expect_err("the value is not a number");
+
+    assert_eq!(
+        format!("{duration:#}"),
+        "invalid duration: expected number at 0"
+    );
+    assert_eq!(
+        format!("{ratio:#}"),
+        format!("invalid trace sample ratio: {float_cause}")
+    );
+
+    let refused = try_test_args(&["--otel-trace-sample-ratio", "often"])
+        .expect_err("the value is not a number");
+    assert_eq!(refused.kind(), clap::error::ErrorKind::ValueValidation);
+    let rendered = refused.to_string();
+    assert_eq!(
+        rendered
+            .matches(&format!("invalid trace sample ratio: {float_cause}"))
+            .count(),
+        1,
+        "{rendered}"
+    );
+}
+
+#[test]
 fn server_args_parse_memory_pressure_options() {
     let args = test_args(&[
         "--memory-high-watermark",
@@ -180,7 +230,11 @@ fn server_args_parse_memory_pressure_options() {
         "500ms",
     ]);
     let app = Application::try_from(args).expect("args should parse");
-    let memory_pressure = app.memory_pressure.expect("memory pressure configured");
+    let memory_pressure = app
+        .settings
+        .memory_pressure
+        .config()
+        .expect("memory pressure configured");
 
     assert_eq!(memory_pressure.high_watermark, ubyte::ByteUnit::Mebibyte(2));
     assert_eq!(memory_pressure.low_watermark, ubyte::ByteUnit::Mebibyte(1));
@@ -197,6 +251,29 @@ fn server_args_reject_incomplete_memory_pressure_watermarks() {
 }
 
 #[test]
+fn server_args_reject_a_low_watermark_at_or_above_the_high_one() {
+    let args = test_args(&[
+        "--memory-high-watermark",
+        "1MiB",
+        "--memory-low-watermark",
+        "2MiB",
+    ]);
+
+    let error = Application::try_from(args).expect_err("the low watermark must be lower");
+    assert!(matches!(
+        error.current_context(),
+        AppError::InvalidMemoryPressureConfig
+    ));
+    assert_eq!(
+        error.downcast_ref::<MemoryPressureConfigError>(),
+        Some(&MemoryPressureConfigError::LowWatermarkNotBelowHigh {
+            low: ubyte::ByteUnit::Mebibyte(2),
+            high: ubyte::ByteUnit::Mebibyte(1),
+        })
+    );
+}
+
+#[test]
 fn server_args_parse_opentelemetry_options() {
     let args = test_args(&[
         "--otel-enabled",
@@ -208,30 +285,30 @@ fn server_args_parse_opentelemetry_options() {
         "0.5",
     ]);
 
-    assert!(args.otel_enabled);
-    assert_eq!(args.otel_otlp_endpoint, "http://collector:4317");
-    assert_eq!(args.otel_service_name, "nervix-test");
-    assert_eq!(args.otel_trace_sample_ratio, 0.5);
+    assert!(args.tracing.otel_enabled);
+    assert_eq!(args.tracing.otel_otlp_endpoint, "http://collector:4317");
+    assert_eq!(args.tracing.otel_service_name, "nervix-test");
+    assert_eq!(args.tracing.otel_trace_sample_ratio, 0.5);
 }
 
 #[test]
 fn server_args_do_not_require_opentelemetry_options() {
     let args = test_args(&[]);
 
-    assert!(!args.otel_enabled);
-    assert_eq!(args.otel_otlp_endpoint, "http://127.0.0.1:4317");
-    assert_eq!(args.otel_service_name, "nervix");
-    assert_eq!(args.otel_trace_sample_ratio, 1.0);
+    assert!(!args.tracing.otel_enabled);
+    assert_eq!(args.tracing.otel_otlp_endpoint, "http://127.0.0.1:4317");
+    assert_eq!(args.tracing.otel_service_name, "nervix");
+    assert_eq!(args.tracing.otel_trace_sample_ratio, 1.0);
 }
 
 #[test]
 fn server_args_only_require_opentelemetry_enable_flag_to_enable_export() {
     let args = test_args(&["--otel-enabled"]);
 
-    assert!(args.otel_enabled);
-    assert_eq!(args.otel_otlp_endpoint, "http://127.0.0.1:4317");
-    assert_eq!(args.otel_service_name, "nervix");
-    assert_eq!(args.otel_trace_sample_ratio, 1.0);
+    assert!(args.tracing.otel_enabled);
+    assert_eq!(args.tracing.otel_otlp_endpoint, "http://127.0.0.1:4317");
+    assert_eq!(args.tracing.otel_service_name, "nervix");
+    assert_eq!(args.tracing.otel_trace_sample_ratio, 1.0);
 }
 
 #[test]

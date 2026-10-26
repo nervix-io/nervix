@@ -1,7 +1,7 @@
 //! Models and statements keep every field through their archived forms, and a stored Model's
 //! resource versions survive widening into the versions a statement asks for.
 //!
-//! The domain is the vocabulary's: every Model family and statement form, including states NSPL
+//! The domain is the vocabulary's: every Model family and statement form, including states Plexus
 //! cannot spell, such as negative and non-finite literals, empty arrays and collection casts. A
 //! stored Model binds concrete resource versions; a statement carries `LATEST` or a number.
 
@@ -20,6 +20,20 @@ fn pinned(model: Model<RequestedResourceVersion>) -> Model {
         Ok(model) => model,
         Err(never) => match never {},
     }
+}
+
+#[test]
+fn archived_model_corpus_reaches_resumed_restore() {
+    let bytes = include_bytes!(
+        "__fuzz__/models__bolero_models_and_statements_round_trip_through_their_archives/corpus/\
+         resume"
+    );
+    let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+    let _stored = pinned(arbitrary.model());
+    let Statement::Restore(restore) = arbitrary.statement() else {
+        panic!("the resume corpus entry generates a current restore statement");
+    };
+    assert_eq!(restore.lifecycle, nervix_models::RestoreLifecycle::Resume);
 }
 
 #[test]

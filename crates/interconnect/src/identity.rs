@@ -2,16 +2,26 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Loading cluster trust, TLS 1.3 configuration, certificate SAN identity, and the
-//!   identity a transport binds as.
+//! - **Owns.** Loading cluster trust and its fingerprint, TLS 1.3 configuration, certificate SAN
+//!   identity, and the identity and join terms a transport binds as.
 //! - **Depends on.** The shared cluster node name vocabulary and X.509/TLS primitives.
 //! - **Must not know.** HTTP/2 pools, request routing, or runtime operations.
 
-use std::{io, net::IpAddr, path::Path};
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
+use std::{collections::BTreeSet, io, net::IpAddr, path::Path};
 
 use error_stack::Report;
 use meticulous::OptionExt as _;
-use nervix_models::ClusterNodeName;
+use nervix_models::{
+    ClusterNodeName, PrerequisiteTimings, RaftLogDurability, TrustRootFingerprint,
+};
 use nervix_primitives::sync::StdArc;
 use percent_encoding::percent_decode_str;
 use rustls::{
@@ -21,6 +31,7 @@ use rustls::{
     server::WebPkiClientVerifier,
 };
 use rustls_pki_types::pem::{Error as PemError, PemObject};
+use sha2::{Digest as _, Sha256};
 use url::Url;
 use x509_parser::{
     extensions::GeneralName,
@@ -189,13 +200,24 @@ fn parse_identity_uri(raw: &str) -> Result<(String, ClusterNodeName), Report<Tls
     Ok((cluster_id, node_id))
 }
 
-/// Who one transport is: the cluster and node its certificate must name, and the host it
-/// advertises, which its certificate must also name.
+/// Who one transport is: the cluster and node its certificate must name, the host it advertises,
+/// which its certificate must also name, and the terms it joins the cluster with.
 #[derive(Debug, Clone)]
 pub struct TransportIdentity {
     pub cluster_id: String,
     pub node_id: ClusterNodeName,
     pub advertised_host: String,
+    pub join_terms: JoinTerms,
+}
+
+/// The prerequisites a node brings that the transport does not own itself: the durability its
+/// Raft log promises and its timings. The transport adds its cluster identity, the trust root of
+/// its current credentials, the wire contract it speaks and the consensus floors of its executor,
+/// and carries the whole record in every connection handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinTerms {
+    pub durability: RaftLogDurability,
+    pub timings: PrerequisiteTimings,
 }
 
 #[derive(Clone)]
@@ -204,6 +226,7 @@ pub struct TlsConfigBundle {
     pub(crate) server_config: StdArc<ServerConfig>,
     pub(crate) certificate: CertificateIdentity,
     pub(crate) clock: TransportClock,
+    pub(crate) trust_root: TrustRootFingerprint,
 }
 
 impl TlsConfigBundle {
@@ -260,6 +283,7 @@ impl TlsConfigBundle {
         certificate: CertificateIdentity,
         clock: TransportClock,
     ) -> Result<Self, Report<TlsConfigError>> {
+        let trust_root = trust_root_fingerprint(&ca_certs);
         let mut roots = RootCertStore::empty();
         for cert in ca_certs {
             roots.add(cert).map_err(TlsConfigError::from)?;
@@ -294,8 +318,30 @@ impl TlsConfigBundle {
             server_config: StdArc::new(server_config),
             certificate,
             clock,
+            trust_root,
         })
     }
+
+    /// The fingerprint of the trust anchors this bundle verifies peers against.
+    pub fn trust_root(&self) -> TrustRootFingerprint {
+        self.trust_root
+    }
+}
+
+/// The SHA-256 digest over the sorted SHA-256 digests of every trust anchor's DER encoding, so the
+/// same set of anchors gives the same fingerprint whatever order its file lists them in.
+fn trust_root_fingerprint(anchors: &[CertificateDer<'static>]) -> TrustRootFingerprint {
+    let mut digests = BTreeSet::new();
+    for anchor in anchors {
+        let digest: [u8; 32] = Sha256::digest(anchor.as_ref()).into();
+        digests.insert(digest);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"nervix/interconnect/trust-root\0");
+    for digest in &digests {
+        hasher.update(digest);
+    }
+    TrustRootFingerprint::from_digest(hasher.finalize().into())
 }
 
 fn load_certificates(

@@ -4,7 +4,7 @@ Feature: Bounded execution and transient memory
     Given a <cluster_size> node nervix cluster is started
     When bulk execution on node "<node_id>" is occupied
     Then node "<node_id>" observability path "/readyz" eventually responds with 200 and "ready"
-    And within "10s" these NSPL commands complete on node "<node_id>"
+    And within "10s" these Plexus commands complete on node "<node_id>"
       """
       CREATE DOMAIN bounded_execution;
       """
@@ -18,7 +18,7 @@ Feature: Bounded execution and transient memory
 
   Scenario Outline: Credentials a node cannot verify now are answered as unavailable
     Given a <cluster_size> node nervix cluster is started
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       CREATE USER busy_user WITH PASSWORD 'busy-password';
       """
@@ -43,12 +43,12 @@ Feature: Bounded execution and transient memory
   Scenario Outline: An emitter keeps its rows while no node can take their transformed encoding
     Given Kafka is running
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
     And Kafka topic "transformed_out_{{test_id}}" is observed
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA notification ( user_id I64 );
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT ( user_id integer );
@@ -60,8 +60,8 @@ Feature: Bounded execution and transient memory
       CREATE RELAY notifications SCHEMA notification UNBRANCHED;
       CREATE VHOST edge transformed-{{test_id}}.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/notifications' TYPE HTTP;
-      CREATE INGESTOR notification_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR notification_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING notification_in
         TO notifications
         INHERIT ALL
@@ -69,12 +69,11 @@ Feature: Bounded execution and transient memory
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE CLIENT kafka_main
-        TYPE KAFKA
+      CREATE KAFKA CLIENT kafka_main
         CONFIG {
           'bootstrap.servers' = '{{kafka_addr}}'
         };
-      CREATE EMITTER transformed_notifications FROM notifications TO KAFKA kafka_main TOPIC transformed_out_{{test_id}} MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_out
+      CREATE KAFKA TOPIC EMITTER transformed_notifications FROM notifications TO kafka_main TOPIC 'transformed_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 1s ENCODE USING notification_out
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -104,7 +103,7 @@ Feature: Bounded execution and transient memory
   @retained_unfolding_waits_for_extension_room
   Scenario Outline: A retained endpoint body waits for the extension workers when it drains
     Given a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA retained_event ( seq I64 );
@@ -115,8 +114,8 @@ Feature: Bounded execution and transient memory
       CREATE RELAY retained_events SCHEMA retained_event UNBRANCHED;
       CREATE VHOST edge http-{{test_id}}-retained-unfolding.example.com;
       CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
-      CREATE INGESTOR retained_source
-        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+      CREATE HTTP ENDPOINT INGESTOR retained_source
+        FROM ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING retained_codec
         TO retained_events INHERIT ALL UNBRANCHED
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
@@ -124,9 +123,9 @@ Feature: Bounded execution and transient memory
       START;
       """
     Given the entity gate for domain "{{domain}}" pauses after engagement
-    When these NSPL commands begin executing in the background
+    When these Plexus commands begin executing in the background
       """
-      ALTER INGESTOR retained_source SET DECODE USING delivery_codec;
+      ALTER HTTP ENDPOINT INGESTOR retained_source SET DECODE USING delivery_codec;
       """
     Then the entity gate pause for domain "{{domain}}" is reached
     And within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "status: quiesced"
@@ -145,7 +144,7 @@ Feature: Bounded execution and transient memory
     Then within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "nervix_ingestor_quiesce_buffered_records: 3"
     When extension execution is saturated on every node
     And the entity gate pause for domain "{{domain}}" is released
-    Then the background NSPL execution succeeds
+    Then the background Plexus execution succeeds
     And within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "status: running"
     And within "10s" node "node-1" eventually reports describe ingestor "retained_source" as "nervix_ingestor_quiesce_buffered_records: 3"
     When extension execution is released on every node
@@ -161,3 +160,127 @@ Feature: Bounded execution and transient memory
       | cluster_size |
       | 1            |
       | 3            |
+
+  @polled_unfolding_waits_for_extension_room
+  Scenario Outline: A polled payload waits for the extension workers when the node cannot unfold it
+    Given the HTTP mock server is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA polled_event ( user_id I64 );
+      CREATE CODEC polled_codec FROM JSON TO SCHEMA polled_event
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.';
+      CREATE RELAY polled_events SCHEMA polled_event UNBRANCHED;
+      CREATE HTTP CLIENT polled_http CONFIG {
+        'endpoint' = '{{mock_http_addr}}/http/{{test_id}}',
+        'method' = 'GET',
+        'timeout_ms' = 5000
+      };
+      CREATE HTTP REQUEST INGESTOR polled_source
+        FROM polled_http EVERY 1s
+        MODE NO ACK ON QUIESCE SUSPEND DECODE USING polled_codec
+        TO polled_events INHERIT ALL UNBRANCHED
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION polled_subscription TO polled_events;
+      """
+    When extension execution is saturated on every node
+    And these Plexus commands are executed
+      """
+      START;
+      """
+    # The mock answers only the first poll with its payload, and nothing can be unfolded while
+    # every extension worker and place in the extension wait queue is held.
+    Then the HTTP mock eventually answers a poll with its payload
+    And the relay subscription does not receive a payload within "3s"
+    When extension execution is released on every node
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @unacknowledged_unfolding_waits_for_extension_room
+  Scenario Outline: An unacknowledged <source> payload waits for the extension workers when the node cannot unfold it
+    Given unacknowledged source "<source>" is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When the unacknowledged source "<source>" ingestor is created
+    And extension execution is saturated on every node
+    And these Plexus commands are executed
+      """
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "unacknowledged_source" on the leader node contains
+      """
+      ready: true
+      """
+    When the unacknowledged source "<source>" delivers the payload of user 42
+    # Nothing can be unfolded while every extension worker and place in the extension wait queue
+    # is held.
+    Then the relay subscription does not receive a payload within "3s"
+    When extension execution is released on every node
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+
+    Examples:
+      | cluster_size | source |
+      | 1            | nats   |
+      | 3            | nats   |
+      | 1            | syslog |
+      | 3            | syslog |
+      | 1            | zeromq |
+      | 3            | zeromq |
+
+  @unacknowledged_unfolding_refused_without_extension_room
+  Scenario Outline: An unacknowledged <source> payload the node cannot unfold is refused and counted
+    Given unacknowledged source "<source>" is running
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When the unacknowledged source "<source>" ingestor is created
+    And extension execution is saturated on every node
+    And these Plexus commands are executed
+      """
+      START;
+      """
+    Then within "30s" DESCRIBE INGESTOR "unacknowledged_source" on the leader node contains
+      """
+      ready: true
+      """
+    When the unacknowledged source "<source>" delivers the payload of user 42
+    Then within "30s" the active session observes a server error containing
+      """
+      the node's bounded execution did not unfold the payload
+      """
+    And the unacknowledged source ingestor eventually counts 1 refused payload
+    When extension execution is released on every node
+    And the unacknowledged source "<source>" delivers the payload of user 7
+    Then within "30s" the relay subscription receives a payload
+      """
+      "user_id":7
+      """
+
+    Examples:
+      | cluster_size | source           |
+      | 1            | kafka            |
+      | 3            | kafka            |
+      | 1            | mqtt             |
+      | 3            | mqtt             |
+      | 1            | pulsar           |
+      | 3            | pulsar           |
+      | 1            | redis            |
+      | 3            | redis            |
+      | 1            | websocket client |
+      | 3            | websocket client |

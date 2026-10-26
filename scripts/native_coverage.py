@@ -3,22 +3,37 @@
 """Collect LLVM source coverage from the extra checks during the runs CI already makes of them.
 
 `just coverage-native-extras [producer ...]` runs `run`. A producer is an extra check whose recipe
-executes Nervix code natively in ordinary mode: `test-typed-ratchet` qualifies compiler-resolved
+executes Nervix code natively in its declared mode: `test-typed-ratchet` qualifies compiler-resolved
 source diagnostics, generated reports, semantic fixtures and paired API doctests with the pinned
 compiler's matching LLVM tools; `bench-smoke` exercises every Criterion body once,
-`test-primitives` runs the primitive boundary's conformance checks, and `nspl-completion-walk`
-walks the NSPL completion graph. Without names every producer runs, in that order. A producer runs
+`test-primitives` runs the primitive boundary's conformance checks, and `plexus-completion-walk`
+walks the Plexus completion graph. `test-shuttle` and `test-loom` collect the canonical inventories,
+`test-turmoil` collects the canonical simulation suite, including its fresh-process attempts,
+`test-deadlock-evidence-order` executes diagnostic owners and disposable-process probes,
+`test-deadlock-report` exercises the ordinary local report command in its own build, and
+`test-deloxide`, `test-deloxide-order`, `test-deloxide-stress` and `test-deloxide-stress-restore`
+run the whole Deloxide diagnostic lane of each selection, each in the instrumented build of the
+diagnostic feature its selection compiles.
+`test-primitives` selects the native conformance producers of every mode. Without names every producer runs. A producer runs
 its check exactly as `just <producer>` does and fails when the check fails, which is why CI's
-extra-tests job runs those checks through this command instead of beside it.
+jobs run those checks through this command instead of beside it.
 
 A check's recipes fall into three parts, and the justfile must compose the check from exactly
 those parts. The prepare recipes, such as the web console the server benches link, run first in the
 ordinary environment. The instrumented recipe then runs in the environment that
 `cargo llvm-cov show-env --sh --no-rustc-wrapper` describes: every crate is built with source
 coverage instrumentation, the configured compiler wrapper stays in place so kache still serves the
-build, and the build goes to `<target>/native-coverage-build`, so ordinary builds are not
-invalidated. The finish recipes complete the check outside instrumentation: compile-only checks,
-browser builds and modeled modes, whose coverage this command does not claim.
+build, and ordinary instrumentation goes to `<target>/native-coverage-build`; other modes use
+`<target>/native-coverage-build-<mode>`, so ordinary builds are not
+invalidated. The Deloxide lanes instrument only workspace crates instead: the collector moves the
+instrumentation flags into a workspace compiler wrapper, `coverage_workspace_wrapper.py`, which
+Cargo runs beneath the configured kache for workspace crates alone, as `cargo llvm-cov` itself does
+for the ordinary coverage build. Their dependencies, wasmtime's compiler among them, then run at
+full speed under nodes whose product deadlines the lane must meet, and their reports are the same,
+because export keeps only repository sources. Kache runs a workspace wrapper chain directly, so
+those workspace crates are compiled rather than served from the cache. The finish recipes complete
+the check outside instrumentation: compile-only checks,
+browser builds. Primitive compile checks and Loom weakening qualification run independently.
 When a producer selects a compiler, its prepare recipes install that toolchain before the
 collector resolves the compiler and validates its LLVM tools. Its attempt directory uses the
 requested toolchain's name, and the record gains the installed compiler identity after preparation.
@@ -54,6 +69,18 @@ It reads `running` from the moment the directory exists, so an interrupted colle
 `failed` or `interrupted` otherwise, naming the stage. An attempt keeps its raw profiles, whatever
 its verdict, as the evidence the report was made from; `export.log` holds the LLVM tools' own
 diagnostics, each bounded.
+
+The model runners write `models.json` with the canonical discovery, selection, executions and
+completions. Shuttle retains both exploration and nondeterminism records, and Loom retains each
+InvariantId, execution count and bounds. The Deloxide lane writes `lane.json` with its discovery,
+selection, executions, completions and the qualification of every process's evidence. The
+collector requires complete matching evidence before export; qualification never supplies
+current-source counters. The instrumented recipe also learns the target directory its prepare
+recipes built into, so a check runs prepared binaries from there while it builds its own
+instrumented.
+
+The record times every stage it reaches, so a check's budget can be set from what preparation,
+the instrumented run, export and finishing each took.
 """
 
 from __future__ import annotations
@@ -66,6 +93,7 @@ import json
 import os
 import shlex
 import signal
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -79,6 +107,14 @@ REPOSITORY = SCRIPT.parent.parent
 BUILD_DIRECTORY = "native-coverage-build"
 COLLECTION_DIRECTORY = "native-coverage"
 ATTEMPT_VARIABLE = "NERVIX_NATIVE_COVERAGE_ATTEMPT"
+# The target directory the prepare recipes built into, which the instrumented recipe reads prepared
+# binaries from.
+PREPARED_TARGET_VARIABLE = "NERVIX_PREPARED_TARGET_DIR"
+# The workspace compiler wrapper of a producer that instruments only workspace crates, and the
+# instrumentation flags it adds, separated as in CARGO_ENCODED_RUSTFLAGS.
+WORKSPACE_WRAPPER = SCRIPT.with_name("coverage_workspace_wrapper.py")
+WORKSPACE_FLAGS_VARIABLE = "NERVIX_NATIVE_COVERAGE_WORKSPACE_RUSTFLAGS"
+ENCODED_FLAG_SEPARATOR = "\x1f"
 EXECUTIONS = "executions.jsonl"
 PROFILES = "profiles"
 MERGED_PROFILE = "merged.profdata"
@@ -147,6 +183,15 @@ SOURCE_POLICY = {
 }
 
 
+class InstrumentedCrates(enum.StrEnum):
+    """Which crates of a producer's build carry source coverage instrumentation."""
+
+    # Every crate, dependencies included, through the build's own compiler flags.
+    EVERY = "every"
+    # Only workspace crates, through a workspace compiler wrapper beneath the configured kache.
+    WORKSPACE = "workspace"
+
+
 @dataclass(frozen=True)
 class Producer:
     """An extra check whose executions are collected, and the recipes the check consists of."""
@@ -157,9 +202,17 @@ class Producer:
     instrumented: str
     finish: tuple[str, ...]
     toolchain: str | None = None
+    filterable: bool = False
+    # The Deloxide lane selection its instrumented recipe runs, whose complete record export
+    # requires; `None` for a check that is not the lane. The lane builds in the mode's build.
+    lane: str | None = None
+    instrumented_crates: InstrumentedCrates = InstrumentedCrates.EVERY
 
-    def rerun(self) -> str:
-        return f"just coverage-native-extras {self.name}"
+    def rerun(self, filter_text: str = "") -> str:
+        command = f"just coverage-native-extras {self.name}"
+        if filter_text:
+            command += f" --filter {shlex.quote(filter_text)}"
+        return command
 
     def recipes(self) -> list[str]:
         return [*self.prepare, self.instrumented, *self.finish]
@@ -177,23 +230,72 @@ PRODUCERS: tuple[Producer, ...] = (
     Producer(
         name="bench-smoke",
         mode="ordinary",
-        prepare=("build-web-console",),
+        prepare=("build-web-console", "wasm-processor-guests", "download-onnxruntime"),
         instrumented="bench-smoke-bodies",
         finish=(),
     ),
     Producer(
-        name="test-primitives",
+        name="test-primitives-ordinary",
         mode="ordinary",
         prepare=(),
         instrumented="test-primitives-ordinary",
-        finish=("test-primitives-modeled", "test-primitives-compile"),
+        finish=(),
+    ),
+    *(
+        Producer(
+            name=f"test-primitives-{mode}", mode=mode, prepare=(),
+            instrumented=f"test-primitives-{mode}", finish=(),
+        )
+        for mode in ("shuttle", "loom", "turmoil", "deloxide")
     ),
     Producer(
-        name="nspl-completion-walk",
+        name="plexus-completion-walk",
         mode="ordinary",
         prepare=(),
-        instrumented="nspl-completion-walk",
+        instrumented="plexus-completion-walk",
         finish=(),
+    ),
+    Producer(
+        name="validate-connector-matrix", mode="ordinary", prepare=("test-connector-matrix",),
+        instrumented="validate-connector-matrix-render", finish=(),
+    ),
+    Producer(
+        name="test-shuttle", mode="shuttle",
+        prepare=("build-web-console", "wasm-processor-guests", "download-onnxruntime"),
+        instrumented="test-shuttle-checks", finish=(), filterable=True,
+    ),
+    Producer(
+        name="test-loom", mode="loom", prepare=("build-web-console",),
+        instrumented="test-loom-models", finish=(), filterable=True,
+    ),
+    Producer(
+        name="test-turmoil", mode="turmoil", prepare=(),
+        instrumented="test-turmoil", finish=(),
+    ),
+    Producer(
+        name="test-deadlock-evidence-order", mode="deloxide-order", prepare=(),
+        instrumented="test-deadlock-evidence-order", finish=(),
+    ),
+    Producer(
+        name="test-deadlock-report", mode="ordinary", prepare=(),
+        instrumented="test-deadlock-report", finish=(),
+    ),
+    # The lanes' nodes must meet product deadlines while they prepare WASM processors and Arrow
+    # state, which instrumented dependencies made several times slower. Each lane selection
+    # collects in the build of the diagnostic feature it compiles, as tests/deloxide-inventory.toml
+    # declares it: the stressed restore scenarios share the stress selection's build.
+    *(
+        Producer(
+            name=f"test-{selection}", mode=feature, prepare=("tests-deps",),
+            instrumented=f"test-{selection}-workloads", finish=(), lane=selection,
+            instrumented_crates=InstrumentedCrates.WORKSPACE,
+        )
+        for selection, feature in (
+            ("deloxide", "deloxide"),
+            ("deloxide-order", "deloxide-order"),
+            ("deloxide-stress", "deloxide-stress"),
+            ("deloxide-stress-restore", "deloxide-stress"),
+        )
     ),
 )
 
@@ -242,6 +344,11 @@ def validate_composition(producer: Producer, recipes: Mapping[str, object]) -> N
     check = declared[producer.name]
     composition = dependency_names(check)
     expected = producer.recipes()
+    if producer.filterable:
+        expected[expected.index(producer.instrumented)] += " with arguments"
+        dependency = check["dependencies"][-1]
+        if dependency.get("arguments") != [["variable", "filter"]]:
+            raise RunnerError(f"`{producer.name}` must forward its filter to `{producer.instrumented}`")
     if composition != expected:
         raise RunnerError(
             f"`just {producer.name}` must consist of exactly {', '.join(expected)} for its "
@@ -260,12 +367,15 @@ def select_producers(names: Sequence[str], producers: Sequence[Producer]) -> lis
     known = {producer.name: producer for producer in producers}
     selected: list[Producer] = []
     for name in names:
-        producer = known.get(name)
-        if producer is None:
+        matching = [producer for producer in producers if name == "test-primitives" and producer.name.startswith("test-primitives-")]
+        if not matching and name in known:
+            matching = [known[name]]
+        if not matching:
             raise RunnerError(f"no producer `{name}`; the producers are {', '.join(known)}")
-        if producer in selected:
-            raise RunnerError(f"`{name}` is named twice")
-        selected.append(producer)
+        for producer in matching:
+            if producer in selected:
+                raise RunnerError(f"`{producer.name}` is named twice")
+            selected.append(producer)
     return selected
 
 
@@ -485,9 +595,11 @@ class Workspace:
 
     root: Path
     target: Path
+    mode: str = "ordinary"
 
     def build(self) -> Path:
-        return self.target / BUILD_DIRECTORY
+        name = BUILD_DIRECTORY if self.mode == "ordinary" else f"{BUILD_DIRECTORY}-{self.mode}"
+        return self.target / name
 
     def new_attempt(self, producer: Producer, toolchain: str, name: str) -> Path:
         directory = (
@@ -522,6 +634,11 @@ class Workspace:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise RunnerError(f"another native coverage run is using {build}") from None
+            # Cargo tags directories it creates. The collector creates this one first to lock
+            # it, so it also owns the cache marker that permits Cargo's guarded cleanup.
+            (build / "CACHEDIR.TAG").write_text(
+                "Signature: 8a477f597d28d172789f06886806bc55\n", encoding="utf-8"
+            )
             yield
 
     def display(self, path: Path) -> str:
@@ -548,7 +665,7 @@ def parse_exports(text: str) -> dict[str, str]:
 def compiler_flags(exported: Mapping[str, str]) -> list[str]:
     encoded = exported.get("CARGO_ENCODED_RUSTFLAGS")
     if encoded is not None:
-        return [flag for flag in encoded.split("\x1f") if flag]
+        return [flag for flag in encoded.split(ENCODED_FLAG_SEPARATOR) if flag]
     return exported.get("RUSTFLAGS", "").split()
 
 
@@ -561,6 +678,42 @@ def instruments_coverage(flags: Sequence[str]) -> bool:
     return False
 
 
+# The cfg values `cargo llvm-cov` sets beside the instrumentation, which belong to the crates it
+# instruments.
+COVERAGE_CFGS = frozenset({"coverage", "coverage_nightly"})
+
+
+@dataclass(frozen=True)
+class SeparatedFlags:
+    """A build's compiler flags apart from the instrumentation a workspace wrapper adds instead."""
+
+    build: tuple[str, ...]
+    coverage: tuple[str, ...]
+
+
+def separate_coverage_flags(flags: Sequence[str]) -> SeparatedFlags:
+    build: list[str] = []
+    coverage: list[str] = []
+    index = 0
+    while index < len(flags):
+        flag = flags[index]
+        following = flags[index + 1] if index + 1 < len(flags) else None
+        if flag == "-C" and following == "instrument-coverage":
+            coverage.extend([flag, following])
+            index += 2
+            continue
+        if flag == "--cfg" and following in COVERAGE_CFGS:
+            coverage.extend([flag, following])
+            index += 2
+            continue
+        if flag == "-Cinstrument-coverage" or flag.removeprefix("--cfg=") in COVERAGE_CFGS:
+            coverage.append(flag)
+        else:
+            build.append(flag)
+        index += 1
+    return SeparatedFlags(build=tuple(build), coverage=tuple(coverage))
+
+
 def runner_variable(host: str) -> str:
     return "CARGO_TARGET_" + host.upper().replace("-", "_").replace(".", "_") + "_RUNNER"
 
@@ -568,15 +721,23 @@ def runner_variable(host: str) -> str:
 @dataclass(frozen=True)
 class Instrumentation:
     environment: dict[str, str]
+    # The flags every crate of the build is compiled with.
     flags: tuple[str, ...]
+    crates: InstrumentedCrates = InstrumentedCrates.EVERY
+    # The flags the workspace wrapper adds to workspace crates alone.
+    workspace_flags: tuple[str, ...] = ()
 
     def describe(self, workspace: Workspace) -> dict[str, object]:
-        return {
+        description: dict[str, object] = {
             "target_directory": workspace.display(workspace.build()),
+            "instrumented_crates": str(self.crates),
             "rustflags": list(self.flags),
             "runtime_profiles": f"{PROFILES}/{PROFILE_PATTERN}",
             "build_time_profiles": BUILD_TIME_PROFILE,
         }
+        if self.crates is InstrumentedCrates.WORKSPACE:
+            description["workspace_rustflags"] = list(self.workspace_flags)
+        return description
 
 
 def instrumentation(
@@ -585,6 +746,7 @@ def instrumentation(
     toolchain: Toolchain,
     attempt: Path,
     base: Mapping[str, str],
+    crates: InstrumentedCrates = InstrumentedCrates.EVERY,
 ) -> Instrumentation:
     runner = runner_variable(toolchain.host)
     if runner in base:
@@ -618,7 +780,28 @@ def instrumentation(
     environment["LLVM_PROFILE_FILE"] = BUILD_TIME_PROFILE
     environment[runner] = " ".join(command)
     environment[ATTEMPT_VARIABLE] = str(attempt)
-    return Instrumentation(environment=environment, flags=tuple(flags))
+    environment[PREPARED_TARGET_VARIABLE] = str(workspace.target)
+    if crates is InstrumentedCrates.EVERY:
+        return Instrumentation(environment=environment, flags=tuple(flags))
+
+    if "RUSTC_WORKSPACE_WRAPPER" in base:
+        raise RunnerError(
+            "RUSTC_WORKSPACE_WRAPPER is already set; instrumenting only workspace crates composes "
+            "a workspace compiler wrapper of its own"
+        )
+    separated = separate_coverage_flags(flags)
+    if "CARGO_ENCODED_RUSTFLAGS" in exported:
+        environment["CARGO_ENCODED_RUSTFLAGS"] = ENCODED_FLAG_SEPARATOR.join(separated.build)
+    else:
+        environment["RUSTFLAGS"] = " ".join(separated.build)
+    environment["RUSTC_WORKSPACE_WRAPPER"] = str(WORKSPACE_WRAPPER)
+    environment[WORKSPACE_FLAGS_VARIABLE] = ENCODED_FLAG_SEPARATOR.join(separated.coverage)
+    return Instrumentation(
+        environment=environment,
+        flags=separated.build,
+        crates=crates,
+        workspace_flags=separated.coverage,
+    )
 
 
 def aligned(size: int, alignment: int) -> int:
@@ -1206,10 +1389,27 @@ class Collected:
     record: Record
 
 
-def collect(commands: Commands, context: Context, producer: Producer) -> Collected:
+def collect(
+    commands: Commands, context: Context, producer: Producer, filter_text: str = ""
+) -> Collected:
     """Run one producer's check with its native executions collected, and write its record."""
 
-    workspace = context.workspace
+    # Cargo's standalone `exec` runner also runs from fixture workspaces with no Python package.
+    # Only collection needs the canonical model report reader.
+    from scripts.model_evidence import (
+        EvidenceError,
+        FILENAME as MODEL_REPORT,
+        VARIABLE as MODEL_VARIABLE,
+        read_complete,
+    )
+    from scripts.deloxide_lane import (
+        RECORD as LANE_REPORT,
+        REPORT_VARIABLE as LANE_VARIABLE,
+        RecordError,
+        read_complete as read_complete_lane,
+    )
+
+    workspace = Workspace(context.workspace.root, context.workspace.target, mode=producer.mode)
     toolchain = context.toolchain
     environment = dict(context.environment)
     label = f"rust-{producer.toolchain}" if producer.toolchain else toolchain.label()
@@ -1220,7 +1420,7 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
             "producer": producer.name,
             "mode": producer.mode,
             "verdict": str(Verdict.RUNNING),
-            "rerun": producer.rerun(),
+            "rerun": producer.rerun(filter_text),
             "revision": context.revision.describe(),
             "run": context.run.describe(),
             "attempt": attempt.name,
@@ -1235,8 +1435,15 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
             },
         },
     )
-    record.write()
-    stage = Stage.PREPARE
+    stages: dict[str, str] = {}
+    record.content["stages"] = stages
+
+    def enter(next_stage: Stage) -> Stage:
+        stages[str(next_stage)] = timestamp(context.clock())
+        record.write()
+        return next_stage
+
+    stage = enter(Stage.PREPARE)
     try:
         for recipe in producer.prepare:
             status = commands.stream(["just", recipe], environment=context.environment)
@@ -1251,23 +1458,43 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
             record.content["toolchain"] = toolchain.describe()
             record.write()
 
-        stage = Stage.INSTRUMENT
+        stage = enter(Stage.INSTRUMENT)
         instrumented = instrumentation(
-            commands, workspace, toolchain, attempt, environment
+            commands, workspace, toolchain, attempt, environment, producer.instrumented_crates
         )
+        if producer.filterable:
+            instrumented.environment[MODEL_VARIABLE] = str(attempt / MODEL_REPORT)
+            record.content["filter"] = filter_text
+        if producer.lane is not None:
+            instrumented.environment[LANE_VARIABLE] = str(attempt / LANE_REPORT)
         record.content["instrumentation"] = instrumented.describe(workspace)
         record.write()
 
-        stage = Stage.RUN
+        stage = enter(Stage.RUN)
         with workspace.build_lock():
+            arguments = ["just", producer.instrumented]
+            if producer.filterable:
+                arguments.append(filter_text)
             status = commands.stream(
-                ["just", producer.instrumented], environment=instrumented.environment
+                arguments, environment=instrumented.environment
             )
             if status != 0:
                 detail = f"`just {producer.instrumented}` exited with status {status}"
                 record.fail(Verdict.FAILED, stage, detail, context.clock())
                 return Collected(status, attempt, record)
-            stage = Stage.EXPORT
+            if producer.filterable:
+                record.content["models"] = read_complete(attempt / MODEL_REPORT, producer.mode, filter_text)
+                record.write()
+            if producer.lane is not None:
+                lane = read_complete_lane(attempt / LANE_REPORT, producer.lane)
+                record.content["lane"] = {
+                    "record": LANE_REPORT,
+                    "attempt": dict(lane["workspace"])["attempt"],
+                    "counts": lane["counts"],
+                    "findings": lane["findings"],
+                }
+                record.write()
+            stage = enter(Stage.EXPORT)
             exported = export(commands, workspace, toolchain, context.packages, attempt)
         record.content["selection"] = exported.selection.describe(workspace)
         record.content["profiles"] = exported.selection.describe_profiles()
@@ -1276,7 +1503,7 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
         record.content["report"] = REPORT
         record.write()
 
-        stage = Stage.FINISH
+        stage = enter(Stage.FINISH)
         for recipe in producer.finish:
             status = commands.stream(["just", recipe], environment=environment)
             if status != 0:
@@ -1290,7 +1517,7 @@ def collect(commands: Commands, context: Context, producer: Producer) -> Collect
         detail = f"interrupted by {interruption}"
         record.fail(Verdict.INTERRUPTED, stage, detail, context.clock())
         return Collected(128 + interruption.number, attempt, record)
-    except RunnerError as error:
+    except (RunnerError, EvidenceError, RecordError) as error:
         record.fail(Verdict.FAILED, stage, str(error), context.clock())
         return Collected(1, attempt, record)
     record.conclude(Verdict.COMPLETE, context.clock())
@@ -1313,7 +1540,7 @@ def summary(workspace: Workspace, producer: Producer, collected: Collected) -> l
     if (collected.attempt / REPORT).is_file():
         lines.append(f"  report: {workspace.display(collected.attempt / REPORT)}")
     lines.append(f"  record: {workspace.display(collected.record.path)}")
-    lines.append(f"  rerun:  {producer.rerun()}")
+    lines.append(f"  rerun:  {content['rerun']}")
     return lines
 
 
@@ -1349,8 +1576,14 @@ def run(
     names: Sequence[str],
     producers: Sequence[Producer],
     environment: Mapping[str, str],
+    filter_text: str = "",
+    output: Path | None = None,
 ) -> int:
     selected = select_producers(names, producers)
+    if filter_text and any(not producer.filterable for producer in selected):
+        raise RunnerError("a filter is supported only by the canonical Shuttle and Loom producers")
+    if output is not None and len(selected) != 1:
+        raise RunnerError("an output path requires exactly one producer; each mode keeps its own report")
     dumped = commands.capture(["just", "--dump", "--dump-format", "json"])
     if dumped.status != 0:
         raise RunnerError(f"just could not describe the justfile: {dumped.stderr.strip()}")
@@ -1367,12 +1600,15 @@ def run(
         environment=environment,
     )
     for producer in selected:
-        collected = collect(commands, context, producer)
+        collected = collect(commands, context, producer, filter_text)
         lines = summary(workspace, producer, collected)
         print("\n".join(lines), flush=True)
         publish_step_summary(environment, lines)
         if collected.status != 0:
             return collected.status
+        if output is not None:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(collected.attempt / REPORT, output)
     return 0
 
 
@@ -1402,6 +1638,8 @@ def main(
     subcommands = parser.add_subparsers(dest="command", required=True)
     run_parser = subcommands.add_parser("run", help="collect the named producers, or all of them")
     run_parser.add_argument("producers", nargs="*", metavar="producer", help=f"one of {names}")
+    run_parser.add_argument("--filter", default="", help="canonical Shuttle test or Loom invariant filter")
+    run_parser.add_argument("--output", type=Path, help="copy one complete report to this path")
     subcommands.add_parser("exec", help="Cargo's runner inside `run`; not for direct use")
     parsed = parser.parse_args(arguments)
 
@@ -1410,7 +1648,7 @@ def main(
     commands = commands_for(root)
     try:
         with interruptible():
-            return run(commands, workspace, parsed.producers, producers, current)
+            return run(commands, workspace, parsed.producers, producers, current, parsed.filter, parsed.output)
     except RunnerError as error:
         print(f"native coverage: {error}", file=sys.stderr)
         return 1

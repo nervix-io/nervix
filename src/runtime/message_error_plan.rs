@@ -4,7 +4,14 @@
 //! - **Owns.** Binding the registry's typed error-route decisions to node-local relay services,
 //!   lookup maps, UDFs and compiled VM programs before a revision is published.
 //! - **Depends on.** Typed route specs, the VM and installed runtime capabilities.
-//! - **Must not know.** Scheduled Models or how an error route was declared in NSPL.
+//! - **Must not know.** Scheduled Models or how an error route was declared in Plexus.
+
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(data_plane, reason = "owns the data plane boundary declared above")
+)]
+
+use error_stack::ResultExt as _;
 
 use super::{message_error::MessageErrorHandlingError, vm_compile::RuntimeVmCompileContext, *};
 
@@ -20,6 +27,7 @@ pub(super) struct BoundMessageErrorRoute {
     pub(super) branching: ResolvedBranching,
     pub(super) program: CompiledProgramWithMaterializedInterest,
     pub(super) flush_policy: Option<RuntimeFlushPolicy>,
+    pub(super) delivery: Option<Arc<MessageErrorRouteRuntime>>,
 }
 
 pub(super) struct MessageErrorRouteBindingContext<'a> {
@@ -46,17 +54,8 @@ impl BoundMessageErrorRoutes {
             })?;
             let flush_policy = match spec.flush_policy.as_ref() {
                 Some(policy) => Some(
-                    Runtime::parse_runtime_node_flush_policy(
-                        &key.domain,
-                        key.node.kind.as_str(),
-                        &key.node.identifier,
-                        policy,
-                    )
-                    .map_err(|source| {
-                        error_stack::Report::new(MessageErrorHandlingError::FlushPolicy {
-                            node: key.node.clone(),
-                            source,
-                        })
+                    Runtime::parse_runtime_node_flush_policy(policy).change_context_lazy(|| {
+                        MessageErrorHandlingError::FlushPolicy { route: key.clone() }
                     })?,
                 ),
                 None => None,
@@ -88,6 +87,7 @@ impl BoundMessageErrorRoutes {
                 branching: spec.target_branching,
                 program,
                 flush_policy,
+                delivery: flush_policy.map(|_| MessageErrorRouteRuntime::prepare()),
             });
             if routes.insert(key.clone(), route).is_some() {
                 return Err(error_stack::Report::new(
@@ -98,12 +98,27 @@ impl BoundMessageErrorRoutes {
         Ok(Self { routes })
     }
 
+    /// Only the successful running revision installs delivery workers. Binding is fallible and
+    /// must not retire a worker belonging to the preceding published revision.
+    pub(super) fn activate(&self, runtime: &Runtime, domain: &DomainName) {
+        runtime.retire_unselected_message_error_routes(domain, &self.routes);
+        for route in self.routes.values() {
+            if route.flush_policy.is_some() {
+                runtime.install_message_error_route(route);
+            }
+        }
+    }
+
     pub(super) fn get(&self, key: &MessageErrorRouteKey) -> Option<Arc<BoundMessageErrorRoute>> {
         self.routes.get(key).cloned()
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use std::num::NonZeroUsize;
 
@@ -161,6 +176,7 @@ mod tests {
             Vec::new(),
             None,
             Arc::new(BranchPresence::new()),
+            nervix_primitives::sync::Arc::new(crate::runtime_ack::AckRootTracker::default()),
         ))
     }
 
@@ -203,10 +219,17 @@ mod tests {
             error.current_context(),
             MessageErrorHandlingError::FlushPolicy { .. }
         ));
+        assert!(
+            format!("{error:#}").starts_with(
+                "the message-error route for junction 'compute' to relay 'errors' has an invalid \
+                 flush policy: invalid flush_each 'not-a-duration': "
+            ),
+            "{error:#}"
+        );
 
         let mut invalid_set = spec(Some(FlushPolicy::Immediate));
         invalid_set.program = lowered_set(
-            nervix_nspl::parse_route_construction("SET missing = input.value")
+            nervix_plexus::parse_route_construction("SET missing = input.value")
                 .expect("the test assignment parses")
                 .assignments,
         );

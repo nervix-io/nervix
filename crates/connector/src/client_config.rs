@@ -11,6 +11,14 @@
 //! - **Must not know.** How a resource mount is resolved, how retry backoff is scheduled, or any
 //!   connector's driver.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
 use error_stack::Report;
@@ -20,6 +28,23 @@ use thiserror::Error;
 use upon::Engine as TemplateEngine;
 
 pub type ClientConfigResult<T> = Result<T, Report<ClientConfigError>>;
+
+/// A network-free driver check refused configuration before a client could be committed.
+/// Driver causes remain beneath this context; public command projection renders only this
+/// key-bearing context because a driver error can quote credentials from its input.
+#[derive(Debug, Error)]
+pub enum OfflineClientConfigError {
+    #[error("invalid client config key '{key}'")]
+    InvalidKey { key: String },
+    #[error("the driver refused its client configuration")]
+    Configuration,
+}
+
+impl OfflineClientConfigError {
+    pub fn key(key: impl Into<String>) -> Self {
+        Self::InvalidKey { key: key.into() }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ClientConfigError {
@@ -38,6 +63,9 @@ pub enum ClientConfigError {
     },
     #[error("invalid boolean client config key '{key}' value '{value}'")]
     InvalidBoolean { key: String, value: String },
+    /// A deadline key's value breaks the vocabulary's deadline rule, which the cause beneath names.
+    #[error("invalid client config key '{key}'")]
+    InvalidDeadline { key: &'static str },
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +222,10 @@ pub fn next_retry_delay(current: Duration, policy: ParsedRetryPolicy) -> Duratio
 }
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
     use super::*;
 

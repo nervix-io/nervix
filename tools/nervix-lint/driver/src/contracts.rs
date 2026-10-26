@@ -43,6 +43,7 @@ pub struct Flow {
     calls: Vec<Call>,
     acquisitions: Vec<Operation>,
     validated: HashSet<HirId>,
+    diagnostics: Vec<(HirId, &'static Lint)>,
 }
 
 struct Call {
@@ -79,12 +80,29 @@ struct ReviewedOperations {
 
 type ExpectationCounts = HashMap<ExpectedLint, ReviewedOperations>;
 
+/// The `nervix::<name>` source contract `definition` declares, if any.
+///
+/// Every contract lookup reads through here. An `extern` block holds no contract: placement
+/// validation rejects one there, and crate metadata keeps no attributes for another crate's
+/// block, so asking for them panics the compiler. A walk from a foreign item therefore goes on
+/// to the module that holds its block.
+pub fn contract_attribute<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    definition: DefId,
+    name: &str,
+) -> Option<&'tcx rustc_hir::Attribute> {
+    if tcx.def_kind(definition) == DefKind::ForeignMod {
+        return None;
+    }
+    let path = [Symbol::intern("nervix"), Symbol::intern(name)];
+    tcx.get_attrs_by_path(definition, &path).next()
+}
+
 /// Narrowest metadata contract wins. Parent contracts supply defaults for their definitions;
 /// call reachability can make a helper recurring even when its inherited default is cold.
 pub fn context(tcx: TyCtxt<'_>, mut definition: DefId) -> Option<Context> {
     loop {
-        let path = [Symbol::intern("nervix"), Symbol::intern("context")];
-        if let Some(attribute) = tcx.get_attrs_by_path(definition, &path).next() {
+        if let Some(attribute) = contract_attribute(tcx, definition, "context") {
             return parse_context(attribute).ok();
         }
         if let Some(value) = binding_context(tcx, definition) {
@@ -103,11 +121,9 @@ pub fn context(tcx: TyCtxt<'_>, mut definition: DefId) -> Option<Context> {
                 .instantiate_identity()
                 .skip_norm_wip()
                 .kind()
+            && let Some(attribute) = contract_attribute(tcx, adt.did(), "context")
         {
-            let path = [Symbol::intern("nervix"), Symbol::intern("context")];
-            if let Some(attribute) = tcx.get_attrs_by_path(adt.did(), &path).next() {
-                return parse_context(attribute).ok();
-            }
+            return parse_context(attribute).ok();
         }
         // Derives implement data operations, not the module's task entry contract. An explicit
         // type or method contract above still applies; acquisitions remain independently checked.
@@ -120,6 +136,21 @@ pub fn context(tcx: TyCtxt<'_>, mut definition: DefId) -> Option<Context> {
     }
 }
 
+/// The declared contract, or recurring reachability from a recurring caller.
+pub fn effective_context(
+    tcx: TyCtxt<'_>,
+    owner: LocalDefId,
+    recurring: &HashSet<LocalDefId>,
+) -> Option<Context> {
+    let declared = context(tcx, owner.to_def_id());
+    if recurring.contains(&owner) && !declared.as_ref().is_some_and(Context::is_recurring) {
+        return Some(Context::Recurring {
+            reason: "reachable from a recurring source contract".into(),
+        });
+    }
+    declared
+}
+
 /// Module/crate frequency defaults seed analysis; a supported local caller can refine them.
 /// A callable, trait, impl or type's lifecycle contract is an installation boundary instead.
 fn lifecycle_boundary(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
@@ -130,8 +161,7 @@ fn lifecycle_boundary(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
         if matches!(tcx.def_kind(definition), DefKind::Mod) {
             return false;
         }
-        let path = [Symbol::intern("nervix"), Symbol::intern("context")];
-        if let Some(attribute) = tcx.get_attrs_by_path(definition, &path).next() {
+        if let Some(attribute) = contract_attribute(tcx, definition, "context") {
             return parse_context(attribute).is_ok_and(|value| value.is_lifecycle());
         }
         if let Some(value) = binding_context(tcx, definition) {
@@ -149,7 +179,7 @@ fn lifecycle_boundary(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
                 .instantiate_identity()
                 .skip_norm_wip()
                 .kind()
-            && let Some(attribute) = tcx.get_attrs_by_path(adt.did(), &path).next()
+            && let Some(attribute) = contract_attribute(tcx, adt.did(), "context")
         {
             return parse_context(attribute).is_ok_and(|value| value.is_lifecycle());
         }
@@ -167,14 +197,7 @@ pub fn has_callee_contract(tcx: TyCtxt<'_>, mut definition: DefId) -> bool {
         if matches!(tcx.def_kind(definition), DefKind::Mod) {
             return false;
         }
-        if tcx
-            .get_attrs_by_path(
-                definition,
-                &[Symbol::intern("nervix"), Symbol::intern("context")],
-            )
-            .next()
-            .is_some()
-        {
+        if contract_attribute(tcx, definition, "context").is_some() {
             return true;
         }
         if let Some(item) = tcx.opt_associated_item(definition)
@@ -243,6 +266,19 @@ fn parse_context(
 }
 
 impl Flow {
+    pub fn diagnostic(
+        &mut self,
+        cx: &LateContext<'_>,
+        node: HirId,
+        span: Span,
+        lint: &'static Lint,
+        message: String,
+    ) {
+        self.diagnostics.push((node, lint));
+        cx.tcx
+            .emit_node_span_lint(lint, node, span, Message { message });
+    }
+
     pub fn validate(&mut self, cx: &LateContext<'_>, node: HirId, placement: bool) {
         if !self.validated.insert(node) {
             return;
@@ -252,16 +288,44 @@ impl Flow {
         for attribute in cx.tcx.hir_attrs(node) {
             let path = attribute.path();
             if path.first().is_some_and(|name| name.as_str() == "nervix")
-                && (path.len() != 2 || !matches!(path[1].as_str(), "context" | "dispatch"))
+                && (path.len() != 2
+                    || !matches!(
+                        path[1].as_str(),
+                        "context"
+                            | "dispatch"
+                            | "error_boundary"
+                            | "layer"
+                            | "value"
+                            | "identity"
+                            | "state"
+                            | "input"
+                            | "constant"
+                    ))
             {
                 cx.tcx.emit_node_span_lint(
                     INVALID_CONTRACT,
                     node,
                     attribute.span(),
                     Message {
-                        message: "unknown Nervix source annotation; use context or dispatch".into(),
+                        message: "unknown Nervix source annotation; use an execution, error or \
+                                  architectural contract"
+                            .into(),
                     },
                 );
+            }
+            if path.first().is_some_and(|name| name.as_str() == "nervix")
+                && path.get(1).is_some_and(|name| {
+                    matches!(
+                        name.as_str(),
+                        "layer" | "value" | "identity" | "state" | "input" | "constant"
+                    )
+                })
+            {
+                crate::architecture::validate(cx, node, attribute);
+            }
+            if attribute.path_matches(&[Symbol::intern("nervix"), Symbol::intern("error_boundary")])
+            {
+                crate::errors::validate_boundary(cx, node, attribute);
             }
             if attribute.path_matches(&[Symbol::intern("nervix"), Symbol::intern("context")]) {
                 contexts += 1;
@@ -488,10 +552,29 @@ impl Flow {
         });
     }
 
-    pub fn finish(&self, cx: &LateContext<'_>, findings: &mut [nervix_lint_report::Finding]) {
+    pub fn nodes(&self) -> impl Iterator<Item = LocalDefId> + '_ {
+        self.nodes.iter().copied()
+    }
+
+    /// Local bodies whose supported calls resolve to `target`.
+    pub fn callers(&self, target: LocalDefId) -> usize {
+        let mut count = 0;
+        for callees in self.edges.values() {
+            if callees.contains(&target) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub fn callees(&self, owner: LocalDefId) -> impl Iterator<Item = LocalDefId> + '_ {
+        self.edges.get(&owner).into_iter().flatten().copied()
+    }
+
+    pub fn recurring_owners(&self, tcx: TyCtxt<'_>) -> HashSet<LocalDefId> {
         let mut recurring = HashSet::new();
         for owner in &self.nodes {
-            if context(cx.tcx, owner.to_def_id()).is_some_and(|value| value.is_recurring()) {
+            if context(tcx, owner.to_def_id()).is_some_and(|value| value.is_recurring()) {
                 recurring.insert(*owner);
             }
         }
@@ -504,7 +587,7 @@ impl Flow {
                     for callee in callees {
                         // A lifecycle contract is an explicit call boundary. Diagnose its caller
                         // below; do not also reclassify the installation's internal operations.
-                        if !lifecycle_boundary(cx.tcx, callee.to_def_id()) {
+                        if !lifecycle_boundary(tcx, callee.to_def_id()) {
                             changed |= recurring.insert(*callee);
                         }
                     }
@@ -514,18 +597,17 @@ impl Flow {
                 break;
             }
         }
+        recurring
+    }
+
+    pub fn finish(&self, cx: &LateContext<'_>, findings: &mut [nervix_lint_report::Finding]) {
+        let recurring = self.recurring_owners(cx.tcx);
         let mut expectations = HashMap::new();
+        for &(node, lint) in &self.diagnostics {
+            self.count_expectation(cx, &mut expectations, node, lint);
+        }
         for operation in &self.acquisitions {
-            let declared = context(cx.tcx, operation.owner.to_def_id());
-            let actual = if recurring.contains(&operation.owner)
-                && !declared.as_ref().is_some_and(Context::is_recurring)
-            {
-                Some(Context::Recurring {
-                    reason: "reachable from a recurring source contract".into(),
-                })
-            } else {
-                declared
-            };
+            let actual = effective_context(cx.tcx, operation.owner, &recurring);
             let finding = &mut findings[operation.finding];
             finding.context = actual.clone();
             match actual {
@@ -665,25 +747,12 @@ impl Flow {
     fn has_dispatch(&self, tcx: TyCtxt<'_>, owner: LocalDefId) -> bool {
         let mut definition = owner.to_def_id();
         loop {
-            if tcx
-                .get_attrs_by_path(
-                    definition,
-                    &[Symbol::intern("nervix"), Symbol::intern("dispatch")],
-                )
-                .next()
-                .is_some()
-            {
+            if contract_attribute(tcx, definition, "dispatch").is_some() {
                 return true;
             }
             if let Some(item) = tcx.opt_associated_item(definition)
                 && let Some(trait_item) = item.trait_item_def_id()
-                && tcx
-                    .get_attrs_by_path(
-                        trait_item,
-                        &[Symbol::intern("nervix"), Symbol::intern("dispatch")],
-                    )
-                    .next()
-                    .is_some()
+                && contract_attribute(tcx, trait_item, "dispatch").is_some()
             {
                 return true;
             }

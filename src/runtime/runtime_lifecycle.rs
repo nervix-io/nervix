@@ -7,7 +7,19 @@
     )
 )]
 
+use error_stack::ResultExt as _;
+use futures_util::future::join_all;
+
 use super::*;
+
+/// How long a stopping task is waited for once its stop is signalled, before it is aborted.
+const TASK_STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// One task of a stopping domain, with the entity it runs for.
+struct StoppingTask {
+    owner: IngestorName,
+    task: JoinHandle<()>,
+}
 
 impl Runtime {
     pub(crate) fn new() -> Self {
@@ -18,55 +30,69 @@ impl Runtime {
     /// A runtime without persistence whose admitted work goes through `executor`.
     #[cfg(test)]
     pub(crate) fn with_executor(executor: Executor) -> Self {
-        Self::with_persistence_and_temp_dir(
-            executor,
-            None,
-            None,
-            DEFAULT_STATE_SNAPSHOT_INTERVAL,
-            ConfiguredFaultInjection::default(),
-            PathBuf::from(DEFAULT_TEMP_DIR),
+        Self::with_environment(
+            RuntimeEnvironment::transient(executor),
+            RuntimeSettings::default(),
         )
         .verified("the None persistence path has no fallible step")
+    }
+
+    /// A runtime without persistence that consults `fault_injection`, so a test can arm the
+    /// failures and waits its runtime seams take.
+    #[cfg(all(test, feature = "testing"))]
+    pub(crate) fn with_fault_injection(fault_injection: ConfiguredFaultInjection) -> Self {
+        let environment = RuntimeEnvironment {
+            fault_injection,
+            ..RuntimeEnvironment::transient(Executor::default())
+        };
+        Self::with_environment(environment, RuntimeSettings::default())
+            .verified("the None persistence path has no fallible step")
     }
 
     pub(in crate::runtime) fn with_persistence(
         db: Option<Database>,
         state_snapshot_interval: Duration,
-    ) -> Result<Self, RuntimePersistenceError> {
-        Self::with_persistence_and_temp_dir(
-            Executor::default(),
-            None,
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
+        let environment = RuntimeEnvironment {
             db,
-            state_snapshot_interval,
-            ConfiguredFaultInjection::default(),
-            PathBuf::from(DEFAULT_TEMP_DIR),
-        )
+            ..RuntimeEnvironment::transient(Executor::default())
+        };
+        let settings = RuntimeSettings::resolve(Some(state_snapshot_interval), None)
+            .assured("the runtime settings declare no validation");
+        Self::with_environment(environment, settings)
     }
 
-    pub(crate) fn with_persistence_and_temp_dir(
-        executor: Executor,
-        dns: Option<DnsResolver>,
-        db: Option<Database>,
-        state_snapshot_interval: Duration,
-        fault_injection: ConfiguredFaultInjection,
-        temp_dir: PathBuf,
-    ) -> Result<Self, RuntimePersistenceError> {
+    /// A runtime constructed in `environment` with `settings`.
+    pub(crate) fn with_environment(
+        environment: RuntimeEnvironment,
+        settings: RuntimeSettings,
+    ) -> error_stack::Result<Self, RuntimePersistenceError> {
+        let RuntimeEnvironment {
+            executor,
+            dns,
+            db,
+            restore_staging_max_bytes,
+            fault_injection,
+            temp_dir,
+        } = environment;
+        let state_snapshot_interval = settings.state_snapshot_interval();
+        let restore_staging_max_bytes = restore_staging_max_bytes.as_u64();
         let events = RuntimeEvents::new();
         let (domain_status_changed, _) = watch::channel(0);
         let state_store = db
-            .map(|db| RuntimeStateStore::from_database(db, executor.clone()))
+            .map(|db| {
+                RuntimeStateStore::from_database(db, executor.clone(), restore_staging_max_bytes)
+            })
             .transpose()?
             .map(Arc::new);
         let prepared_runtime_state_handoffs = DashMap::default();
         if let Some(store) = state_store.as_ref() {
-            let persisted_handoffs = store
-                .handoff_preparations()
-                .map_err(|error| error.current_context().clone())?;
+            let persisted_handoffs = store.handoff_preparations()?;
             for persisted in persisted_handoffs {
                 let mut checkpoints = Vec::with_capacity(persisted.checkpoints.len());
                 for (placement, snapshot) in persisted.checkpoints {
                     let placement = RuntimeStatePlacement::from_remote(placement)
-                        .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
+                        .change_context(RuntimePersistenceError::DecodeState)?;
                     checkpoints.push((placement, snapshot));
                 }
                 prepared_runtime_state_handoffs.insert(
@@ -105,7 +131,7 @@ impl Runtime {
                 dns,
                 ingestors: Arc::new(DashMap::default()),
                 ingestor_quiescence: Arc::new(DashMap::default()),
-                ingestors_paused_for_memory_pressure: AtomicBool::new(false),
+                memory_pressure: MemoryPressurePause::default(),
                 ingestor_statuses: DashMap::default(),
                 ingestor_readiness: DashMap::default(),
                 emitter_statuses: DashMap::default(),
@@ -113,7 +139,7 @@ impl Runtime {
                 pool_waits: DashMap::default(),
                 emitter_confirmation_waits: DashMap::default(),
                 executions: DashMap::default(),
-                domain_routings: DashMap::default(),
+                domain_routings: domain_execution::DomainRoutings::default(),
                 message_error_routes: DashMap::default(),
                 compiled_domain_udfs: DashMap::default(),
                 compiled_wasm_modules: DashMap::default(),
@@ -133,8 +159,10 @@ impl Runtime {
                 node_quiesce_counters: DashMap::default(),
                 entity_gate_holds: Arc::new(DashMap::default()),
                 frozen_ownership_handoff_entities: Arc::new(DashMap::default()),
+                entity_gate_tasks: EntityGateTasks::default(),
                 active_domain_alters: Arc::new(DashMap::default()),
                 state_identities: DashMap::default(),
+                state_replication_routing: Default::default(),
                 client_ingestors: DashMap::default(),
                 client_producer_budget: client_ingestor::ClientProducerBudget::default(),
                 client_emitters: DashMap::default(),
@@ -145,11 +173,13 @@ impl Runtime {
                 fault_injection,
                 resource_store: ArcSwapOption::empty(),
                 remote_dispatcher: ArcSwapOption::empty(),
-                remote_dispatch: Arc::new(RemoteDispatchRegistry::new()),
+                remote_dispatch: Arc::new(RemoteDispatchRegistry::new(executor.clone())),
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
-                state_replication_tasks: TaskTracker::new(),
+                state_replication_tasks: Default::default(),
+                branch_snapshot_tasks: Default::default(),
                 passive_runtime_state_snapshots: DashMap::default(),
+                backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
                 replicated_branch_lifecycles: DashMap::default(),
                 prepared_runtime_state_handoffs,
                 activated_runtime_state_handoffs: DashMap::default(),
@@ -263,6 +293,22 @@ impl Runtime {
         super::branch_task_stop_timeout(self.inner.domain_drain_timeout)
     }
 
+    /// When the emitters of a domain execution that stops now finish their emitters: the domain drain
+    /// timeout from now, the same bound a stop command gives an emitter.
+    pub(in crate::runtime) fn emitter_finish_deadline(&self) -> Instant {
+        self.emitter_finish_deadline_within(self.inner.domain_drain_timeout)
+    }
+
+    /// When the emitters of a domain execution that stops now finish their emitters, no later than
+    /// `limit` from now.
+    fn emitter_finish_deadline_within(&self, limit: Duration) -> Instant {
+        let budget = limit.min(self.inner.domain_drain_timeout);
+        Instant::now().checked_add(budget).assured(
+            "the domain drain timeout bounds the budget, and it is the sixty-second default or a \
+             scenario's own short drain, which end within the monotonic clock's range",
+        )
+    }
+
     pub(crate) fn entity_gate_deadline(&self) -> Duration {
         self.inner.entity_gate_deadline
     }
@@ -289,6 +335,42 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_handoff_engagement_transport_failure(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_handoff_engagement_transport_failure(domain)
+    }
+
+    pub(crate) fn take_wasm_reset_publication_authority_loss(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_wasm_reset_publication_authority_loss(domain)
+    }
+
+    pub(crate) fn wasm_reset_publication_failure_is_enabled(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .wasm_reset_publication_failure_is_enabled(domain)
+    }
+
+    pub(crate) fn deliver_wasm_reset_publication_failure(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .deliver_wasm_reset_publication_failure(domain);
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn loses_handoff_gate_engagement(
+        &self,
+        coordinator: &ClusterNodeName,
+        participant: &ClusterNodeName,
+    ) -> bool {
+        self.inner
+            .fault_injection
+            .loses_handoff_gate_engagement(coordinator, participant)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) fn take_armed_schedule_publication_fault(&self, domain: &DomainName) -> bool {
         self.inner
             .fault_injection
@@ -300,6 +382,54 @@ impl Runtime {
         self.inner
             .fault_injection
             .take_armed_transaction_binding_drop(node_id)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_shutdown_cordon_release_delay(
+        &self,
+        stopping_node: &ClusterNodeName,
+    ) -> Option<Duration> {
+        self.inner
+            .fault_injection
+            .take_shutdown_cordon_release_delay(stopping_node)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_transaction_cleanup_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_transaction_cleanup_if_armed(node, domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_standalone_transaction_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        boundary: crate::fault_injection::StandaloneTransactionBoundary,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_standalone_transaction_if_armed(node, domain, boundary)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_domain_resume_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+        boundary: crate::fault_injection::DomainResumeBoundary,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_domain_resume_if_armed(node, domain, boundary)
+            .await;
     }
 
     #[cfg(feature = "testing")]
@@ -332,6 +462,88 @@ impl Runtime {
         self.inner
             .fault_injection
             .pause_restore_step_if_armed(node_id, step)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_backup_download_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_backup_download_if_armed(node_id)
+            .await;
+    }
+
+    /// After how many entries a test interrupts the next branch lifecycle or Kafka offset section
+    /// of `entity` that a backup of `domain` streams, once. A product build never interrupts one.
+    pub(crate) fn native_metadata_capture_interruption(
+        &self,
+        domain: &DomainName,
+        entity: &ModelName,
+    ) -> Option<u64> {
+        self.inner
+            .fault_injection
+            .native_metadata_capture_interruption(domain, entity)
+    }
+
+    /// After how many chunks a test interrupts the next guest save of `entity` in `domain`.
+    pub(crate) fn guest_save_capture_interruption(
+        &self,
+        domain: &DomainName,
+        entity: &ModelName,
+    ) -> Option<u64> {
+        self.inner
+            .fault_injection
+            .guest_save_capture_interruption(domain, entity)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_backup_cut_if_armed(
+        &self,
+        domain: &DomainName,
+        boundary: crate::fault_injection::BackupCutBoundary,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_backup_cut_if_armed(domain, boundary)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_restore_branch_state_conversion_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_restore_branch_state_conversion_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_restore_state_publication_if_armed(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_restore_state_publication_if_armed(domain, coordinator)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn mark_restore_state_publication_refused(
+        &self,
+        domain: &DomainName,
+        coordinator: &ClusterNodeName,
+    ) {
+        self.inner
+            .fault_injection
+            .mark_restore_state_publication_refused(domain, coordinator);
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_runtime_installation_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_runtime_installation_if_armed(node_id)
             .await;
     }
 
@@ -381,11 +593,46 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_command_finalization_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_command_finalization_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_relocation_publication_if_armed(&self, domain: &DomainName) {
         self.inner
             .fault_injection
             .pause_relocation_publication_if_armed(domain)
             .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_relocation_commit_refusal(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_relocation_commit_refusal(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_model_publication_refusal(
+        &self,
+        domain: &DomainName,
+    ) -> Option<crate::fault_injection::ModelPublicationRefusalKind> {
+        self.inner
+            .fault_injection
+            .take_model_publication_refusal(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_model_pause_release_refusal(
+        &self,
+        domain: &DomainName,
+    ) -> Option<crate::fault_injection::ModelPublicationRefusalKind> {
+        self.inner
+            .fault_injection
+            .take_model_pause_release_refusal(domain)
     }
 
     #[cfg(feature = "testing")]
@@ -419,6 +666,22 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) async fn pause_ownership_handoff_activation_if_armed(&self, domain: &DomainName) {
+        self.inner
+            .fault_injection
+            .pause_ownership_handoff_activation_if_armed(domain)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_graceful_drain_if_armed(&self, node_id: &ClusterNodeName) {
+        self.inner
+            .fault_injection
+            .pause_graceful_drain_if_armed(node_id)
+            .await;
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) fn scheduler_mode(&self) -> crate::registry::SchedulerMode {
         self.inner.fault_injection.scheduler_mode()
     }
@@ -438,12 +701,18 @@ impl Runtime {
         self.inner.events.report_error(message);
     }
 
+    /// Stops `execution` and waits for its tasks. Every emitter task the stop ends finishes its
+    /// emitter by `emitter_finish_deadline`, which it learns before the shutdown is signalled.
     pub(in crate::runtime) async fn stop_domain_execution(
         &self,
         domain: &DomainName,
         execution: DomainExecution,
+        emitter_finish_deadline: Instant,
     ) {
         self.inner.endpoint_intake_routes.withdraw_domain(domain);
+        for emitter_task in execution.emitter_tasks.values() {
+            emitter_task.finish_by(emitter_finish_deadline);
+        }
         execution.shutdown.send_replace(true);
         for (relay, task) in execution.relay_owner_tasks {
             nervix_primitives::task::consume_budget().await;
@@ -486,26 +755,31 @@ impl Runtime {
             )
             .await;
         }
+        // A generator reads its source relay from the node that owns it, and generators and
+        // reingestors publish to the node that owns their output relay, so a peer that stops with
+        // this node holds all of them up at the same moment. Neither kind owns state the node
+        // persists or replicates, so the waits of one kind run together: each task keeps the whole
+        // stop grace, and the kind costs the domain that grace once however many of its tasks
+        // outlast it. The kinds around them persist or replicate state they own, or drain an emitter,
+        // as they stop, and are waited for in turn, each with a grace of its own.
+        let mut generators = Vec::with_capacity(execution.generator_tasks.len());
         for (entity, task) in execution.generator_tasks {
-            Self::await_shutdown_task(
+            generators.push(StoppingTask {
+                owner: IngestorName::from(&entity.identifier),
                 task,
-                domain,
-                Some(&IngestorName::from(&entity.identifier)),
-                "generator",
-            )
-            .await;
+            });
         }
+        Self::await_shutdown_tasks_together(generators, domain, "generator").await;
+        let mut reingestors = Vec::new();
         for (entity, tasks) in execution.reingestor_tasks {
             for task in tasks {
-                Self::await_shutdown_task(
+                reingestors.push(StoppingTask {
+                    owner: IngestorName::from(&entity.identifier),
                     task,
-                    domain,
-                    Some(&IngestorName::from(&entity.identifier)),
-                    "reingestor",
-                )
-                .await;
+                });
             }
         }
+        Self::await_shutdown_tasks_together(reingestors, domain, "reingestor").await;
         for (entity, tasks) in execution.placement_tasks {
             for task in tasks {
                 Self::await_shutdown_task(
@@ -520,6 +794,15 @@ impl Runtime {
         for task in execution.tasks {
             Self::await_shutdown_task(task, domain, None, "domain execution").await;
         }
+        // Every branch task of the execution has ended, in time or at a stop grace, so the
+        // snapshot task of each of its deduplicator and window branches is making its last write.
+        // A branch ended at its grace did not wait for that write, so the domain waits for it
+        // here: a stopped domain's checkpoints are what a stopped backup cut, a restart and the
+        // next start read, and they are on disk once its stop completes.
+        self.inner
+            .branch_snapshot_tasks
+            .wait_for_domain(domain)
+            .await;
         let quiesce_keys = self
             .inner
             .node_quiesce_counters
@@ -541,6 +824,9 @@ impl Runtime {
             }
         }
         self.stop_message_error_routes_for_domain(domain).await;
+        for services in execution.routing.relay_services.values() {
+            services.retire_channels();
+        }
         if !self.inner.domains.contains_key(domain) {
             self.clear_runtime_state_for_domain(domain);
         }
@@ -550,7 +836,8 @@ impl Runtime {
         self.stop_domain_ingestors(domain).await;
         if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
             execution.routing.deactivate();
-            self.stop_domain_execution(domain, execution).await;
+            self.stop_domain_execution(domain, execution, self.emitter_finish_deadline())
+                .await;
         }
     }
 
@@ -571,14 +858,18 @@ impl Runtime {
                 warn!(
                     domain = domain.as_str(),
                     ingestor = key.identifier().as_str(),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to stop domain ingestor during schedule rebuild"
                 );
             }
         }
     }
 
-    pub(crate) async fn shutdown(&self) {
+    /// Stops every domain's execution and the runtime services behind them. `left` is the time the
+    /// node's shutdown leaves the runtime: an emitter finishes its emitter within it, and within the
+    /// domain drain timeout.
+    pub(crate) async fn shutdown(&self, left: Duration) {
+        let emitter_finish_deadline = self.emitter_finish_deadline_within(left);
         self.end_client_ingestor_endpoints(ClientProducerEndReason::ShuttingDown)
             .await;
         let domains = self
@@ -593,20 +884,40 @@ impl Runtime {
         for domain in &domains {
             if let Some((_, mut execution)) = self.inner.executions.remove(domain) {
                 execution.routing.deactivate();
-                self.stop_domain_execution(domain, execution).await;
+                self.stop_domain_execution(domain, execution, emitter_finish_deadline)
+                    .await;
             }
             self.clear_domain_ingestor_quiescence(domain);
         }
+        // Every branch task has ended, in time or at a stop grace, and the snapshot task of each
+        // deduplicator and window branch is writing what its branch published last. Those tasks
+        // hold this runtime and its storage, so the runtime waits for each of them here, while
+        // the replication routes their checkpoints are offered through are still installed.
+        self.inner.branch_snapshot_tasks.close();
+        self.inner.branch_snapshot_tasks.wait().await;
+        // Nothing dispatches through a gate, admits through a quiesced ingestor or publishes past
+        // a freeze any more, so every entity gate this node holds ends here with its runtime. A
+        // lease that a handoff left held until a deadline past this node's stop would otherwise
+        // keep its hold, and the ingestor controls and metrics that hold retains, after the node
+        // stopped.
+        self.inner.entity_gate_tasks.close();
+        self.inner.entity_gate_tasks.wait().await;
+        self.inner.domain_routings.clear();
         self.inner.endpoint_intake_routes.clear();
         self.inner.compiled_domain_udfs.clear();
         self.inner.compiled_wasm_modules.clear();
+        for readiness in self.inner.ingestor_readiness.iter() {
+            readiness.retire();
+        }
         self.inner.ingestor_readiness.clear();
         self.inner.remote_ack_watcher_shutdown.cancel();
         self.inner.remote_ack_watcher_tasks.close();
         self.inner.remote_ack_watcher_tasks.wait().await;
+        self.inner.remote_dispatch.shutdown();
         self.inner.state_replication_tasks.close();
         self.inner.state_replication_tasks.wait().await;
         self.inner.relay_branch_presences.clear();
+        self.inner.state_replication_routing.clear();
         self.inner.replicated_deduplicator_states.clear();
         self.inner.replicated_kafka_offset_states.clear();
         self.inner.replicated_materialized_stream_states.clear();
@@ -615,58 +926,32 @@ impl Runtime {
         self.inner.replicated_branch_aggregated_states.clear();
     }
 
-    #[cfg_attr(
-        nervix_lint,
-        nervix::context(
-            recurring,
-            reason = "running tasks borrow retained node services or await their selected \
-                      acknowledgement root"
-        )
-    )]
-    pub(in crate::runtime) async fn await_ack_completion(
-        shutdown_rx: &mut watch::Receiver<bool>,
-        mut completion: AckCompletion,
-        timeout_duration: Duration,
-    ) -> Option<AckOutcome> {
-        loop {
-            nervix_primitives::select! {
-                // A signalled stop and a dropped sender both end this wait, so the outcome
-                // carries nothing the caller could act on differently.
-                _ = shutdown_rx.changed() => {
-                    return None;
-                }
-                progress = nervix_primitives::time::timeout(timeout_duration, completion.wait_for_progress()) => {
-                    match progress {
-                        Ok(AckProgress::Alive) => {}
-                        Ok(AckProgress::Complete(outcome)) => return Some(outcome),
-                        Err(_) => {
-                            return Some(AckOutcome::NoAck(format!(
-                                "ack timeout elapsed after {}",
-                                humantime::format_duration(timeout_duration)
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
     pub(in crate::runtime) async fn await_shutdown_task(
         task: JoinHandle<()>,
         domain: &DomainName,
         ingestor: Option<&IngestorName>,
         task_kind: &str,
     ) {
-        const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
+        Self::await_shutdown_task_with_grace(task, domain, ingestor, task_kind, TASK_STOP_GRACE)
+            .await;
+    }
 
-        Self::await_shutdown_task_with_grace(
-            task,
-            domain,
-            ingestor,
-            task_kind,
-            SHUTDOWN_GRACE_PERIOD,
-        )
-        .await;
+    /// Waits for tasks of one kind, to which their domain's stop has already been published, all
+    /// inside one stop grace.
+    ///
+    /// The waits run together, so tasks that outlast the grace at the same moment cost their
+    /// domain that grace once. Waited for in turn, each of them adds a grace of its own, and a
+    /// node whose peers stop with it holds up every task that was calling one of them.
+    async fn await_shutdown_tasks_together(
+        tasks: Vec<StoppingTask>,
+        domain: &DomainName,
+        task_kind: &str,
+    ) {
+        let stops = tasks.into_iter().map(|stopping| async move {
+            Self::await_shutdown_task(stopping.task, domain, Some(&stopping.owner), task_kind)
+                .await;
+        });
+        join_all(stops).await;
     }
 
     pub(super) async fn await_shutdown_task_with_grace(
@@ -720,3 +1005,7 @@ impl Runtime {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_lifecycle_tests.rs"]
+mod tests;

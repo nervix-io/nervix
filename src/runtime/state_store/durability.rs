@@ -7,12 +7,20 @@
 //! - **Depends on.** The store's database and executor.
 //! - **Must not know.** What the writes it makes durable hold, who waits for them, or replicas.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use error_stack::{Report, ResultExt as _};
 use fjall::PersistMode;
 use meticulous::OptionExt as _;
 use nervix_execution::{MemoryClass, StorageClass};
 use nervix_primitives::sync::{
-    Notify,
+    Arc, Notify,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
@@ -23,10 +31,15 @@ use super::{RuntimePersistenceError, RuntimeStateStore};
 ///
 /// A writer applies its write and then takes a ticket. A synchronization covers every ticket issued
 /// before it starts, because each of those writes was applied before its ticket was taken. At most
-/// one writer runs a synchronization at a time; the others wait for it, and one of them runs the
-/// next synchronization when the finished one did not cover them. Every branch that checkpoints at
-/// the same time therefore shares a synchronization of the node's storage instead of queuing one
-/// each behind the storage workers.
+/// one synchronization runs at a time; the writers that asked meanwhile wait for it, and one of
+/// them starts the next synchronization when the finished one did not cover them. Every branch that
+/// checkpoints at the same time therefore shares a synchronization of the node's storage instead of
+/// queuing one each behind the storage workers.
+///
+/// A synchronization is a [`DurabilityRound`] that the job flushing the storage owns and that
+/// records its own outcome. The writer that started it may stop waiting, but the flush runs on, so
+/// the round, not that writer, holds the barrier until the flush has ended and its outcome is
+/// recorded.
 #[derive(Debug)]
 pub(super) struct DurabilityBarrier {
     /// The last ticket issued.
@@ -71,29 +84,66 @@ impl DurabilityBarrier {
             .assured("a store cannot issue 2^64 synchronization tickets in the lifetime of a node")
     }
 
-    /// Claim the one synchronization the barrier runs at a time, or `None` while another writer
-    /// runs it.
-    fn claim(&self) -> Option<DurabilitySynchronization<'_>> {
-        if self
+    /// Claim the one synchronization `barrier` runs at a time, or `None` while another one runs.
+    fn claim(barrier: &Arc<Self>) -> Option<DurabilityRound> {
+        if barrier
             .running
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
             return None;
         }
-        Some(DurabilitySynchronization { barrier: self })
+        Some(DurabilityRound {
+            barrier: Arc::clone(barrier),
+            covered: None,
+        })
     }
 }
 
-/// The one synchronization a barrier runs at a time. Dropping it frees the slot and wakes the
-/// waiting writers, also when the writer running it is cancelled, so they elect another runner
-/// instead of waiting for one that is gone.
-struct DurabilitySynchronization<'a> {
-    barrier: &'a DurabilityBarrier,
+/// The one synchronization a barrier runs at a time, owned by the job that flushes the storage.
+///
+/// The job starts it just before the flush, then records whether the flush succeeded. Dropping it
+/// frees the barrier and wakes the waiting writers. A round dropped before it started, because its
+/// job was refused or never ran, records nothing. One dropped after it started without an outcome,
+/// as a panic in the flush drops it, refuses every later durability promise, because the flush may
+/// have failed.
+struct DurabilityRound {
+    barrier: Arc<DurabilityBarrier>,
+    /// The last ticket this round covers, read when it started.
+    covered: Option<u64>,
 }
 
-impl Drop for DurabilitySynchronization<'_> {
+impl DurabilityRound {
+    /// Starts the flush, and returns the last ticket it covers: the last one issued, which is read
+    /// just before the flush so that it covers every write whose ticket was issued by then.
+    fn start(&mut self) -> u64 {
+        let covered = self.barrier.issued.load(Ordering::SeqCst);
+        self.barrier.rounds.fetch_add(1, Ordering::SeqCst);
+        self.covered = Some(covered);
+        covered
+    }
+
+    /// Records that the flush succeeded: every ticket it covers is durable.
+    fn succeeded(mut self) {
+        if let Some(covered) = self.covered.take() {
+            self.barrier
+                .synchronized
+                .fetch_max(covered, Ordering::SeqCst);
+        }
+    }
+
+    /// Records that the flush failed, which refuses this and every later durability promise.
+    fn failed(mut self) {
+        self.covered = None;
+        self.barrier.failed.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for DurabilityRound {
     fn drop(&mut self) {
+        if self.covered.is_some() {
+            self.barrier.failed.store(true, Ordering::SeqCst);
+        }
         self.barrier.running.store(false, Ordering::SeqCst);
         self.barrier.finished.notify_waiters();
     }
@@ -103,59 +153,42 @@ impl DurabilityBarrier {
     /// Return once every write the caller applied before the call is covered by a synchronization
     /// that succeeded.
     ///
-    /// `round` runs one synchronization of the storage and returns the last ticket it covers. The
-    /// barrier runs at most one round at a time and lets every caller waiting meanwhile share the
-    /// next one. A round that fails with [`RuntimePersistenceError::Synchronize`] refuses this and
-    /// every later durability promise.
+    /// `run` runs one synchronization of the storage, the round it receives, and that round
+    /// records its own outcome. The barrier runs at most one round at a time and lets every caller
+    /// waiting meanwhile share the next one. A round that failed refuses this and every later
+    /// durability promise.
     #[cfg_attr(
         nervix_lint,
         nervix::dispatch(
             reason = "the external storage driver owns the admitted durability action"
         )
     )]
-    async fn synchronize<Round, Synchronized>(
-        &self,
-        round: Round,
+    async fn synchronize<Run, Ran>(
+        barrier: &Arc<Self>,
+        run: Run,
     ) -> error_stack::Result<(), RuntimePersistenceError>
     where
-        Round: Fn() -> Synchronized,
-        Synchronized: Future<Output = error_stack::Result<u64, RuntimePersistenceError>>,
+        Run: Fn(DurabilityRound) -> Ran,
+        Ran: Future<Output = error_stack::Result<(), RuntimePersistenceError>>,
     {
-        let ticket = self.issue();
+        let ticket = barrier.issue();
         loop {
             nervix_primitives::task::consume_budget().await;
-            let finished = self.finished.notified();
+            let finished = barrier.finished.notified();
             tokio::pin!(finished);
             finished.as_mut().enable();
-            if self.synchronized.load(Ordering::SeqCst) >= ticket {
+            if barrier.synchronized.load(Ordering::SeqCst) >= ticket {
                 return Ok(());
             }
-            if self.failed.load(Ordering::SeqCst) {
+            if barrier.failed.load(Ordering::SeqCst) {
                 return Err(Report::new(RuntimePersistenceError::Synchronize));
             }
-            let Some(synchronization) = self.claim() else {
+            let Some(round) = Self::claim(barrier) else {
                 finished.await;
                 continue;
             };
-            match round().await {
-                Ok(covered) => {
-                    self.synchronized.fetch_max(covered, Ordering::SeqCst);
-                }
-                Err(error) => {
-                    if let RuntimePersistenceError::Synchronize = error.current_context() {
-                        self.failed.store(true, Ordering::SeqCst);
-                    }
-                    return Err(error);
-                }
-            }
-            drop(synchronization);
+            run(round).await?;
         }
-    }
-
-    /// The last ticket issued. A synchronization reads it just before it starts, which is what
-    /// lets it cover every write whose ticket was issued by then.
-    fn covered_by_a_round_starting_now(&self) -> u64 {
-        self.issued.load(Ordering::SeqCst)
     }
 }
 
@@ -173,16 +206,17 @@ impl RuntimeStateStore {
     pub(in crate::runtime) async fn synchronize(
         &self,
     ) -> error_stack::Result<(), RuntimePersistenceError> {
-        self.durability
-            .synchronize(|| self.synchronize_storage())
+        DurabilityBarrier::synchronize(&self.durability, |round| self.synchronize_storage(round))
             .await
     }
 
-    /// Synchronize the database on a storage worker, and return the last ticket that
-    /// synchronization covers.
-    async fn synchronize_storage(&self) -> error_stack::Result<u64, RuntimePersistenceError> {
+    /// Synchronize the database on a storage worker as `round`, which the storage job owns and
+    /// records its outcome in, also when the caller stops waiting for it.
+    async fn synchronize_storage(
+        &self,
+        round: DurabilityRound,
+    ) -> error_stack::Result<(), RuntimePersistenceError> {
         let db = self.db.clone();
-        let barrier = self.durability.clone();
         let reservation = self
             .executor
             .reserve(MemoryClass::Bulk, 1)
@@ -193,16 +227,22 @@ impl RuntimeStateStore {
                 StorageClass::Filesystem,
                 reservation,
                 move |_charge, _cancellation| {
+                    let mut round = round;
                     // Every ticket issued so far belongs to a write that was applied before it was
-                    // issued, so reading the last one just before the synchronization starts is
-                    // what lets the synchronization cover it.
-                    let covered = barrier.covered_by_a_round_starting_now();
-                    barrier.rounds.fetch_add(1, Ordering::SeqCst);
-                    db.persist(PersistMode::SyncAll).map_err(|error| {
-                        Report::new(RuntimePersistenceError::Synchronize)
-                            .attach_printable(error.to_string())
-                    })?;
-                    Ok(covered)
+                    // issued, so starting the round just before the flush is what lets it cover
+                    // them.
+                    round.start();
+                    match db.persist(PersistMode::SyncAll) {
+                        Ok(()) => {
+                            round.succeeded();
+                            Ok(())
+                        }
+                        Err(error) => {
+                            round.failed();
+                            Err(Report::new(RuntimePersistenceError::Synchronize)
+                                .attach_printable(error.to_string()))
+                        }
+                    }
                 },
             )
             .await
@@ -215,28 +255,145 @@ impl RuntimeStateStore {
 mod shuttle_tests;
 
 #[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
 mod tests {
-    use super::{super::tests::open_store, *};
+    use std::num::NonZeroUsize;
 
-    /// Writers that ask for durability at the same time share synchronizations instead of each
-    /// queuing one behind the storage workers. A writer that asks while a synchronization runs is
-    /// covered by the next one at the latest.
-    #[nervix_primitives::test]
-    async fn concurrent_writers_share_synchronizations() {
-        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
-        let store = open_store(&dir);
-        let writers = (0..16).map(|_| store.synchronize()).collect::<Vec<_>>();
+    use nervix_execution::{ExecutionConfig, ExecutionError, Executor, WorkerCounts};
+    use nervix_primitives::{sync::oneshot, task::JoinHandle};
 
-        for outcome in futures_util::future::join_all(writers).await {
-            outcome.expect("every writer should be synchronized");
+    use super::{
+        super::tests::{open_store, open_store_on},
+        *,
+    };
+
+    /// How many writers ask for durability together.
+    const WRITERS: u64 = 16;
+
+    /// An executor that runs filesystem work on one storage worker, which a test can hold.
+    fn one_filesystem_worker() -> Executor {
+        Executor::new(ExecutionConfig {
+            workers: WorkerCounts {
+                filesystem_storage: NonZeroUsize::MIN,
+                ..WorkerCounts::default()
+            },
+            ..ExecutionConfig::default()
+        })
+        .expect("the test changes only the filesystem worker count")
+    }
+
+    /// The only filesystem worker of an executor, held by a job until the test releases it. A
+    /// synchronization claimed meanwhile waits for that worker, so it has not started.
+    struct HeldFilesystemWorker {
+        release: oneshot::Sender<()>,
+        holding: JoinHandle<Result<(), Report<ExecutionError>>>,
+    }
+
+    impl HeldFilesystemWorker {
+        async fn hold(executor: &Executor) -> Self {
+            let (started, has_started) = oneshot::channel();
+            let (release, released) = oneshot::channel::<()>();
+            let holder = executor.clone();
+            let charge = executor
+                .try_reserve(MemoryClass::Bulk, 1)
+                .expect("the holding job's charge fits the bulk budget");
+            let holding = nervix_primitives::task::spawn(async move {
+                holder
+                    .run_storage(StorageClass::Filesystem, charge, move |_, _| {
+                        started.send(()).expect("the test awaits the held worker");
+                        released
+                            .blocking_recv()
+                            .expect("the test releases the held worker");
+                    })
+                    .await
+            });
+            has_started
+                .await
+                .expect("the holding job takes the only filesystem worker");
+            Self { release, holding }
         }
 
-        let rounds = store.durability.rounds();
-        assert!(
-            (1..=2).contains(&rounds),
-            "sixteen concurrent writers needed {rounds} synchronizations"
+        async fn release(self) {
+            self.release
+                .send(())
+                .expect("the holding job waits for its release");
+            self.holding
+                .await
+                .expect("the holding job's task is joined")
+                .expect("the holding job ends");
+        }
+    }
+
+    /// Writers that ask for durability before a synchronization starts share it instead of each
+    /// queuing one behind the storage workers: it covers every ticket issued before it started.
+    #[nervix_primitives::test]
+    async fn writers_that_ask_before_a_synchronization_starts_share_it() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let executor = one_filesystem_worker();
+        let store = open_store_on(&dir, executor.clone());
+        let held = HeldFilesystemWorker::hold(&executor).await;
+        let writers = futures_util::future::join_all((0..WRITERS).map(|_| store.synchronize()));
+        tokio::pin!(writers);
+
+        // Each writer takes its ticket when it is first polled. The first one claims the
+        // synchronization, which waits for the held worker, and the others wait for it.
+        assert!(futures_util::poll!(&mut writers).is_pending());
+        assert_eq!(store.durability.issued.load(Ordering::SeqCst), WRITERS);
+        assert_eq!(
+            store.durability.rounds(),
+            0,
+            "a synchronization started while the only filesystem worker was held"
         );
-        assert_eq!(store.durability.synchronized.load(Ordering::SeqCst), 16);
+        held.release().await;
+
+        for outcome in writers.await {
+            outcome.expect("every writer should be synchronized");
+        }
+        assert_eq!(
+            store.durability.rounds(),
+            1,
+            "writers that all asked before the synchronization started needed more than it"
+        );
+        assert_eq!(
+            store.durability.synchronized.load(Ordering::SeqCst),
+            WRITERS
+        );
+    }
+
+    /// Writers that ask while a synchronization runs are not covered by it, since it covers only
+    /// the tickets issued before it started. They share the next one, which the first of them to
+    /// wake starts once the running one has recorded its outcome.
+    #[nervix_primitives::test]
+    async fn writers_that_ask_while_a_synchronization_runs_share_the_next_one() {
+        let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
+        let store = open_store(&dir);
+        let mut running = DurabilityBarrier::claim(&store.durability)
+            .expect("nothing else runs a synchronization");
+        running.start();
+        let writers = futures_util::future::join_all((0..WRITERS).map(|_| store.synchronize()));
+        tokio::pin!(writers);
+
+        // Each writer takes its ticket when it is first polled, after the running synchronization
+        // started, and waits for that synchronization to end.
+        assert!(futures_util::poll!(&mut writers).is_pending());
+        assert_eq!(store.durability.issued.load(Ordering::SeqCst), WRITERS);
+        running.succeeded();
+
+        for outcome in writers.await {
+            outcome.expect("every writer should be synchronized");
+        }
+        assert_eq!(
+            store.durability.rounds(),
+            2,
+            "writers that all asked while a synchronization ran needed more than the next one"
+        );
+        assert_eq!(
+            store.durability.synchronized.load(Ordering::SeqCst),
+            WRITERS
+        );
     }
 
     /// A synchronization that fails leaves every write it covered, and every later one, without a
@@ -268,9 +425,7 @@ mod tests {
     async fn a_cancelled_synchronization_frees_the_barrier() {
         let dir = tempfile::tempdir().expect("temporary runtime state directory should open");
         let store = open_store(&dir);
-        let abandoned = store
-            .durability
-            .claim()
+        let abandoned = DurabilityBarrier::claim(&store.durability)
             .expect("nothing else runs a synchronization");
         drop(abandoned);
 

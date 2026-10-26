@@ -8,11 +8,11 @@ Feature: Resource-backed lookups
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n{\"zip\":\"10001\",\"city\":\"New York\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
@@ -21,7 +21,7 @@ Feature: Resource-backed lookups
       """
       uploaded resource version 1
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA zip_code_entry (
         zip STRING,
@@ -43,7 +43,7 @@ Feature: Resource-backed lookups
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE HASH MAP zip_codes_by_zip;
       """
@@ -71,7 +71,7 @@ Feature: Resource-backed lookups
       """
       entries: 2
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       LOOKUP zip_codes_by_zip KEY '60601';
       """
@@ -99,7 +99,7 @@ Feature: Resource-backed lookups
         "lookup.jsonl": "{not-json}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE malformed_lookup;
@@ -113,7 +113,7 @@ Feature: Resource-backed lookups
         FROM WIRE JSON SCHEMA malformed_entry_wire
         TO SCHEMA malformed_entry;
       """
-    When these NSPL commands fail with "failed to decode lookup 'malformed_by_key' line 1"
+    When these Plexus commands fail with "failed to build domain execution for '{{domain}}': failed to load lookup 'malformed_by_key': failed to decode lookup 'malformed_by_key' line 1: failed to parse json payload for codec 'malformed_entry_codec'"
       """
       CREATE HASH MAP malformed_by_key
         KEY key
@@ -131,7 +131,7 @@ Feature: Resource-backed lookups
         "present.jsonl": "{\"key\":\"one\",\"value\":\"first\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE DOMAIN {{domain}};
       CREATE RESOURCE lookup_bundle;
@@ -145,7 +145,7 @@ Feature: Resource-backed lookups
         FROM WIRE JSON SCHEMA lookup_wire
         TO SCHEMA lookup_entry;
       """
-    When these NSPL commands fail with "resource file 'missing.jsonl' in 'lookup_bundle@1' for HASH MAP 'by_key'"
+    When these Plexus commands fail with "resource file 'missing.jsonl' in 'lookup_bundle@1' for HASH MAP 'by_key'"
       """
       CREATE HASH MAP by_key
         KEY key
@@ -163,16 +163,16 @@ Feature: Resource-backed lookups
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
 
       CREATE SCHEMA zip_code_entry (
@@ -195,7 +195,7 @@ Feature: Resource-backed lookups
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
       """
-    When these NSPL commands fail with "hash map 'zip_codes_by_zip' has no entry for key '99999'"
+    When these Plexus commands fail with "hash map 'zip_codes_by_zip' has no entry for key '99999'"
       """
       LOOKUP zip_codes_by_zip KEY '99999';
       """
@@ -215,16 +215,16 @@ Feature: Resource-backed lookups
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Chicago\"}\n{\"zip\":\"10001\",\"city\":\"New York\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
 
       CREATE SCHEMA zip_code_entry (
@@ -247,7 +247,7 @@ Feature: Resource-backed lookups
         PATH 'lookup.jsonl'
         DECODE USING zip_code_entry_codec;
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE HASH MAP zip_codes_by_zip;
       """
@@ -255,7 +255,7 @@ Feature: Resource-backed lookups
       """
       owner: node-
       """
-    When these NSPL commands are executed on a node that is not a holder of the last described hash map
+    When these Plexus commands are executed on a node that is not a holder of the last described hash map
       """
       LOOKUP zip_codes_by_zip KEY '60601';
       """
@@ -296,16 +296,16 @@ Feature: Resource-backed lookups
         "lookup.jsonl": "{\"zip\":\"60601\",\"city\":\"Madison\"}\n{\"zip\":\"10001\",\"city\":\"New York\"}\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE zip_codes;
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_dir}}';
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
 
       CREATE SCHEMA zip_code_entry (
@@ -330,14 +330,14 @@ Feature: Resource-backed lookups
 
       START;
       """
-    When these NSPL commands are executed through the client on the leader node
+    When these Plexus commands are executed through the client on the leader node
       """
       UPLOAD RESOURCE zip_codes VERSION '{{zip_codes_v2_dir}}';
       """
     When the cluster is restarted
     Then node "node-1" eventually observes a stable leader
     And node "node-1" eventually reports status containing "{{domain}} status=Running"
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       DESCRIBE HASH MAP zip_codes_by_zip;
       """
@@ -345,7 +345,7 @@ Feature: Resource-backed lookups
       """
       resource: zip_codes@1
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       LOOKUP zip_codes_by_zip KEY '60601';
       """
@@ -377,11 +377,11 @@ Feature: Resource-backed lookups
         "lookup.jsonl": "[{\"zip\":\"60601\",\"city\":\"Chicago\"},{\"zip\":\"10001\",\"city\":\"New York\"}]\n"
       }
       """
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE DOMAIN {{domain}};
       """
-    When these NSPL commands are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE RESOURCE zip_batches;
       UPLOAD RESOURCE zip_batches VERSION '{{zip_batches_dir}}';
@@ -390,7 +390,7 @@ Feature: Resource-backed lookups
       """
       uploaded resource version 1
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA zip_code_entry (
         zip STRING,
@@ -408,7 +408,7 @@ Feature: Resource-backed lookups
         PATH 'lookup.jsonl'
         DECODE USING zip_batch_codec;
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE HASH MAP zip_codes_by_zip;
       """
@@ -416,7 +416,7 @@ Feature: Resource-backed lookups
       """
       entries: 2
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       LOOKUP zip_codes_by_zip KEY '60601';
       """
@@ -424,7 +424,7 @@ Feature: Resource-backed lookups
       """
       "city":"Chicago"
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       LOOKUP zip_codes_by_zip KEY '10001';
       """

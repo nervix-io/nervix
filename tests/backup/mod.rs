@@ -6,7 +6,7 @@
 //!   through its own session, the downloads it shapes itself, archives it alters to probe the
 //!   reader's refusals, and the checks of what an archive holds.
 //! - **Depends on.** The public CLI, the harness's own session and download client, the archive
-//!   format's reader, and the language layer to parse an archive's NSPL.
+//!   format's reader, and the language layer to parse an archive's Plexus.
 //! - **Must not know.** How the server assembles, retains or streams an archive.
 
 use cucumber::{given, then, when};
@@ -14,15 +14,30 @@ use nervix_backup::{SectionContent, SectionEntry, SectionReader, SectionVisitor,
 use nervix_models::{
     BackupArchiveSummary, CommandExecutionReference, DomainName, Statement, Timestamp,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
+use nervix_plexus::client_statement::{ClientStatement, parse_client_statements};
+use nervix_server::BackupCutBoundary;
 
 use super::*;
 use crate::common::{
     cluster::test_basic_authorization,
     raw_session::{TestDownload, TestDownloadEnd, download_backup},
+    runner_offload::off_the_runner,
+    suite_watchdog::SUITE_BUDGET,
 };
 
+mod branch_keys;
+mod branch_state;
+pub(crate) mod console;
+mod delivery;
+mod fidelity;
+mod guest_saves;
+mod large_branch_state;
+mod materialized;
+pub(crate) mod memory;
+mod native_metadata;
 pub(crate) mod restore;
+mod staging;
+mod wait;
 
 /// The backup a scenario ran through its own session.
 #[derive(Debug, Clone)]
@@ -31,10 +46,30 @@ pub(crate) struct TestBackup {
     summary: BackupArchiveSummary,
 }
 
-/// How long a backup the CLI runs may take, download included.
-const CLI_BACKUP_TIMEOUT: Duration = Duration::from_secs(300);
+/// The slowest three-node restore the CLI completed in the scenarios jobs of Check runs
+/// 39683355582 and 39683521277, both on slow runners, rounded up: 291 seconds for a 42 MB archive,
+/// and up to 260 seconds for the 84 MB keyspace and window archives. Restores that took longer
+/// were ended at the former 300-second budget, so none of them is part of the measurement. A
+/// policy input: measure it again when the backup scenarios, their archives or the suite's
+/// concurrency change.
+const SLOWEST_HEALTHY_CLI_RESTORE: Duration = Duration::from_secs(300);
+/// How many times the slowest healthy restore one CLI run may take. A leader change while a
+/// restore installs its state makes the next leader install it again once the CLI sends the
+/// archive again, and six concurrent local copies of the keyspace and window scenario saw a
+/// restore start installing its state three times. A policy input.
+const CLI_RESTORE_INSTALLATIONS: u32 = 3;
+/// How long a backup or restore the CLI runs may take, download included.
+const CLI_BACKUP_TIMEOUT: Duration =
+    match SLOWEST_HEALTHY_CLI_RESTORE.checked_mul(CLI_RESTORE_INSTALLATIONS) {
+        Some(budget) => budget,
+        None => panic!("the CLI budget must fit in Duration"),
+    };
+const _: () = assert!(
+    CLI_BACKUP_TIMEOUT.as_nanos() < SUITE_BUDGET.as_nanos(),
+    "a CLI run must end inside the suite budget, so its scenario fails with its own reason"
+);
 
-/// The largest `models.nspl` a scenario reads back.
+/// The largest `models.plexus` a scenario reads back.
 const MODELS_LIMIT: u64 = 64 * 1024 * 1024;
 
 /// Where a scenario's archive named `name` lives.
@@ -47,6 +82,18 @@ fn archive_path(world: &mut ScenarioWorld, name: &str) -> PathBuf {
             .expect("the scenario's backup directory is created")
     });
     directory.path().join(name)
+}
+
+/// Reads, verifies and describes the archive at `path`. A scenario's archive can hold hundreds of
+/// MiB, so the work runs on a blocking task rather than the runner task every scenario shares.
+async fn described_archive(path: PathBuf) -> nervix_backup::ArchiveDescription {
+    off_the_runner(move || {
+        let file = std::fs::File::open(&path)
+            .unwrap_or_else(|error| panic!("archive {} opens: {error}", path.display()));
+        nervix_backup::describe_archive(file)
+            .unwrap_or_else(|report| panic!("archive {} verifies: {report:?}", path.display()))
+    })
+    .await
 }
 
 fn scenario_domain(world: &ScenarioWorld, raw: &str) -> DomainName {
@@ -84,8 +131,12 @@ fn cli_json(output: &Output) -> serde_json::Value {
         .unwrap_or_else(|error| panic!("the CLI printed {document:?}, which is not JSON: {error}"))
 }
 
-/// Runs the CLI with `arguments` after the connection arguments for `node`.
-async fn run_cli(world: &mut ScenarioWorld, node: &str, arguments: Vec<String>) {
+/// The CLI with the connection arguments for `node`, followed by `arguments`.
+fn cli_command(
+    world: &mut ScenarioWorld,
+    node: &str,
+    arguments: Vec<String>,
+) -> tokio::process::Command {
     let node = expand_placeholders(world, node);
     let grpc_uri = world
         .cluster()
@@ -103,6 +154,12 @@ async fn run_cli(world: &mut ScenarioWorld, node: &str, arguments: Vec<String>) 
         TEST_AUTH_PASSWORD,
     ]);
     command.args(arguments);
+    command
+}
+
+/// Runs the CLI with `arguments` after the connection arguments for `node`.
+async fn run_cli(world: &mut ScenarioWorld, node: &str, arguments: Vec<String>) {
+    let mut command = cli_command(world, node, arguments);
     let output = nervix_primitives::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
         .await
         .expect("the CLI finishes within its budget")
@@ -126,8 +183,154 @@ async fn when_cli_backs_up(world: &mut ScenarioWorld, scope: String, node: Strin
     run_cli(world, &node, arguments).await;
 }
 
+#[given(expr = "the backup cut for domain {string} will pause before its capture")]
+fn given_backup_cut_pauses(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .pause_backup_cut_on(domain, BackupCutBoundary::Capture);
+}
+
+#[when(
+    expr = "the CLI begins backing up {string} from node {string} into {string} in the background"
+)]
+fn when_cli_backup_begins_in_background(
+    world: &mut ScenarioWorld,
+    scope: String,
+    node: String,
+    file: String,
+) {
+    assert!(
+        world.background_backup.is_none(),
+        "a backup is already running"
+    );
+    let archive = archive_path(world, &file);
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world.cluster().grpc_uri(&node).expect("the node exists");
+    let selected_domain = world.domain.clone();
+    let scope = expand_placeholders(world, &scope);
+    world.background_backup = Some(AbortOnDropHandle::new(nervix_primitives::task::spawn(
+        async move {
+            let mut command = tokio::process::Command::new(scenario_cli_binary());
+            command.args([
+                "--server",
+                &grpc_uri,
+                "--domain",
+                &selected_domain,
+                "--username",
+                TEST_AUTH_USERNAME,
+                "--password",
+                TEST_AUTH_PASSWORD,
+            ]);
+            command.arg("backup");
+            command.args(scope.split_whitespace());
+            command
+                .arg("--output")
+                .arg(&archive)
+                .args(["--format", "json"]);
+            nervix_primitives::time::timeout(CLI_BACKUP_TIMEOUT, command.output())
+                .await
+                .expect("the background backup finishes within its budget")
+                .expect("the CLI process starts")
+        },
+    )));
+}
+
+#[then(expr = "the backup cut for domain {string} has reached its pause")]
+async fn then_backup_cut_paused(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    // The cut reaches its pause after its lease, its pause and its drain, each of which a loaded
+    // runner delays; the wait ends as soon as the pause is reached.
+    nervix_primitives::time::timeout(
+        Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_for_backup_cut_pause(&domain, BackupCutBoundary::Capture),
+    )
+    .await
+    .expect("the backup reaches the pause before its capture");
+}
+
+#[when(expr = "the backup cut pause for domain {string} is released")]
+fn when_backup_cut_pause_released(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .release_backup_cut_pause(&domain, BackupCutBoundary::Capture);
+}
+
+#[given(expr = "the backup cut for domain {string} will pause once it holds its lease")]
+fn given_backup_lease_pauses(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .pause_backup_cut_on(domain, BackupCutBoundary::Lease);
+}
+
+#[then(expr = "the backup cut for domain {string} has reached its lease pause")]
+async fn then_backup_lease_paused(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    // The cut reaches this pause after its lease wait, which a loaded runner delays; the wait ends
+    // as soon as the pause is reached.
+    nervix_primitives::time::timeout(
+        Duration::from_secs(120),
+        world
+            .fault_injection
+            .wait_for_backup_cut_pause(&domain, BackupCutBoundary::Lease),
+    )
+    .await
+    .expect("the backup holds its lease and reaches the pause before its reach check");
+}
+
+#[when(expr = "the backup lease pause for domain {string} is released")]
+fn when_backup_lease_pause_released(world: &mut ScenarioWorld, raw_domain: String) {
+    let domain = scenario_domain(world, &raw_domain);
+    world
+        .fault_injection
+        .release_backup_cut_pause(&domain, BackupCutBoundary::Lease);
+}
+
+#[then("the background CLI backup finishes")]
+async fn then_background_backup_finishes(world: &mut ScenarioWorld) {
+    let task = world
+        .background_backup
+        .take()
+        .expect("a preceding step started a backup in the background");
+    world.last_cli_output = Some(task.await.expect("the background backup does not panic"));
+}
+
+#[then(expr = "the background CLI backup remains pending for {string}")]
+async fn then_background_backup_remains_pending(world: &mut ScenarioWorld, duration: String) {
+    let duration = nervix_models::parse_duration_text(&duration).expect("a valid duration");
+    nervix_primitives::time::sleep(duration).await;
+    assert!(
+        !world
+            .background_backup
+            .as_ref()
+            .expect("a backup is running")
+            .is_finished(),
+        "the backup completed before the domain mutation lease was released"
+    );
+}
+
+#[then(expr = "the CLI backup reports at least {int} records dropped during quiesce")]
+fn then_backup_reports_dropped_records(world: &mut ScenarioWorld, minimum: u64) {
+    let report = cli_json(last_cli_output(world));
+    let domains = report["domains"]
+        .as_array()
+        .expect("the report names domains");
+    let dropped = domains
+        .iter()
+        .filter_map(|domain| domain["cut"]["dropped_records"].as_u64())
+        .sum::<u64>();
+    assert!(
+        dropped >= minimum,
+        "quiesce dropped {dropped} records, expected at least {minimum}: {report}"
+    );
+}
+
 #[then(expr = "the CLI backup succeeded with a JSON report naming domain {string}")]
-fn then_cli_backup_succeeded(world: &mut ScenarioWorld, domain: String) {
+async fn then_cli_backup_succeeded(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     let output = last_cli_output(world);
     assert!(
@@ -149,24 +352,29 @@ fn then_cli_backup_succeeded(world: &mut ScenarioWorld, domain: String) {
             .as_str()
             .expect("the report names its output"),
     );
-    let bytes = std::fs::read(&path).expect("the reported archive exists");
-    let length = u64::try_from(bytes.len()).expect("an archive length fits 64 bits");
-    assert_eq!(
-        Some(length),
-        report["total_bytes"].as_u64(),
-        "the archive has its reported size"
-    );
-    assert_eq!(
-        Some(blake3::hash(&bytes).to_hex().as_str()),
-        report["blake3"].as_str(),
-        "the archive has its reported digest"
-    );
-    use std::os::unix::fs::PermissionsExt as _;
-    let mode = std::fs::metadata(&path)
-        .expect("the archive's metadata is readable")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600, "only the owner may read an archive");
+    let reported_length = report["total_bytes"].as_u64();
+    let reported_digest = report["blake3"].as_str().map(ToOwned::to_owned);
+    off_the_runner(move || {
+        let bytes = std::fs::read(&path).expect("the reported archive exists");
+        let length = u64::try_from(bytes.len()).expect("an archive length fits 64 bits");
+        assert_eq!(
+            Some(length),
+            reported_length,
+            "the archive has its reported size"
+        );
+        assert_eq!(
+            Some(blake3::hash(&bytes).to_hex().as_str()),
+            reported_digest.as_deref(),
+            "the archive has its reported digest"
+        );
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&path)
+            .expect("the archive's metadata is readable")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "only the owner may read an archive");
+    })
+    .await;
 }
 
 #[then("the CLI backup succeeded with a JSON report naming no domain")]
@@ -202,6 +410,16 @@ fn then_cli_backup_failed(world: &mut ScenarioWorld, code: String) {
     );
 }
 
+#[then(expr = "the CLI backup failure mentions {string}")]
+fn then_cli_backup_failure_mentions(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let report = cli_json(last_cli_output(world));
+    let message = report["error"]["message"]
+        .as_str()
+        .expect("the backup failure reports a message");
+    assert!(message.contains(&expected), "{message}");
+}
+
 #[then(expr = "backup archive {string} does not exist")]
 fn then_backup_archive_does_not_exist(world: &mut ScenarioWorld, file: String) {
     let path = archive_path(world, &file);
@@ -219,7 +437,7 @@ fn then_backup_archive_is_larger_than(world: &mut ScenarioWorld, file: String, m
     );
 }
 
-/// Collects every `models.nspl` of an archive, keyed by its section path.
+/// Collects every `models.plexus` of an archive, keyed by its section path.
 #[derive(Default)]
 struct ModelsCollector {
     documents: BTreeMap<String, String>,
@@ -238,35 +456,38 @@ impl SectionVisitor for ModelsCollector {
         entry: &SectionEntry,
         content: &mut SectionReader<'_>,
     ) -> Result<(), error_stack::Report<nervix_backup::ArchiveReadError>> {
-        if entry.content != SectionContent::Nspl {
-            let mut sink = std::io::sink();
-            std::io::copy(content, &mut sink).expect("a section can be read through");
+        if entry.content != SectionContent::Plexus {
+            let mut connector = std::io::sink();
+            std::io::copy(content, &mut connector).expect("a section can be read through");
             return Ok(());
         }
         let bytes = content.read_all(entry, MODELS_LIMIT)?;
-        let text = String::from_utf8(bytes).expect("models.nspl is UTF-8");
+        let text = String::from_utf8(bytes).expect("models.plexus is UTF-8");
         self.documents.insert(entry.path.to_string(), text);
         Ok(())
     }
 }
 
-/// The NSPL an archive holds for `domain`.
-fn archived_models(path: &Path, domain: &DomainName) -> String {
-    let file = std::fs::File::open(path).expect("the archive exists");
-    let mut collector = ModelsCollector::default();
-    read_archive(std::io::BufReader::new(file), &mut collector)
-        .unwrap_or_else(|report| panic!("the archive verifies: {report:?}"));
-    let models_path = nervix_backup::SectionPath::domain_models(domain).to_string();
-    collector
-        .documents
-        .remove(&models_path)
-        .unwrap_or_else(|| panic!("the archive holds '{models_path}'"))
+/// The Plexus an archive holds for `domain`, read after the whole archive verifies on a blocking task.
+async fn archived_models(path: PathBuf, domain: DomainName) -> String {
+    off_the_runner(move || {
+        let file = std::fs::File::open(&path).expect("the archive exists");
+        let mut collector = ModelsCollector::default();
+        read_archive(std::io::BufReader::new(file), &mut collector)
+            .unwrap_or_else(|report| panic!("the archive verifies: {report:?}"));
+        let models_path = nervix_backup::SectionPath::domain_models(&domain).to_string();
+        collector
+            .documents
+            .remove(&models_path)
+            .unwrap_or_else(|| panic!("the archive holds '{models_path}'"))
+    })
+    .await
 }
 
-/// The canonical NSPL of every model `source` creates, in name order.
+/// The canonical Plexus of every model `source` creates, in name order.
 fn created_models(source: &str) -> Vec<String> {
     let statements = parse_client_statements(source)
-        .unwrap_or_else(|error| panic!("the NSPL parses: {error:?}"));
+        .unwrap_or_else(|error| panic!("the Plexus parses: {error:?}"));
     let mut models = Vec::new();
     for statement in statements {
         let ClientStatement::Server(Statement::Create(create)) = statement else {
@@ -274,8 +495,8 @@ fn created_models(source: &str) -> Vec<String> {
         };
         let rendered = create
             .body
-            .to_canonical_nspl()
-            .expect("a parsed model renders as NSPL");
+            .to_canonical_plexus()
+            .expect("a parsed model renders as Plexus");
         models.push(rendered);
     }
     models.sort();
@@ -283,10 +504,10 @@ fn created_models(source: &str) -> Vec<String> {
 }
 
 #[then(
-    expr = "backup archive {string} holds for domain {string} exactly the models these NSPL \
+    expr = "backup archive {string} holds for domain {string} exactly the models these Plexus \
             commands create"
 )]
-fn then_archive_holds_exactly_the_models(
+async fn then_archive_holds_exactly_the_models(
     world: &mut ScenarioWorld,
     file: String,
     domain: String,
@@ -294,12 +515,12 @@ fn then_archive_holds_exactly_the_models(
 ) {
     let path = archive_path(world, &file);
     let domain = scenario_domain(world, &domain);
-    let archived = archived_models(&path, &domain);
+    let archived = archived_models(path, domain).await;
     let expected = created_models(&expand_placeholders(world, docstring(step)));
     assert_eq!(
         created_models(&archived),
         expected,
-        "models.nspl:\n{archived}"
+        "models.plexus:\n{archived}"
     );
 }
 
@@ -307,7 +528,7 @@ fn then_archive_holds_exactly_the_models(
     expr = "backup archive {string} holds for domain {string} schema {string} and relays {string} \
             numbered contiguously from 1"
 )]
-fn then_archive_holds_a_contiguous_run(
+async fn then_archive_holds_a_contiguous_run(
     world: &mut ScenarioWorld,
     file: String,
     domain: String,
@@ -316,14 +537,14 @@ fn then_archive_holds_a_contiguous_run(
 ) {
     let path = archive_path(world, &file);
     let domain = scenario_domain(world, &domain);
-    let archived = archived_models(&path, &domain);
+    let archived = archived_models(path, domain).await;
     let statements = parse_client_statements(&archived)
-        .unwrap_or_else(|error| panic!("models.nspl parses: {error:?}\n{archived}"));
+        .unwrap_or_else(|error| panic!("models.plexus parses: {error:?}\n{archived}"));
     let mut schema_found = false;
     let mut numbers = BTreeSet::new();
     for statement in statements {
         let ClientStatement::Server(Statement::Create(create)) = statement else {
-            panic!("models.nspl holds only model creations:\n{archived}");
+            panic!("models.plexus holds only model creations:\n{archived}");
         };
         let name = create.body.name().to_string();
         if name == schema {
@@ -345,14 +566,31 @@ fn then_archive_holds_a_contiguous_run(
 
 #[when(expr = "the CLI describes backup archive {string} as {word}")]
 async fn when_cli_describes_backup(world: &mut ScenarioWorld, file: String, format: String) {
-    let path = archive_path(world, &file);
+    let leader = current_leader_node(world).await;
+    describe_backup_through(world, &file, &format, &leader).await;
+}
+
+/// Describes the archive through `node`, for a scenario in which another node is down and the
+/// cluster's leader cannot be read from every node.
+#[when(expr = "the CLI describes backup archive {string} as {word} through node {string}")]
+async fn when_cli_describes_backup_through_node(
+    world: &mut ScenarioWorld,
+    file: String,
+    format: String,
+    node: String,
+) {
+    let node = expand_placeholders(world, &node);
+    describe_backup_through(world, &file, &format, &node).await;
+}
+
+async fn describe_backup_through(world: &mut ScenarioWorld, file: &str, format: &str, node: &str) {
+    let path = archive_path(world, file);
     let statement = format!(
         "DESCRIBE BACKUP '{}' FORMAT {};",
         path.display(),
         format.to_uppercase()
     );
-    let leader = current_leader_node(world).await;
-    run_cli(world, &leader, vec!["--command".to_string(), statement]).await;
+    run_cli(world, node, vec!["--command".to_string(), statement]).await;
 }
 
 fn described_backup(world: &ScenarioWorld) -> serde_json::Value {
@@ -365,6 +603,64 @@ fn described_backup(world: &ScenarioWorld) -> serde_json::Value {
         String::from_utf8_lossy(&output.stderr)
     );
     cli_json(output)
+}
+
+#[then(expr = "the described backup has exactly {int} {string} state sections")]
+fn then_described_backup_has_state_sections(
+    world: &mut ScenarioWorld,
+    expected: usize,
+    kind: String,
+) {
+    let description = described_backup(world);
+    let actual = description["domains"]
+        .as_array()
+        .expect("the archive lists its domains")
+        .iter()
+        .flat_map(|domain| {
+            domain["runtime_state"]
+                .as_array()
+                .expect("the domain lists its state")
+        })
+        .filter(|section| kind == "any" || section["kind"].as_str() == Some(kind.as_str()))
+        .count();
+    assert_eq!(actual, expected, "the described backup: {description}");
+}
+
+#[then(expr = "the described backup records Kafka domain offset {int} for ingestor {string}")]
+fn then_described_backup_records_kafka_domain_offset(
+    world: &mut ScenarioWorld,
+    expected: i64,
+    ingestor: String,
+) {
+    let description = described_backup(world);
+    let sections = description["domains"]
+        .as_array()
+        .expect("the archive lists its domains")
+        .iter()
+        .flat_map(|domain| {
+            domain["runtime_state"]
+                .as_array()
+                .expect("the domain lists its state")
+        })
+        .filter(|section| {
+            section["kind"].as_str() == Some("kafka_offsets")
+                && section["entity"].as_str() == Some(ingestor.as_str())
+        })
+        .collect::<Vec<_>>();
+    let [section] = sections.as_slice() else {
+        panic!("the archive holds one Kafka offset section of '{ingestor}': {description}");
+    };
+    let offsets = section["positions"]
+        .as_array()
+        .expect("a Kafka offset section lists its positions")
+        .iter()
+        .map(|position| position["next_offset"].as_i64())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        offsets,
+        vec![Some(expected)],
+        "the archived domain offsets of '{ingestor}': {description}"
+    );
 }
 
 #[then(expr = "the described backup lists the scenario user")]
@@ -500,17 +796,22 @@ async fn given_resource_directory_holding_a_large_file(
         .node_base_dir(&node_id)
         .expect("the node has a base directory");
     let resource_dir = base_dir.join("fixtures").join(&placeholder);
-    std::fs::create_dir_all(&resource_dir).expect("the fixture directory is created");
-    // Varied bytes, so nothing between the client and the archive can shrink them.
-    let mut bytes = Vec::with_capacity(mebibytes * 1024 * 1024);
-    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-    while bytes.len() < mebibytes * 1024 * 1024 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        bytes.extend_from_slice(&state.to_le_bytes());
-    }
-    std::fs::write(resource_dir.join("payload.bin"), bytes).expect("the fixture file is written");
+    let fixture_dir = resource_dir.clone();
+    off_the_runner(move || {
+        std::fs::create_dir_all(&fixture_dir).expect("the fixture directory is created");
+        // Varied bytes, so nothing between the client and the archive can shrink them.
+        let mut bytes = Vec::with_capacity(mebibytes * 1024 * 1024);
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        while bytes.len() < mebibytes * 1024 * 1024 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            bytes.extend_from_slice(&state.to_le_bytes());
+        }
+        std::fs::write(fixture_dir.join("payload.bin"), bytes)
+            .expect("the fixture file is written");
+    })
+    .await;
     world
         .placeholders
         .insert(placeholder, resource_dir.display().to_string());
@@ -524,10 +825,19 @@ async fn when_session_backs_up_the_cluster(world: &mut ScenarioWorld, node: Stri
         .open_session(&node, &world.domain)
         .await
         .expect("the scenario's session opens");
-    let outcome = session
-        .run_command_result("BACKUP CLUSTER TO 'unused.nvxb';")
+    let query = "BACKUP CLUSTER TO 'unused.nvxb';";
+    let mut outcome = session
+        .run_command_result(query)
         .await
         .expect("the backup is answered");
+    if outcome_awaits_leader(&outcome) {
+        let reference = outcome.execution_reference.clone();
+        let scope = session.scope();
+        let routes = world.cluster().leader_routes();
+        let learned =
+            learn_command_outcome(&routes, &scope, query, reference.as_str(), outcome).await;
+        outcome = learned.outcome;
+    }
     let summary = outcome
         .backup
         .as_deref()
@@ -668,16 +978,20 @@ async fn when_cli_backs_up_to_standard_output(
 #[then(
     "the archive the CLI wrote to standard output verifies and its report went to standard error"
 )]
-fn then_standard_output_holds_the_archive(world: &mut ScenarioWorld) {
+async fn then_standard_output_holds_the_archive(world: &mut ScenarioWorld) {
     let output = last_cli_output(world);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(
         output.status.success(),
         "the backup failed: status {}; stderr: {stderr}",
         output.status
     );
-    nervix_backup::describe_archive(output.stdout.as_slice())
-        .unwrap_or_else(|report| panic!("standard output holds a valid archive: {report:?}"));
+    let archive = output.stdout.clone();
+    off_the_runner(move || {
+        nervix_backup::describe_archive(archive.as_slice())
+            .unwrap_or_else(|report| panic!("standard output holds a valid archive: {report:?}"))
+    })
+    .await;
     assert!(
         stderr.contains("backed up domain"),
         "the report went to standard error: {stderr}"
@@ -808,7 +1122,7 @@ async fn when_backup_retry_validity_has_ended(world: &mut ScenarioWorld) {
     expr = "backup archive {string} is copied to {string} with its manifest's record {word} set \
             to {int}"
 )]
-fn when_archive_is_copied_with_a_foreign_header(
+async fn when_archive_is_copied_with_a_foreign_header(
     world: &mut ScenarioWorld,
     source: String,
     target: String,
@@ -817,11 +1131,6 @@ fn when_archive_is_copied_with_a_foreign_header(
 ) {
     let source = archive_path(world, &source);
     let target = archive_path(world, &target);
-    let mut bytes = Vec::new();
-    std::fs::File::open(&source)
-        .expect("the source archive exists")
-        .read_to_end(&mut bytes)
-        .expect("the source archive is readable");
     // The manifest is the first entry: its 512-byte tar header, then its record, whose header is
     // an eight-byte magic, a little-endian kind tag, and a little-endian format version.
     let offset = match field.as_str() {
@@ -829,6 +1138,14 @@ fn when_archive_is_copied_with_a_foreign_header(
         "version" => 512 + 8 + 2,
         other => panic!("a record header has no field '{other}'"),
     };
-    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
-    std::fs::write(&target, bytes).expect("the altered archive is written");
+    off_the_runner(move || {
+        let mut bytes = Vec::new();
+        std::fs::File::open(&source)
+            .expect("the source archive exists")
+            .read_to_end(&mut bytes)
+            .expect("the source archive is readable");
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        std::fs::write(&target, bytes).expect("the altered archive is written");
+    })
+    .await;
 }

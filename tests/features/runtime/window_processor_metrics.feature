@@ -3,11 +3,11 @@ Feature: Window processor metrics
   Scenario Outline: DESCRIBE WINDOW PROCESSOR and Prometheus report window traffic metrics
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
-    And the leader node is configured with these NSPL commands
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       CREATE SCHEMA metric (
         tenant STRING,
@@ -31,8 +31,8 @@ Feature: Window processor metrics
         CREATE RELAY metrics_summary SCHEMA metric_summary BRANCHED BY by_window_metrics_source;
         CREATE VHOST edge http-{{test_id}}.example.com;
         CREATE ENDPOINT window_metrics_ingress ON edge PATH '/window-metrics' TYPE HTTP;
-        CREATE INGESTOR window_metrics_source
-        FROM ENDPOINT window_metrics_ingress MODE NO_ACK SEQUENTIAL
+        CREATE HTTP ENDPOINT INGESTOR window_metrics_source
+        FROM window_metrics_ingress MODE NO ACK
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
         TO metrics_input
         INHERIT ALL
@@ -83,7 +83,7 @@ Feature: Window processor metrics
       """
       "tenant":"acme"
       """
-    When these NSPL commands are executed
+    When these Plexus commands are executed
       """
       DESCRIBE WINDOW PROCESSOR window_metrics_node;
       """

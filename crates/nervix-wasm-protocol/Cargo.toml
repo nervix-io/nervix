@@ -15,6 +15,10 @@ flatbuffers = { workspace = true }
 meticulous = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+bolero = { workspace = true }
+nervix-arbitrary = { workspace = true }
+
 [build-dependencies]
 flatc-rust = { workspace = true }
 meticulous = { workspace = true }

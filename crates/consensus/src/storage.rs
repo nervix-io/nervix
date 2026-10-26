@@ -5,6 +5,14 @@
 //! - **Depends on.** The bounded executor, Fjall, and the replicated vocabulary.
 //! - **Must not know.** Network transport, graph execution or application lifecycle policy.
 
+#![cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        engine,
+        reason = "owns the engines and infrastructure boundary declared above"
+    )
+)]
+
 use std::{
     collections::BTreeSet,
     fmt, io,
@@ -122,7 +130,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    WideCounts = 6,
+    RestoredLifecycle = 8,
 }
 
 #[derive(Debug)]
@@ -177,7 +185,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::WideCounts,
+            encoding: StateEncoding::RestoredLifecycle,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -206,13 +214,13 @@ impl StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::WideCounts,
+            encoding: StateEncoding::RestoredLifecycle,
             last_applied_log_id,
             last_membership,
             runtime_revision,
             command_retry_fence,
         } = metadata;
-        Ok(Self {
+        let state = Self {
             last_applied_log_id,
             last_membership,
             runtime_revision,
@@ -231,6 +239,7 @@ impl StateMachineData {
             cordoned_node_ids: Records::load(b'n', sm)?,
             node_admission_fences: Records::load(b'f', sm)?,
             domain_mutations: Records::load(b'x', sm)?,
+            domain_restore_installations: Records::load(b'I', sm)?,
             transactions: Records::load(b't', sm)?,
             transaction_commit_plans: crate::transaction_plan::TransactionCommitPlanRecords::load(
                 sm,
@@ -240,7 +249,42 @@ impl StateMachineData {
                 sm,
                 command_retry_fence,
             )?,
-        })
+        };
+        state.resources.check_recovered()?;
+        // Every family above read only the keys under its own tag, so a record under any other
+        // key would otherwise be left in place unread. The metadata record is the one other key.
+        let stored = sm.len().map_err(io::Error::other)?;
+        let Some(recovered) = state.stored_records() else {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        };
+        if recovered.checked_add(1) != Some(stored) {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        }
+        Ok(state)
+    }
+
+    /// How many keyed records this revision stores, besides its metadata.
+    fn stored_records(&self) -> Option<usize> {
+        let families = [
+            self.schedule.domains.len(),
+            self.domains.len(),
+            self.domain_clock_authorities.len(),
+            self.users.len(),
+            self.resources.stored_records()?,
+            self.cordoned_node_ids.len(),
+            self.node_admission_fences.len(),
+            self.domain_mutations.len(),
+            self.domain_restore_installations.len(),
+            self.transactions.len(),
+            self.transaction_commit_plans.stored_records()?,
+            self.transaction_reports.stored_records()?,
+            self.command_executions.stored_records(),
+        ];
+        let mut records = 0_usize;
+        for family in families {
+            records = records.checked_add(family)?;
+        }
+        Some(records)
     }
 
     /// Apply one committed entry: its log position, the membership it carries and its command.
@@ -335,6 +379,12 @@ impl StateMachineData {
         )?;
         self.domain_mutations
             .write_changes(&preceding.domain_mutations, b'x', batch, sm)?;
+        self.domain_restore_installations.write_changes(
+            &preceding.domain_restore_installations,
+            b'I',
+            batch,
+            sm,
+        )?;
         self.transactions
             .write_changes(&preceding.transactions, b't', batch, sm)?;
         self.transaction_commit_plans.write_changes(
@@ -601,6 +651,29 @@ impl GenerationSeal {
 impl StoreInner {
     pub(super) fn state(&self) -> StateMachineData {
         self.state_machine.read().clone()
+    }
+
+    pub(super) fn with_restore_state_reclamation<T>(
+        &self,
+        reclaim: impl FnOnce(&crate::RestoreStateRetention<'_>) -> T,
+    ) -> T {
+        crate::restore::with_restore_state_reclamation(&self.state_machine, reclaim)
+    }
+
+    pub(super) fn with_restore_state_installation<T>(
+        &self,
+        domain: &nervix_models::DomainName,
+        authority: &nervix_models::RestoreStateAuthority,
+        tenure: impl FnOnce() -> Option<crate::LeaderTenure>,
+        publish: impl FnOnce() -> T,
+    ) -> error_stack::Result<T, crate::RestoreStateInstallationError> {
+        crate::restore::with_restore_state_installation(
+            &self.state_machine,
+            domain,
+            authority,
+            tenure,
+            publish,
+        )
     }
 
     async fn run<T: Send + 'static>(
@@ -1031,6 +1104,30 @@ impl StoreInner {
         index.to_be_bytes().to_vec()
     }
 
+    /// The entry a stored log record holds. An append stores every entry under its own index, so
+    /// a record under another index, or one whose membership no configuration can hold, is a
+    /// record no append wrote.
+    fn decode_log_entry(key: &[u8], value: &[u8]) -> io::Result<EntryOf<TypeConfig>> {
+        let index = Self::log_index(key)?;
+        let record: EntryRecord = storage_decode(value)?;
+        let entry = record
+            .into_entry()
+            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+        if entry.log_id.index != index {
+            return Err(io::Error::other(StorageFailure::InvalidState));
+        }
+        Ok(entry)
+    }
+
+    /// The log index a stored log key names. A log key is exactly the index's eight big-endian
+    /// bytes, so any other length is a key no append wrote.
+    fn log_index(key: &[u8]) -> io::Result<u64> {
+        let index: [u8; 8] = key
+            .try_into()
+            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+        Ok(u64::from_be_bytes(index))
+    }
+
     fn log_bounds<R: RangeBounds<u64>>(range: R) -> (Bound<Vec<u8>>, Bound<Vec<u8>>) {
         let convert = |bound: Bound<&u64>| match bound {
             Bound::Included(index) => Bound::Included(Self::log_key(*index)),
@@ -1071,10 +1168,7 @@ impl StoreInner {
                 }
                 bytes = next_bytes;
             }
-            let record: EntryRecord = storage_decode(&value)?;
-            let entry = record
-                .into_entry()
-                .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+            let entry = Self::decode_log_entry(&key, &value)?;
             if let LogReadLimit::Bounded { .. } = limit {
                 continuation = Some(Bound::Excluded(key.to_vec()));
             }
@@ -1378,11 +1472,7 @@ impl FjallStore {
                 let mut boundary = None;
                 for item in inner.logs.range(bounds).rev() {
                     let (key, value) = item.into_inner().map_err(io::Error::other)?;
-                    let index: [u8; 8] = key
-                        .as_ref()
-                        .try_into()
-                        .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
-                    let index = u64::from_be_bytes(index);
+                    let index = StoreInner::log_index(&key)?;
                     let length = u64::try_from(value.len()).map_err(io::Error::other)?;
                     if kept_entries >= entries_retained || kept_bytes >= bytes_retained {
                         boundary = Some(index);
@@ -1445,6 +1535,37 @@ struct LogEntryChunk {
     _reservation: Reservation,
 }
 
+/// The read boundary survives exhaustion without retaining the chunk's allocation or charge.
+enum LogChunkState {
+    Unread,
+    Buffered(LogEntryChunk),
+    Exhausted,
+}
+
+impl LogChunkState {
+    fn next_entry(&mut self) -> Option<EntryOf<TypeConfig>> {
+        let Self::Buffered(chunk) = self else {
+            return None;
+        };
+        let entry = chunk.entries.next();
+        if chunk.entries.as_slice().is_empty() {
+            // A consumer may park after taking this entry. Free the allocation and its permits
+            // now, rather than making another read or source control call wait for its next poll.
+            *self = Self::Exhausted;
+        }
+        entry
+    }
+
+    fn begin_read(&mut self) -> bool {
+        let crossed_boundary = matches!(self, Self::Exhausted);
+        *self = Self::Unread;
+        crossed_boundary
+    }
+}
+
+#[cfg(all(test, feature = "shuttle"))]
+mod chunk_shuttle_tests;
+
 enum LogChunkRead {
     Entries {
         chunk: Option<LogEntryChunk>,
@@ -1483,7 +1604,7 @@ struct LogEntryStream {
     inner: StoreInner,
     start: Bound<Vec<u8>>,
     end: Bound<Vec<u8>>,
-    chunk: Option<LogEntryChunk>,
+    chunk: LogChunkState,
     complete: bool,
     expected_leader: Option<LeaderIdOf<TypeConfig>>,
 }
@@ -1499,19 +1620,17 @@ impl LogEntryStream {
             inner,
             start,
             end,
-            chunk: None,
+            chunk: LogChunkState::Unread,
             complete: false,
             expected_leader,
         }
     }
 
     async fn next(&mut self) -> Result<Option<EntryOf<TypeConfig>>, Report<LogEntryStreamError>> {
-        if let Some(chunk) = &mut self.chunk
-            && let Some(entry) = chunk.entries.next()
-        {
+        if let Some(entry) = self.chunk.next_entry() {
             return Ok(Some(entry));
         }
-        let crossed_chunk_boundary = self.chunk.take().is_some();
+        let crossed_chunk_boundary = self.chunk.begin_read();
         if self.complete {
             return Ok(None);
         }
@@ -1547,14 +1666,14 @@ impl LogEntryStream {
             Some(start) => self.start = start,
             None => self.complete = true,
         }
-        let Some(mut chunk) = chunk else {
+        let Some(chunk) = chunk else {
             return Ok(None);
         };
-        let entry = chunk
-            .entries
-            .next()
+        self.chunk = LogChunkState::Buffered(chunk);
+        let entry = self
+            .chunk
+            .next_entry()
             .verified("a present log chunk contains at least one decoded entry");
-        self.chunk = Some(chunk);
         Ok(Some(entry))
     }
 }
@@ -1651,11 +1770,8 @@ impl RaftLogStorage<TypeConfig> for FjallStore {
                 let last_purged_log_id = inner.read_optional_log_id(KEY_LAST_PURGED)?;
                 let last_log_id = match inner.logs.iter().next_back() {
                     Some(item) => {
-                        let (_, value) = item.into_inner().map_err(io::Error::other)?;
-                        let record: EntryRecord = storage_decode(&value)?;
-                        let entry = record
-                            .into_entry()
-                            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+                        let (key, value) = item.into_inner().map_err(io::Error::other)?;
+                        let entry = StoreInner::decode_log_entry(&key, &value)?;
                         Some(entry.log_id)
                     }
                     None => last_purged_log_id.clone(),
@@ -1890,5 +2006,11 @@ impl RaftSnapshotBuilder<TypeConfig> for FjallStore {
     }
 }
 
+#[cfg(test)]
+mod generators;
+#[cfg(test)]
+mod properties;
+#[cfg(test)]
+mod raft_properties;
 #[cfg(test)]
 mod tests;
