@@ -77,6 +77,61 @@ async fn default_limits_validate_together() {
     assert_eq!(snapshot.connector_storage.workers, 2);
 }
 
+/// Each class's budget counts once in the total. With a distinct power of two for every class, a
+/// class left out of the total or counted twice changes the sum.
+#[test]
+fn the_memory_total_counts_every_class_once() {
+    let budgets = MemoryBudgets {
+        management: ByteUnit::Byte(1),
+        commands: ByteUnit::Byte(2),
+        relay: ByteUnit::Byte(4),
+        bulk: ByteUnit::Byte(8),
+        bulk_window: ByteUnit::Byte(16),
+        restore_metadata: ByteUnit::Byte(32),
+        credentials: ByteUnit::Byte(64),
+    };
+
+    assert_eq!(budgets.total(), Some(ByteUnit::Byte(127)));
+}
+
+/// Budgets whose sum does not fit a byte count have no total, rather than one that wrapped.
+#[test]
+fn memory_budgets_beyond_a_byte_count_have_no_total() {
+    let budgets = MemoryBudgets {
+        relay: ByteUnit::Byte(u64::MAX),
+        ..MemoryBudgets::default()
+    };
+
+    assert_eq!(budgets.total(), None);
+}
+
+/// The startup preflight refuses a memory limit below the total, so the total is what the executor
+/// can reserve: the capacity of every memory class together, 2,339 MiB by default.
+#[nervix_primitives::test]
+async fn the_default_memory_total_is_what_the_executor_can_reserve() {
+    use meticulous::ResultExt as _;
+
+    let config = ExecutionConfig::default();
+    let executor = Executor::new(config).assured("the default budgets hold the default limits");
+    let mut reservable = 0_u64;
+    for class in [
+        MemoryClass::Management,
+        MemoryClass::Commands,
+        MemoryClass::Relay,
+        MemoryClass::Bulk,
+        MemoryClass::BulkWindow,
+        MemoryClass::RestoreMetadata,
+        MemoryClass::Credentials,
+    ] {
+        reservable = reservable
+            .checked_add(executor.memory(class).capacity_bytes)
+            .assured("seven budgets that each fit a u32 permit count add up within a u64");
+    }
+
+    assert_eq!(config.budgets.total(), Some(ByteUnit::Byte(reservable)));
+    assert_eq!(reservable, ByteUnit::Mebibyte(2339).as_u64());
+}
+
 #[test]
 fn charged_bytes_keep_their_own_size_and_the_room_their_only_holder_keeps() {
     let executor = Executor::default();

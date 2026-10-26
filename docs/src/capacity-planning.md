@@ -134,7 +134,7 @@ cannot hold it:
 - **Memory.** The node's memory limit is `--memory-limit` (`NERVIX_MEMORY_LIMIT`) when given, and
   otherwise the smallest memory limit of its control group and the groups above it, or its
   physical memory when no group limit is smaller. It must hold every execution budget at once: the
-  275 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,323 MiB in all,
+  291 MiB of transient budgets above and the 2 GiB grant for restore metadata, 2,339 MiB in all,
   and a `--memory-high-watermark` when one is set. A container limited to 2 GiB therefore cannot
   start a node. Size the limit above the budgets by the process memory a running graph holds, which
   the memory-pressure watermarks govern.
