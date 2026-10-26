@@ -6603,8 +6603,7 @@ async fn observe_nats(
     dependencies: &DependencyEndpoints,
     subject: &str,
 ) -> io::Result<BrokerObserver> {
-    let client = nats_client(dependencies).await?;
-    let observer = NatsObserver::subscribe(&client, subject).await?;
+    let observer = NatsObserver::connect(dependencies.get(NATS_ADDR)?, subject).await?;
     Ok(BrokerObserver::nats(observer))
 }
 

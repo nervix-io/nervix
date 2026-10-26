@@ -205,6 +205,13 @@ checks of broker ingestor reconnect, confirmation, refused payload confirmation 
 interruption, and of the brokered emitter confirmation window, hold the host's protocols for these
 rules; see [Protocols and their checks](./data-plane-concurrency.md#protocols-and-their-checks).
 
+The wide-columnar NATS delivery scenario checks all 32,768 sequence values and repeated headers
+through the real broker, on one node and across explicit source-to-relay and relay-to-emitter
+remote hops on three nodes. Its observing client retains receipt counts and subject-labelled
+driver-event diagnostics; a source sent counter alone does not confirm broker delivery. The
+[broker observer contract](./integration-test-lifecycle.md#broker-observers) owns those diagnostics,
+their bounds and the unchanged sequence deadline.
+
 #### Delivery review
 
 A change that adds or alters a source or emitter entity, or a host path that drives one, checks that:

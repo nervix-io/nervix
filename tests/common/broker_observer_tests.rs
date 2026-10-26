@@ -36,12 +36,9 @@ async fn a_buffered_sequence_meets_its_deadline_while_the_runner_is_stalled() {
     let server = StandInNatsServer::start_sequence(BURST)
         .await
         .assured("the regression binds an ephemeral loopback port");
-    let client = async_nats::connect(server.address.to_string())
+    let observer = NatsObserver::connect(&server.address.to_string(), "observed")
         .await
-        .assured("the stand-in server answers the real client's handshake");
-    let observer = NatsObserver::subscribe(&client, "observed")
-        .await
-        .assured("the connected client can subscribe");
+        .assured("the real client opens its observing subscription");
     timeout(Duration::from_secs(60), async {
         while observer.received() < 32_768 {
             consume_budget().await;

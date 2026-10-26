@@ -165,10 +165,12 @@ impl BrokerObserver {
                     expected_u64,
                     "broker messages were duplicated, lost, or reordered: expected sequence \
                      {expected_u64} but observed {actual_sequence} ({} messages behind, {} of {} \
-                     consumed so far)",
+                     consumed so far); observed headers: {:?}; {}",
                     actual_sequence.abs_diff(expected_u64),
                     expected_sequence,
-                    count
+                    count,
+                    message.headers,
+                    self.describe_client_receipts()
                 );
                 assert_eq!(
                     message.headers, expected_headers,
@@ -231,10 +233,7 @@ impl BrokerObserver {
             ObservedDeliveries::Forwarded { .. } => {
                 "the observing client keeps no count of what its broker delivered".to_string()
             }
-            ObservedDeliveries::Nats(observer) => format!(
-                "the observing NATS client had received {} messages from the server",
-                observer.received()
-            ),
+            ObservedDeliveries::Nats(observer) => observer.describe_receipts(),
         }
     }
 }
