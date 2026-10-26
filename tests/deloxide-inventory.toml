@@ -143,6 +143,7 @@ tags = [
   "@shutdown_kafka_refused_commit",
   "@shutdown_emitter_finish",
   "@emitter_finish_at_stop",
+  "@nats_core_connection_loss",
   "@iceberg_commit_memory",
   "@zeromq_emitter_open_deadline",
   "@metrics_checkpoint_handoff",
@@ -737,6 +738,26 @@ id = "scenario.nats-finish-at-stop"
 invariant = "STOP finishes a Core NATS emitter by flushing what its client still holds within the domain drain timeout, so the records a write that ran out of timeout_ms left with the client reach the server once it is back."
 invocation = "scenarios"
 scenario = "STOP sends the records a core NATS write left with its client"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A Core NATS write on one and three nodes whose connection ends while the controlled endpoint holds a publish. The endpoint observes the held frame and refuses a reconnect before resuming; the subscriber requires every original record, allowing retries to duplicate records already received. Source quiescence and teardown exercise tracked lifecycle owners. The NATS driver socket, flush and generation observation are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "scenario.nats-core-connection-loss"
+invariant = "A Core NATS write leaves records unresolved across connection loss so the host retries every record instead of certifying a replacement connection flush."
+invocation = "scenarios"
+scenario = "A core NATS write retries every record through connection loss"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "A domain STOP on one and three nodes races a lost Core NATS connection after the endpoint holds a publish. A retained public session observes the connection-change error and uncertain pending count. Domain STOP may cancel unresolved host work; it must not certify bytes discarded by a connection. Domain teardown exercises tracked lifecycle owners. The NATS driver socket, flush and generation observation are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "scenario.nats-core-connection-loss-stop"
+invariant = "A lost connection during STOP produces the Core NATS pending-record uncertainty diagnostic rather than certifying that attempt through a replacement connection."
+invocation = "scenarios"
+scenario = "Nervix reports a core NATS connection change during STOP"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -2043,6 +2064,26 @@ id = "stress.nats-finish-at-stop"
 invariant = "STOP finishes a Core NATS emitter by flushing what its client still holds within the domain drain timeout, so the records a write that ran out of timeout_ms left with the client reach the server once it is back."
 invocation = "stress-scenarios"
 scenario = "STOP sends the records a core NATS write left with its client"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: A Core NATS write on one and three nodes whose connection ends while the controlled endpoint holds a publish. The endpoint observes the held frame and refuses a reconnect before resuming; the subscriber requires every original record, allowing retries to duplicate records already received. Source quiescence and teardown exercise tracked lifecycle owners. The NATS driver socket, flush and generation observation are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "stress.nats-core-connection-loss"
+invariant = "A Core NATS write leaves records unresolved across connection loss so the host retries every record instead of certifying a replacement connection flush."
+invocation = "stress-scenarios"
+scenario = "A core NATS write retries every record through connection loss"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "Under scheduling stress: A domain STOP on one and three nodes races a lost Core NATS connection after the endpoint holds a publish. A retained public session observes the connection-change error and uncertain pending count. Domain STOP may cancel unresolved host work; it must not certify bytes discarded by a connection. Domain teardown exercises tracked lifecycle owners. The NATS driver socket, flush and generation observation are untracked."
+examples = 2
+feature = "tests/features/runtime/nats_emission.feature"
+id = "stress.nats-core-connection-loss-stop"
+invariant = "A lost connection during STOP produces the Core NATS pending-record uncertainty diagnostic rather than certifying that attempt through a replacement connection."
+invocation = "stress-scenarios"
+scenario = "Nervix reports a core NATS connection change during STOP"
 selections = ["deloxide-stress"]
 
 [[workload]]
