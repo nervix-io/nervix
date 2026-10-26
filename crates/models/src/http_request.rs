@@ -56,7 +56,8 @@ impl HttpOrigin {
         }) {
             return Err(Report::new(HttpRequestFieldError::Origin));
         }
-        let url = Url::parse(value).map_err(|_| Report::new(HttpRequestFieldError::Origin))?;
+        let url = Url::parse(value)
+            .map_err(|cause| Report::new(cause).change_context(HttpRequestFieldError::Origin))?;
         let lower = value.to_ascii_lowercase();
         let explicit_scheme = lower.starts_with("http://") || lower.starts_with("https://");
         if !explicit_scheme
@@ -102,7 +103,7 @@ impl HttpOrigin {
         let parsed = self
             .0
             .join(value)
-            .map_err(|_| Report::new(HttpRequestFieldError::Target))?;
+            .map_err(|cause| Report::new(cause).change_context(HttpRequestFieldError::Target))?;
         if parsed.origin() != self.0.origin() || parsed.path().starts_with("//") {
             return Err(Report::new(HttpRequestFieldError::Target));
         }

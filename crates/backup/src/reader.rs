@@ -250,6 +250,6 @@ fn entry_path<R: Read>(entry: &tar::Entry<'_, R>) -> Result<String, Report<Archi
     let bytes = entry.path_bytes();
     match std::str::from_utf8(&bytes) {
         Ok(path) => Ok(path.to_string()),
-        Err(_) => Err(Report::new(ArchiveReadError::InvalidPath)),
+        Err(cause) => Err(Report::new(cause).change_context(ArchiveReadError::InvalidPath)),
     }
 }

@@ -71,6 +71,34 @@ async fn failed_dial(dialer: &MqttDialer, authority: &str) -> io::Error {
 }
 
 #[nervix_primitives::test]
+async fn an_invalid_port_keeps_its_parse_cause_when_the_driver_error_is_reported() {
+    let fixture = DnsFixture::start().await;
+    let failure = failed_dial(&dialer(&fixture, GENEROUS_BUDGET), "mqtt.nervix.test:port").await;
+    let carried = failure
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<MqttDialReport>())
+        .expect("the socket hook keeps its typed report");
+    assert_eq!(
+        carried
+            .0
+            .downcast_ref::<std::num::ParseIntError>()
+            .expect("typed parse cause")
+            .kind(),
+        &std::num::IntErrorKind::InvalidDigit
+    );
+    let report = MqttConnectionError::report(ConnectionError::Io(failure));
+    let rendered = format!("{report:#}");
+    assert!(
+        rendered.contains("whose port is not a number"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("invalid digit found in string"),
+        "{rendered}"
+    );
+}
+
+#[nervix_primitives::test]
 async fn a_connection_dials_the_answers_in_order_until_one_accepts() {
     let fixture = DnsFixture::start().await;
     let refusing = loopback_listener(loopback(1)).await;

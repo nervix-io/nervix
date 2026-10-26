@@ -20,6 +20,11 @@ all use the same backend. Selection depends only on features, never on `cfg(test
 modes fails to compile with a diagnostic that names both, including when two different dependencies
 each enable one.
 
+A closed channel returns its unaccepted value as an ordinary ownership refusal. The modeled
+watch adapter declares that classification on its `SendError` type, matching the selected native
+channel contract. Permit and queue refusals likewise carry admission or absence outcomes;
+infrastructure and decoding failures retain their contextual reports.
+
 The primitive crate depends on the standard library and the backend libraries it selects. It
 names no Nervix vocabulary, graph, policy or scenario. `nervix-model-harness` owns the exploration
 of caller models and their invariant identities, separately from backend selection. The server

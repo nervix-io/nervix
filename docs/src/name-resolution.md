@@ -376,6 +376,12 @@ the identity of the connection, whichever address accepted it:
 
 ## Failure Ownership
 
+An invalid numeric port supplied to the MQTT dial hook retains the parse cause inside the
+standard-error carrier, beneath the typed invalid-authority context. The carrier renders the
+complete chain when the MQTT driver adds its own report. Resolver failures continue through the
+existing typed lookup report; classifying a parse failure never changes which name,
+port or lookup budget the hook would resolve.
+
 A failed lookup is a connection failure of the path that asked, reported through that owner's
 existing error and handled by its existing policy. It never rejects a record, never acknowledges or
 commits input, and never marks a message delivered: a source that cannot connect holds no delivery,

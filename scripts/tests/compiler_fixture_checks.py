@@ -42,6 +42,19 @@ class CompilerFixtureTests(unittest.TestCase):
         self.assertGreater(sum(item["excluded_generated"] for entry in report["evidence"] for item in entry["reports"].values()), 0)
 
 class ModeledFixtureTests(unittest.TestCase):
+    def test_replacement_outcomes_follow_the_selected_backend(self) -> None:
+        from scripts.tests.compiler_contract_checks import CompilerContractTests
+        compiler = CompilerContractTests("test_informative_error_replacement_retains_its_cause")
+        for mode in ("shuttle", "loom", "turmoil", "deloxide"):
+            with self.subTest(mode=mode):
+                allowed = compiler.compile("error_replacement_allowed", fixture_mode=mode)
+                self.assertEqual(allowed.returncode, 0, allowed.stderr)
+                rejected = compiler.compile("error_replacement", "--error-format=json", fixture_mode=mode)
+                self.assertNotEqual(rejected.returncode, 0, rejected.stderr)
+                diagnostics = [json.loads(line) for line in rejected.stderr.splitlines() if line.startswith("{")]
+                findings = [item for item in diagnostics if (item.get("code") or {}).get("code") == "nervix::replaced_error"]
+                self.assertEqual(len(findings), 16, rejected.stderr)
+
     def test_selected_backends_preserve_authored_operations(self) -> None:
         for mode, expected in (("shuttle", 24), ("loom", 25), ("turmoil", 25), ("deloxide", 25)):
             with self.subTest(mode=mode):

@@ -15,7 +15,7 @@
     )
 )]
 
-use error_stack::ResultExt as _;
+use error_stack::{Report, ResultExt as _};
 use nervix_backup::{ArchiveRecord, SectionContent, SectionPath, StateField, WasmStateDescriptor};
 use nervix_execution::MemoryClass;
 use nervix_interconnect::{
@@ -25,7 +25,7 @@ use nervix_models::{ClusterNodeName, DomainName, DomainSchedule, NodeRef, Schedu
 
 use super::{
     CaptureSectionKey, CapturedSection,
-    interconnect::{CaptureDomainStateRequest, failed},
+    interconnect::{CaptureDomainStateRequest, failure_context},
 };
 use crate::{
     application::session_service::SessionServiceImpl,
@@ -44,7 +44,7 @@ impl SessionServiceImpl {
         captured: Vec<CapturedGuestSave>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
+    ) -> Result<Vec<CapturedSection>, Report<RemoteOperationFailure>> {
         let local_node = self.inner.consensus.local_node_id();
         let mut staged = Vec::new();
         for save in captured {
@@ -81,25 +81,25 @@ impl SessionServiceImpl {
                 branch_fingerprint.as_ref(),
             );
             let descriptor_bytes = descriptor.encode().map_err(|error| {
-                failed(
+                error.change_context(failure_context(
                     &request.domain,
                     &format!(
-                        "guest descriptor of '{}' could not be encoded: {error:#}",
+                        "guest descriptor of '{}' could not be encoded",
                         placement.identifier.as_str()
                     ),
-                )
+                ))
             })?;
             let descriptor_artifact = self
                 .stage_captured_section(descriptor_bytes, &request.domain)
                 .await
                 .map_err(|error| {
-                    failed(
+                    error.change_context(failure_context(
                         &request.domain,
                         &format!(
-                            "guest descriptor of '{}' could not be staged: {error}",
+                            "guest descriptor of '{}' could not be staged",
                             placement.identifier.as_str()
                         ),
-                    )
+                    ))
                 })?;
             staged.push(CapturedSection {
                 key: CaptureSectionKey {
@@ -132,42 +132,33 @@ impl SessionServiceImpl {
         &self,
         save: CapturedGuestSave,
         domain: &DomainName,
-    ) -> Result<(StagedArtifact, u64), RemoteOperationFailure> {
+    ) -> Result<(StagedArtifact, u64), Report<RemoteOperationFailure>> {
         let executor = self.inner.runtime.executor().clone();
         let entity = save.placement.identifier.clone();
         let (stored_bytes, conversion_bytes) =
             save.size_and_conversion_charge().map_err(|error| {
-                failed(
+                error.change_context(failure_context(
                     domain,
-                    &format!(
-                        "guest save of '{}' could not be inspected: {error:#}",
-                        entity.as_str()
-                    ),
-                )
+                    &format!("guest save of '{}' could not be inspected", entity.as_str()),
+                ))
             })?;
         let conversion = executor
             .reserve(MemoryClass::RestoreMetadata, conversion_bytes)
             .await
             .map_err(|error| {
-                failed(
+                error.change_context(failure_context(
                     domain,
-                    &format!(
-                        "guest save of '{}' could not be admitted: {error:#}",
-                        entity.as_str()
-                    ),
-                )
+                    &format!("guest save of '{}' could not be admitted", entity.as_str()),
+                ))
             })?;
         let working = executor
             .reserve(MemoryClass::Bulk, GUEST_WRITER_BYTES)
             .await
             .map_err(|error| {
-                failed(
+                error.change_context(failure_context(
                     domain,
-                    &format!(
-                        "guest save of '{}' could not be admitted: {error:#}",
-                        entity.as_str()
-                    ),
-                )
+                    &format!("guest save of '{}' could not be admitted", entity.as_str()),
+                ))
             })?;
         let writer = self
             .inner
@@ -175,13 +166,10 @@ impl SessionServiceImpl {
             .try_stage_artifact(stored_bytes)
             .await
             .map_err(|error| {
-                failed(
+                error.change_context(failure_context(
                     domain,
-                    &format!(
-                        "guest save of '{}' could not be staged: {error:#}",
-                        entity.as_str()
-                    ),
-                )
+                    &format!("guest save of '{}' could not be staged", entity.as_str()),
+                ))
             })?;
         let interruption = self
             .inner
@@ -195,13 +183,10 @@ impl SessionServiceImpl {
             })
             .await
             .map_err(|error| {
-                failed(
+                error.change_context(failure_context(
                     domain,
-                    &format!(
-                        "guest save of '{}' could not be staged: {error:#}",
-                        entity.as_str()
-                    ),
-                )
+                    &format!("guest save of '{}' could not be staged", entity.as_str()),
+                ))
             })
     }
 }

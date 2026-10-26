@@ -780,6 +780,13 @@ routing could not reach. A section path names a branch by the BLAKE3 fingerprint
 
 ## Failure Semantics At Every Boundary
 
+Section conversion, executor admission, checkpoint reads and staging keep their typed causes in
+local reports. Capture and restore handlers project those reports into the fixed interconnect
+failure only when returning their reply; its reason renders the context chain. A staging refusal
+that the restore stream projects into its fixed intake outcome is also reported at its recovery
+decision, so a failed write or seal retains an operator-visible cause.
+A retained archive's read failure is reported before its download sends the fixed read refusal.
+
 | Boundary | Failure | What remains | Recovery |
 | --- | --- | --- | --- |
 | Backup admission | The statement is batched, queued in a transaction, or sent to a follower | Nothing admitted | Send it alone, to the leader the redirect names. |

@@ -2281,6 +2281,24 @@ retains the Syslog plan and signaling compiler reports in its runtime startup er
 may turn a report into the existing source or emitter outcome only at that boundary, while preserving
 the typed cause and rendering only non-sensitive configuration or transport details.
 
+Client template compilation and rendering keep the template engine's typed error beneath
+`ClientConfigError`; the resource resolver adds `RuntimeResourceError` above that same report.
+NATS subject subscription, flush and connection failures likewise keep the actual driver error
+as a context, with the ingestor operation above it. Printable attachments do not replace these
+causes. An unadmitted ingest batch, a closed channel and a refused permit are ownership or
+admission outcomes rather than underlying operation failures.
+
+MongoDB request failures retain the driver in a typed diagnostic frame whose rendering exposes
+the operation, I/O class or numeric command code. Free-form driver and document text stays private.
+The BSON construction check separately declares its exact semantic record/configuration refusal;
+it does not classify network or server failures as validation outcomes. HTTP response parsing
+retains its UTF-8 and numeric parsing causes beneath the response-head failure.
+
+A MySQL mapped column that the emitter cannot bind fails the whole publish with its exact column
+and Arrow type retained beneath the publish context. It is not a per-record rejection. Pool
+maintenance reports its own failed connection attempt before its next retry; a later writer's
+failure remains a separate diagnostic.
+
 The host's source start keeps every connector report it composes an ingestor from. A client
 configuration that does not resolve, a connector plan that fails, such as a Syslog, Redis,
 WebSocket, Pulsar or SQS plan, an instance whose `open` fails, and a domain cadence that does not

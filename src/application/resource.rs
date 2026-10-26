@@ -524,7 +524,7 @@ impl SessionServiceImpl {
         } else {
             self.wait_for_resource_completion(&id)
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| format!("{error:#}"))
         };
         match outcome {
             Ok(()) => {
@@ -656,7 +656,7 @@ impl SessionServiceImpl {
             Ok(manifest) => manifest,
             Err(error) => {
                 if let Err(publish_error) = self
-                    .publish_resource_replica(failed_replica(None, error.to_string()))
+                    .publish_resource_replica(failed_replica(None, format!("{error:#}")))
                     .await
                 {
                     self.broadcast_error(format!("{publish_error:#}"));
@@ -804,7 +804,7 @@ impl SessionServiceImpl {
                         Report::new(ResourceUploadError::Terminal {
                             key: key.clone(),
                             version: upload.version,
-                            reason: error.to_string(),
+                            reason: format!("{error:#}"),
                         })
                     })?;
                 return Ok(ResourceInstallation {
@@ -841,7 +841,7 @@ impl SessionServiceImpl {
         {
             Ok(manifest) => manifest,
             Err(error) => {
-                let reason = error.to_string();
+                let reason = format!("{error:#}");
                 self.inner
                     .consensus
                     .fail_resource_upload(key.clone(), reason.clone())
@@ -937,7 +937,7 @@ impl SessionServiceImpl {
             .wait_for_resource_completion(&manifest.resource.id)
             .await
         {
-            let reason = error.to_string();
+            let reason = format!("{error:#}");
             self.inner
                 .consensus
                 .fail_resource_upload(key.clone(), reason.clone())
@@ -987,7 +987,7 @@ impl SessionServiceImpl {
                 Report::new(ResourceUploadError::Terminal {
                     key,
                     version: manifest.resource.id.version,
-                    reason: error.to_string(),
+                    reason: format!("{error:#}"),
                 })
             })?;
         // Completion is retained before it is exposed to the caller. Re-evaluate the live set
@@ -1041,7 +1041,7 @@ impl SessionServiceImpl {
                         Report::new(ResourceUploadError::Terminal {
                             key: key.clone(),
                             version: id.version,
-                            reason: error.to_string(),
+                            reason: format!("{error:#}"),
                         })
                     });
             }
@@ -1095,7 +1095,7 @@ impl SessionServiceImpl {
             }
         }
         if let Err(error) = self.wait_for_resource_completion(&id).await {
-            let reason = error.to_string();
+            let reason = format!("{error:#}");
             self.inner
                 .consensus
                 .fail_resource_upload(key.clone(), reason.clone())
@@ -1134,7 +1134,7 @@ impl SessionServiceImpl {
                 Report::new(ResourceUploadError::Terminal {
                     key,
                     version: id.version,
-                    reason: error.to_string(),
+                    reason: format!("{error:#}"),
                 })
             })?;
         // As for an upload, a node that joined while the outcome propagated also has to hold the

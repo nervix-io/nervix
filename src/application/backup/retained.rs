@@ -37,6 +37,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{CommandExecutionReference, Timestamp, UserName};
 use nervix_primitives::sync::{Arc, blocking::Mutex, mpsc};
+use nervix_recovery::Reported as _;
 use thiserror::Error;
 
 /// Archive bytes one download frame carries at most.
@@ -287,7 +288,10 @@ where
         let chunk = match source.next_chunk(chunk_bytes).await {
             Ok(Some(chunk)) => chunk,
             Ok(None) => break,
-            Err(_) => return refuse_read(&frames, &limits).await,
+            Err(error) => {
+                Err::<(), _>(error).reported("read retained backup archive");
+                return refuse_read(&frames, &limits).await;
+            }
         };
         let Ok(frame) = BackupDownloadMessage::encode_chunk(chunk.as_ref(), &limits) else {
             return refuse_read(&frames, &limits).await;

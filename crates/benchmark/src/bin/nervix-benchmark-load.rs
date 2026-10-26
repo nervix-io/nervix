@@ -8,6 +8,7 @@
 )]
 
 use std::{
+    any::Any,
     collections::{BTreeMap, VecDeque},
     fs,
     io::Write as _,
@@ -15,7 +16,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use arch_into::ArchInto as _;
 use clap::{Parser, Subcommand};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -39,6 +40,41 @@ use rdkafka::{
     producer::{BaseRecord, DeliveryResult, Producer, ProducerContext, ThreadedProducer},
 };
 use serde::{Deserialize, Serialize};
+use sync_wrapper::SyncWrapper;
+
+/// A scoped worker's panic payload is Send but need not be Sync. Retain it behind an
+/// ownership wrapper that permits access only through an exclusive reference.
+#[derive(thiserror::Error)]
+#[error("query worker panicked: {message}")]
+struct QueryThreadPanic {
+    message: String,
+    _payload: SyncWrapper<Box<dyn Any + Send>>,
+}
+
+impl QueryThreadPanic {
+    fn new(payload: Box<dyn Any + Send>) -> Self {
+        let message = if let Some(text) = payload.downcast_ref::<String>() {
+            text.clone()
+        } else if let Some(text) = payload.downcast_ref::<&'static str>() {
+            (*text).to_string()
+        } else {
+            "non-text panic payload".to_string()
+        };
+        Self {
+            message,
+            _payload: SyncWrapper::new(payload),
+        }
+    }
+}
+
+impl std::fmt::Debug for QueryThreadPanic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QueryThreadPanic")
+            .field("message", &self.message)
+            .finish_non_exhaustive()
+    }
+}
 
 const SEND_CLOCK_MESSAGES: u64 = 65_536;
 const OFFSET_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -1751,11 +1787,11 @@ impl BenchmarkRunner {
         let mut counts = Vec::with_capacity(watermark_results.len());
         for (partition, query) in watermark_results {
             let (low, high) = query
-                .map_err(|_| {
-                    anyhow!(
+                .map_err(|payload| {
+                    anyhow::Error::new(QueryThreadPanic::new(payload)).context(format!(
                         "Kafka watermark query thread panicked for topic '{topic}' partition \
                          {partition}"
-                    )
+                    ))
                 })?
                 .with_context(|| {
                     format!(
@@ -1821,10 +1857,22 @@ fn wait_for_empty_topic(
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
     use nervix_primitives::sync::blocking::mpsc;
     use nervix_recovery::NoReceiver as _;
 
     use super::*;
+
+    #[test]
+    fn worker_panic_causes_retain_text_and_the_typed_payload() {
+        let text = QueryThreadPanic::new(Box::new(String::from("query failure cause")));
+        assert!(text.to_string().contains("query failure cause"));
+        let mut value = QueryThreadPanic::new(Box::new(vec![3_u8, 5]));
+        assert_eq!(
+            value._payload.get_mut().downcast_ref::<Vec<u8>>(),
+            Some(&vec![3, 5])
+        );
+    }
 
     #[test]
     fn empty_topic_setup_waits_for_partition_leaders_inside_one_budget() {

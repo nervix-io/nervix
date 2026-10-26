@@ -12,6 +12,7 @@ pub fn dropped(text: &str) -> u32 {
     let parsed: Result<u32, ParseIntError> = text.parse();
     let first = parsed.clone().ok().unwrap_or(0);
     let second = parsed.clone().unwrap_or_default();
+    #[cfg_attr(nervix_lint, expect(nervix::replaced_error, reason = "this one replacement calibrates the audit's separate review observation"))]
     let replaced = parsed.clone().map_err(|_| "unparsed");
     let replaced = match replaced {
         Ok(value) => value,

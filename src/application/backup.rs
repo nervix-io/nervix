@@ -506,13 +506,13 @@ impl SessionServiceImpl {
             {
                 Ok(acquired) => break acquired,
                 Err(error) if nervix_primitives::time::Instant::now() < deadline => {
-                    tracing::debug!(domain = %domain, error = %error, "waiting for backup domain mutation lease");
+                    tracing::debug!(domain = %domain, error = %format_args!("{error:#}"), "waiting for backup domain mutation lease");
                     nervix_primitives::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(error) => {
-                    return Err(Report::new(BackupError::CaptureTimeout {
+                    return Err(error.change_context(BackupError::CaptureTimeout {
                         domain: domain.clone(),
-                        reason: error.to_string(),
+                        reason: "domain mutation admission failed".to_string(),
                     }));
                 }
             }
@@ -735,9 +735,9 @@ impl SessionServiceImpl {
                 self.ingestor_summary(domain, &name, node)
                     .await
                     .map_err(|error| {
-                        Report::new(BackupError::CaptureDomain {
+                        error.change_context(BackupError::CaptureDomain {
                             domain: domain.clone(),
-                            reason: error.to_string(),
+                            reason: "ingestor inspection failed".to_string(),
                         })
                     })?;
             let counters = summary.quiesce_counters;
@@ -835,20 +835,18 @@ impl SessionServiceImpl {
             .interconnect
             .next_coordination_identity()
             .map_err(|error| {
-                Report::new(BackupError::CaptureDomain {
+                error.change_context(BackupError::CaptureDomain {
                     domain: domain.clone(),
-                    reason: error.to_string(),
+                    reason: "capture coordination allocation failed".to_string(),
                 })
             })?;
         let results = futures_util::future::join_all(nodes.into_iter().map(|node| {
             let coordination = coordination.clone();
             let domain = domain.clone();
             async move {
-                let failed = |reason: String| {
-                    Report::new(BackupError::CaptureDomain {
-                        domain: domain.clone(),
-                        reason,
-                    })
+                let failed = |reason: &str| BackupError::CaptureDomain {
+                    domain: domain.clone(),
+                    reason: reason.to_string(),
                 };
                 let capture_request = CaptureDomainStateRequest {
                     coordination: coordination.clone(),
@@ -870,9 +868,9 @@ impl SessionServiceImpl {
                         .interconnect
                         .request_with_timeout(&node, capture_request, remaining)
                         .await
-                        .map_err(|error| failed(error.to_string()))?
+                        .change_context_lazy(|| failed("capture request failed"))?
                 };
-                captured.map_err(|error| failed(error.to_string()))?;
+                captured.change_context_lazy(|| failed("owner capture failed"))?;
                 let inventory_request = CaptureInventoryRequest {
                     coordination: coordination.clone(),
                     domain: domain.clone(),
@@ -885,9 +883,10 @@ impl SessionServiceImpl {
                         .interconnect
                         .request(&node, inventory_request)
                         .await
-                        .map_err(|error| failed(error.to_string()))?
+                        .change_context_lazy(|| failed("inventory request failed"))?
                 };
-                let sections = inventory.map_err(|error| failed(error.to_string()))?;
+                let sections =
+                    inventory.change_context_lazy(|| failed("owner inventory failed"))?;
                 Ok::<_, Report<BackupError>>(StateInventory {
                     node,
                     coordination,
@@ -913,8 +912,11 @@ impl SessionServiceImpl {
                 reason,
             })
         };
-        let path = SectionPath::parse(&section.path)
-            .map_err(|error_read| error(error_read.to_string()))?;
+        let failure_context = || BackupError::CaptureDomain {
+            domain: inventory.domain.clone(),
+            reason: "captured state section could not be read or staged".to_string(),
+        };
+        let path = SectionPath::parse(&section.path).change_context_lazy(failure_context)?;
         let entry = SectionEntry {
             path,
             content: interconnect::section_content(section.kind),
@@ -973,7 +975,7 @@ impl SessionServiceImpl {
         let mut body = nervix_primitives::time::timeout(FetchCapturedSection::TIMEOUT, opening)
             .await
             .map_err(|_| error("captured section opening exceeded its deadline".to_string()))?
-            .map_err(|reason| error(reason.to_string()))?;
+            .change_context_lazy(failure_context)?;
         if body.content_length() != section.length {
             return Err(error(
                 "captured section length differs from its inventory".to_string(),
@@ -984,23 +986,23 @@ impl SessionServiceImpl {
             .runtime
             .try_stage_artifact(section.length)
             .await
-            .map_err(|reason| error(reason.to_string()))?;
+            .change_context_lazy(failure_context)?;
         while let Some(chunk) = body
             .next_chunk()
             .await
-            .map_err(|reason| error(reason.to_string()))?
+            .change_context_lazy(failure_context)?
         {
             nervix_primitives::task::consume_budget().await;
             writer
                 .write_chunk(chunk)
                 .await
-                .map_err(|reason| error(reason.to_string()))?;
+                .change_context_lazy(failure_context)?;
         }
         drop(body);
         let artifact = writer
             .finish_artifact()
             .await
-            .map_err(|reason| error(reason.to_string()))?;
+            .change_context_lazy(failure_context)?;
         if artifact.length() != section.length || artifact.digest() != section.digest {
             return Err(error(
                 "captured section digest differs from its inventory".to_string(),

@@ -1366,7 +1366,11 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         let Some(endpoint) = optional_client_config_value(config, "endpoint") else {
             return Err(invalid());
         };
-        HttpOrigin::parse(endpoint).map_err(|_| invalid())
+        HttpOrigin::parse(endpoint).map_err(|cause| {
+            cause.change_context(EmitterStartPlanError::InvalidHttpEndpoint {
+                client: client.clone(),
+            })
+        })
     }
 
     /// Resolves the configured storage client into its backend and declared configuration.

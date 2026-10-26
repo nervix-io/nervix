@@ -106,6 +106,18 @@ naming its operation, node, route, branch, placement, or target, and keeps the r
 It does not format a cause into a string and then classify that text as a new failure, and it does
 not replace the report by a clone of its current context.
 
+A replacement keeps an informative failure beneath its context. For a foreign error this is
+`Report::new(cause).change_context(context)`; for an existing report it is
+`cause.change_context(context)`. A new outer report and a printable copy of the cause's text
+do not preserve that failure. Storage, I/O, decoding and nested reports retain their typed
+frames even when the caller needs only the outer context today.
+
+A foreign failure without a standard error implementation still stays typed: the Wasmtime and
+byte-quantity adapters own the original library value as a report frame. MongoDB's frame owns the
+driver error while rendering only safe operation, I/O-class and numeric-code details. A scoped
+benchmark worker's panic retains its original payload behind an ownership wrapper that requires
+exclusive access; rendering reads its captured text without acquiring a lock.
+
 A context describes its own failure once:
 
 - It names its own operation and identity and leaves its cause to the frame beneath. `error-stack`
@@ -2425,7 +2437,7 @@ records each failed implementation with its chain.
 
 `just validate-typed-errors`, run by `just validate`, rejects textual
 `Result<_, String>` in product code without a baseline. It remains a separate source rule,
-including inactive source. The compiler architecture gate, run by `just ratchet`, owns three
+including inactive source. The compiler architecture gate, run by `just ratchet`, owns four
 resolved Rust diagnostics:
 
 | Diagnostic | Contract it checks |
@@ -2433,6 +2445,7 @@ resolved Rust diagnostics:
 | `nervix::bare_error_signature` | A canonical `Result` carrying a Nervix-owned standard error returns a contextual `Report`, directly or inside resolved `Future::Output` and `Stream::Item`. |
 | `nervix::discarded_outcome` | A `let` wildcard, unused statement or resolved `drop` consuming a `Result`, report, owning collection or transparent wrapper states its handling or recovery class. |
 | `nervix::bare_panic` | A resolved inherent `Option` or `Result` `unwrap`/`expect` uses `meticulous` to state its guarantee. |
+| `nervix::replaced_error` | A resolved failure replacement retains its informative cause or declares an exact ordinary-outcome boundary. |
 
 The same driver emits the source-owned layer, Model, language, awaited cluster, identity and
 installation-state diagnostics described in
@@ -2465,9 +2478,34 @@ The `library` kind names the external contract a modeled primitive preserves. A 
 may also name one exact return contract, including a trait method; it never inherits from a
 module, package or enclosing callable. Both kinds require a meaningful reason. Malformed,
 duplicate and misplaced classifications fail. Source metadata crosses crate boundaries.
-A type's `Error` suffix establishes no classification.
+A type's `Error` suffix establishes no classification. A `library` declaration preserves a
+foreign signature; it does not classify its informative failures as ordinary outcomes.
+
+The replacement check shares the audit's resolved `Result` operations and unused-failure
+analysis. It covers `map_err`, error-producing `unwrap_or_else` and `or_else`, and `Err(_)`
+or `let Ok(..) else` branches that construct another error or report. An enclosing function's
+classification never classifies a call inside it. Exact producer contracts follow immutable
+bindings, awaited calls and canonical `Result` adapters that leave the error unchanged. A success
+mapping preserves that producer; `and_then` or `map_err` may introduce a different failure and
+does not inherit it. Source metadata preserves declarations across crates. Probe-only
+`is_ok`, `is_err`, `ok` and default queries remain audit candidates for review: some are validity
+checks and others must propagate or report the operation failure.
+
+An immutable local closure binding, including a borrowed closure, is resolved to the same callback
+body as an inline closure. Renaming the callback does not hide an ignored informative failure.
+
+The finite foreign definitions recognized as outcomes are integer range refusals, closed-channel
+send errors, permit and empty-queue refusals, and `core::fmt::Error`. Resolved atomic
+comparisons return the observed value, slice searches return an insertion point, and Arrow schema
+field lookups report an absent field.
+Their other methods and similarly named application types receive no exemption. Semantic row,
+wire and ABI outcomes are projected only at their declared boundary; they do not carry reports.
+Paired compiler controls cover preserved foreign and nested causes, aliases, closures, macros,
+metadata, same-named unrelated types and exact-operation expectations.
 
 Foreign hooks that require `std::error::Error` receive a carrier owning the complete report.
+The consensus storage and MQTT socket carriers render that report's whole chain even for ordinary
+`Display`, so a later report that formats the carrier as a context still shows its inner causes.
 The compiler checks that every carrier variant retains a report, including through boxed or
 shared ownership. Optional reports do not establish that guarantee. `DnsLookupReport` retains
 the lookup report at the Hyper boundary; the node trace connector retains its connection report
@@ -2488,6 +2526,26 @@ resolution; current API doctests pair supported calls with `compile_fail` exampl
 fallible site, a reviewer identifies the deciding layer, ordinary outcome or failure class,
 actionable fields, context across boundaries and the public diagnostic or recovery that ends the
 path. That classification preserves branch and sensitivity rules.
+
+A recovered operation with no other witness uses `nervix_recovery::Reported::reported` at the
+decision that continues without its result. That record renders the complete context chain at
+`debug`. A success flag used beside the result that the caller still receives loses no failure;
+a validity probe states why absence or refusal itself is the answer.
+
+The backup dialog's browser adapter exposes capability outcomes: `Browser::open` answers whether
+the browser supplied a socket, and `SocketFailed` means a send could not use that capability.
+Their exact contracts declare these refusals; neither declaration classifies JavaScript values
+or WebSocket failures throughout the console.
+
+Resource upload form construction renders the browser's exception in its terminal UI message,
+the boundary that owns the string shown to the user.
+
+An archive reader or a worker that stops before the protocol projects its fixed upload, restore
+or download refusal keeps a diagnostic witness: read and feeder failures are reported before the
+stream ends, and the backup-file worker's join error stays inside the I/O carrier. Completion
+probes report request failures before retaining their pending state. Formatter UTF-8 failures
+render the decoding cause at stderr, and throttled default-user warnings render their whole chain.
+
 ### Tooling And Diagnostic Runs
 
 The compiler architecture gate owns typed tooling failures for invalid source contracts,

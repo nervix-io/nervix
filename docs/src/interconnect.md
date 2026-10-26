@@ -1993,6 +1993,11 @@ statuses, and what each ending preserves.
 
 ## Failure Ownership And Persistence
 
+Refreshing peer targets reports a failed installation at the recovery decision before continuing
+with the accepted targets. Backup capture and restore handlers retain local typed reports through
+section conversion and staging, then render their causes into the fixed `RemoteOperationFailure`
+reply. The wire class and its typed subject remain the caller's decision inputs.
+
 Transport failures identify name-resolution, setup, authentication, prerequisite-refusal,
 admission, encoding, decoding, flow-control, timeout, remote-response, and target-departure
 failures separately. Typed remote

@@ -207,11 +207,21 @@ impl ArchiveRecord for BranchLifecycleRecord {
 }
 
 fn parse_domain(path: &str, raw: &str) -> Result<DomainName, Report<ArchiveReadError>> {
-    DomainName::parse(raw).map_err(|_| invalid(path, "domain name"))
+    DomainName::parse(raw).map_err(|cause| {
+        cause.change_context(ArchiveReadError::InvalidValue {
+            path: path.to_string(),
+            field: "domain name",
+        })
+    })
 }
 
 fn parse_entity(path: &str, raw: &str) -> Result<ModelName, Report<ArchiveReadError>> {
-    ModelName::parse(raw).map_err(|_| invalid(path, "state entity name"))
+    ModelName::parse(raw).map_err(|cause| {
+        cause.change_context(ArchiveReadError::InvalidValue {
+            path: path.to_string(),
+            field: "state entity name",
+        })
+    })
 }
 
 pub(crate) fn validate_branch(
@@ -226,7 +236,12 @@ pub(crate) fn validate_branch(
     }
     let mut previous = None;
     for field in fields {
-        FieldName::parse(&field.name).map_err(|_| invalid(path, "branch field name"))?;
+        FieldName::parse(&field.name).map_err(|cause| {
+            cause.change_context(ArchiveReadError::InvalidValue {
+                path: path.to_string(),
+                field: "branch field name",
+            })
+        })?;
         if previous.is_some_and(|name: &str| name >= field.name.as_str()) {
             return Err(invalid(path, "branch field order"));
         }

@@ -23,6 +23,7 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 
+use error_stack::{Report, ResultExt as _};
 use nervix_execution::{MemoryClass, StorageClass};
 use nervix_interconnect::RemoteOperationFailure;
 use nervix_models::{DomainName, RestoreStateAuthority};
@@ -85,12 +86,7 @@ impl RestoredStateSource {
     }
 }
 
-fn failed(domain: &DomainName, reason: &str) -> RemoteOperationFailure {
-    RemoteOperationFailure::failed(
-        nervix_interconnect::RemoteOperationSubject::domain(domain),
-        reason.to_string(),
-    )
-}
+use super::interconnect::failure_context;
 
 impl SessionServiceImpl {
     pub(in crate::application) async fn sweep_restore_checkpoint_staging(&self) {
@@ -141,7 +137,7 @@ impl SessionServiceImpl {
         authority: &RestoreStateAuthority,
         checkpoint: RestoredRuntimeState,
         source: RestoredStateSource,
-    ) -> Result<(), RemoteOperationFailure> {
+    ) -> Result<(), Report<RemoteOperationFailure>> {
         let domain = checkpoint.placement.domain.clone();
         let charge = self
             .inner
@@ -149,7 +145,9 @@ impl SessionServiceImpl {
             .executor()
             .reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES)
             .await
-            .map_err(|error| failed(&domain, &error.to_string()))?;
+            .change_context_lazy(|| {
+                failure_context(&domain, "restore state installation failed")
+            })?;
         let domain_owned = domain.clone();
         let authority = authority.clone();
         let service = self.clone();
@@ -160,12 +158,15 @@ impl SessionServiceImpl {
                 StorageClass::Filesystem,
                 charge,
                 move |_charge, cancellation| {
-                    cancellation
-                        .check()
-                        .map_err(|error| failed(&domain_owned, &format!("{error:#}")))?;
-                    let reader = source
-                        .open()
-                        .map_err(|error| failed(&domain_owned, &format!("{error:#}")))?;
+                    cancellation.check().change_context_lazy(|| {
+                        failure_context(&domain_owned, "restore state installation failed")
+                    })?;
+                    let reader = source.open().map_err(|error| {
+                        Report::new(error).change_context(failure_context(
+                            &domain_owned,
+                            "restore state installation failed",
+                        ))
+                    })?;
                     service
                         .inner
                         .consensus
@@ -177,12 +178,16 @@ impl SessionServiceImpl {
                                 cancellation,
                             )
                         })
-                        .map_err(|error| failed(&domain_owned, &format!("{error:#}")))?
-                        .map_err(|error| failed(&domain_owned, &format!("{error:#}")))
+                        .change_context_lazy(|| {
+                            failure_context(&domain_owned, "restore state installation failed")
+                        })?
+                        .change_context_lazy(|| {
+                            failure_context(&domain_owned, "restore state installation failed")
+                        })
                 },
             )
             .await
-            .map_err(|error| failed(&domain, &error.to_string()))?
+            .change_context_lazy(|| failure_context(&domain, "restore state installation failed"))?
     }
 
     pub(in crate::application) async fn publish_restored_state_generation(
@@ -190,14 +195,14 @@ impl SessionServiceImpl {
         domain: &DomainName,
         authority: &RestoreStateAuthority,
         inventory: RestoreStateInventory,
-    ) -> Result<(), RemoteOperationFailure> {
+    ) -> Result<(), Report<RemoteOperationFailure>> {
         let charge = self
             .inner
             .runtime
             .executor()
             .reserve(MemoryClass::Bulk, RESTORE_STATE_WORKING_BYTES)
             .await
-            .map_err(|error| failed(domain, &error.to_string()))?;
+            .change_context_lazy(|| failure_context(domain, "restore state installation failed"))?;
         #[cfg(feature = "testing")]
         self.inner
             .runtime
@@ -213,9 +218,9 @@ impl SessionServiceImpl {
                 StorageClass::Filesystem,
                 charge,
                 move |_charge, cancellation| {
-                    cancellation
-                        .check()
-                        .map_err(|error| failed(&domain_owned, &format!("{error:#}")))?;
+                    cancellation.check().change_context_lazy(|| {
+                        failure_context(&domain_owned, "restore state installation failed")
+                    })?;
                     let publication = service.inner.consensus.with_restore_state_installation(
                         &domain_owned,
                         &authority,
@@ -239,13 +244,18 @@ impl SessionServiceImpl {
                                     &domain_owned,
                                     &authority.leader,
                                 );
-                            return Err(failed(&domain_owned, &format!("{error:#}")));
+                            return Err(error.change_context(failure_context(
+                                &domain_owned,
+                                "restore state publication was refused",
+                            )));
                         }
                     };
-                    state.map_err(|error| failed(&domain_owned, &format!("{error:#}")))
+                    state.change_context_lazy(|| {
+                        failure_context(&domain_owned, "restore state installation failed")
+                    })
                 },
             )
             .await
-            .map_err(|error| failed(domain, &error.to_string()))?
+            .change_context_lazy(|| failure_context(domain, "restore state installation failed"))?
     }
 }
