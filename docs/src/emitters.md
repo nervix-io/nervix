@@ -1158,8 +1158,9 @@ the node's graceful shutdown each give that flush their deadline. Records still 
 delivery report when the deadline passes are lost; `DESCRIBE EMITTER` reports how many as its
 transient error, counting records alone and never the errors or statistics waiting in librdkafka's
 queue beside them, and a replacement that cannot flush fails and keeps the running emitter. Because
-a record counts until its delivery report arrives, the producer always reports every record and
-overrides `delivery.report.only.error` in the client's `CONFIG`. A definitive record-specific
+a record counts until its delivery report arrives, the producer always reports every record.
+`delivery.report.only.error` is reserved for Nervix and refused in the client's `CONFIG` at CREATE.
+A definitive record-specific
 rejection, such as an oversized message, follows `ON MESSAGE ERROR`.
 Once the emitter and its flush are done with the producer, the node destroys it on its connector
 control workers, never on the task that served the emitter. The destruction purges what the producer

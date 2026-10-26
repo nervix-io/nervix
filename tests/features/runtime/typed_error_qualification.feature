@@ -180,13 +180,16 @@ Feature: Typed error qualification through public streams
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus commands fail
+    And the leader node is configured with these Plexus commands
       """
       CREATE SCHEMA secret_event (id STRING, secret STRING SENSITIVE);
       CREATE RELAY secret_events SCHEMA secret_event UNBRANCHED;
       CREATE POSTGRES CLIENT database
         POOL SIZE MIN 1 MAX 4
-        CONFIG { 'addr' = '127.0.0.1:5432' };
+        CONFIG { 'addr' = 'postgres://127.0.0.1:5432/events?sslmode=disable' };
+      """
+    When these Plexus commands fail with "leak_sensitive"
+      """
       CREATE POSTGRES TABLE EMITTER direct_values FROM secret_events
         TO database TABLE 'existing_events'
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "id" = input.id, "secret" = input.secret } BATCH MAX MESSAGES 64 MAX SIZE 1MiB

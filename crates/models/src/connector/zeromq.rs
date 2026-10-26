@@ -4,8 +4,9 @@
 //!
 //! - **Owns.** The ZeroMQ client Model, the pull source and push emitter Models with their delivery
 //!   mode, and what each entity declares.
+//!   Client declarations also own public configuration keys, types and confidentiality.
 //! - **Depends on.** The shared source and emitter declarations and the names a body references.
-//! - **Must not know.** The ZeroMQ driver, its configuration keys, or how a socket is bound,
+//! - **Must not know.** The ZeroMQ driver, or how a socket is bound,
 //!   connected, read or written.
 
 #![cfg_attr(
@@ -33,7 +34,22 @@ use crate::{
     PositionClass,
 };
 
-configured_client!(ZeroMq: unpooled, config Nervix, CreateClientZeroMq => ZeroMqConfigEntry);
+configured_client!(ZeroMq: unpooled, config CLIENT_CONFIG, CreateClientZeroMq => ZeroMqConfigEntry);
+
+/// The current keys this connector reads, shared by validation, completion and inspection.
+const CLIENT_CONFIG: crate::ClientConfigSchema = {
+    use crate::{ClientConfigKey as K, ClientConfigSchema, ClientConfigValue as V};
+    ClientConfigSchema::new(
+        &[
+            K::required("addr", V::String),
+            K::optional("bind", V::Boolean),
+            K::CONNECT_TIMEOUT,
+            K::TIMEOUT,
+        ],
+        &[],
+        &[],
+    )
+};
 
 /// The pull socket of a ZeroMQ client, which the client's configuration addresses.
 #[derive(

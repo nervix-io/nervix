@@ -27,16 +27,13 @@ fn config(entries: &[(&str, &str)]) -> Vec<ClientConfigEntry> {
 }
 
 #[test]
-fn every_config_key_is_case_insensitive_and_every_supplied_duration_is_positive() {
+fn every_config_key_round_trips_and_every_supplied_duration_is_positive() {
     use std::str::FromStr as _;
     for key in WebsocketsClientKey::iter() {
-        assert_eq!(
-            WebsocketsClientKey::from_str(&key.to_string().to_ascii_uppercase()),
-            Ok(key)
-        );
+        assert_eq!(WebsocketsClientKey::from_str(key.as_ref()), Ok(key));
     }
     let parsed = WebsocketsClientConfig::parse(&config(&[
-        ("ENDPOINT", "wss://example.test/events?token=opaque"),
+        ("endpoint", "wss://example.test/events?token=opaque"),
         ("connect_timeout_ms", "123"),
         ("ping_interval_ms", "456"),
         ("tls_ca_file", "{{ certs }}/ca.pem"),
@@ -114,7 +111,7 @@ fn config_refusals_keep_the_offending_key_and_never_credential_values() {
             WebsocketsClientConfigError::UnpairedTlsIdentity,
         ),
         (
-            config(&[("endpoint", "ws://example.test"), ("ENDPOINT", "secret")]),
+            config(&[("endpoint", "ws://example.test"), ("endpoint", "secret")]),
             WebsocketsClientConfigError::RepeatedKey {
                 key: WebsocketsClientKey::Endpoint,
             },
