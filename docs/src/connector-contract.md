@@ -712,10 +712,14 @@ an optional Redis subscription capacity passes the same range parser its ingesto
 Ingestor-only presence requirements stay with that plan.
 MQTT's representative first instance uses the same instance-template renderer as execution.
 Connector-owned offline parsers check librdkafka property names and values, sqlx and mysql_async
-options, Redis connection information, lapin AMQP URIs and NATS server addresses. They create no
-connection, consumer, producer, DNS lookup or remote side effect. Checks requiring the remote
-service still belong to client initialization. The registry names no connector crate and runtime
-receives entries and pinned mounts rather than a Model.
+options, Redis connection information, lapin AMQP URIs, NATS server addresses and ZeroMQ endpoints.
+They create no connection, consumer, producer, DNS lookup or remote side effect. Checks requiring
+the remote service still belong to client initialization. The registry names no connector crate
+and runtime receives entries and pinned mounts rather than a Model.
+
+ZeroMQ uses its socket driver's endpoint parser for both TCP and IPC addresses. Its `bind` key
+uses the shared Boolean parser at the connector boundary, so a malformed value is a configuration
+refusal before either a PULL or PUSH socket opens; an omitted value selects connect.
 
 Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
 exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed

@@ -36,7 +36,7 @@ use nervix_connector::{
     ConfiguredDeadline, EmitterFinish, EmitterFinishResult, EmitterHost, EmitterLifecycle,
     EmitterOpenError, EmitterRecord, EmitterRecordId, EmitterStartResult, EmitterWriteError,
     EmitterWriteResult, PerRecordOutcome, RecordEmitter, client_config_value,
-    optional_client_config_value,
+    optional_bool_client_config_value,
 };
 use nervix_models::ClientConfigEntry;
 use nervix_primitives::time::{Instant, timeout};
@@ -81,7 +81,7 @@ impl ZeroMqPushEmitter {
         connect_timeout: ConfiguredDeadline,
     ) -> EmitterStartResult<PushSocket> {
         let addr = Self::addr_from_config(config)?;
-        let bind = Self::bind_from_config(config);
+        let bind = Self::bind_from_config(config)?;
         let mut socket = PushSocket::new();
         if bind {
             socket.bind(&addr).await.map_err(Self::start_error)?;
@@ -175,11 +175,10 @@ impl ZeroMqPushEmitter {
         }
     }
 
-    fn bind_from_config(config: &[ClientConfigEntry]) -> bool {
-        match optional_client_config_value(config, "bind") {
-            Some(value) => value.eq_ignore_ascii_case("true"),
-            None => false,
-        }
+    fn bind_from_config(config: &[ClientConfigEntry]) -> EmitterStartResult<bool> {
+        let bind = optional_bool_client_config_value(config, "bind")
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: ZEROMQ })?;
+        Ok(bind.unwrap_or(false))
     }
 
     fn start_error(error: impl std::fmt::Display) -> Report<EmitterOpenError> {
