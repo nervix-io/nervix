@@ -169,12 +169,6 @@ fn validate_driver(
     config: &[ClientConfigEntry],
 ) -> error_stack::Result<(), OfflineClientConfigError> {
     match connector {
-        ConnectorKind::Kafka => nervix_connector_kafka::validate_client_configuration(config),
-        ConnectorKind::Postgres => nervix_connector_postgres::validate_client_configuration(config),
-        ConnectorKind::MySql => nervix_connector_mysql::validate_client_configuration(config),
-        ConnectorKind::Redis => nervix_connector_redis::validate_client_configuration(config),
-        ConnectorKind::RabbitMq => nervix_connector_rabbitmq::validate_client_configuration(config),
-        ConnectorKind::Nats => nervix_connector_nats::validate_client_configuration(config),
         ConnectorKind::S3 => nervix_connector_iceberg::validate_client_configuration(
             nervix_models::IcebergStorageBackend::S3,
             config,
@@ -190,6 +184,13 @@ fn validate_driver(
         ConnectorKind::IcebergRest => {
             nervix_connector_iceberg::validate_catalog_configuration(config)
         }
+        ConnectorKind::Kafka => nervix_connector_kafka::validate_client_configuration(config),
+        ConnectorKind::Postgres => nervix_connector_postgres::validate_client_configuration(config),
+        ConnectorKind::MySql => nervix_connector_mysql::validate_client_configuration(config),
+        ConnectorKind::Redis => nervix_connector_redis::validate_client_configuration(config),
+        ConnectorKind::RabbitMq => nervix_connector_rabbitmq::validate_client_configuration(config),
+        ConnectorKind::Nats => nervix_connector_nats::validate_client_configuration(config),
+        ConnectorKind::ZeroMq => nervix_connector_zeromq::validate_client_configuration(config),
         _ => Ok(()),
     }
 }
@@ -235,6 +236,20 @@ pub(in crate::application) fn client_validation_message<C: error_stack::Context>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zeromq_driver_validation_refuses_an_endpoint_without_its_transport() {
+        let config = [ClientConfigEntry {
+            key: "addr".to_string(),
+            value: "127.0.0.1:5555".to_string(),
+        }];
+        let refusal = validate_driver(ConnectorKind::ZeroMq, &config)
+            .expect_err("a ZeroMQ endpoint requires its transport scheme");
+        assert!(matches!(
+            refusal.current_context(),
+            OfflineClientConfigError::InvalidKey { key } if key == "addr"
+        ));
+    }
 
     #[test]
     fn rendered_api_root_refusal_retains_its_cause_and_hides_its_query() {

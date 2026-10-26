@@ -984,6 +984,7 @@ capability = "MODE NO ACK"
 entity = "ZEROMQ PULL INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/zeromq_ingestion.feature", scenario = "ZeroMQ ingestor delivers JSON payloads to a subscribed relay" },
+  { feature = "tests/features/runtime/zeromq_client_declarations.feature", scenario = "Typed ZeroMQ bind and connect clients round-trip and deliver through PULL and PUSH" },
 ]
 
 [[capability]]
@@ -998,6 +999,7 @@ capability = "MODE NO ACK"
 entity = "ZEROMQ PUSH EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "ZeroMQ emitter publishes JSON payloads from a relay" },
+  { feature = "tests/features/runtime/zeromq_client_declarations.feature", scenario = "Typed ZeroMQ bind and connect clients round-trip and deliver through PULL and PUSH" },
 ]
 
 [[capability]]
