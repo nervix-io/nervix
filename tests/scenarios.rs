@@ -15936,6 +15936,7 @@ async fn then_named_client_completes_plexus_statements_within(
         panic!("client '{name}' must be connected before the timed probe");
     };
     let client = client.clone();
+    let probe_domain = world.domain.clone();
     let commands = expand_placeholders(world, docstring(step));
     let statements = plexus_statements(&commands);
     assert!(!statements.is_empty(), "a timed probe requires statements");
@@ -15951,35 +15952,49 @@ async fn then_named_client_completes_plexus_statements_within(
             let mut last_outcome = None;
             for (position, statement) in statements.into_iter().enumerate() {
                 nervix_primitives::task::consume_budget().await;
-                let result =
-                    nervix_primitives::time::timeout_at(deadline, client.execute(statement)).await;
-                let outcome = match result {
-                    Ok(Ok(outcome)) => outcome,
-                    Ok(Err(error)) => {
-                        panic!("client '{name}' failed at Plexus statement {position}: {error:#}")
-                    }
-                    Err(_) => {
-                        panic!(
-                            "client '{name}' did not complete the Plexus statements within \
-                             {limit:?}; pending statement {position}"
-                        )
-                    }
-                };
+                append_cucumber_log_line(&format!(
+                    "Plexus control dispatch: client={name} domain={probe_domain} \
+                     position={position} elapsed={:?}",
+                    started.elapsed()
+                ));
+                let outcome =
+                    nervix_primitives::time::timeout_at(deadline, client.execute(statement))
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "client '{name}' did not complete the Plexus statements within \
+                                 {limit:?}; pending statement {position}; domain={probe_domain}"
+                            )
+                        })
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "client '{name}' failed at Plexus statement {position}: {error:#}"
+                            )
+                        });
+                let completed_at = Instant::now();
+                let elapsed = completed_at.duration_since(started);
+                assert!(
+                    elapsed <= limit,
+                    "client '{name}' completed Plexus statement {position} after {limit:?}: \
+                     {elapsed:?}; domain={probe_domain}"
+                );
                 assert!(
                     outcome.succeeded(),
                     "client '{name}' Plexus statement {position} must succeed: {}",
                     outcome.message
                 );
                 append_cucumber_log_line(&format!(
-                    "Plexus control statement: client={name} position={position} elapsed={:?}",
-                    started.elapsed()
+                    "Plexus control statement: client={name} domain={probe_domain} \
+                     position={position} elapsed={elapsed:?}"
                 ));
-                last_outcome = Some(outcome);
+                last_outcome = Some((outcome, completed_at));
             }
-            let outcome = last_outcome.assured("each statement in the nonempty probe answered");
-            let elapsed = started.elapsed();
+            let (outcome, completed_at) =
+                last_outcome.assured("each statement in the nonempty probe answered");
+            let elapsed = completed_at.duration_since(started);
             append_cucumber_log_line(&format!(
-                "Plexus control probe: client={name} elapsed={elapsed:?} limit={limit:?}"
+                "Plexus control probe: client={name} domain={probe_domain} elapsed={elapsed:?} \
+                 limit={limit:?}"
             ));
             (outcome, elapsed)
         })
@@ -32476,6 +32491,27 @@ async fn try_capture_any_subscription_payload(
     world.last_subscription_payload = Some(event.payload);
     true
 }
+#[then(expr = "the last cluster status reports interconnect to {string} as {string}")]
+fn then_last_cluster_status_reports_interconnect_status(
+    world: &mut ScenarioWorld,
+    peer_node_id: String,
+    expected_status: String,
+) {
+    let peer_node_id = expand_placeholders(world, &peer_node_id);
+    let expected_status = expand_placeholders(world, &expected_status);
+    let output = world
+        .last_command_output
+        .as_deref()
+        .expect("the probe must retain its cluster status before asserting peer health");
+    let observed = crate::common::cluster::interconnect_status_from_text(output, &peer_node_id);
+    assert_eq!(
+        observed.as_deref(),
+        Some(expected_status.as_str()),
+        "expected peer '{peer_node_id}' to remain '{expected_status}' in the probe's status: \
+         {output}"
+    );
+}
+
 #[then(expr = "node {string} eventually reports interconnect to {string} as {string}")]
 async fn then_node_eventually_reports_interconnect_status(
     world: &mut ScenarioWorld,

@@ -17,6 +17,12 @@ running service. A node publishes, carries and verifies its prerequisites as
 parameters are not committed through Raft and capability records are not announced: a node reads
 its cluster parameters from its own options, and its capabilities stay local claims.
 
+Changes to the server's command line, startup settings and initialization contract keep the shipped
+Kubernetes operator's generated startup command, chart and example current in the same delivery.
+The server-image [deployment checks](installation-kubernetes.md#deployment-qualification) qualify
+both native architectures before publication; the operator's own repository checks alone cannot
+detect server changes.
+
 ## Choose The Class
 
 Apply one test: does the value establish how a node reaches the cluster, what the cluster

@@ -45,21 +45,20 @@ Feature: Web console backup and restore
       CREATE SCHEMA item ( id I64 );
       CREATE RELAY items SCHEMA item UNBRANCHED;
       """
-    Then the current leader node is saved as placeholder "leader"
-    Given backup archive downloads on node "{{leader}}" pause before the archive streams
+    Given backup archive downloads on every node pause before the archive streams
     When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".backup-menu-button" is clicked
     And selector ".backup-destination" is filled with "resumed.nvxb"
     Then selector ".backup-preview" contains "BACKUP DOMAIN {{domain}} TO 'resumed.nvxb';"
     When selector ".backup-submit" is clicked
-    Then the backup archive download pause on node "{{leader}}" is reached
+    Then the backup archive download pause on the node that serves the download is reached
     And selector ".backup-status" contains "downloading 0 of"
     When the web console page is reloaded and its next download is saved as backup archive "resumed.nvxb"
     Then selector ".backup-status" contains "downloaded 'resumed.nvxb'"
     And backup archive "resumed.nvxb" has the size and digest selector ".backup-status" shows
     And selector ".terminal" contains "resuming backup"
-    When the backup archive download pause on node "{{leader}}" is released
+    When the backup archive download pause is released on every node
     And the CLI describes backup archive "resumed.nvxb" as text
     Then the CLI output contains "- domain={{domain}} "
 
@@ -67,6 +66,37 @@ Feature: Web console backup and restore
       | cluster_size |
       | 1            |
       | 3            |
+
+  @console_backup_reload
+  Scenario: A console backup download interrupted by a page reload resumes after leadership moved under the backup
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA item ( id I64 );
+      CREATE RELAY items SCHEMA item UNBRANCHED;
+      """
+    Given backup archive downloads on every node pause before the archive streams
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".backup-menu-button" is clicked
+    And selector ".backup-destination" is filled with "resumed.nvxb"
+    Then selector ".backup-preview" contains "BACKUP DOMAIN {{domain}} TO 'resumed.nvxb';"
+    And the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "successor"
+    Given leadership moves from node "{{leader}}" to node "{{successor}}" under its next durably admitted command
+    When selector ".backup-submit" is clicked
+    Then the backup archive download pause on the node that serves the download is reached
+    And the leadership move under the durably admitted command completed
+    And selector ".backup-status" contains "downloading 0 of"
+    When the web console page is reloaded and its next download is saved as backup archive "resumed.nvxb"
+    Then selector ".backup-status" contains "downloaded 'resumed.nvxb'"
+    And backup archive "resumed.nvxb" has the size and digest selector ".backup-status" shows
+    And selector ".terminal" contains "resuming backup"
+    When the backup archive download pause is released on every node
+    And the CLI describes backup archive "resumed.nvxb" as text
+    Then the CLI output contains "- domain={{domain}} "
 
   @console_backup_foreign_record
   Scenario Outline: A page reload forgets a pending backup record the console did not write and resumes nothing
@@ -78,8 +108,7 @@ Feature: Web console backup and restore
       CREATE SCHEMA item ( id I64 );
       CREATE RELAY items SCHEMA item UNBRANCHED;
       """
-    Then the current leader node is saved as placeholder "leader"
-    Given backup archive downloads on node "{{leader}}" pause before the archive streams
+    Given backup archive downloads on every node pause before the archive streams
     When the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When a pending backup of "BACKUP DOMAIN {{domain}} TO 'foreign.nvxb';" whose domain entry spells "{{domain}}" in upper case is written into the web console tab's session storage
