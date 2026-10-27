@@ -29,6 +29,7 @@ use super::{
         GrantCapacityRefusals, RelaySendAttempts, RelaySendFailure, RelaySendStep,
     },
     remote_ack_owner::RecordStorage,
+    remote_ack_registrar::{RegistrarLook, RegistrarPresence},
     remote_ack_watch_charge::{RemoteAckWatchCharge, RemoteAckWatchHold},
     *,
 };
@@ -47,7 +48,10 @@ pub(super) const REMOTE_ACK_ALIVE_INTERVAL: Duration = Duration::from_millis(100
 /// report was delivered or given up, and gives a report up after
 /// `RemoteDispatcher::DISPATCH_TIMEOUT`. Two consecutive reports that each exhaust that deadline
 /// stay inside this bound, so only a receiver that stopped reporting the acknowledgement altogether
-/// is silent this long: its terminal outcome was lost on the way back, or its run ended.
+/// is silent this long: its terminal outcome was lost on the way back, its run ended, or its live
+/// view has missed this node's run for this long. A receiver holds its reports while this node's
+/// run is briefly missing from its live view, and gives the acknowledgement up only once the run
+/// has been missing past this bound and one sweep.
 pub(super) const REMOTE_ACK_SILENCE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How often a node looks for forwarded record acknowledgements whose receiver fell silent.
@@ -202,13 +206,73 @@ struct RemoteRelayAdmissionContext<'a> {
 struct RemoteAckWatch {
     completion: AckCompletion,
     registration: RemoteAckRegistration,
-    discovery_deadline: Instant,
-    observed_registrar: bool,
+    registrar: RegistrarPresence,
+    /// The terminal outcome the root reached while its registrar's run was missing from the live
+    /// view, kept for the run's return: the completion delivers an outcome only once.
+    unreturned: Option<AckOutcome>,
+}
+
+/// What one look at a receiver's acknowledgement watch sends to its registrar.
+enum RemoteAckWatchReport {
+    /// Send this report. A terminal outcome is the watch's last one.
+    Send(RemoteAckOutcome),
+    /// Send nothing now and look again later.
+    Hold,
+    /// End the watch without sending anything more.
+    Release,
+}
+
+impl RemoteAckWatch {
+    /// A watch that starts now, before the registrar's run has appeared in the live view.
+    fn new(completion: AckCompletion, registration: RemoteAckRegistration) -> Self {
+        Self {
+            completion,
+            registration,
+            registrar: RegistrarPresence::undiscovered(Instant::now()),
+            unreturned: None,
+        }
+    }
+
+    /// What the watch sends after its root reported `progress` since the last look, when the
+    /// live view shows `live` for the registrar's node at `now`.
+    fn next_report(
+        &mut self,
+        progress: Option<AckProgress>,
+        live: Option<ClusterNodeIncarnation>,
+        now: Instant,
+    ) -> RemoteAckWatchReport {
+        let terminal = match progress {
+            Some(AckProgress::Complete(outcome)) => Some(outcome),
+            Some(AckProgress::Alive) | None => self.unreturned.take(),
+        };
+        let look = self
+            .registrar
+            .look(self.registration.registrar.incarnation(), live, now);
+        match look {
+            RegistrarLook::Report => {}
+            RegistrarLook::Hold => {
+                self.unreturned = terminal;
+                return RemoteAckWatchReport::Hold;
+            }
+            RegistrarLook::Release => return RemoteAckWatchReport::Release,
+        }
+        let outcome = match terminal {
+            Some(AckOutcome::Ack) => RemoteAckOutcome::Ack,
+            Some(AckOutcome::NoAck(error)) => RemoteAckOutcome::NoAck(error),
+            None => remote_ack_progress(&self.completion),
+        };
+        RemoteAckWatchReport::Send(outcome)
+    }
 }
 
 async fn wait_remote_ack_progress(
     mut watch: RemoteAckWatch,
 ) -> (RemoteAckWatch, Option<AckProgress>) {
+    if watch.unreturned.is_some() {
+        // The root already delivered its outcome, so only the registrar's return is awaited.
+        sleep(REMOTE_ACK_ALIVE_INTERVAL).await;
+        return (watch, None);
+    }
     let progress = nervix_primitives::select! {
         _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => None,
         progress = watch.completion.wait_for_progress() => Some(progress),
@@ -1194,14 +1258,7 @@ impl Runtime {
             };
             let (record_acks, completion) =
                 AckSet::tracked_root(services.domain_ack_tracker.clone());
-            watches.push(RemoteAckWatch {
-                completion,
-                registration,
-                discovery_deadline: Instant::now()
-                    .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
-                    .assured("the bounded registrar discovery grace fits the monotonic clock"),
-                observed_registrar: false,
-            });
+            watches.push(RemoteAckWatch::new(completion, registration));
             acks.push(record_acks);
         }
         if let RemoteAckWatchAdmission::Charged { dispatcher, charge } = watch_owner {
@@ -1453,14 +1510,7 @@ impl Runtime {
         self.spawn_remote_ack_watchers(
             domain,
             dispatcher,
-            vec![RemoteAckWatch {
-                completion,
-                registration: ack,
-                discovery_deadline: Instant::now()
-                    .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
-                    .assured("the bounded registrar discovery grace fits the monotonic clock"),
-                observed_registrar: false,
-            }],
+            vec![RemoteAckWatch::new(completion, ack)],
             charge,
         );
         Ok(())
@@ -1488,32 +1538,32 @@ impl Runtime {
                 pending.push(wait_remote_ack_progress(watch));
             }
             while let Some((mut watch, progress)) = pending.next().await {
-                let ack = &watch.registration;
-                match dispatcher
-                    .cluster
-                    .live_node_incarnation(ack.registrar.node_id())
+                let registrar = watch.registration.registrar.node_id();
+                let live = if fault_injection.misses_live_run(dispatcher.local_node_id(), registrar)
                 {
-                    Some(incarnation) if incarnation != ack.registrar.incarnation() => {
-                        charge = charge.release_watch();
-                        continue;
-                    }
-                    Some(_) => watch.observed_registrar = true,
-                    None if watch.observed_registrar
-                        || Instant::now() >= watch.discovery_deadline =>
-                    {
-                        charge = charge.release_watch();
-                        continue;
-                    }
-                    None => {}
-                }
-                let terminal = matches!(progress, Some(AckProgress::Complete(_)));
-                let outcome = match progress {
-                    Some(AckProgress::Complete(AckOutcome::Ack)) => RemoteAckOutcome::Ack,
-                    Some(AckProgress::Complete(AckOutcome::NoAck(error))) => {
-                        RemoteAckOutcome::NoAck(error)
-                    }
-                    Some(AckProgress::Alive) | None => remote_ack_progress(&watch.completion),
+                    None
+                } else {
+                    dispatcher.cluster.live_node_incarnation(registrar)
                 };
+                let report = watch.next_report(progress, live, Instant::now());
+                let outcome = match report {
+                    RemoteAckWatchReport::Send(outcome) => outcome,
+                    RemoteAckWatchReport::Hold => {
+                        pending.push(wait_remote_ack_progress(watch));
+                        continue;
+                    }
+                    RemoteAckWatchReport::Release => {
+                        debug!(domain = domain.as_str(), ack_id = watch.registration.ack_id,
+                            target_node = %watch.registration.registrar,
+                            registrar = ?watch.registrar,
+                            "stopped reporting a remote ack whose registrar run changed or \
+                             stayed missing from the live view");
+                        charge = charge.release_watch();
+                        continue;
+                    }
+                };
+                let ack = &watch.registration;
+                let terminal = !outcome.is_progress();
                 trace!(domain = domain.as_str(), ack_id = ack.ack_id, target_node = %ack.registrar,
                     terminal, "sending remote ack progress");
                 if terminal
@@ -1911,14 +1961,7 @@ mod tests {
         for _ in 0..count {
             let (root, completion) = AckSet::root();
             roots.push(root);
-            watches.push(RemoteAckWatch {
-                completion,
-                registration: dispatcher.registration(1),
-                discovery_deadline: Instant::now()
-                    .checked_add(REMOTE_RELAY_INSTANTIATION_WAIT)
-                    .assured("the fixture discovery grace fits the clock"),
-                observed_registrar: false,
-            });
+            watches.push(RemoteAckWatch::new(completion, dispatcher.registration(1)));
         }
         let RemoteAckWatchAdmission::Charged { dispatcher, charge } = runtime
             .hold_remote_ack_watches(count, std::future::pending())
@@ -1984,6 +2027,106 @@ mod tests {
             dispatcher.executor.snapshot().relay_memory.reserved_bytes,
             0
         );
+    }
+
+    /// A registration the fixture's registering node handed out in its run `incarnation`.
+    fn registered_by(incarnation: ClusterNodeIncarnation) -> RemoteAckRegistration {
+        RemoteAckRegistration {
+            ack_id: 1,
+            registrar: ClusterNodeIdentity::new(
+                ClusterNodeName::parse("node-1").expect("the fixture node name is valid"),
+                incarnation,
+            ),
+        }
+    }
+
+    fn after(start: Instant, elapsed: Duration) -> Instant {
+        start
+            .checked_add(elapsed)
+            .expect("a fixture instant a few seconds ahead fits the monotonic clock")
+    }
+
+    /// A failure detector that briefly drops the registrar's run from the live view does not end
+    /// that run, so the outcome the root reaches meanwhile waits for the run and is returned once
+    /// it is back, instead of being dropped with the watch.
+    #[nervix_primitives::test]
+    async fn an_outcome_reached_while_the_registrar_is_missing_is_returned_once_it_is_back() {
+        let run = ClusterNodeIncarnation::new(7);
+        let (acks, completion) = AckSet::root();
+        let mut watch = RemoteAckWatch::new(completion, registered_by(run));
+        let start = Instant::now();
+        let RemoteAckWatchReport::Send(first) = watch.next_report(None, Some(run), start) else {
+            panic!("a watch reports to a registrar its live view shows");
+        };
+        assert!(first.is_progress());
+
+        acks.ack_success();
+        let progress = watch.completion.wait_for_progress().await;
+        assert_eq!(progress, AckProgress::Complete(AckOutcome::Ack));
+        let missing = after(start, Duration::from_millis(100));
+        assert!(matches!(
+            watch.next_report(Some(progress), None, missing),
+            RemoteAckWatchReport::Hold
+        ));
+        // The completion delivered its outcome once; waiting again only passes time.
+        let (mut watch, progress) = wait_remote_ack_progress(watch).await;
+        assert_eq!(progress, None);
+        let still_missing = after(start, Duration::from_millis(200));
+        assert!(matches!(
+            watch.next_report(progress, None, still_missing),
+            RemoteAckWatchReport::Hold
+        ));
+
+        let back = after(start, Duration::from_millis(300));
+        assert!(matches!(
+            watch.next_report(None, Some(run), back),
+            RemoteAckWatchReport::Send(RemoteAckOutcome::Ack)
+        ));
+    }
+
+    /// A negative outcome reaches a registrar the live view shows as the outcome the root decided.
+    #[nervix_primitives::test]
+    async fn a_negative_outcome_is_returned_as_the_root_decided_it() {
+        let run = ClusterNodeIncarnation::new(7);
+        let (acks, completion) = AckSet::root();
+        let mut watch = RemoteAckWatch::new(completion, registered_by(run));
+        acks.no_ack("the attached emitter refused the record");
+        let progress = watch.completion.wait_for_progress().await;
+        let RemoteAckWatchReport::Send(outcome) =
+            watch.next_report(Some(progress), Some(run), Instant::now())
+        else {
+            panic!("a watch reports to a registrar its live view shows");
+        };
+        assert_eq!(
+            outcome,
+            RemoteAckOutcome::NoAck("the attached emitter refused the record".to_string())
+        );
+    }
+
+    /// Once the registrar's run has stayed missing past its own silence bound and one sweep, a
+    /// registering node whose run goes on has failed the acknowledgement, so the watch gives the
+    /// outcome up.
+    #[nervix_primitives::test]
+    async fn an_outcome_whose_registrar_stays_missing_past_its_grace_is_given_up() {
+        let run = ClusterNodeIncarnation::new(7);
+        let (acks, completion) = AckSet::root();
+        let mut watch = RemoteAckWatch::new(completion, registered_by(run));
+        let start = Instant::now();
+        assert!(matches!(
+            watch.next_report(None, Some(run), start),
+            RemoteAckWatchReport::Send(_)
+        ));
+        acks.ack_success();
+        let progress = watch.completion.wait_for_progress().await;
+        assert!(matches!(
+            watch.next_report(Some(progress), None, start),
+            RemoteAckWatchReport::Hold
+        ));
+        let past_grace = after(start, RegistrarPresence::missing_grace());
+        assert!(matches!(
+            watch.next_report(None, None, past_grace),
+            RemoteAckWatchReport::Release
+        ));
     }
 
     /// The node the tests' deliveries go to, which resolves the acknowledgements they forward.

@@ -797,6 +797,10 @@ the full workspace union, and their relationship to the deterministic complexity
 with its
 [local reproduction commands](./coverage-reports.md#the-ordinary-workspace-report) or
 [native collection commands](./coverage-reports.md#native-collection).
+When adding execution, follow [producer registration](./coverage-reports.md#adding-or-changing-a-producer)
+and keep [independent verification verdicts](./coverage-reports.md#verification-outside-collected-counters)
+separate from collected counters. A complete report qualifies its recorded source and selection;
+later targets need their own completed execution.
 
 ### The scenario suite's execution budget
 

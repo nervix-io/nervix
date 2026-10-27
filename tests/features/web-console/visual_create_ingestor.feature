@@ -15,6 +15,7 @@ Feature: Web console visual ingestor creation
       CREATE ENDPOINT visual_ingest_endpoint ON visual_ingest_host PATH '/visual-ingest' TYPE HTTP;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
@@ -69,6 +70,7 @@ Feature: Web console visual ingestor creation
       CREATE UNPACED DOMAIN {{domain}};
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "incomplete_source"
@@ -94,6 +96,7 @@ Feature: Web console visual ingestor creation
       CREATE ENDPOINT visual_scope_endpoint ON visual_scope_host PATH '/scope' TYPE HTTP;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "scoped_source"
@@ -131,6 +134,7 @@ Feature: Web console visual ingestor creation
       CREATE ENDPOINT visual_tx_endpoint ON visual_tx_host PATH '/tx' TYPE HTTP;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
@@ -191,6 +195,7 @@ Feature: Web console visual ingestor creation
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
     When the web console is opened on node "{{old_leader}}"
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
@@ -244,6 +249,7 @@ Feature: Web console visual ingestor creation
       CREATE ENDPOINT visual_branch_endpoint ON visual_branch_host PATH '/branch' TYPE HTTP;
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
     And selector ".create-name" is filled with "visual_branch_source"
@@ -319,6 +325,7 @@ Feature: Web console visual ingestor creation
       };
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
@@ -375,6 +382,7 @@ Feature: Web console visual ingestor creation
       CREATE PULSAR CLIENT visual_pulsar_client CONFIG { 'addr' = '{{pulsar_addr}}' };
       """
     And the web console is opened on the leader node
+    Then selector ".domain-menu [data-domain='{{domain}}'].active" exists
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='ingestor']" is clicked
