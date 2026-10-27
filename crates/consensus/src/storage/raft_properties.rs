@@ -20,6 +20,7 @@ use super::{
     generators::{entry, optional_log_id, stored_membership, vote},
     *,
 };
+use crate::durable_batch::StorageReport;
 
 /// What the consensus store encodes one generated record within. Every generated record is a few
 /// kibibytes at most.
@@ -65,10 +66,12 @@ fn is_invalid_storage(error: &io::Error) -> bool {
     let Some(inner) = error.get_ref() else {
         return false;
     };
-    matches!(
-        inner.downcast_ref::<StorageFailure>(),
-        Some(StorageFailure::InvalidState)
-    )
+    let failure = if let Some(report) = inner.downcast_ref::<StorageReport<StorageFailure>>() {
+        Some(report.0.current_context())
+    } else {
+        inner.downcast_ref::<StorageFailure>()
+    };
+    matches!(failure, Some(StorageFailure::InvalidState))
 }
 
 /// Up to three records of arbitrary key and value bytes, as a snapshot section copies them from

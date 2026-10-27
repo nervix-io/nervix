@@ -2307,6 +2307,12 @@ fn define_host_functions(linker: &mut Linker<BranchStore>) -> StackResult<(), Wa
     Ok(())
 }
 
+/// Wasmtime's error owns a complete engine diagnostic but does not implement the standard
+/// error trait. This frame keeps that typed value and renders its chain at the report boundary.
+#[derive(Debug, Error)]
+#[error("{0:#}")]
+struct WasmtimeFailure(wasmtime::Error);
+
 fn typed_export<Params, Results>(
     store: &mut Store<BranchStore>,
     instance: &Instance,
@@ -2316,9 +2322,9 @@ where
     Params: wasmtime::WasmParams,
     Results: wasmtime::WasmResults,
 {
-    instance
-        .get_typed_func(store, name)
-        .map_err(|_| Report::new(WasmGuestCallError::MissingExport(name)))
+    instance.get_typed_func(store, name).map_err(|cause| {
+        Report::new(WasmtimeFailure(cause)).change_context(WasmGuestCallError::MissingExport(name))
+    })
 }
 
 fn optional_typed_export<Params, Results>(

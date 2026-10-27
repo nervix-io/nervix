@@ -545,6 +545,12 @@ The public contract is in [Extrema](./filter-map-functions.md#extrema). Unit tes
 
 ## Batch Execution
 
+Batch input conversion keeps the VM's report beneath the runtime-schema context. Arrow decoding
+and batch-container encoding likewise keep informative causes until the codec's reporting
+boundary. Calendar checks that return a bounded datetime row refusal keep their semantic outcome
+instead of allocating an infrastructure report. A missing register encountered by a shape probe
+is reported before the probe takes its nonscalar fallback.
+
 ### Typed Batches And Registers
 
 `TypedBatch` carries:

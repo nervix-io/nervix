@@ -274,7 +274,7 @@ impl CreateEmitter {
                     return Err(Report::new(AlterEmitterError::CommitPolicyUnsupported));
                 };
                 table.commit_each = commit_each.clone();
-                table.max_commit_size = max_commit_size.clone();
+                table.max_commit_size = *max_commit_size;
             }
         }
         Ok(())
@@ -361,7 +361,7 @@ pub enum AlterEmitterOperation {
     },
     SetCommit {
         commit_each: String,
-        max_commit_size: String,
+        max_commit_size: crate::PayloadSizeLimit,
     },
 }
 

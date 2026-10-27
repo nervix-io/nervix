@@ -19,6 +19,7 @@ use nervix_models::{DomainName, ResourceName, ResourceUploadKey};
 use tempfile::TempDir;
 
 use super::{generators::state_machine, *};
+use crate::durable_batch::StorageReport;
 
 /// What storing one generated revision may charge its batch. A generated state holds a few
 /// bounded records of each family, far below the half of this the batch may use.
@@ -226,10 +227,12 @@ fn is_invalid_storage(error: &io::Error) -> bool {
     let Some(inner) = error.get_ref() else {
         return false;
     };
-    matches!(
-        inner.downcast_ref::<StorageFailure>(),
-        Some(StorageFailure::InvalidState)
-    )
+    let failure = if let Some(report) = inner.downcast_ref::<StorageReport<StorageFailure>>() {
+        Some(report.0.current_context())
+    } else {
+        inner.downcast_ref::<StorageFailure>()
+    };
+    matches!(failure, Some(StorageFailure::InvalidState))
 }
 
 /// The facts the readers of a recovered state rely on without checking them again: every record

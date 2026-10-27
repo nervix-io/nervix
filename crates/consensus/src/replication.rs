@@ -51,7 +51,7 @@ use nervix_primitives::{
     sync::{CancellationToken, DropGuard, mpsc},
     time::{Instant, sleep_until, timeout},
 };
-use nervix_recovery::Discarded as _;
+use nervix_recovery::{Discarded as _, Reported as _};
 use openraft::{
     error::{RPCError, Unreachable},
     network::{RPCOption, RaftNetworkV2 as _},
@@ -304,8 +304,12 @@ impl AppendSubmission {
         };
         self.wait_for_follower_capacity().await?;
         let record = wire::AppendEntriesRecord::from_request(request);
-        let Ok(bytes) = self.sender.send(record).await else {
-            return Err(SubmissionStopped::StreamFailed);
+        let bytes = match self.sender.send(record).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                Err::<(), _>(error).reported("submit replication append batch");
+                return Err(SubmissionStopped::StreamFailed);
+            }
         };
         self.submitted_bytes = self
             .submitted_bytes

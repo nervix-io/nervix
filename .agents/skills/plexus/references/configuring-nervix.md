@@ -294,6 +294,8 @@ current connection, retry and deadline limits.
   the whole class is free; `DESCRIBE EMITTER` shows a commit waiting for that memory as its
   transient error while the emitter retries.
 - Provision Iceberg table columns with names and types matching the emitter's `VALUES`. A
+  required `NAMESPACE` names the catalog namespace independently of the Nervix domain; provision
+  each of its case-preserving dot-separated levels before starting the emitter. A
   `DATETIME`, at the top level or inside a `VEC` or `ARRAY`, is written at the containing
   microsecond and needs a `timestamptz` column, not `timestamptz_ns`. A commit writes each mapped
   column into the table column of its name, in any `VALUES` order, and a null into each optional

@@ -1347,6 +1347,14 @@ pub(super) async fn decode_ingested_payload(
 }
 
 impl Runtime {
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            outcome,
+            reason = "dispatch returns the unadmitted batch when its owner cannot accept it; this \
+                      is an ownership refusal, not an operation failure"
+        )
+    )]
     pub(in crate::runtime) async fn ingest_stream_boundary_message(
         &self,
         domain: &DomainName,

@@ -285,6 +285,9 @@ retain that table's `FileIO` and its initialized storage, so later object calls 
 an object URL for a different storage root is refused. OpenDAL's credential providers keep their
 own credential refresh. Storage calls make one attempt: the emitter host owns retry pacing, and
 neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt.
+Azure locations select the Blob service with `wasb`/`wasbs` and the Data Lake service with
+`abfs`/`abfss`; their account hosts identify the corresponding `blob` or `dfs` service. Both use
+the same node resolver and storage-client operation deadline described here.
 The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
 Nervix does not call it; S3 operator construction requires its configured region or the driver's
 environment policy.
@@ -805,6 +808,27 @@ Iceberg retains a storage-client reference in its destination Model. Validation 
 object-store client kinds; planning resolves the actual S3, GCS or Azure Blob client into the
 connector's storage-backend setting. The destination statement does not select that backend.
 The host receives the completed plan and performs no Model lookup to choose it.
+
+The Iceberg declaration also requires a case-preserving catalog namespace. Its validated identity
+passes from the statement through the execution plan into the connector; the connector supplies
+its dot-separated levels to the catalog API. The Nervix domain does not supply an implicit
+namespace. Location validation compares the URL scheme with the resolved storage-client kind
+before activation. Commit size and batch size share the vocabulary's positive whole-byte value,
+so planning consumes the decided count instead of parsing a second size string.
+
+The storage clients declare their Nervix-owned addresses, credentials, booleans and deadlines
+separately from `s3.*`/`client.*`, `gcs.*` and `adls.*` driver properties. The REST client owns its
+catalog locator and warehouse and delegates its catalog headers and storage-property namespaces.
+Registry validation, completion, inspection and the generated key reference consume these shared
+schemas; they do not keep another Iceberg key table. The network-free composition hook checks
+the storage properties the connector can interpret before a table location exists. Building an
+OpenDAL operator, credentials and connectivity remain initialization checks.
+
+The REST catalog's file I/O property map starts with the normalized storage properties and then
+applies catalog properties. A catalog entry for the same Iceberg property key takes precedence
+in that map, which the table's file I/O supplies to the configured storage factory for object
+operations. The factory retains the selected backend, resolver, location and storage deadline; it
+does not replace the effective catalog properties with a second client map.
 
 ### Capability inventory
 
@@ -2346,6 +2370,24 @@ beneath the invalid-timeout failure. The server
 retains the Syslog plan and signaling compiler reports in its runtime startup errors. A connector
 may turn a report into the existing source or emitter outcome only at that boundary, while preserving
 the typed cause and rendering only non-sensitive configuration or transport details.
+
+Client template compilation and rendering keep the template engine's typed error beneath
+`ClientConfigError`; the resource resolver adds `RuntimeResourceError` above that same report.
+NATS subject subscription, flush and connection failures likewise keep the actual driver error
+as a context, with the ingestor operation above it. Printable attachments do not replace these
+causes. An unadmitted ingest batch, a closed channel and a refused permit are ownership or
+admission outcomes rather than underlying operation failures.
+
+MongoDB request failures retain the driver in a typed diagnostic frame whose rendering exposes
+the operation, I/O class or numeric command code. Free-form driver and document text stays private.
+The BSON construction check separately declares its exact semantic record/configuration refusal;
+it does not classify network or server failures as validation outcomes. HTTP response parsing
+retains its UTF-8 and numeric parsing causes beneath the response-head failure.
+
+A MySQL mapped column that the emitter cannot bind fails the whole publish with its exact column
+and Arrow type retained beneath the publish context. It is not a per-record rejection. Pool
+maintenance reports its own failed connection attempt before its next retry; a later writer's
+failure remains a separate diagnostic.
 
 The host's source start keeps every connector report it composes an ingestor from. A client
 configuration that does not resolve, a connector plan that fails, such as a Syslog, Redis,

@@ -18,7 +18,7 @@
 use std::time::Duration;
 
 use arch_into::ArchInto as _;
-use error_stack::Report;
+use error_stack::{FrameKind, Report, ResultExt as _};
 use futures_util::stream;
 use meticulous::OptionExt as _;
 use nervix_backup::{RecordKind, SectionContent};
@@ -219,42 +219,48 @@ impl SessionServiceImpl {
         peer: &nervix_models::ClusterNodeName,
         request: BackupDrainStatusRequest,
     ) -> Result<BackupDrainStatus, RemoteOperationFailure> {
-        if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
-            return Err(failed(
-                &request.domain,
-                "backup drain coordinator is not the current leader",
-            ));
-        }
-        self.apply_current_cluster_state()
-            .await
-            .map_err(|error| failed(&request.domain, &format!("{error:#}")))?;
-        match request.action {
-            BackupDrainAction::FlushIfIdle => {
-                self.inner
-                    .runtime
-                    .force_flush_domain_if_idle(&request.domain);
+        let result: Result<_, Report<RemoteOperationFailure>> = async {
+            if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
+                return Err(failed(
+                    &request.domain,
+                    "backup drain coordinator is not the current leader",
+                ));
             }
-            BackupDrainAction::Confirm => {
-                self.inner.runtime.force_flush_domain(&request.domain);
+            self.apply_current_cluster_state()
+                .await
+                .change_context_lazy(|| {
+                    failure_context(&request.domain, "backup state section operation failed")
+                })?;
+            match request.action {
+                BackupDrainAction::FlushIfIdle => {
+                    self.inner
+                        .runtime
+                        .force_flush_domain_if_idle(&request.domain);
+                }
+                BackupDrainAction::Confirm => {
+                    self.inner.runtime.force_flush_domain(&request.domain);
+                }
+                BackupDrainAction::Observe => {}
             }
-            BackupDrainAction::Observe => {}
+            let status = self
+                .inner
+                .runtime
+                .local_domain_drain_status(&request.domain);
+            Ok(BackupDrainStatus {
+                admitting_ingestors: status.admitting_ingestors.arch_into(),
+                active_generators: status.active_generators.arch_into(),
+                admitted_acks: status.outstanding_acks.arch_into(),
+                admitting_relays: status.admitting_relays.arch_into(),
+                buffered_relay_batches: status.buffered_relay_batches.arch_into(),
+                node_work_items: status.node_work_items.arch_into(),
+                buffered_emitter_messages: status.buffered_emitter_messages.arch_into(),
+                publishing_emitters: status.publishing_emitters.arch_into(),
+                parked_required_waits: status.required_waits.arch_into(),
+                force_flush_obligations: status.force_flush_obligations.arch_into(),
+            })
         }
-        let status = self
-            .inner
-            .runtime
-            .local_domain_drain_status(&request.domain);
-        Ok(BackupDrainStatus {
-            admitting_ingestors: status.admitting_ingestors.arch_into(),
-            active_generators: status.active_generators.arch_into(),
-            admitted_acks: status.outstanding_acks.arch_into(),
-            admitting_relays: status.admitting_relays.arch_into(),
-            buffered_relay_batches: status.buffered_relay_batches.arch_into(),
-            node_work_items: status.node_work_items.arch_into(),
-            buffered_emitter_messages: status.buffered_emitter_messages.arch_into(),
-            publishing_emitters: status.publishing_emitters.arch_into(),
-            parked_required_waits: status.required_waits.arch_into(),
-            force_flush_obligations: status.force_flush_obligations.arch_into(),
-        })
+        .await;
+        result.map_err(project_failure)
     }
 
     /// Captures this node's share of a cut: the state of `primaries`, the entities the cut's
@@ -265,20 +271,22 @@ impl SessionServiceImpl {
         quiesced: bool,
         status: DomainStatus,
         primaries: ahash::HashSet<NodeRef>,
-    ) -> Result<CapturedDomainState, RemoteOperationFailure> {
+    ) -> Result<CapturedDomainState, Report<RemoteOperationFailure>> {
         let runtime = self.inner.runtime.clone();
         if quiesced {
             runtime
                 .checkpoint_backup_branch_lifecycles(domain)
                 .await
-                .map_err(|error| failed(domain, &format!("{error:#}")))?;
+                .change_context_lazy(|| {
+                    failure_context(domain, "backup state section operation failed")
+                })?;
         }
         let domain_owned = domain.clone();
         let executor = runtime.executor().clone();
         let reservation = executor
             .reserve(MemoryClass::Bulk, 1)
             .await
-            .map_err(|_| failed(domain, "state capture admission failed"))?;
+            .change_context_lazy(|| failure_context(domain, "state capture admission failed"))?;
         let read = executor
             .run_storage(
                 nervix_execution::StorageClass::Filesystem,
@@ -294,8 +302,10 @@ impl SessionServiceImpl {
                 },
             )
             .await
-            .map_err(|_| failed(domain, "state capture execution failed"))?;
-        read.map_err(|error| failed(domain, &format!("{error:#}")))
+            .change_context_lazy(|| failure_context(domain, "state capture execution failed"))?;
+        read.change_context_lazy(|| {
+            failure_context(domain, "backup state section operation failed")
+        })
     }
 
     pub(crate) async fn handle_backup_capture_request(
@@ -303,112 +313,119 @@ impl SessionServiceImpl {
         peer: &nervix_models::ClusterNodeName,
         request: CaptureDomainStateRequest,
     ) -> Result<(), RemoteOperationFailure> {
-        if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
-            return Err(failed(
+        let result: Result<_, Report<RemoteOperationFailure>> = async {
+            if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
+                return Err(failed(
+                    &request.domain,
+                    "capture coordinator is not the current leader",
+                ));
+            }
+            wait_for_capture_revision(
                 &request.domain,
-                "capture coordinator is not the current leader",
-            ));
-        }
-        wait_for_capture_revision(
-            &request.domain,
-            request.revision,
-            self.inner.consensus.subscribe_applied(),
-        )
-        .await?;
-        self.apply_current_cluster_state()
-            .await
-            .map_err(|error| failed(&request.domain, &format!("{error:#}")))?;
-        if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
-            return Err(failed(
-                &request.domain,
-                "capture coordinator is not the current leader",
-            ));
-        }
-        let Some(capture) = self.inner.consensus.configuration_capture().await else {
-            return Err(failed(&request.domain, "configuration is unavailable"));
-        };
-        let status = capture
-            .domains
-            .get(&request.domain)
-            .ok_or_else(|| failed(&request.domain, "domain is unavailable"))?
-            .status
-            .clone();
-        // Only a placement's scheduled primary archives it, so a replica's copy is never read: its
-        // admission or storage refusal could only fail the cut.
-        let mut primaries = ahash::HashSet::default();
-        if let Some(schedule) = capture.schedule.domain(&request.domain) {
-            primaries.extend(schedule.primary_entities_on(self.inner.consensus.local_node_id()));
-        }
-        let state = self
-            .capture_local_state(&request.domain, request.quiesced, status, primaries)
-            .await?;
-        let mut staged = self
-            .stage_guest_state_sections(
-                state.guest_saves,
-                capture.schedule.domain(&request.domain),
-                &request,
+                request.revision,
+                self.inner.consensus.subscribe_applied(),
             )
             .await?;
-        staged.extend(
-            self.stage_native_metadata_sections(
-                state.native_metadata,
-                capture.schedule.domain(&request.domain),
-                &request,
-            )
-            .await?,
-        );
-        match state.materialized {
-            CapturedMaterializedState::Current(captured) => {
-                staged.extend(
-                    self.stage_materialized_sections(
-                        captured,
-                        capture.schedule.domain(&request.domain),
-                        &request,
-                    )
-                    .await?,
-                );
+            self.apply_current_cluster_state()
+                .await
+                .change_context_lazy(|| {
+                    failure_context(&request.domain, "backup state section operation failed")
+                })?;
+            if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
+                return Err(failed(
+                    &request.domain,
+                    "capture coordinator is not the current leader",
+                ));
             }
-            CapturedMaterializedState::Stored(captured) => {
-                staged.extend(
-                    self.stage_stored_materialized_sections(
-                        captured,
-                        capture.schedule.domain(&request.domain),
-                        &request,
-                    )
-                    .await?,
-                );
+            let Some(capture) = self.inner.consensus.configuration_capture().await else {
+                return Err(failed(&request.domain, "configuration is unavailable"));
+            };
+            let status = capture
+                .domains
+                .get(&request.domain)
+                .ok_or_else(|| failed(&request.domain, "domain is unavailable"))?
+                .status
+                .clone();
+            // Only a placement's scheduled primary archives it, so a replica's copy is never read: its
+            // admission or storage refusal could only fail the cut.
+            let mut primaries = ahash::HashSet::default();
+            if let Some(schedule) = capture.schedule.domain(&request.domain) {
+                primaries
+                    .extend(schedule.primary_entities_on(self.inner.consensus.local_node_id()));
             }
-        }
-        staged.extend(
-            self.stage_branch_state_sections(
-                state.branch_states,
-                capture.schedule.domain(&request.domain),
-                &request,
-            )
-            .await?,
-        );
-        self.inner.captured_backup_sections.retain(|key, _| {
-            key.coordination != request.coordination || key.domain != request.domain
-        });
-        let expires_at = Instant::now() + Duration::from_secs(600);
-        for section in staged {
-            self.inner.captured_backup_sections.insert(
-                section.key,
-                CapturedSectionStage {
-                    artifact: Arc::new(section.artifact),
-                    content: section.content,
-                    expires_at,
-                },
+            let state = self
+                .capture_local_state(&request.domain, request.quiesced, status, primaries)
+                .await?;
+            let mut staged = self
+                .stage_guest_state_sections(
+                    state.guest_saves,
+                    capture.schedule.domain(&request.domain),
+                    &request,
+                )
+                .await?;
+            staged.extend(
+                self.stage_native_metadata_sections(
+                    state.native_metadata,
+                    capture.schedule.domain(&request.domain),
+                    &request,
+                )
+                .await?,
             );
+            match state.materialized {
+                CapturedMaterializedState::Current(captured) => {
+                    staged.extend(
+                        self.stage_materialized_sections(
+                            captured,
+                            capture.schedule.domain(&request.domain),
+                            &request,
+                        )
+                        .await?,
+                    );
+                }
+                CapturedMaterializedState::Stored(captured) => {
+                    staged.extend(
+                        self.stage_stored_materialized_sections(
+                            captured,
+                            capture.schedule.domain(&request.domain),
+                            &request,
+                        )
+                        .await?,
+                    );
+                }
+            }
+            staged.extend(
+                self.stage_branch_state_sections(
+                    state.branch_states,
+                    capture.schedule.domain(&request.domain),
+                    &request,
+                )
+                .await?,
+            );
+            self.inner.captured_backup_sections.retain(|key, _| {
+                key.coordination != request.coordination || key.domain != request.domain
+            });
+            let expires_at = Instant::now() + Duration::from_secs(600);
+            for section in staged {
+                self.inner.captured_backup_sections.insert(
+                    section.key,
+                    CapturedSectionStage {
+                        artifact: Arc::new(section.artifact),
+                        content: section.content,
+                        expires_at,
+                    },
+                );
+            }
+            Ok(())
         }
-        Ok(())
+        .await;
+        result.map_err(project_failure)
     }
 
     pub(super) async fn stage_captured_section(
         &self,
         bytes: Vec<u8>,
         domain: &DomainName,
-    ) -> Result<StagedArtifact, RemoteOperationFailure> {
+    ) -> Result<StagedArtifact, Report<RemoteOperationFailure>> {
         let length =
             u64::try_from(bytes.len()).map_err(|_| failed(domain, "state section is too large"))?;
         let mut writer = self
@@ -416,7 +433,7 @@ impl SessionServiceImpl {
             .runtime
             .try_stage_artifact(length)
             .await
-            .map_err(|_| failed(domain, "state staging quota is full"))?;
+            .change_context_lazy(|| failure_context(domain, "state staging quota is full"))?;
         if !bytes.is_empty() {
             let charge = self
                 .inner
@@ -424,16 +441,18 @@ impl SessionServiceImpl {
                 .executor()
                 .reserve(MemoryClass::Bulk, length)
                 .await
-                .map_err(|_| failed(domain, "state section admission failed"))?;
+                .change_context_lazy(|| {
+                    failure_context(domain, "state section admission failed")
+                })?;
             writer
                 .write_chunk(ChargedBytes::from_owned(bytes, charge))
                 .await
-                .map_err(|_| failed(domain, "state section staging failed"))?;
+                .change_context_lazy(|| failure_context(domain, "state section staging failed"))?;
         }
         writer
             .finish_artifact()
             .await
-            .map_err(|_| failed(domain, "state section staging failed"))
+            .change_context_lazy(|| failure_context(domain, "state section staging failed"))
     }
 
     pub(crate) async fn handle_backup_inventory_request(
@@ -441,30 +460,34 @@ impl SessionServiceImpl {
         peer: &nervix_models::ClusterNodeName,
         request: CaptureInventoryRequest,
     ) -> Result<Vec<CapturedSectionInventory>, RemoteOperationFailure> {
-        if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
-            return Err(failed(
-                &request.domain,
-                "inventory coordinator is not the current leader",
-            ));
+        let result: Result<_, Report<RemoteOperationFailure>> = async {
+            if self.inner.consensus.current_leader().await.as_ref() != Some(peer) {
+                return Err(failed(
+                    &request.domain,
+                    "inventory coordinator is not the current leader",
+                ));
+            }
+            let mut sections = self
+                .inner
+                .captured_backup_sections
+                .iter()
+                .filter(|entry| {
+                    entry.key().coordination == request.coordination
+                        && entry.key().domain == request.domain
+                })
+                .map(|entry| CapturedSectionInventory {
+                    path: entry.key().path.clone(),
+                    length: entry.value().artifact.length(),
+                    digest: entry.value().artifact.digest(),
+                    kind: section_kind(entry.value().content)
+                        .verified("capture staging holds only runtime state sections"),
+                })
+                .collect::<Vec<_>>();
+            sections.sort_by(|left, right| left.path.cmp(&right.path));
+            Ok(sections)
         }
-        let mut sections = self
-            .inner
-            .captured_backup_sections
-            .iter()
-            .filter(|entry| {
-                entry.key().coordination == request.coordination
-                    && entry.key().domain == request.domain
-            })
-            .map(|entry| CapturedSectionInventory {
-                path: entry.key().path.clone(),
-                length: entry.value().artifact.length(),
-                digest: entry.value().artifact.digest(),
-                kind: section_kind(entry.value().content)
-                    .verified("capture staging holds only runtime state sections"),
-            })
-            .collect::<Vec<_>>();
-        sections.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(sections)
+        .await;
+        result.map_err(project_failure)
     }
 
     pub(crate) fn take_captured_backup_section(
@@ -491,177 +514,197 @@ impl SessionServiceImpl {
         peer: &nervix_models::ClusterNodeName,
         request: InstallRestoredStateRequest,
     ) -> Result<(), RemoteOperationFailure> {
-        if peer != &request.authority.leader {
-            return Err(failed(
-                &request.domain,
-                "state installer differs from the admitted leader",
-            ));
-        }
-        self.wait_for_restore_installation_revision(&request.authority, &request.domain)
-            .await?;
-        self.inner
-            .consensus
-            .with_restore_state_installation(&request.domain, &request.authority, || ())
-            .map_err(|error| failed(&request.domain, &error.to_string()))?;
-        match request.action {
-            InstallRestoredStateAction::Publish { inventory } => {
-                self.publish_restored_state_generation(
+        let result: Result<_, Report<RemoteOperationFailure>> = async {
+            if peer != &request.authority.leader {
+                return Err(failed(
                     &request.domain,
-                    &request.authority,
-                    inventory,
-                )
-                .await
+                    "state installer differs from the admitted leader",
+                ));
             }
-            InstallRestoredStateAction::Begin {
-                placement,
-                branch_fingerprint,
-                revision,
-                length,
-                digest,
-            } => {
-                if placement.domain != request.domain {
-                    return Err(failed(
+            self.wait_for_restore_installation_revision(&request.authority, &request.domain)
+                .await?;
+            self.inner
+                .consensus
+                .with_restore_state_installation(&request.domain, &request.authority, || ())
+                .change_context_lazy(|| {
+                    failure_context(&request.domain, "backup state section operation failed")
+                })?;
+            match request.action {
+                InstallRestoredStateAction::Publish { inventory } => {
+                    self.publish_restored_state_generation(
                         &request.domain,
-                        "restored placement belongs to another domain",
-                    ));
-                }
-                let writer = self
-                    .inner
-                    .runtime
-                    .try_stage_artifact(length)
-                    .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                self.inner.restored_state_uploads.insert(
-                    request.coordination,
-                    RestoreUploadEntry {
-                        stage: Arc::new(AsyncMutex::new(RestoreUploadStage {
-                            domain: request.domain,
-                            authority: request.authority,
-                            placement,
-                            branch_fingerprint,
-                            revision,
-                            length,
-                            digest,
-                            next_offset: 0,
-                            writer: Some(writer),
-                        })),
-                        expires_at: Instant::now() + Duration::from_secs(600),
-                    },
-                );
-                Ok(())
-            }
-            InstallRestoredStateAction::Chunk { offset, payload } => {
-                if payload.is_empty() || payload.len() > 64 * 1024 {
-                    return Err(failed(
-                        &request.domain,
-                        "restored state chunk has an invalid length",
-                    ));
-                }
-                let entry = self
-                    .inner
-                    .restored_state_uploads
-                    .get(&request.coordination)
-                    .ok_or_else(|| {
-                        failed(&request.domain, "restored state upload was not started")
-                    })?;
-                let stage = Arc::clone(&entry.stage);
-                drop(entry);
-                let mut stage = stage.lock().await;
-                if stage.domain != request.domain
-                    || stage.authority != request.authority
-                    || stage.next_offset != offset
-                {
-                    return Err(failed(
-                        &request.domain,
-                        "restored state upload offset differs",
-                    ));
-                }
-                let length = u64::try_from(payload.len()).map_err(|_| {
-                    failed(
-                        &request.domain,
-                        "restored state chunk length exceeds address space",
+                        &request.authority,
+                        inventory,
                     )
-                })?;
-                if offset
-                    .checked_add(length)
-                    .is_none_or(|end| end > stage.length)
-                {
-                    return Err(failed(
-                        &request.domain,
-                        "restored state chunk exceeds declared length",
-                    ));
+                    .await
                 }
-                let charge = self
-                    .inner
-                    .runtime
-                    .executor()
-                    .reserve(MemoryClass::Bulk, length)
-                    .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                let writer = stage.writer.as_mut().ok_or_else(|| {
-                    failed(&request.domain, "restored state upload is already sealed")
-                })?;
-                writer
-                    .write_chunk(ChargedBytes::from_owned(payload, charge))
-                    .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                stage.next_offset += length;
-                Ok(())
-            }
-            InstallRestoredStateAction::Finish => {
-                let (_, entry) = self
-                    .inner
-                    .restored_state_uploads
-                    .remove(&request.coordination)
-                    .ok_or_else(|| {
-                        failed(&request.domain, "restored state upload was not started")
+                InstallRestoredStateAction::Begin {
+                    placement,
+                    branch_fingerprint,
+                    revision,
+                    length,
+                    digest,
+                } => {
+                    if placement.domain != request.domain {
+                        return Err(failed(
+                            &request.domain,
+                            "restored placement belongs to another domain",
+                        ));
+                    }
+                    let writer = self
+                        .inner
+                        .runtime
+                        .try_stage_artifact(length)
+                        .await
+                        .change_context_lazy(|| {
+                            failure_context(
+                                &request.domain,
+                                "backup state section operation failed",
+                            )
+                        })?;
+                    self.inner.restored_state_uploads.insert(
+                        request.coordination,
+                        RestoreUploadEntry {
+                            stage: Arc::new(AsyncMutex::new(RestoreUploadStage {
+                                domain: request.domain,
+                                authority: request.authority,
+                                placement,
+                                branch_fingerprint,
+                                revision,
+                                length,
+                                digest,
+                                next_offset: 0,
+                                writer: Some(writer),
+                            })),
+                            expires_at: Instant::now() + Duration::from_secs(600),
+                        },
+                    );
+                    Ok(())
+                }
+                InstallRestoredStateAction::Chunk { offset, payload } => {
+                    if payload.is_empty() || payload.len() > 64 * 1024 {
+                        return Err(failed(
+                            &request.domain,
+                            "restored state chunk has an invalid length",
+                        ));
+                    }
+                    let entry = self
+                        .inner
+                        .restored_state_uploads
+                        .get(&request.coordination)
+                        .ok_or_else(|| {
+                            failed(&request.domain, "restored state upload was not started")
+                        })?;
+                    let stage = Arc::clone(&entry.stage);
+                    drop(entry);
+                    let mut stage = stage.lock().await;
+                    if stage.domain != request.domain
+                        || stage.authority != request.authority
+                        || stage.next_offset != offset
+                    {
+                        return Err(failed(
+                            &request.domain,
+                            "restored state upload offset differs",
+                        ));
+                    }
+                    let length = u64::try_from(payload.len()).map_err(|_| {
+                        failed(
+                            &request.domain,
+                            "restored state chunk length exceeds address space",
+                        )
                     })?;
-                let mut stage = entry.stage.lock().await;
-                if stage.domain != request.domain
-                    || stage.authority != request.authority
-                    || stage.next_offset != stage.length
-                {
-                    return Err(failed(
-                        &request.domain,
-                        "restored state upload is incomplete",
-                    ));
+                    if offset
+                        .checked_add(length)
+                        .is_none_or(|end| end > stage.length)
+                    {
+                        return Err(failed(
+                            &request.domain,
+                            "restored state chunk exceeds declared length",
+                        ));
+                    }
+                    let charge = self
+                        .inner
+                        .runtime
+                        .executor()
+                        .reserve(MemoryClass::Bulk, length)
+                        .await
+                        .change_context_lazy(|| {
+                            failure_context(
+                                &request.domain,
+                                "backup state section operation failed",
+                            )
+                        })?;
+                    let writer = stage.writer.as_mut().ok_or_else(|| {
+                        failed(&request.domain, "restored state upload is already sealed")
+                    })?;
+                    writer
+                        .write_chunk(ChargedBytes::from_owned(payload, charge))
+                        .await
+                        .change_context_lazy(|| {
+                            failure_context(
+                                &request.domain,
+                                "backup state section operation failed",
+                            )
+                        })?;
+                    stage.next_offset += length;
+                    Ok(())
                 }
-                let writer = stage.writer.take().ok_or_else(|| {
-                    failed(&request.domain, "restored state upload is already sealed")
-                })?;
-                let artifact = writer
-                    .finish_artifact()
+                InstallRestoredStateAction::Finish => {
+                    let (_, entry) = self
+                        .inner
+                        .restored_state_uploads
+                        .remove(&request.coordination)
+                        .ok_or_else(|| {
+                            failed(&request.domain, "restored state upload was not started")
+                        })?;
+                    let mut stage = entry.stage.lock().await;
+                    if stage.domain != request.domain
+                        || stage.authority != request.authority
+                        || stage.next_offset != stage.length
+                    {
+                        return Err(failed(
+                            &request.domain,
+                            "restored state upload is incomplete",
+                        ));
+                    }
+                    let writer = stage.writer.take().ok_or_else(|| {
+                        failed(&request.domain, "restored state upload is already sealed")
+                    })?;
+                    let artifact = writer.finish_artifact().await.change_context_lazy(|| {
+                        failure_context(&request.domain, "backup state section operation failed")
+                    })?;
+                    if artifact.length() != stage.length || artifact.digest() != stage.digest {
+                        return Err(failed(
+                            &request.domain,
+                            "restored state upload digest differs",
+                        ));
+                    }
+                    self.stage_restored_state_checkpoint(
+                        &request.authority,
+                        RestoredRuntimeState {
+                            placement: stage.placement.clone(),
+                            branch_fingerprint: stage
+                                .branch_fingerprint
+                                .map(nervix_models::BranchKeyFingerprint::new),
+                            revision: stage.revision,
+                            length: stage.length,
+                            digest: stage.digest,
+                        },
+                        RestoredStateSource::Upload(artifact),
+                    )
                     .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                if artifact.length() != stage.length || artifact.digest() != stage.digest {
-                    return Err(failed(
-                        &request.domain,
-                        "restored state upload digest differs",
-                    ));
                 }
-                self.stage_restored_state_checkpoint(
-                    &request.authority,
-                    RestoredRuntimeState {
-                        placement: stage.placement.clone(),
-                        branch_fingerprint: stage
-                            .branch_fingerprint
-                            .map(nervix_models::BranchKeyFingerprint::new),
-                        revision: stage.revision,
-                        length: stage.length,
-                        digest: stage.digest,
-                    },
-                    RestoredStateSource::Upload(artifact),
-                )
-                .await
             }
         }
+        .await;
+        result.map_err(project_failure)
     }
 
     async fn wait_for_restore_installation_revision(
         &self,
         authority: &RestoreStateAuthority,
         domain: &DomainName,
-    ) -> Result<(), RemoteOperationFailure> {
+    ) -> Result<(), Report<RemoteOperationFailure>> {
         let mut applied = self.inner.consensus.subscribe_applied();
         nervix_primitives::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -690,15 +733,39 @@ impl SessionServiceImpl {
     }
 }
 
-pub(super) fn failed(domain: &DomainName, reason: &str) -> RemoteOperationFailure {
+pub(super) fn failure_context(domain: &DomainName, reason: &str) -> RemoteOperationFailure {
     RemoteOperationFailure::failed(RemoteOperationSubject::domain(domain), reason.to_string())
+}
+
+pub(super) fn failed(domain: &DomainName, reason: &str) -> Report<RemoteOperationFailure> {
+    Report::new(failure_context(domain, reason))
+}
+
+/// Project only when the handler returns its fixed wire outcome. The local report retains
+/// typed causes; the wire's reason carries their rendered chain without repeating its subject.
+fn project_failure(report: Report<RemoteOperationFailure>) -> RemoteOperationFailure {
+    let mut projected = report.current_context().clone();
+    if let RemoteOperationFailure::Failed { reason, .. } = &mut projected {
+        for cause in report
+            .frames()
+            .filter_map(|frame| match frame.kind() {
+                FrameKind::Context(context) => Some(context),
+                FrameKind::Attachment(_) => None,
+            })
+            .skip(1)
+        {
+            reason.push_str(": ");
+            reason.push_str(&cause.to_string());
+        }
+    }
+    projected
 }
 
 async fn wait_for_capture_revision(
     domain: &DomainName,
     revision: u64,
     mut applied: watch::Receiver<u64>,
-) -> Result<(), RemoteOperationFailure> {
+) -> Result<(), Report<RemoteOperationFailure>> {
     nervix_primitives::time::timeout(Duration::from_secs(5), async {
         loop {
             nervix_primitives::task::consume_budget().await;
@@ -730,6 +797,31 @@ mod tests {
     use meticulous::ResultExt as _;
 
     use super::*;
+
+    #[test]
+    fn a_capture_failure_keeps_its_typed_cause_until_the_wire_projection() {
+        let domain = DomainName::parse("capture_failure").assured("valid domain");
+        let report = Report::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "checkpoint permission denied",
+        ))
+        .change_context(failure_context(&domain, "state capture failed"));
+        assert_eq!(
+            report
+                .downcast_ref::<std::io::Error>()
+                .expect("typed I/O cause")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let projected = project_failure(report);
+        assert_eq!(
+            projected,
+            RemoteOperationFailure::failed(
+                RemoteOperationSubject::domain(&domain),
+                "state capture failed: checkpoint permission denied"
+            )
+        );
+    }
 
     #[nervix_primitives::test]
     async fn capture_waits_until_the_selected_revision_is_applied() {

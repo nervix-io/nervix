@@ -1285,7 +1285,7 @@ impl Client {
                         stream: EventStreamKind::Subscription,
                     }));
                 }
-                Err(_) => {
+                Err(report) => {
                     if let Some(event) = self.inner.events.emitters.desired.take_event() {
                         return Ok(event);
                     }
@@ -1299,14 +1299,14 @@ impl Client {
                         match self.recover_session(RecoveryMode::IfClosed).await? {
                             SessionRecovery::Ready => continue,
                             SessionRecovery::Unavailable => {
-                                return Err(Report::new(ClientError::SessionClosed));
+                                return Err(report.change_context(ClientError::SessionClosed));
                             }
                         }
                     }
                     // Nothing waits to be restored, so the stream follows whichever session the
                     // client opens next.
                     if !self.can_reconnect().await {
-                        return Err(Report::new(ClientError::SessionClosed));
+                        return Err(report.change_context(ClientError::SessionClosed));
                     }
                     nervix_primitives::select! {
                         () = self.inner.events.emitters.subscriptions.resumed() => {}

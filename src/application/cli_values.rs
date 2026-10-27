@@ -53,6 +53,12 @@ pub(in crate::application) enum CliValueError {
     TraceSampleRatio,
 }
 
+/// The quantity parser exposes a typed, displayable refusal without a standard error trait.
+/// Keep that value as a report frame instead of retaining only its printed description.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct ByteQuantityCause(ubyte::Error);
+
 /// A command-line value the node refuses, in the form clap shows an operator.
 ///
 /// Clap prints the error a value parser returns with its plain `Display`, which for a report is
@@ -86,9 +92,9 @@ pub(in crate::application) fn parse_human_duration(
 pub(in crate::application) fn parse_human_bytes(
     input: &str,
 ) -> Result<ubyte::ByteUnit, RefusedCliValue> {
-    let bytes = input
-        .parse::<ubyte::ByteUnit>()
-        .map_err(|_| Report::new(CliValueError::Bytes))?;
+    let bytes = input.parse::<ubyte::ByteUnit>().map_err(|cause| {
+        Report::new(ByteQuantityCause(cause)).change_context(CliValueError::Bytes)
+    })?;
     Ok(bytes)
 }
 
@@ -199,4 +205,21 @@ pub(in crate::application) fn parse_trace_sample_ratio(
         .change_context(CliValueError::TraceSampleRatio)?;
     TraceSampleRatio::validate(&ratio, &()).change_context(CliValueError::TraceSampleRatio)?;
     Ok(ratio)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn byte_quantity_refusals_keep_the_library_cause_and_render_it_for_clap() {
+        let refusal = parse_human_bytes("12XB").expect_err("an unknown quantity character");
+        assert!(matches!(
+            refusal.0.downcast_ref::<ByteQuantityCause>(),
+            Some(ByteQuantityCause(ubyte::Error::Unexpected(2, 'X')))
+        ));
+        let message = refusal.to_string();
+        assert!(message.contains("invalid byte quantity"), "{message}");
+        assert!(message.contains("unexpected character"), "{message}");
+    }
 }

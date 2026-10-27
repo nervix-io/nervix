@@ -595,6 +595,12 @@ Nervix does not provide:
 
 ## Failure Semantics And Recovery
 
+Resource reads, archive decoding, directory walks, writes and publication keep the original I/O
+or decoding error beneath `ResourceStoreError`. When an upload records its terminal reason, that
+fixed stored outcome receives the rendered context chain. A malformed tar upload therefore names
+the archive failure and the reader's decoding cause, on either a single node or a replicated
+cluster. Local reports remain typed until that projection.
+
 | Failure | Outcome |
 | --- | --- |
 | A statement binds a missing, applying, or failed version, uses `LATEST` with no completed version, names an unknown resource, or lists a missing or non-binding `FOR` member | The statement is rejected before any effect. No model is stored, nothing pauses, and every usage keeps its version. |

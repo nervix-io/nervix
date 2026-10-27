@@ -786,6 +786,13 @@ routing could not reach. A section path names a branch by the BLAKE3 fingerprint
 
 ## Failure Semantics At Every Boundary
 
+Section conversion, executor admission, checkpoint reads and staging keep their typed causes in
+local reports. Capture and restore handlers project those reports into the fixed interconnect
+failure only when returning their reply; its reason renders the context chain. A staging refusal
+that the restore stream projects into its fixed intake outcome is also reported at its recovery
+decision, so a failed write or seal retains an operator-visible cause.
+A retained archive's read failure is reported before its download sends the fixed read refusal.
+
 | Boundary | Failure | What remains | Recovery |
 | --- | --- | --- | --- |
 | Backup admission | The statement is batched, queued in a transaction, or sent to a follower | Nothing admitted | Send it alone, to the leader the redirect names. |
@@ -881,6 +888,12 @@ and its section count and bytes. A restore reports each step's outcome, applied,
 attempted, each domain's status and start generation, a dry run's impact reports, and the warnings
 for every skipped state section. `DESCRIBE BACKUP` inventories an archive without contacting a node.
 [Backup And Restore](./backup-and-restore.md) shows each report.
+
+Backup command diagnostics and restore step reasons render the owning context and its complete
+cause chain. A coordinator's direct checkpoint calls retain the same runtime-state and staging
+causes as an installation through the interconnect; interrupted guest and native-metadata captures
+retain their cause in the backup failure. These diagnostics name operations and entities without
+including archive contents.
 
 The leader logs at `info` when it assembled an archive, when a download collected one and when a
 restore completed, with the execution reference and the domains; skipped state is logged at `warn`

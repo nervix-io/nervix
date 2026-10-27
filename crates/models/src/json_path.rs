@@ -180,9 +180,9 @@ impl JsonPath {
         if digits.len() > 1 && digits.starts_with('0') {
             return Err(Report::new(JsonPathError::InvalidIndex { at }));
         }
-        let index = digits
-            .parse::<u32>()
-            .map_err(|_| Report::new(JsonPathError::InvalidIndex { at }))?;
+        let index = digits.parse::<u32>().map_err(|cause| {
+            Report::new(cause).change_context(JsonPathError::InvalidIndex { at })
+        })?;
         Ok((JsonPathStep::Element(index), rest))
     }
 

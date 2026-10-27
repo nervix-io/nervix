@@ -70,7 +70,7 @@ struct AcquisitionPass {
     report: Arc<Mutex<CompilerReport>>,
 }
 
-impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW]);
+impl_lint_pass!(AcquisitionPass => [SYNC_ACQUISITION, LIFECYCLE_CALL, UNKNOWN_EFFECT, INVALID_CONTRACT, errors::BARE_ERROR_SIGNATURE, errors::DISCARDED_OUTCOME, errors::BARE_PANIC, errors::REPLACED_ERROR, architecture::MODEL_IN_DATA_PLANE, architecture::PARSER_DEPENDENCY, architecture::CLUSTER_AWAIT, architecture::NODE_IDENTITY, architecture::INSTALLED_STATE, architecture::STATE_CONTRACT, api::CLAMPED_ARITHMETIC, api::COMBINATOR_CONTROL_FLOW]);
 
 /// Why a span has no authored source location.
 enum Exclusion {
@@ -351,7 +351,10 @@ impl<'tcx> LateLintPass<'tcx> for AcquisitionPass {
         self.flow.body(cx, body);
         if self.authored(cx, body.value.span) {
             self.architecture.parameters(cx, body, &mut self.flow);
-            self.audit.body(cx, body);
+            let replacements = self.audit.body(cx, body);
+            for replacement in replacements {
+                self.errors.replacement(cx, replacement, &mut self.flow);
+            }
         }
     }
     fn check_fn(
@@ -683,6 +686,7 @@ impl Callbacks for Analysis {
                 errors::BARE_ERROR_SIGNATURE,
                 errors::DISCARDED_OUTCOME,
                 errors::BARE_PANIC,
+                errors::REPLACED_ERROR,
                 architecture::MODEL_IN_DATA_PLANE,
                 architecture::PARSER_DEPENDENCY,
                 architecture::CLUSTER_AWAIT,
@@ -822,6 +826,7 @@ fn main() -> anyhow::Result<()> {
                 "-Wnervix::bare_error_signature",
                 "-Wnervix::discarded_outcome",
                 "-Wnervix::bare_panic",
+                "-Wnervix::replaced_error",
                 "-Wnervix::model_in_data_plane",
                 "-Wnervix::parser_dependency",
                 "-Wnervix::cluster_await",

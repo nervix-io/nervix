@@ -68,7 +68,7 @@ pub(super) struct InvocationDraft {
 impl InvocationDraft {
     fn build(&self) -> error_stack::Result<Invocation, IngestRouteDraftError> {
         let function = BuiltinFunctionName::parse(self.function.trim())
-            .map_err(|_| Report::new(IngestRouteDraftError::InvocationFunction))?;
+            .map_err(|cause| cause.change_context(IngestRouteDraftError::InvocationFunction))?;
         let mut arguments = Vec::new();
         for argument in &self.arguments {
             arguments.push(

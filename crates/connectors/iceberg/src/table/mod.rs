@@ -30,6 +30,7 @@
     nervix::input(plans, reason = "the host supplies a validated connector plan")
 )]
 
+mod offline_config;
 mod storage;
 mod table_projection;
 
@@ -40,11 +41,11 @@ use ::iceberg::{
     Result as IcebergResult, TableIdent,
     io::{
         ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID,
-        ADLS_CLIENT_SECRET, ADLS_CONNECTION_STRING, ADLS_SAS_TOKEN, ADLS_TENANT_ID, CLIENT_REGION,
-        GCS_ALLOW_ANONYMOUS, GCS_CREDENTIALS_JSON, GCS_DISABLE_CONFIG_LOAD,
-        GCS_DISABLE_VM_METADATA, GCS_NO_AUTH, GCS_SERVICE_PATH, GCS_TOKEN, S3_ACCESS_KEY_ID,
-        S3_ALLOW_ANONYMOUS, S3_DISABLE_CONFIG_LOAD, S3_DISABLE_EC2_METADATA, S3_ENDPOINT,
-        S3_PATH_STYLE_ACCESS, S3_REGION, S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN,
+        ADLS_CLIENT_SECRET, ADLS_SAS_TOKEN, ADLS_TENANT_ID, CLIENT_REGION, GCS_ALLOW_ANONYMOUS,
+        GCS_CREDENTIALS_JSON, GCS_DISABLE_CONFIG_LOAD, GCS_DISABLE_VM_METADATA, GCS_NO_AUTH,
+        GCS_SERVICE_PATH, GCS_TOKEN, S3_ACCESS_KEY_ID, S3_ALLOW_ANONYMOUS, S3_DISABLE_CONFIG_LOAD,
+        S3_DISABLE_EC2_METADATA, S3_ENDPOINT, S3_PATH_STYLE_ACCESS, S3_REGION,
+        S3_SECRET_ACCESS_KEY, S3_SESSION_TOKEN,
     },
     spec::{DataFile, DataFileFormat, Snapshot, TableProperties},
     table::Table,
@@ -85,6 +86,7 @@ use nervix_execution::{
 };
 use nervix_models::{ClientConfigEntry, IcebergStorageBackend, IcebergTableName, Timestamp};
 use nervix_primitives::{sync::StdArc, time::Instant};
+pub use offline_config::{validate_catalog_configuration, validate_client_configuration};
 use parquet::file::properties::WriterProperties;
 use storage::DnsStorageFactory;
 use table_projection::{IcebergColumnError, IcebergTableProjection};
@@ -125,7 +127,7 @@ pub struct IcebergTableEmitterConfig {
     pub catalog_name: String,
     pub catalog_config: Vec<ClientConfigEntry>,
     /// The catalog namespace this emitter's table lives in.
-    pub namespace: String,
+    pub namespace: nervix_models::IcebergNamespace,
     pub table: IcebergTableName,
     pub location: String,
     /// The mapped columns every staged batch carries, in `VALUES` order, each nullable exactly
@@ -442,20 +444,6 @@ struct IcebergObjectStoreProperties {
     props: HashMap<String, String>,
 }
 
-trait IcebergStorageBackendExt {
-    fn accepts_location_scheme(self, scheme: &str) -> bool;
-}
-
-impl IcebergStorageBackendExt for IcebergStorageBackend {
-    fn accepts_location_scheme(self, scheme: &str) -> bool {
-        match self {
-            Self::S3 => scheme == "s3",
-            Self::Gcs => scheme == "gs",
-            Self::AzureBlob => scheme == "wasb" || scheme == "wasbs",
-        }
-    }
-}
-
 impl IcebergTableEmitter {
     pub const KIND: nervix_models::EmitterEntityKind =
         nervix_models::EmitterEntityKind::Iceberg(nervix_models::IcebergEmitterEntity::Table);
@@ -464,6 +452,8 @@ impl IcebergTableEmitter {
         config: IcebergTableEmitterConfig,
         host: EmitterHost,
     ) -> EmitterStartResult<Self> {
+        use meticulous::ResultExt as _;
+
         let IcebergTableEmitterConfig {
             backend,
             dns,
@@ -501,8 +491,9 @@ impl IcebergTableEmitter {
                         ))
                 })?,
         );
-        let table_ident =
-            TableIdent::new(NamespaceIdent::new(namespace), table.as_str().to_string());
+        let namespace = NamespaceIdent::from_strs(namespace.levels())
+            .assured("a validated Iceberg namespace has at least one nonempty level");
+        let table_ident = TableIdent::new(namespace, table.as_str().to_string());
         let loaded = catalog.load_table(&table_ident).await.map_err(|error| {
             Report::new(EmitterOpenError::Initialize { connector: ICEBERG }).attach_printable(
                 format!("failed to initialize Iceberg table {table_ident}: {error}"),
@@ -651,12 +642,13 @@ impl IcebergTableEmitter {
         };
         let url = Url::parse(location)
             .map_err(|error| invalid(format!("{label} location '{location}': {error}")))?;
-        if !backend.accepts_location_scheme(url.scheme()) {
-            let expected = match backend {
-                IcebergStorageBackend::S3 => "s3://",
-                IcebergStorageBackend::Gcs => "gs://",
-                IcebergStorageBackend::AzureBlob => "wasb:// or wasbs://",
-            };
+        if !backend.location_schemes().contains(&url.scheme()) {
+            let expected = backend
+                .location_schemes()
+                .iter()
+                .map(|scheme| format!("{scheme}://"))
+                .collect::<Vec<_>>()
+                .join(" or ");
             return Err(invalid(format!(
                 "{label} location '{location}' must use {expected}"
             )));
@@ -674,9 +666,14 @@ impl IcebergTableEmitter {
                 )));
             }
             let host = url.host_str().unwrap_or_default();
-            if !host.contains(".blob.") {
+            let service = if url.scheme().starts_with("abfs") {
+                "dfs"
+            } else {
+                "blob"
+            };
+            if host.split('.').nth(1) != Some(service) {
                 return Err(invalid(format!(
-                    "{label} location '{location}' must use an Azure Blob host"
+                    "{label} location '{location}' must use an Azure {service} host"
                 )));
             }
         }
@@ -1394,79 +1391,60 @@ impl IcebergObjectStoreProperties {
     }
 
     fn s3_property_key(key: &str) -> &str {
-        let normalized = key.to_ascii_lowercase();
-        match normalized.as_str() {
-            "endpoint" | "s3.endpoint" => S3_ENDPOINT,
-            "region" | "s3.region" => S3_REGION,
-            "client_region" | "client.region" => CLIENT_REGION,
-            "access_key_id" | "access-key-id" | "s3.access-key-id" => S3_ACCESS_KEY_ID,
-            "secret_access_key" | "secret-access-key" | "s3.secret-access-key" => {
-                S3_SECRET_ACCESS_KEY
-            }
-            "session_token" | "session-token" | "s3.session-token" => S3_SESSION_TOKEN,
-            "path_style_access" | "path-style-access" | "s3.path-style-access" => {
-                S3_PATH_STYLE_ACCESS
-            }
-            "allow_anonymous" | "allow-anonymous" | "s3.allow-anonymous" => S3_ALLOW_ANONYMOUS,
-            "disable_ec2_metadata" | "disable-ec2-metadata" | "s3.disable-ec2-metadata" => {
-                S3_DISABLE_EC2_METADATA
-            }
-            "disable_config_load" | "disable-config-load" | "s3.disable-config-load" => {
-                S3_DISABLE_CONFIG_LOAD
-            }
+        match key {
+            "endpoint" => S3_ENDPOINT,
+            "region" => S3_REGION,
+            "client_region" => CLIENT_REGION,
+            "access_key_id" => S3_ACCESS_KEY_ID,
+            "secret_access_key" => S3_SECRET_ACCESS_KEY,
+            "session_token" => S3_SESSION_TOKEN,
+            "path_style_access" => S3_PATH_STYLE_ACCESS,
+            "allow_anonymous" => S3_ALLOW_ANONYMOUS,
+            "disable_ec2_metadata" => S3_DISABLE_EC2_METADATA,
+            "disable_config_load" => S3_DISABLE_CONFIG_LOAD,
             _ => key,
         }
     }
 
     fn gcs_property_key(key: &str) -> &str {
-        let normalized = key.to_ascii_lowercase();
-        match normalized.as_str() {
-            "endpoint" | "service_path" | "service-path" | "service.path" | "gcs.service.path" => {
-                GCS_SERVICE_PATH
-            }
-            "credentials_json" | "credentials-json" | "credential" | "gcs.credentials-json" => {
-                GCS_CREDENTIALS_JSON
-            }
-            "token" | "oauth2_token" | "oauth2-token" | "oauth2.token" | "gcs.oauth2.token" => {
-                GCS_TOKEN
-            }
-            "no_auth" | "no-auth" | "gcs.no-auth" => GCS_NO_AUTH,
-            "allow_anonymous" | "allow-anonymous" | "gcs.allow-anonymous" => GCS_ALLOW_ANONYMOUS,
-            "disable_vm_metadata" | "disable-vm-metadata" | "gcs.disable-vm-metadata" => {
-                GCS_DISABLE_VM_METADATA
-            }
-            "disable_config_load" | "disable-config-load" | "gcs.disable-config-load" => {
-                GCS_DISABLE_CONFIG_LOAD
-            }
+        match key {
+            "service_path" => GCS_SERVICE_PATH,
+            "credentials_json" => GCS_CREDENTIALS_JSON,
+            "token" => GCS_TOKEN,
+            "no_auth" => GCS_NO_AUTH,
+            "allow_anonymous" => GCS_ALLOW_ANONYMOUS,
+            "disable_vm_metadata" => GCS_DISABLE_VM_METADATA,
+            "disable_config_load" => GCS_DISABLE_CONFIG_LOAD,
             _ => key,
         }
     }
 
     fn azure_blob_property_key(key: &str) -> &str {
-        let normalized = key.to_ascii_lowercase();
-        match normalized.as_str() {
-            "account_name" | "account-name" | "azure.account-name" | "adls.account-name" => {
-                ADLS_ACCOUNT_NAME
-            }
-            "account_key" | "account-key" | "azure.account-key" | "adls.account-key" => {
-                ADLS_ACCOUNT_KEY
-            }
-            "sas_token" | "sas-token" | "azure.sas-token" | "adls.sas-token" => ADLS_SAS_TOKEN,
-            "tenant_id" | "tenant-id" | "azure.tenant-id" | "adls.tenant-id" => ADLS_TENANT_ID,
-            "client_id" | "client-id" | "azure.client-id" | "adls.client-id" => ADLS_CLIENT_ID,
-            "client_secret" | "client-secret" | "azure.client-secret" | "adls.client-secret" => {
-                ADLS_CLIENT_SECRET
-            }
-            "authority_host"
-            | "authority-host"
-            | "azure.authority-host"
-            | "adls.authority-host" => ADLS_AUTHORITY_HOST,
-            "connection_string"
-            | "connection-string"
-            | "azure.connection-string"
-            | "adls.connection-string" => ADLS_CONNECTION_STRING,
+        match key {
+            "account_name" => ADLS_ACCOUNT_NAME,
+            "account_key" => ADLS_ACCOUNT_KEY,
+            "sas_token" => ADLS_SAS_TOKEN,
+            "tenant_id" => ADLS_TENANT_ID,
+            "client_id" => ADLS_CLIENT_ID,
+            "client_secret" => ADLS_CLIENT_SECRET,
+            "authority_host" => ADLS_AUTHORITY_HOST,
             _ => key,
         }
+    }
+
+    /// Catalog configuration supplies the final value of a duplicate effective property.
+    fn catalog_properties<'a>(
+        &'a self,
+        config: &'a [ClientConfigEntry],
+    ) -> impl Iterator<Item = (String, String)> + 'a {
+        self.props
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .chain(
+                config
+                    .iter()
+                    .map(|entry| (entry.key.clone(), entry.value.clone())),
+            )
     }
 
     async fn rest_catalog(
@@ -1477,15 +1455,7 @@ impl IcebergObjectStoreProperties {
         storage_root: &Url,
         storage_deadline: Option<ConfiguredDeadline>,
     ) -> IcebergResult<RestCatalog> {
-        let props = self
-            .props
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .chain(
-                catalog_config
-                    .iter()
-                    .map(|entry| (entry.key.clone(), entry.value.clone())),
-            );
+        let props = self.catalog_properties(catalog_config);
         let tls = rustls::ClientConfig::builder_with_provider(StdArc::new(
             rustls::crypto::aws_lc_rs::default_provider(),
         ))
@@ -1547,6 +1517,57 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
+
+    #[test]
+    fn catalog_properties_preserve_the_declared_collision_precedence() {
+        let entry = |key: &str, value: &str| ClientConfigEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+        };
+        let storage = IcebergObjectStoreProperties::from_entries(
+            IcebergStorageBackend::S3,
+            &[
+                entry("endpoint", "http://first-storage.example.com"),
+                entry(S3_ENDPOINT, "http://last-storage.example.com"),
+                entry("region", "storage-region"),
+                entry("s3.driver_extension", "Case-Preserved"),
+            ],
+        );
+        assert_eq!(
+            storage.props[S3_ENDPOINT],
+            "http://last-storage.example.com"
+        );
+        let effective: HashMap<_, _> = storage
+            .catalog_properties(&[
+                entry(S3_ENDPOINT, "http://catalog-storage.example.com"),
+                entry("uri", "http://catalog.example.com"),
+            ])
+            .collect();
+        assert_eq!(effective[S3_ENDPOINT], "http://catalog-storage.example.com");
+        assert_eq!(effective[S3_REGION], "storage-region");
+        assert_eq!(effective["s3.driver_extension"], "Case-Preserved");
+        assert_eq!(effective["uri"], "http://catalog.example.com");
+    }
+
+    #[test]
+    fn azure_locations_use_the_storage_service_named_by_their_scheme() {
+        for (scheme, service) in [
+            ("wasb", "blob"),
+            ("wasbs", "blob"),
+            ("abfs", "dfs"),
+            ("abfss", "dfs"),
+        ] {
+            let location =
+                format!("{scheme}://container@account.{service}.core.windows.net/events");
+            let url = IcebergTableEmitter::validate_blob_location(
+                IcebergStorageBackend::AzureBlob,
+                "table",
+                &location,
+            )
+            .assured("the scheme and host identify the same Azure storage service");
+            assert_eq!(url.as_str(), location);
+        }
+    }
 
     #[nervix_primitives::test]
     async fn iceberg_catalog_authentication_uses_the_node_dns_client() {

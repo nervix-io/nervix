@@ -465,6 +465,15 @@ contact hints; current peer identity, incarnation, and endpoint still come from 
 
 ## Observability
 
+Durable record decoding and recovered catalog checks preserve decoding or nested report causes
+inside the standard-error carrier that the storage trait accepts. The carrier's ordinary rendering
+includes the entire chain when a later report names the I/O error as its context. Transaction
+report and commit plan operations retain their store reports beneath the existing
+transaction-conflict context;
+testing success for a change flag does not consume a report still returned to the caller.
+An append submission reports its transport failure with the complete chain before returning the
+ordinary stream-stop decision. That diagnostic changes neither retry admission nor batch accounting.
+
 | Signal | What catch-up or retention looks like |
 | --- | --- |
 | `SHOW CLUSTER STATUS` | On each node, `raft.last_log_index` advances as entries arrive and `raft.last_applied` follows durable application. Membership lines show learner or voter state. |

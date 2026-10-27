@@ -237,9 +237,9 @@ fn a_deadline_uses_the_shared_positive_millisecond_contract() {
 
 #[test]
 fn cloud_endpoint_inspection_hides_credentials_and_query_options() {
-    let schema = ConnectorKind::AzureBlob
+    let schema = ConnectorKind::S3
         .client()
-        .assured("Azure Blob declares a configured client")
+        .assured("S3 declares its object-store endpoint")
         .config;
     for value in [
         "https://user:private-password@account.blob.example.com",
@@ -336,6 +336,17 @@ fn bolero_schema_checked_client_entries_round_trip() {
                 };
                 entries.push(entry(key.name, &value));
                 assert_eq!(schema.key(key.name), Some(key));
+            }
+            if let Some(count) = NonZeroUsize::new(schema.namespaces().len()) {
+                let namespace = schema.namespaces()[arbitrary.entropy().index(count)];
+                let prefix = match namespace {
+                    ClientConfigNamespace::All => "driver.",
+                    ClientConfigNamespace::Prefix(prefix) => prefix,
+                };
+                entries.push(entry(
+                    &format!("{prefix}fixture_property"),
+                    &arbitrary.string(),
+                ));
             }
             schema
                 .validate_rendered(&entries)

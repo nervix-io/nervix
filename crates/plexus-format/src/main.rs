@@ -194,8 +194,8 @@ fn format_path(path: &Path, args: &Args, unformatted: &mut Vec<PathBuf>) -> Outc
     let input = match fs::read(path) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(text) => text,
-            Err(_) => {
-                eprintln!("nervix-plexus-format: {origin} is not valid UTF-8");
+            Err(error) => {
+                eprintln!("nervix-plexus-format: {origin} is not valid UTF-8: {error}");
                 return Outcome::Unusable;
             }
         },

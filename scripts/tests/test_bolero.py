@@ -221,6 +221,7 @@ class InventoryTests(unittest.TestCase):
             "models-durations",
             "models-duration-text",
             "models-header-model-round-trip",
+            "models-iceberg-declarations",
             "models-json-paths",
             "models-json-path-validation",
             "models-batch-limits",

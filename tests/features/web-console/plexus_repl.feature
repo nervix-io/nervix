@@ -574,6 +574,31 @@ Feature: Web console Plexus REPL
     And selector ".terminal" contains "stopped domain '{{domain}}'"
     And selector ".summary-row" contains "STOPPED"
 
+  Scenario Outline: Web console resource upload reports the browser form creation cause
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has resource directory "refused_form" containing
+      """
+      {"record.txt": "record"}
+      """
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE browser_bundle;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".nav-item.resources:has-text('browser_bundle')" is clicked
+    Then selector ".resource-dialog" contains "browser_bundle"
+    When the browser refuses new upload forms with "form storage unavailable"
+    And selector ".resource-dialog .file-upload-input" uploads resource directory "refused_form"
+    Then selector ".resource-upload-status" contains "form storage unavailable"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Web console opens resource upload dialog and uploads a version
     Given a 3 node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -1776,7 +1801,7 @@ Feature: Web console Plexus REPL
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions FROM connected_sessions TO s3_lakehouse TABLE 'datalake_connected_sessions' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'tenant_id' = input.tenant_id, 'device_id' = input.device_id, 'event_type' = input.event_type, 'value' = input.value } FLUSH EACH 10s MAX BATCH SIZE 8MiB
+      CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions FROM connected_sessions TO s3_lakehouse TABLE 'datalake_connected_sessions' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'tenant_id' = input.tenant_id, 'device_id' = input.device_id, 'event_type' = input.event_type, 'value' = input.value } FLUSH EACH 10s MAX BATCH SIZE 8MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """

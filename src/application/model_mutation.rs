@@ -578,13 +578,17 @@ impl SessionServiceImpl {
                         Some(no_op_operations) => no_op_operations.contains(&operation),
                         None => false,
                     };
-                    let existing_noop = no_op_operations.is_none()
-                        && self
-                            .inner
-                            .registry
-                            .contains(domain, model_kind, &model_id)
-                            .unwrap_or(false)
-                        && if_not_exists;
+                    let existing_noop = if no_op_operations.is_none() {
+                        match self.inner.registry.contains(domain, model_kind, &model_id) {
+                            Ok(exists) => exists && if_not_exists,
+                            Err(error) => {
+                                results[index] = Some(command_error(format!("{error:#}")));
+                                continue;
+                            }
+                        }
+                    } else {
+                        false
+                    };
                     if planned_noop || existing_noop {
                         results[index] = Some(command_ok_already_existed(format!(
                             "model '{}' already exists in domain '{}'",
@@ -2450,16 +2454,16 @@ impl SessionServiceImpl {
                             ..CommandResult::new(CommandDisposition::Failed, message)
                         };
                     }
-                    Err(_) => {
-                        return command_error(
-                            "failed to read stored model for SHOW CREATE".to_string(),
-                        );
+                    Err(error) => {
+                        return command_error(format!(
+                            "failed to read stored model for SHOW CREATE: {error:#}"
+                        ));
                     }
                 };
 
                 let canonical = match model.to_public_plexus() {
                     Ok(v) => v,
-                    Err(_) => {
+                    Err(error) => {
                         let diagnostic = CommandDiagnostic::unlocated(
                             "model contains values that cannot be rendered as canonical Plexus"
                                 .to_string(),
@@ -2468,7 +2472,7 @@ impl SessionServiceImpl {
                             diagnostics: vec![diagnostic],
                             ..CommandResult::new(
                                 CommandDisposition::Failed,
-                                "failed to render canonical Plexus".to_string(),
+                                format!("failed to render canonical Plexus: {error:#}"),
                             )
                         };
                     }
