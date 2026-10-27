@@ -889,6 +889,12 @@ attempted, each domain's status and start generation, a dry run's impact reports
 for every skipped state section. `DESCRIBE BACKUP` inventories an archive without contacting a node.
 [Backup And Restore](./backup-and-restore.md) shows each report.
 
+Backup command diagnostics and restore step reasons render the owning context and its complete
+cause chain. A coordinator's direct checkpoint calls retain the same runtime-state and staging
+causes as an installation through the interconnect; interrupted guest and native-metadata captures
+retain their cause in the backup failure. These diagnostics name operations and entities without
+including archive contents.
+
 The leader logs at `info` when it assembled an archive, when a download collected one and when a
 restore completed, with the execution reference and the domains; skipped state is logged at `warn`
 on the leader. Maintenance failures are logged at `warn` on the node. There are no backup-specific

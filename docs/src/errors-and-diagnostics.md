@@ -921,7 +921,9 @@ shows.
 A NATS source whose client loses its connection to the server reports
 `NatsSubjectIngestorError::ConnectionLost` beneath `IngestorError::Read` once it has handed over what the client
 received, and each reconnect that fails reports `NatsSubjectIngestorError::Connect` beneath
-`IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error. A
+`IngestorError::Resume`; the source host shows the deepest cause as the ingestor's transient error.
+The driver's `ConnectError` remains beneath `Connect`, so a peer that closes before its initial
+INFO message is reported as `expected INFO, got nothing`. A
 NATS JetStream publish keeps the driver's `PublishError` beneath `EmitterWriteError::Publish` when the
 client does not take a record within `ACK TIMEOUT` and when a record's `PubAck` fails, each with the
 connector's description of the failure for the emitter's transient error. A message above the
@@ -2122,9 +2124,9 @@ typed codec/storage failures follow the same domain capture failure path without
 An owner still applying the selected revision waits within a five-second bound; a closed
 applied-state authority or an expired catch-up
 wait is a domain capture failure. A leadership change during that wait refuses the capture before
-state is read. The failed command's message is
-`backup failed:` followed by that
-error's text. A download the server does not serve is answered with a typed refusal,
+state is read. The failed command's message is `backup failed:` followed by the complete
+domain-capture context and cause chain, including an interrupted guest or native-metadata capture.
+A download the server does not serve is answered with a typed refusal,
 `InvalidRequest`, `NotRetained`, `Expired`, `NotOwner` or `ReadFailed`, or with a redirect to the
 leader, and a call without valid credentials ends with `UNAUTHENTICATED`. The client reports a
 `BackupDownloadError` beneath `ClientError::BackupDownload`, which carries the backup's execution
@@ -2245,7 +2247,9 @@ Once admitted, a step that fails ends the restore as `restore failed at step '<s
 reason, with the restore's report: the consensus command that records a step refuses it with a
 `RestoreStepConflict` naming the step and the domain, user, resource, or version, and a resource
 import, domain model batch, or state installation renders its own failure's complete chain into
-the step's reason. The steps before it stay applied, and the message says so. An admitted restore
+the step's reason. Both a checkpoint handled by the coordinator and one installed through an
+interconnect request retain that chain, including runtime-state and staging-quota failures.
+The steps before it stay applied, and the message says so. An admitted restore
 that cannot reach its first step not recorded, because its leader no longer holds the archive or
 the restore no longer plans against the cluster, ends as `restore failed:` and its reason, and the
 steps it recorded stay applied. `RestoreStateInstallationError` distinguishes an

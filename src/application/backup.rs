@@ -309,7 +309,7 @@ impl SessionServiceImpl {
                 }
             }
             Err(report) => {
-                let message = format!("backup failed: {}", report.current_context());
+                let message = format!("backup failed: {report:#}");
                 CommandResult {
                     diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
                     ..command_error(message)
