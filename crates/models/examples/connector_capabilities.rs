@@ -20,7 +20,7 @@ use nervix_models::{
     EmitterBatchLegality, EmitterBodyForm, EmitterEntityCapabilities, EmitterEntityKind,
     EmitterReferenceKind, HeaderModel, IngestorEntityCapabilities, IngestorEntityKind,
     IngestorReferenceKind, LocatorDeclaration, LocatorName, OmittedDeadline, OptionDeclaration,
-    OptionForm, OptionPresence, OptionValue, WaitBound,
+    OptionForm, OptionPresence, OptionValue, OtelEmitterEntity, OtelValueField, WaitBound,
 };
 use serde_json::{Value, json};
 use strum::IntoEnumIterator as _;
@@ -324,7 +324,47 @@ fn emitter(kind: EmitterEntityKind) -> Value {
         "batch_transformation": requires_batch_transformation,
         "envelope": envelope, "properties": properties,
         "bounds": bounds(declared_bounds), "template": emitter_template(kind, body),
+        "value_contract": otel_value_contract(kind),
     })
+}
+
+/// Each OTEL shape projects its one public table, without a second catalog in the renderer.
+fn otel_value_contract(kind: EmitterEntityKind) -> Option<Value> {
+    use nervix_models::{
+        OTEL_HISTOGRAM_VALUE_FIELDS, OTEL_LOG_VALUE_FIELDS, OTEL_NUMBER_VALUE_FIELDS,
+        OTEL_TRACE_VALUE_FIELDS, OTEL_UNSUPPORTED_FEATURES,
+    };
+    let shapes: &[(&str, &[OtelValueField])] = match kind {
+        EmitterEntityKind::Otel(OtelEmitterEntity::Logs) => &[("LOGS", OTEL_LOG_VALUE_FIELDS)],
+        EmitterEntityKind::Otel(OtelEmitterEntity::Traces) => {
+            &[("TRACES", OTEL_TRACE_VALUE_FIELDS)]
+        }
+        EmitterEntityKind::Otel(OtelEmitterEntity::Metrics) => &[
+            ("GAUGE / SUM", OTEL_NUMBER_VALUE_FIELDS),
+            ("HISTOGRAM", OTEL_HISTOGRAM_VALUE_FIELDS),
+        ],
+        _ => return None,
+    };
+    let mut fields = Vec::new();
+    for (shape, declarations) in shapes {
+        for field in *declarations {
+            fields.push(format!(
+                "{shape} `{}`: {}; {}; {}",
+                field.key,
+                field.rule.value_type(),
+                field.presence,
+                field.rule.constraint()
+            ));
+        }
+    }
+    let unsupported: Vec<_> = OTEL_UNSUPPORTED_FEATURES
+        .iter()
+        .map(|item| format!("{}: {}", item.feature, item.reason))
+        .collect();
+    Some(json!({"fields": fields, "unsupported": unsupported,
+        "attributes": format!("{}; {}", nervix_models::MappedValueType::Attribute, nervix_models::OTEL_ATTRIBUTES_ENCODING),
+        "resource": format!("{}; {}", nervix_models::MappedValueType::Literal, nervix_models::OTEL_RESOURCE_ENCODING),
+    }))
 }
 
 /// Synopses use the current destination grammar; all clauses and choices come from declarations.
@@ -391,9 +431,16 @@ fn client(kind: ConnectorKind) -> Option<Value> {
         })
         .collect();
     let options: Vec<_> = options.iter().map(option).collect();
+    let constraints: &[&str] = match kind {
+        ConnectorKind::Otel => &[
+            nervix_models::OTEL_HEADERS_FORMAT,
+            nervix_models::OTEL_TLS_ENDPOINT_RULE,
+        ],
+        _ => &[],
+    };
     Some(
         json!({ "kind": kind.keyword(), "pool": pool, "config_owner": config_owner, "options": options,
-            "keys": keys, "namespaces": namespaces, "reserved": config.reserved() }),
+            "keys": keys, "namespaces": namespaces, "reserved": config.reserved(), "constraints": constraints }),
     )
 }
 
