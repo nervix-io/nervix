@@ -138,7 +138,9 @@ lifecycle, deduplicator keys and windows. `RESUME` precedes the user policy and 
 run reports the planned status and generation. Read
 [Backup And Restore](https://docs.nervix.io/backup-and-restore.html) for format and memory limits.
 
-`BACKUP ... TIMEOUT` bounds each running domain's cut independently. Native clients use a separate
+`BACKUP ... TIMEOUT` bounds each running domain's cut independently. For a cut timeout, inspect its
+active phase and completed phase durations before choosing a new budget; the backup architecture's
+Observability section explains owner-side attribution. Native clients use a separate
 bounded overall backup wait (CLI `--backup-wait-timeout`, default `10m`). If that wait is uncertain,
 retain its execution reference and recover with CLI `backup --execution-reference` and the same
 selected domain, scope, resources and capture options; the output file or stdout may change.

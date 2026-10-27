@@ -126,6 +126,7 @@ tags = [
   "@client_io_03_generation",
   "@remote_ack_owners",
   "@backup_wait",
+  "@backup_cut_diagnostics",
   "@restarted_voter_observation",
   "@domain_clock_takeover",
   "@udf_column_builder",
@@ -1287,6 +1288,16 @@ scenario = "A second-domain quiesce expiry returns its failure and resumes both 
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
+coverage = "Diagnostic cut timeout and domain resumption through the public CLI, retaining the active capture phase and elapsed completed drain."
+examples = 2
+feature = "tests/features/cluster/backup_cut_diagnostics.feature"
+id = "scenario.backup-cut-diagnostics"
+invariant = "A capture held beyond the cut budget reports capture and the elapsed completed drain, creates no archive and resumes the domain on one and three nodes."
+invocation = "scenarios"
+scenario = "A capture timeout reports its active phase and completed drain"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
 coverage = "Diagnostic node capture and retained-result recovery through a raw session, followed by ordinary CLI archive download to stdout."
 examples = 2
 feature = "tests/features/cluster/backup_wait.feature"
@@ -1944,6 +1955,16 @@ id = "stress.backup-cut-expiry"
 invariant = "A second-domain cut expiry returns its bounded failure and resumes both domains on one and three nodes."
 invocation = "stress-restore-scenarios"
 scenario = "A second-domain quiesce expiry returns its failure and resumes both domains"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic cut timeout and resumption while the public CLI verifies the phase and completed drain measurement."
+examples = 2
+feature = "tests/features/cluster/backup_cut_diagnostics.feature"
+id = "stress.backup-cut-diagnostics"
+invariant = "A capture held beyond the cut budget reports capture and the elapsed completed drain, creates no archive and resumes the domain on one and three nodes."
+invocation = "stress-restore-scenarios"
+scenario = "A capture timeout reports its active phase and completed drain"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]

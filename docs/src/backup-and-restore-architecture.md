@@ -802,7 +802,7 @@ A retained archive's read failure is reported before its download sends the fixe
 | Boundary | Failure | What remains | Recovery |
 | --- | --- | --- | --- |
 | Backup admission | The statement is batched, queued in a transaction, or sent to a follower | Nothing admitted | Send it alone, to the leader the redirect names. |
-| Cut lease and drain | The lease or the drain does not finish within the cut's budget | A pause is undone and the lease released; a failed drain names what each node still held | Send the backup again, with a longer `TIMEOUT` or after the stalled emitter recovers. |
+| Cut budget | A lease, guard, counters read, drain, configuration capture or owner capture does not finish within the cut's budget | The refusal names its typed active phase, that phase's age, total elapsed cut time and completed phase durations. A pause is undone and the lease released; a failed drain also retains what each node still held | Inspect the phase and owner logs, then send the backup again with an appropriate `TIMEOUT` or after the stalled operation recovers. |
 | Cut reach | A node the schedule assigns the domain's work to is not reported live when a quiesced cut starts, a scheduled state owner is not reported live when any cut captures, or the schedule places an entity whose state the archive captures on no node | Nothing paused when a quiesced cut refused before its pause, otherwise the pause is undone; the lease is released and no archive is assembled | Send the backup again once the node is back, or once failover has moved its placements or a node can host the entity again. |
 | Leader change during a cut | The tenure check fails | The domain is resumed, by the coordinator or by the next leader's reconciliation, and the command stays applying | The next leader re-executes the backup under the same reference; the client retries the reference to receive its archive. |
 | Outcome recording | Leadership moves, or the leader cannot confirm that it still leads, before the backup's outcome is recorded | The command stays applying, and the client receives `OutcomeUnknown` | The leader that resumes the command, or the client's retry of the reference, runs the backup again with new cuts; the client receives that run's outcome and archive. |
@@ -901,6 +901,20 @@ cause chain. A coordinator's direct checkpoint calls retain the same runtime-sta
 causes as an installation through the interconnect; interrupted guest and native-metadata captures
 retain their cause in the backup failure. These diagnostics name operations and entities without
 including archive contents.
+
+Each domain cut logs its administrative phase entry and completion at `info`, with the domain,
+execution reference, phase duration and total elapsed time. The timeout refusal retains the active
+phase and ordered completed durations, including lease admission, alteration guard, opening
+counters and drain. The controlled boundary after drain is `capture`; configuration capture, owner
+capture and closing counters have distinct phases. Resume and lease release remain cleanup outside
+the cut's deadline and do not receive a new capture budget.
+
+Owner capture logs identify the node and coordination identity and distinguish revision wait,
+cluster-state application, lifecycle checkpoints, storage capture, staging and inventory. The
+capture operation returns a terminal reply, so a coordinator waiting for an owner reports owner
+capture rather than claiming to know that node's current internal phase. Retained owner logs give
+that finer attribution. Phase diagnostics carry no archive contents or branch-key values and do not
+change archive records or node-to-node messages.
 
 The leader logs at `info` when it assembled an archive, when a download collected one and when a
 restore completed, with the execution reference and the domains; skipped state is logged at `warn`
