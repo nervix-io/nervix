@@ -120,6 +120,7 @@ tags = [
   "@client_ingestor_alter_drain",
   "@syslog_suspend_handoff",
   "@syslog_listener_rebind",
+  "@resource_source_discovery",
   "@deadlock_reports",
   "@memory_pressure_pause",
   "@client_io_03_consumer_restore",
@@ -1135,6 +1136,26 @@ invariant = "One-node and every three-node Syslog listener delivers every number
 invocation = "scenarios"
 scenario = "A full Syslog TCP intake keeps every frame through source suspension on <cluster_size> nodes via <node_id>"
 selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Resource publication, a replica's temporarily empty source view, pending observation, archive installation and a lookup through the replicated file. The test-control map and watch are untracked; consensus persistence and node lifecycle use tracked owners."
+examples = 1
+feature = "tests/features/cluster/resource_source_discovery.feature"
+id = "scenario.resource-source-discovery"
+invariant = "A missing local resource copy stays pending until source discovery resumes, then the admitted upload completes and its replicated contents serve the lookup."
+invocation = "scenarios"
+scenario = "A resource upload waits for a replica to discover its source"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: resource publication, pending source discovery, archive installation and a lookup through the replicated file; the scenario control remains untracked."
+examples = 1
+feature = "tests/features/cluster/resource_source_discovery.feature"
+id = "stress.resource-source-discovery"
+invariant = "A missing local resource copy stays pending until source discovery resumes, then the admitted upload completes and its replicated contents serve the lookup."
+invocation = "stress-scenarios"
+scenario = "A resource upload waits for a replica to discover its source"
+selections = ["deloxide-stress"]
 
 [[workload]]
 coverage = "Syslog accept failure injection while an established connection streams; the source retains its connection tasks and rebinds the listening socket."
@@ -2632,6 +2653,8 @@ workloads = [
 [[owner]]
 path = "crates/consensus/src/storage.rs"
 workloads = [
+  "scenario.resource-source-discovery",
+  "stress.resource-source-discovery",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
   "stress.diagnostic-nodes",
@@ -2846,6 +2869,8 @@ workloads = [
 [[owner]]
 path = "src/cluster.rs"
 workloads = [
+  "scenario.resource-source-discovery",
+  "stress.resource-source-discovery",
   "scenario.clock-takeover-local",
   "scenario.clock-takeover-observer",
   "stress.clock-takeover-local",

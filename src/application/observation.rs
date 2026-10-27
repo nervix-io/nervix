@@ -2361,9 +2361,12 @@ impl SessionServiceImpl {
     /// The entries of `resource` as this node's store holds them.
     async fn resource_version_entries(&self, resource: &ResourceVersion) -> ResourceVersionEntries {
         match self.inner.resource_store.read_manifest(&resource.id).await {
-            Ok(manifest) => ResourceVersionEntries::Listed(manifest.entries),
+            Ok(Some(manifest)) => ResourceVersionEntries::Listed(manifest.entries),
+            Ok(None) => ResourceVersionEntries::Unavailable {
+                reason: "resource version is not installed on this node".to_string(),
+            },
             Err(error) => ResourceVersionEntries::Unavailable {
-                reason: error.to_string(),
+                reason: format!("{error:#}"),
             },
         }
     }

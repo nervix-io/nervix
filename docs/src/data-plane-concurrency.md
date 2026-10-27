@@ -1731,6 +1731,13 @@ checks below establish what a caller may do with them.
 
 ## Diagnostic Deadlock Detection
 
+The resource-source-discovery workload exercises resource publication, a pending replica and
+installation once source visibility resumes, followed by a lookup of the replicated file. Its
+active, order and stressed records name the consensus-storage and cluster lifecycle owners it
+reaches. The scenario's command-pause map, watch observation and source filter are test-only and
+outside Deloxide's tracked locks; they establish the public interleaving directly. No data-plane
+lock, memory-ordering protocol or production wait-and-notify mechanism changes.
+
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order
 instrumentation to that same mode, and the `deloxide-stress` feature adds Deloxide's bounded
 scheduling disturbance to its active-only selection; neither is another execution mode, and the two
