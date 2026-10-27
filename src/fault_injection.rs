@@ -59,6 +59,9 @@ mod model_publication;
 mod pause;
 mod relay_memory;
 mod relocation_commit;
+mod resource_publication;
+#[cfg(test)]
+mod resource_publication_tests;
 mod restarted_voter;
 mod restore_publication;
 #[cfg(test)]
@@ -85,6 +88,7 @@ pub use model_publication::ModelPublicationRefusalKind;
 use pause::TestPause;
 use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
+use resource_publication::ResourcePublicationRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 use restore_publication::RestorePublicationFailure;
 pub use restore_staging::RestoreStagingKind;
@@ -189,6 +193,10 @@ struct FaultInjectionState {
     delayed_stopped_branch_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
+    /// Refusals of a node's next uploaded-version publication, each keeping whether a publication
+    /// met it and whether the node's reconciliation took the refused upload up.
+    refused_resource_publications:
+        DashMap<ClusterNodeName, watch::Sender<ResourcePublicationRefusal>, RandomState>,
     /// Failures of every staging of one kind of a restored domain's checkpoints until cleared,
     /// each keeping whether a staging met it.
     failed_restore_checkpoint_stagings:
@@ -499,6 +507,7 @@ impl Default for FaultInjection {
                 delayed_source_confirmations: DashMap::default(),
                 delayed_stopped_branch_state_writes: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
+                refused_resource_publications: DashMap::default(),
                 failed_restore_checkpoint_stagings: DashMap::default(),
                 failed_restore_state_publications: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),

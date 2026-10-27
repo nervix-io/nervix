@@ -170,13 +170,28 @@ If either of those final waits fails, because visibility timed out or a live inc
 failed replica, the command reports that failure although the version stays completed. The recorded
 outcome is terminal: a failed version never becomes completed, and a completed version never fails.
 
-If an applying upload loses the task that was installing it, because leadership moved or a console
-upload's connection was aborted, the leader resumes it at its next reconciliation. An upload whose
-version was never published fails with
+If an applying upload loses the task that was installing it, the leader resumes it at its next
+reconciliation. The task ends without recording an outcome when leadership moves, when a console
+upload's connection is aborted, or when consensus refuses one of the task's writes, as it refuses a
+leader that cannot currently confirm it still leads. A published version keeps waiting for the live
+set as above.
+
+A version that was never published is published from the leader's own installed copy. The node
+that admits an upload installs the first copy before it publishes the version, so a task that ended
+after that installation leaves a copy in the leader's store. When that copy's manifest records the
+upload's number and digest, the leader publishes it with its ready replica record exactly as the
+task would have, and the upload completes as any other. A refused publication on a leader that
+keeps leading therefore does not fail the upload.
+
+When the leader holds no such copy, the upload fails with
 `the admitted archive is unavailable before durable version installation`, because only the node
-that admitted it held the archive. A retry of the same upload identity that reaches the leader
-before that reconciliation carries the archive again, so it installs the version and completes the
-upload instead. A published version keeps waiting for the live set as above.
+that admitted it held the archive: leadership moved to a node that never admitted it, or the task
+ended before its copy was installed. A copy the leader cannot read is unusable, and the failure
+names the read's cause. A refusal that decides nothing, such as the node's executor refusing the
+read or consensus refusing the publication for any reason other than a conflict with the catalog,
+leaves the upload applying, and the next reconciliation resumes it again. A retry of the same
+upload identity that reaches the leader before that reconciliation carries the archive again, so it
+installs the version and completes the upload instead.
 
 A node that joins after completion does not change the outcome. Its reconciliation installs every
 published version it does not hold from a live node that holds it, and
@@ -609,6 +624,7 @@ cluster. Local reports remain typed until that projection.
 | An HTTPS listener cannot install a VHOST change in a step that did not pause | The failure record restores the previous models and schedule, and every listener presents the restored certificates before the command reports the failure. |
 | A consumer cannot load the version during activation, such as protobuf sources that do not compile or a hash-map line that does not decode | The step releases any pause it engaged, the committed models remain, and the command or transaction reports the activation failure. Nothing returns the models to their previous versions; a later model change, such as a rebinding to a usable version, repairs the binding. |
 | One node cannot install a version during its upload, including a transfer that is interrupted | The upload fails with that node's reason. The number stays assigned and is never bindable. |
+| Consensus refuses the publication of an upload's version, such as a leader that cannot confirm it still leads | The uploading client receives a leader redirect and sends the upload again. The leader's next reconciliation publishes its own installed copy, so the upload completes, and the repetition joins it or recovers its outcome. |
 | A node lacks a published version | Its reconciliation fetches the version from a live node that holds it, from the beginning of the archive. Until it holds the version, that node cannot build a domain that needs it. |
 
 Pinned bindings are what make recovery reproduce the same versions. After a process restart, a
