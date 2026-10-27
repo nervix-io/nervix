@@ -90,6 +90,14 @@ impl SubscriptionPayloads {
                     Err(error) => panic!("failed while waiting for subscription payloads: {error}"),
                 };
                 let received_at = Instant::now();
+                assert!(
+                    received_at < deadline,
+                    "timed out waiting for subscription payloads. expected remaining {:?}, \
+                     receipts {:?}; received {payload:?} at {received_at:?}; budget {budget:?}, \
+                     began {began_at:?}, deadline {deadline:?}",
+                    self.remaining,
+                    self.receipts
+                );
                 let fragment = self
                     .remaining
                     .keys()

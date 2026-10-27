@@ -847,8 +847,10 @@ immediately with its cause. The public outline checks each concrete tenant key a
 payloads while deliberately delaying collection of the result for one second, beyond the
 unchanged receive budget. That delay yields to the runtime and other scenarios; it does not block
 the shared runner. A scripted one-second physical cadence still expires the same 800 ms sample.
-Offloading removes runner polling gaps; it neither extends the budget nor proves that runtime
-workers cannot be delayed.
+Every returned row must also have a receipt instant strictly before the original deadline: a
+paused-clock reader that resumes at or beyond either the 500 ms or 800 ms bound must fail even
+when its final row is ready. Offloading removes runner polling gaps; it neither extends the budget
+nor proves that runtime workers cannot be delayed.
 
 The duration window outline establishes its observation boundary through a public subscription:
 it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows

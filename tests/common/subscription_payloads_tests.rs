@@ -164,3 +164,38 @@ async fn a_one_second_physical_cadence_cannot_pass_the_800ms_sample() {
     assert!(message.contains("alpha:2"));
     assert_eq!(began_at.elapsed(), Duration::from_millis(800));
 }
+
+struct LateReceiptSubscription(Duration);
+
+impl PayloadSubscription for LateReceiptSubscription {
+    async fn next_payload(&mut self, _budget: Duration) -> io::Result<Option<String>> {
+        // A ready read may win over an expired timeout when its task resumes late.
+        advance(self.0).await;
+        Ok(Some("alpha:2".to_string()))
+    }
+}
+
+#[nervix_primitives::test(start_paused = true)]
+async fn a_final_row_at_or_after_the_deadline_cannot_complete_the_sample() {
+    for budget in [Duration::from_millis(500), Duration::from_millis(800)] {
+        for lateness in [Duration::ZERO, Duration::from_nanos(1)] {
+            nervix_primitives::task::consume_budget().await;
+            let read_elapsed = budget + lateness;
+            let began_at = Instant::now();
+            let observation = SubscriptionPayloads::new(&["alpha:2".to_string()])
+                .observe(LateReceiptSubscription(read_elapsed), budget);
+            let result = std::panic::AssertUnwindSafe(observation)
+                .catch_unwind()
+                .await;
+            let Err(failure) = result else {
+                panic!("a final row recorded at or after the deadline must fail the sample");
+            };
+            let Some(message) = failure.downcast_ref::<String>() else {
+                panic!("a late final row must report the receive timeout");
+            };
+            assert!(message.contains("timed out waiting for subscription payloads"));
+            assert!(message.contains("alpha:2"));
+            assert_eq!(began_at.elapsed(), read_elapsed);
+        }
+    }
+}
