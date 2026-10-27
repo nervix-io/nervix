@@ -33,7 +33,7 @@ use super::*;
 /// the domain's tasks before it returns, so a stopped domain's checkpoints are on disk when its
 /// stop completes.
 #[derive(Default)]
-pub(in crate::runtime) struct BranchSnapshotTasks {
+pub(in crate::runtime) struct StateSnapshotTasks {
     tracker: TaskTracker,
     stopping: CancellationToken,
     /// The snapshot tasks of every domain that has one. Each tracker is closed as it is created,
@@ -49,7 +49,7 @@ fn closed_domain_tracker() -> TaskTracker {
     tracker
 }
 
-impl BranchSnapshotTasks {
+impl StateSnapshotTasks {
     /// The signal a snapshot task waits for beside its own branch's stop.
     pub(in crate::runtime) fn stopping(&self) -> CancellationToken {
         self.stopping.clone()
@@ -167,7 +167,7 @@ impl Runtime {
     /// snapshot interval, and once more when the branch stops, it also persists what was published
     /// last, including when the branch task is gone and can no longer publish.
     ///
-    /// The task runs under the runtime's [`BranchSnapshotTasks`], not under its branch task, so a
+    /// The task runs under the runtime's [`StateSnapshotTasks`], not under its branch task, so a
     /// runtime that stops waits for that last write. The handle this returns only lets a branch
     /// that stops in time wait for it too; dropping it leaves the task with the runtime.
     pub(in crate::runtime) fn spawn_published_branch_state_snapshot_task(
@@ -182,9 +182,9 @@ impl Runtime {
             snapshot_interval.min(self.inner.state_replication_poll_interval);
         let runtime = self.clone();
         let mut shutdown_rx = shutdown_tx.subscribe();
-        let runtime_stopping = self.inner.branch_snapshot_tasks.stopping();
+        let runtime_stopping = self.inner.state_snapshot_tasks.stopping();
         let domain = state.placement().domain.clone();
-        Some(self.inner.branch_snapshot_tasks.spawn(&domain, async move {
+        Some(self.inner.state_snapshot_tasks.spawn(&domain, async move {
             let mut next_persist = Instant::now() + snapshot_interval;
             loop {
                 nervix_primitives::task::consume_budget().await;
@@ -252,7 +252,7 @@ impl Runtime {
         store: &RuntimeStateStore,
     ) {
         let placement = state.placement();
-        if let Some(delay) = self.inner.fault_injection.stopped_branch_state_write_delay(
+        if let Some(delay) = self.inner.fault_injection.stopped_state_write_delay(
             &placement.domain,
             placement.kind,
             &placement.identifier,

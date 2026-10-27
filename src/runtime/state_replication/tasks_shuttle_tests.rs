@@ -26,7 +26,7 @@ use nervix_primitives::{
     task::JoinHandle,
 };
 
-use super::BranchSnapshotTasks;
+use super::StateSnapshotTasks;
 
 const MODEL_TASK_JOINS: &str =
     "Shuttle fails the whole execution when a model task panics, so no join observes one";
@@ -47,7 +47,7 @@ fn domain(name: &str) -> DomainName {
 /// stop, whether sent or dropped, or for the runtime's, then makes its last write, which yields
 /// before it completes as a storage job does, and ends.
 fn snapshot_task(
-    tasks: &BranchSnapshotTasks,
+    tasks: &StateSnapshotTasks,
     domain: &DomainName,
     branch_stop: &watch::Sender<bool>,
     written: StdArc<AtomicUsize>,
@@ -74,7 +74,7 @@ fn snapshot_task(
 /// a deadlock.
 fn a_closing_runtime_racing_its_branches() {
     shuttle::future::block_on(async {
-        let tasks = BranchSnapshotTasks::default();
+        let tasks = StateSnapshotTasks::default();
         let domain = domain("default");
         let written = StdArc::new(AtomicUsize::new(0));
         let (stopped_in_time, _) = watch::channel(false);
@@ -121,7 +121,7 @@ fn shuttle_a_closed_snapshot_task_owner_is_waited_for_until_every_task_has_writt
 /// stop had removed the tracker the registration joined.
 fn a_stopping_domain_racing_its_branches() {
     shuttle::future::block_on(async {
-        let tasks = StdArc::new(BranchSnapshotTasks::default());
+        let tasks = StdArc::new(StateSnapshotTasks::default());
         let stopping = domain("stopping");
         let running = domain("running");
         let written = StdArc::new(AtomicUsize::new(0));

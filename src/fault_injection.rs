@@ -197,7 +197,7 @@ struct FaultInjectionState {
     /// Waits, keyed by a deduplicator or window processor, that the snapshot task of each of its
     /// branches spends after the branch stopped before it writes what the branch published last,
     /// as storage slow to take a large checkpoint would.
-    delayed_stopped_branch_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
+    delayed_stopped_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
     /// Refusals of a node's next uploaded-version publication, each keeping whether a publication
@@ -514,7 +514,7 @@ impl Default for FaultInjection {
                 transaction_binding_drops: DashMap::default(),
                 delayed_shutdown_cordon_releases: DashMap::default(),
                 delayed_source_confirmations: DashMap::default(),
-                delayed_stopped_branch_state_writes: DashMap::default(),
+                delayed_stopped_state_writes: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 refused_resource_publications: DashMap::default(),
                 failed_restore_checkpoint_stagings: DashMap::default(),
@@ -1186,9 +1186,9 @@ impl FaultInjection {
     /// processor, wait `delay` after its branch stops before it writes what the branch published
     /// last, as storage slow to take a large checkpoint would. A wait longer than a branch's stop
     /// grace leaves that write running after the branch's task was ended.
-    pub fn delay_stopped_branch_state_writes(&self, processor: DomainNodeRef, delay: Duration) {
+    pub fn delay_stopped_state_writes(&self, processor: DomainNodeRef, delay: Duration) {
         self.inner
-            .delayed_stopped_branch_state_writes
+            .delayed_stopped_state_writes
             .insert(processor, delay);
     }
 
@@ -2242,17 +2242,14 @@ impl FaultInjection {
         Some(*delay)
     }
 
-    pub(crate) fn stopped_branch_state_write_delay(
+    pub(crate) fn stopped_state_write_delay(
         &self,
         domain: &DomainName,
         kind: ModelKind,
         entity: &ModelName,
     ) -> Option<Duration> {
         let processor = DomainNodeRef::node_in(domain.clone(), kind, entity.clone());
-        let delay = self
-            .inner
-            .delayed_stopped_branch_state_writes
-            .get(&processor)?;
+        let delay = self.inner.delayed_stopped_state_writes.get(&processor)?;
         Some(*delay)
     }
 

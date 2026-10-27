@@ -427,7 +427,7 @@ async fn a_stopping_runtime_waits_for_the_snapshot_of_a_branch_whose_task_is_gon
             runtime.shutdown(left).await
         }
     });
-    let told_to_stop = runtime.inner.branch_snapshot_tasks.stopping();
+    let told_to_stop = runtime.inner.state_snapshot_tasks.stopping();
     timeout(REACHED_WITHIN, told_to_stop.cancelled())
         .await
         .expect("the stopping runtime reaches its snapshot tasks");

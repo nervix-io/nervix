@@ -75,7 +75,7 @@ impl ConfiguredFaultInjection {
         None
     }
 
-    pub(in crate::runtime) fn stopped_branch_state_write_delay(
+    pub(in crate::runtime) fn stopped_state_write_delay(
         &self,
         _domain: &DomainName,
         _kind: ModelKind,

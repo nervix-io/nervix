@@ -49,7 +49,7 @@ fn given_stopping_window_branches_write_slowly(
         .assured("the scenario domain is an identifier-shaped name");
     let processor = nervix_models::ModelName::try_from(processor.as_str())
         .assured("the window processor is an identifier-shaped name");
-    world.fault_injection.delay_stopped_branch_state_writes(
+    world.fault_injection.delay_stopped_state_writes(
         nervix_models::DomainNodeRef::node_in(
             domain,
             nervix_models::ModelKind::WindowProcessor,

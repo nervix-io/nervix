@@ -177,7 +177,7 @@ impl Runtime {
                 remote_ack_watcher_shutdown: CancellationToken::new(),
                 remote_ack_watcher_tasks: TaskTracker::new(),
                 state_replication_tasks: Default::default(),
-                branch_snapshot_tasks: Default::default(),
+                state_snapshot_tasks: Default::default(),
                 passive_runtime_state_snapshots: DashMap::default(),
                 backup_capture_fences: ArcSwap::from_pointee(HashMap::default()),
                 replicated_branch_lifecycles: DashMap::default(),
@@ -800,7 +800,7 @@ impl Runtime {
         // here: a stopped domain's checkpoints are what a stopped backup cut, a restart and the
         // next start read, and they are on disk once its stop completes.
         self.inner
-            .branch_snapshot_tasks
+            .state_snapshot_tasks
             .wait_for_domain(domain)
             .await;
         let quiesce_keys = self
@@ -893,8 +893,8 @@ impl Runtime {
         // deduplicator and window branch is writing what its branch published last. Those tasks
         // hold this runtime and its storage, so the runtime waits for each of them here, while
         // the replication routes their checkpoints are offered through are still installed.
-        self.inner.branch_snapshot_tasks.close();
-        self.inner.branch_snapshot_tasks.wait().await;
+        self.inner.state_snapshot_tasks.close();
+        self.inner.state_snapshot_tasks.wait().await;
         // Nothing dispatches through a gate, admits through a quiesced ingestor or publishes past
         // a freeze any more, so every entity gate this node holds ends here with its runtime. A
         // lease that a handoff left held until a deadline past this node's stop would otherwise
