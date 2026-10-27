@@ -1188,6 +1188,13 @@ predicate, its relay. The decision fails before a new emitter plan or remote con
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external emitter may fail independently and follows the emitter's retry policy.
 
+OTEL's field declarations supply exact-type and missing-key diagnostics to the registry, including
+the required start time of a DELTA metric. Histogram count and bucket-count mappings require U64;
+sum, min and max require floating-point mappings. Every OTEL client requires its positive
+`timeout_ms` before commit. The connector also validates the rendered client schema when opening
+and keeps its `ClientConfigSchemaError` report beneath `EmitterOpenError::InvalidConfiguration`,
+so an offline refusal retains the offending key and its declared constraint.
+
 The Iceberg emitter plans how its commits write the mapped columns into the table, matching them to
 the table's columns by name, once while opening and again against the table's current schema before
 each commit writes data files. A plan the table cannot take is an `IcebergColumnError` naming the

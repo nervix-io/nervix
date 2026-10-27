@@ -23,10 +23,9 @@ use nervix_models::{
     CreateSignalingProtocol, DomainName, EmitterEntity, EndpointName, Expression, FieldName,
     HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
     HttpRequestEmitter, IngestTimestampSource, IngestorInput, LiteralHeaderWrite, Model,
-    ModelIndex, ModelName, OtelAggregationTemporality, OtelEmitter, OtelMappings, OtelMetricKind,
-    OtelMetricsEmitter, ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField,
-    SchemaName, SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsQueueEmitter, VhostName,
-    parse_duration_text,
+    ModelIndex, ModelName, OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter,
+    ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName,
+    SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsQueueEmitter, VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -555,45 +554,13 @@ fn validate_otel_mapping_contract(
     identifier: &ModelName,
     connector: &OtelEmitter,
 ) -> error_stack::Result<(), RegistryError> {
-    /// The `VALUES` contract one OTEL signal imposes: what it may name, what it must name, and
-    /// whether delta temporality adds `start_time` to the required keys.
-    struct SignalContract {
-        signal: OtelMappingSignal,
-        required: &'static [&'static str],
-        delta: bool,
-    }
-
-    let SignalContract {
-        signal,
-        required,
-        delta,
-    } = match connector {
-        OtelEmitter::Logs(_) => SignalContract {
-            signal: OtelMappingSignal::Logs,
-            required: &["time", "body"],
-            delta: false,
-        },
-        OtelEmitter::Traces(_) => SignalContract {
-            signal: OtelMappingSignal::Traces,
-            required: &["trace_id", "span_id", "name", "start_time", "end_time"],
-            delta: false,
-        },
+    let signal = match connector {
+        OtelEmitter::Logs(_) => OtelMappingSignal::Logs,
+        OtelEmitter::Traces(_) => OtelMappingSignal::Traces,
         OtelEmitter::Metrics(OtelMetricsEmitter { metric, .. }) => match metric.kind {
-            OtelMetricKind::Gauge => SignalContract {
-                signal: OtelMappingSignal::MetricGauge,
-                required: &["time", "value"],
-                delta: false,
-            },
-            OtelMetricKind::Sum { temporality, .. } => SignalContract {
-                signal: OtelMappingSignal::MetricSum,
-                required: &["time", "value"],
-                delta: temporality == OtelAggregationTemporality::Delta,
-            },
-            OtelMetricKind::Histogram { temporality } => SignalContract {
-                signal: OtelMappingSignal::MetricHistogram,
-                required: &["time", "count", "bucket_counts", "explicit_bounds"],
-                delta: temporality == OtelAggregationTemporality::Delta,
-            },
+            OtelMetricKind::Gauge => OtelMappingSignal::MetricGauge,
+            OtelMetricKind::Sum { .. } => OtelMappingSignal::MetricSum,
+            OtelMetricKind::Histogram { .. } => OtelMappingSignal::MetricHistogram,
         },
     };
 
@@ -631,16 +598,22 @@ fn validate_otel_mapping_contract(
             }));
         }
     }
-    for key in required {
-        if !value_keys.contains(key) {
-            return Err(invalid(OtelMappingIssue::MissingValue { signal, key }));
+    for field in connector.value_fields() {
+        if !field.presence.is_required(connector.is_delta()) || value_keys.contains(field.key) {
+            continue;
         }
-    }
-    if delta && !value_keys.contains("start_time") {
-        return Err(invalid(OtelMappingIssue::MissingDeltaValue {
-            signal,
-            key: "start_time",
-        }));
+        let issue = match field.presence {
+            nervix_models::OtelValuePresence::Delta => OtelMappingIssue::MissingDeltaValue {
+                signal,
+                key: field.key,
+            },
+            nervix_models::OtelValuePresence::Required
+            | nervix_models::OtelValuePresence::Optional => OtelMappingIssue::MissingValue {
+                signal,
+                key: field.key,
+            },
+        };
+        return Err(invalid(issue));
     }
 
     for (section, mappings) in [
