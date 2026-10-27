@@ -165,13 +165,12 @@ The shared variables are:
   system recovers or an operator repairs its provisioning.
 
 Request/response emitters—SQS, Sentry, OTEL, HTTP, the databases, and Iceberg—do not take
-`ACK TIMEOUT`. Except for Iceberg, their client request timeout bounds the response: SQS, Sentry,
-OTEL clients expose that bound as the optional `timeout_ms` CONFIG key. ClickHouse clients and a
-client an HTTP emitter uses must declare it. An Iceberg emitter's object-store client bounds each
-storage call with its own optional `timeout_ms`, while Nervix sets no deadline on its REST catalog
-requests,
-as [Iceberg retries](#iceberg-retries) describes. For every emitter, Nervix accounts for records
-individually wherever the transport exposes individual results: delivered records acknowledge
+`ACK TIMEOUT`. Except for Iceberg, their client request timeout bounds the response. SQS and
+Sentry clients expose that bound as the optional `timeout_ms` CONFIG key; OTEL, ClickHouse and
+HTTP emitter clients require it. An Iceberg emitter's object-store client bounds each storage
+call with its own optional `timeout_ms`, while Nervix sets no deadline on its REST catalog
+requests, as [Iceberg retries](#iceberg-retries) describes. For every emitter, Nervix accounts for
+records individually wherever the transport exposes individual results: delivered records acknowledge
 upstream, definitively invalid records follow `ON MESSAGE ERROR`, and a retry resends only records
 that are neither delivered nor rejected. An ambiguous or infrastructure-wide failure is never used
 to discard a record.
@@ -1863,9 +1862,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | the export request of a publish without BATCH: unbounded |
-| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; required |
 | Driver limits | gRPC responses above 4 MiB are refused. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
+| VALUES fields, exact types and constraints | LOGS `time`: DATETIME; required; not before the Unix epoch<br>LOGS `severity_text`: STRING; optional; no additional value constraint<br>LOGS `severity_number`: I32; optional; 0..=24<br>LOGS `body`: STRING; required; no additional value constraint<br>LOGS `trace_id`: STRING; optional; 32 hexadecimal characters; not all zero<br>LOGS `span_id`: STRING; optional; 16 hexadecimal characters; not all zero |
+| ATTRIBUTES values | a string, boolean, number, datetime or an ARRAY or VEC of those; DATETIME becomes RFC 3339 text; ARRAY and VEC may nest; NULL attributes are omitted; BYTES and maps are refused |
+| RESOURCE values | a literal string, boolean, I64, F64, null or ARRAY; literal expressions only, including nested literal arrays; one resource for the emitter |
+| Unsupported OTLP features and reasons | exponential histograms and summaries: METRIC declares only GAUGE, SUM and explicit HISTOGRAM<br>per-record resource and scope: RESOURCE is literal-only and SCOPE is fixed for the emitter<br>span events and links: the closed span VALUES table has no event or link mapping<br>trace_state: the closed span VALUES table does not map trace state<br>log event_name and flags: the closed log VALUES table maps neither field<br>exemplars: metric points expose values and attributes without exemplar mappings<br>non-string log bodies: the log body field requires STRING<br>bytes_value and map attributes: attributes admit scalars and nested ARRAY or VEC values; BYTES and maps are unavailable<br>scope attributes: SCOPE declares only a name and optional version<br>OTLP/JSON: the client declares only grpc and http/protobuf |
 
 See the [OTEL LOGS capability and mirror reference](connector-capabilities.md#otel-logs-emit).
 <!-- connector-matrix:emit-otel-logs:end -->
@@ -1905,9 +1908,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | the export request of a publish without BATCH: unbounded |
-| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; required |
 | Driver limits | gRPC responses above 4 MiB are refused. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
+| VALUES fields, exact types and constraints | TRACES `trace_id`: STRING; required; 32 hexadecimal characters; not all zero<br>TRACES `span_id`: STRING; required; 16 hexadecimal characters; not all zero<br>TRACES `parent_span_id`: STRING; optional; 16 hexadecimal characters; not all zero<br>TRACES `name`: STRING; required; no additional value constraint<br>TRACES `kind`: STRING; optional; SERVER, CLIENT, INTERNAL, PRODUCER or CONSUMER; case-sensitive<br>TRACES `start_time`: DATETIME; required; not before the Unix epoch<br>TRACES `end_time`: DATETIME; required; not before the Unix epoch<br>TRACES `status_code`: STRING; optional; OK, ERROR or UNSET; case-sensitive<br>TRACES `status_message`: STRING; optional; no additional value constraint |
+| ATTRIBUTES values | a string, boolean, number, datetime or an ARRAY or VEC of those; DATETIME becomes RFC 3339 text; ARRAY and VEC may nest; NULL attributes are omitted; BYTES and maps are refused |
+| RESOURCE values | a literal string, boolean, I64, F64, null or ARRAY; literal expressions only, including nested literal arrays; one resource for the emitter |
+| Unsupported OTLP features and reasons | exponential histograms and summaries: METRIC declares only GAUGE, SUM and explicit HISTOGRAM<br>per-record resource and scope: RESOURCE is literal-only and SCOPE is fixed for the emitter<br>span events and links: the closed span VALUES table has no event or link mapping<br>trace_state: the closed span VALUES table does not map trace state<br>log event_name and flags: the closed log VALUES table maps neither field<br>exemplars: metric points expose values and attributes without exemplar mappings<br>non-string log bodies: the log body field requires STRING<br>bytes_value and map attributes: attributes admit scalars and nested ARRAY or VEC values; BYTES and maps are unavailable<br>scope attributes: SCOPE declares only a name and optional version<br>OTLP/JSON: the client declares only grpc and http/protobuf |
 
 See the [OTEL TRACES capability and mirror reference](connector-capabilities.md#otel-traces-emit).
 <!-- connector-matrix:emit-otel-traces:end -->
@@ -1948,9 +1955,13 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | the export request of a publish without BATCH: unbounded |
-| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; unbounded when omitted |
+| Network waits | an export: name resolution, connection, TLS and the response: `timeout_ms`; required |
 | Driver limits | gRPC responses above 4 MiB are refused. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
+| VALUES fields, exact types and constraints | GAUGE / SUM `time`: DATETIME; required; not before the Unix epoch<br>GAUGE / SUM `start_time`: DATETIME; required for DELTA; optional otherwise; not before the Unix epoch<br>GAUGE / SUM `value`: an integer-family, F32, or F64 value; required; integer values must fit I64; floating-point values use OTLP as_double<br>HISTOGRAM `time`: DATETIME; required; not before the Unix epoch<br>HISTOGRAM `start_time`: DATETIME; required for DELTA; optional otherwise; not before the Unix epoch<br>HISTOGRAM `count`: U64; required; the complete U64 range<br>HISTOGRAM `sum`: F32 or F64; optional; no additional value constraint<br>HISTOGRAM `bucket_counts`: a U64 ARRAY or VEC; required; no NULL elements; length equals explicit_bounds length plus one<br>HISTOGRAM `explicit_bounds`: an F32 or F64 ARRAY or VEC; required; no NULL elements<br>HISTOGRAM `min`: F32 or F64; optional; no additional value constraint<br>HISTOGRAM `max`: F32 or F64; optional; no additional value constraint |
+| ATTRIBUTES values | a string, boolean, number, datetime or an ARRAY or VEC of those; DATETIME becomes RFC 3339 text; ARRAY and VEC may nest; NULL attributes are omitted; BYTES and maps are refused |
+| RESOURCE values | a literal string, boolean, I64, F64, null or ARRAY; literal expressions only, including nested literal arrays; one resource for the emitter |
+| Unsupported OTLP features and reasons | exponential histograms and summaries: METRIC declares only GAUGE, SUM and explicit HISTOGRAM<br>per-record resource and scope: RESOURCE is literal-only and SCOPE is fixed for the emitter<br>span events and links: the closed span VALUES table has no event or link mapping<br>trace_state: the closed span VALUES table does not map trace state<br>log event_name and flags: the closed log VALUES table maps neither field<br>exemplars: metric points expose values and attributes without exemplar mappings<br>non-string log bodies: the log body field requires STRING<br>bytes_value and map attributes: attributes admit scalars and nested ARRAY or VEC values; BYTES and maps are unavailable<br>scope attributes: SCOPE declares only a name and optional version<br>OTLP/JSON: the client declares only grpc and http/protobuf |
 
 See the [OTEL METRICS capability and mirror reference](connector-capabilities.md#otel-metrics-emit).
 <!-- connector-matrix:emit-otel-metrics:end -->
@@ -1970,17 +1981,19 @@ CREATE OTEL CLIENT otel_main
   };
 ```
 
-`endpoint` and `protocol` are required. `protocol` is exactly `grpc` or `http/protobuf`. `headers`
-is the OTLP comma-separated `key=value` form, `compression` accepts only `gzip`, and an absent
-compression key sends an uncompressed request. `timeout_ms` is an optional positive request bound.
+`endpoint`, `protocol`, and `timeout_ms` are required. `protocol` is exactly `grpc` or
+`http/protobuf`. `headers` is comma-separated `key=value`: Nervix splits each pair at its first
+`=`, trims surrounding whitespace, lowercases keys, and preserves values literally without
+percent-decoding. Empty input supplies no headers. `compression` accepts only `gzip`, and an
+absent compression key sends an uncompressed request. `timeout_ms` is a positive request bound.
 For `http/protobuf`, Nervix appends `/v1/logs`, `/v1/traces`, or `/v1/metrics` to the endpoint path.
 Mount TLS files and use `tls_ca_file`, `tls_cert_file`, and `tls_key_file` in the same client; the
-certificate and key must be supplied together. Both protocols resolve the endpoint's host through
+certificate and key must be supplied together, and TLS files require an `https` endpoint on either
+protocol. Both protocols resolve the endpoint's host through
 the node's configured DNS resolver for every new connection, and keep the endpoint's host for the
 HTTP authority and the TLS server name. A `timeout_ms` covers the lookup and connection setup as
-well as the response, and for `grpc` it is also the connection timeout. Without it, only a
-thirty-second limit bounds the lookup, and neither the connection nor the export has a deadline of
-its own. A failed lookup is an export failure that the emitter retries on its `RETRY POLICY`.
+well as the response, and for `grpc` it is also the connection timeout. A failed lookup is an
+export failure that the emitter retries on its `RETRY POLICY`.
 
 One log record is mapped as follows:
 
@@ -2009,26 +2022,17 @@ CREATE OTEL LOGS EMITTER audit_to_otel
   ON GENERAL ERROR LOG;
 ```
 
-The clause order is fixed: signal, required `VALUES`, optional `ATTRIBUTES`, optional `RESOURCE`,
-optional `SCOPE '<name>' [VERSION '<version>']`, then `MODE`. `RESOURCE` values must be literals or
+The clause order is fixed: destination and metric options, `MODE`, required `VALUES`, optional
+`ATTRIBUTES`, optional `RESOURCE`, then optional `SCOPE '<name>' [VERSION '<version>']`.
+`RESOURCE` values must be literals or
 literal arrays. `ATTRIBUTES` may use exact-typed `STRING`, `BOOL`, integer-family, `F32`, `F64`,
 `DATETIME`, or array values; datetimes become RFC 3339 strings. Null attribute values are omitted.
 Normal sensitivity rules apply to every expression, including `ATTRIBUTES`.
 
-The closed log `VALUES` set is:
-
-- `time`: required `DATETIME`
-- `body`: required `STRING`
-- `severity_text`: optional `STRING`
-- `severity_number`: optional `I32` in `0..=24`
-- `trace_id`: optional nonzero 32-hex-character `STRING`
-- `span_id`: optional nonzero 16-hex-character `STRING`
-
-Trace emitters use the `OTEL TRACES EMITTER` head and `TO <client>`. Their closed `VALUES` set requires `trace_id`
-(nonzero 32-hex `STRING`), `span_id` (nonzero 16-hex `STRING`), `name` (`STRING`), `start_time`
-(`DATETIME`), and `end_time` (`DATETIME`). Optional keys are `parent_span_id` (nonzero 16-hex
-`STRING`), `kind` (`SERVER`, `CLIENT`, `INTERNAL`, `PRODUCER`, or `CONSUMER`), `status_code` (`OK`,
-`ERROR`, or `UNSET`), and `status_message` (`STRING`). Enum strings are case-sensitive.
+Each signal's generated table above gives its closed `VALUES` keys, exact types, requiredness,
+and record constraints. Those tables also list the unsupported OTLP features and their reasons.
+Timestamps cannot precede the Unix epoch. Key/type and required-mapping checks happen at CREATE
+and ALTER; record-dependent ranges and histogram cardinality are checked while encoding each row.
 
 Each metric emitter defines exactly one metric stream:
 
@@ -2054,11 +2058,15 @@ require `time` (`DATETIME`) and `value` (an exact integer-family, `F32`, or `F64
 values use OTLP `as_int`; floating-point values use `as_double`. `start_time` is required for a
 delta sum and optional otherwise.
 
-Histogram points require `time`, integer-family `count`, integer-array `bucket_counts`, and `F32`
-or `F64` array `explicit_bounds`. Optional keys are `start_time`, numeric `sum`, `min`, and `max`;
+Histogram points require `time`, `U64` `count`, a `U64` ARRAY or VEC `bucket_counts`, and an `F32`
+or `F64` ARRAY or VEC `explicit_bounds`. Optional keys are `start_time` and floating-point `sum`, `min`, and `max`;
 `start_time` is required for delta histograms. At runtime, counts must be non-negative and
 `len(bucket_counts)` must equal `len(explicit_bounds) + 1`. Exponential histograms and summaries
 are not supported.
+
+BATCH is optional and has no learned protocol maximum. A Collector's common 4 MiB gRPC receive
+default is deployment advice: configure the receiver and the emitter's `MAX SIZE` together.
+Nervix does not impose that receiver default as a limit on every Export request.
 
 Without `BATCH`, each pending Arrow batch becomes one Export request containing one resource, one
 scope, and all successfully converted records. With `BATCH`, the connector keeps that resource and

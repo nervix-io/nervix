@@ -203,22 +203,28 @@ impl Arbitrary<'_> {
                 EmitterEntity::from(OtelLogsEmitter {
                     mode: self.otel_logs_publication(),
                     client: self.name(),
-                    mappings: self.otel_mappings(),
+                    mappings: self.otel_mappings(OTEL_LOG_VALUE_FIELDS, false),
                 })
             }
             EmitterEntityKind::Otel(OtelEmitterEntity::Traces) => {
                 EmitterEntity::from(OtelTracesEmitter {
                     mode: self.otel_traces_publication(),
                     client: self.name(),
-                    mappings: self.otel_mappings(),
+                    mappings: self.otel_mappings(OTEL_TRACE_VALUE_FIELDS, false),
                 })
             }
             EmitterEntityKind::Otel(OtelEmitterEntity::Metrics) => {
+                let metric = self.otel_metric();
+                let fields = match metric.kind {
+                    OtelMetricKind::Gauge | OtelMetricKind::Sum { .. } => OTEL_NUMBER_VALUE_FIELDS,
+                    OtelMetricKind::Histogram { .. } => OTEL_HISTOGRAM_VALUE_FIELDS,
+                };
+                let mappings = self.otel_mappings(fields, metric.kind.is_delta());
                 EmitterEntity::from(OtelMetricsEmitter {
                     mode: self.otel_metrics_publication(),
                     client: self.name(),
-                    metric: self.otel_metric(),
-                    mappings: self.otel_mappings(),
+                    metric,
+                    mappings,
                 })
             }
             EmitterEntityKind::ClickHouse(ClickHouseEmitterEntity::Table) => {
@@ -290,8 +296,16 @@ impl Arbitrary<'_> {
     }
 
     /// The mappings every OTEL signal shares, with an optional instrumentation scope.
-    fn otel_mappings(&mut self) -> OtelMappings {
-        let values = self.value_mappings(1);
+    fn otel_mappings(&mut self, fields: &[OtelValueField], delta: bool) -> OtelMappings {
+        let mut values = Vec::new();
+        for field in fields {
+            if field.presence.is_required(delta) || self.entropy.flag() {
+                values.push(EmitterValueMapping {
+                    column: field.key.to_owned(),
+                    expression: self.expression(),
+                });
+            }
+        }
         let attributes = self.value_mappings(0);
         let resource = self.literal_mappings();
         let scope = if self.entropy.flag() {
