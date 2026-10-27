@@ -467,8 +467,8 @@ while four complete occurrences within less than one interval expose a catch-up 
 rate `0.1`, with the same one- and three-node examples and replica counts. The slow-rate profile
 discriminates against scheduling in physical time: four 200ms physical occurrences would span only
 60ms of logical time, below the required 200ms. Longer gaps from missed/coalesced periods remain
-valid. The fixture's two-day logical branch TTL exceeds the current 75-minute suite budget at
-rate `20.0` (25 logical hours); branch expiry is not the subject of this scenario.
+valid. The fixture's two-day logical branch TTL exceeds the current 105-minute suite budget at
+rate `20.0` (35 logical hours); branch expiry is not the subject of this scenario.
 
 The focused observation regressions use a paused test clock to delay nineteen subscription reads
 by a second each, including eleven rows from the first branch before both branches appear. They

@@ -1361,6 +1361,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-emit).
 <!-- connector-matrix:emit-redis-pubsub:end -->
 
+`CHANNEL` uses the same rule as [Redis ingestion](ingestors.md#redis-pubsub): a nonempty literal
+of at most 1,024 UTF-8 bytes, preserved exactly. A star in `CHANNEL 'Orders:EU/*'` is part of the
+channel name. Pub/Sub has no transport headers or per-message envelope, so payload fields must
+carry application attributes. `BATCH` is optional; the emitter learns no additional size limit
+from Redis, whose `proto-max-bulk-len` refusal follows the ordinary record-error policy.
+
 Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` response confirms
 server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
 failures retry the undelivered work. A `REDIS CLIENT` declares its connection-pool bounds; see
