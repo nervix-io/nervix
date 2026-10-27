@@ -263,6 +263,11 @@ sequenceDiagram
     Session-->>Client: Failed command with diagnostic and source span
 ```
 
+Connector inspection renders configured error-policy expressions through the same canonical owner
+as Plexus output. A canonical-rendering failure remains `CanonicalPlexusError` until the command
+response boundary; `DESCRIBE INGESTOR` and `DESCRIBE EMITTER` return that failure instead of a
+partially rendered description.
+
 ## Ownership And Propagation
 
 ### Layers

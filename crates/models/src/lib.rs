@@ -70,10 +70,10 @@ pub use backup::{
     BackupDomainSummary, BackupQuiesceCounters, BackupResources, BackupScope, DescribeBackup,
 };
 pub use canonical::{
-    CanonicalPlexusError, PLEXUS_LANGUAGE_VERSION, alter_avro_wire_schema_to_canonical_plexus,
-    alter_cbor_wire_schema_to_canonical_plexus, alter_json_wire_schema_to_canonical_plexus,
-    canonical_plexus_document, expression_to_plexus, ingest_quiesce_to_plexus,
-    ingestor_input_body_to_plexus, string_literal,
+    CanonicalPlexusError, EntityPresentation, PLEXUS_LANGUAGE_VERSION,
+    alter_avro_wire_schema_to_canonical_plexus, alter_cbor_wire_schema_to_canonical_plexus,
+    alter_json_wire_schema_to_canonical_plexus, canonical_plexus_document, expression_to_plexus,
+    ingest_quiesce_to_plexus, ingestor_input_body_to_plexus, string_literal,
 };
 pub use client_consumer::{
     CLIENT_CONSUMER_NODE_BYTES, CLIENT_CONSUMER_SESSION_BYTES, ClientConsumerLimits,
@@ -322,7 +322,7 @@ pub use statement::{
     InspectionFormat, LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind,
     PlacementPolicy, RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
     RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
-    RetryPolicy, ShowClusterStatus, ShowCreate, ShowIngestors, ShowPlacements,
+    RetryPolicy, ShowClusterStatus, ShowCreate, ShowEmitters, ShowIngestors, ShowPlacements,
     ShowRelayMaterializedState, ShowTransactions, ShowUdfs, SignalingProtobufConfig,
     SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat, StartDomain,
     Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior, SubscriptionLiteral,

@@ -12,12 +12,13 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use meticulous::ResultExt as _;
 use nervix_models::{
     AckMode, AlterRelay, AlterRelayOperation, ClusterNodeName, CordonNode, CorrelatorName,
     DeduplicatorName, DescribeRelay, DrainNode, DropModel, DropNode, EmitterName, EndpointName,
     FieldName, FlushPolicy, IngestorName, JunctionName, Model, ModelKind, ModelName,
     ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName, SchemaName,
-    ShowIngestors, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
+    ShowEmitters, ShowIngestors, Statement, SubscriptionBinding, SubscriptionLiteral, UncordonNode,
     WasmProcessorName, WindowProcessorName,
 };
 use nonzero_ext::nonzero;
@@ -323,6 +324,32 @@ fn show_context_suggestions_include_cluster_without_entity_leakage() {
     assert!(!suggestions.contains(&"INGESTOR".to_string()));
     assert!(!suggestions.contains(&"SCHEMA".to_string()));
     assert!(!suggestions.contains(&"CLIENT".to_string()));
+}
+
+#[test]
+fn show_emitters_is_a_complete_case_insensitive_read_statement() {
+    for source in ["SHOW EMITTERS;", "show emitters"] {
+        let statement =
+            parse_statement(source).assured("the fixture is a complete listing without operands");
+        assert_eq!(statement, Statement::ShowEmitters(ShowEmitters));
+        assert_eq!(
+            statement
+                .to_canonical_plexus()
+                .assured("a listing contains no fallible expression"),
+            "SHOW EMITTERS;"
+        );
+    }
+    assert!(parse_statement("SHOW EMITTERS outgoing;").is_err());
+    let source = "SHOW EMITTERS ";
+    let suggestions = suggest_statement(source, source.len());
+    for foreign in ["FROM", "TO", "MODE", "VALUES"] {
+        assert!(
+            !suggestions.contains(&foreign.to_owned()),
+            "{foreign} leaks after the complete listing"
+        );
+    }
+    let suggestions = suggest_statement("", 0);
+    assert!(suggestions.contains(&"SHOW EMITTERS".to_owned()));
 }
 
 #[test]

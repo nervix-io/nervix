@@ -53,9 +53,12 @@ does not accept it. A client the body names must be a client of the head's conne
 endpoint must have the head's `TYPE`; completion after `FROM` offers only those, and any other
 reference is refused when the statement is applied, with a message that names both kinds, such as
 `requires a KAFKA client, but client 'cache' is a REDIS client`. `SHOW CREATE INGESTOR` renders the
-complete statement under its head. `DESCRIBE INGESTOR` prints the pair and the body on its `from:`
-line, such as `from: KAFKA TOPIC kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' MODE
-NO ACK ON QUIESCE SUSPEND`, and `SHOW INGESTORS` prints the pair alone, such as `from=KAFKA TOPIC`.
+complete statement under its head. `DESCRIBE INGESTOR` prints the pair, reference and locator on
+its `from:` line, such as `from: KAFKA TOPIC kafka_main TOPIC 'Orders'`. The following rows show
+`options: OFFSET BY CONSUMER GROUP 'Readers' INSTANCES 1`, `mode: NO ACK`, and `quiesce: SUSPEND`.
+The shared [inspection block](connector-contract.md#shared-entity-presentation) then reports its
+envelope, batching, output flush policies and error policies. `SHOW INGESTORS` prints the pair
+alone, such as `from=KAFKA TOPIC`.
 
 Every ingestor defines:
 
@@ -863,10 +866,10 @@ holding a slot of its window:
 orders_in from=CLIENT PRODUCER schema=order_in owner=node-2 status=running admission=open producers=2 outstanding_batches=3 outstanding_bytes=2412 admitted_batches=2
 ```
 
-`DESCRIBE INGESTOR` renders `from:` with the head's phrase and the complete body, such as
-`from: CLIENT PRODUCER SCHEMA order_in MODE ACK PARALLEL MAX 4 ACK TIMEOUT 30s RETRY POLICY BACKOFF
-100ms MAX 1s ON QUIESCE SUSPEND`, and `schema:`, `mode:`, `owner:`, `admission:`, `producers:`,
-`forwarded producers:`, `outstanding batches:`, `outstanding bytes:`, and `admitted batches:`. The
+`DESCRIBE INGESTOR` renders `from: CLIENT PRODUCER SCHEMA order_in`, then `options: none`, the
+complete acknowledgement window on `mode:`, and `quiesce: SUSPEND`. Its runtime rows include
+`schema:`, `owner:`, `admission:`, `producers:`, `forwarded producers:`, `outstanding batches:`,
+`outstanding bytes:`, and `admitted batches:`. The
 node that executes the ingestor also exports the same counts and every answered batch as metrics;
 see [Metrics And Observability](metrics-and-observability.md#client-ingestors).
 
@@ -1202,7 +1205,8 @@ Different configured host names are distinct addresses even if DNS resolves them
 Declaring the retained subscription `PROVISIONED` hands its ownership to the operator and keeps
 its backlog. Removal on replacement has the same timeout and best-effort reporting as removal
 on drop; a failure does not prevent starting the replacement. `DESCRIBE INGESTOR`
-shows the ownership as `pulsar subscription ownership: OWNED BY INGESTOR` or `PROVISIONED`.
+shows the subscription name, `OWNED BY INGESTOR` or `PROVISIONED`, and `INSTANCES` together
+in the declared `options:` row.
 
 Client config currently supports:
 
@@ -1819,7 +1823,8 @@ length or whose body exceeds the bound fails the poll before any of its samples 
 `DESCRIBE INGESTOR` shows the failure as the ingestor's transient error, such as `transient error:
 failed to read from prometheus source: Prometheus query response exceeds MAX BODY SIZE 16MiB`, and
 the next poll queries again. `DESCRIBE INGESTOR` prints the bound in effect, whether the statement
-wrote it or not, as `prometheus max body size: 16MiB`. `SET FROM` replaces the whole body, so an
+wrote it or not, in `options: QUERY 'bulk' MAX BODY SIZE 16MiB EVERY 1s`. `SET FROM` replaces the
+whole body, so an
 `ALTER PROMETHEUS QUERY INGESTOR` whose new body leaves `MAX BODY SIZE` out reads at most `16MiB`
 again.
 The samples of one response enter the graph in intake batches of at most 1024 samples, and each

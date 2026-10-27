@@ -358,6 +358,7 @@ impl IngestorEntityBody for MqttTopicIngestor {
     RkyvSerialize,
     RkyvDeserialize,
     AsRefStr,
+    strum::EnumIter,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum MqttSession {
@@ -386,6 +387,7 @@ impl MqttSession {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    strum::EnumIter,
 )]
 pub enum MqttQos {
     AtMostOnce,

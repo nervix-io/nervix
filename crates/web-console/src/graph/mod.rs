@@ -162,7 +162,11 @@ mod tests {
             "emitter:emitter",
             "emitter",
             DataflowNodeRole::Emitter {
-                transport: "REDIS".to_string(),
+                transport: nervix_models::EmitterEntityKind::Redis(
+                    nervix_models::RedisEmitterEntity::PubSub,
+                )
+                .phrase()
+                .to_owned(),
             },
         );
         let item = graph_layout_item(&emitter);

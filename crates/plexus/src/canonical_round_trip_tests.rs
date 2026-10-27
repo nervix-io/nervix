@@ -15,6 +15,7 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
+use chumsky::prelude::*;
 use nervix_arbitrary::{Arbitrary, Domain, ModelVariant, StatementVariant};
 use nervix_models::{
     CreateStatement, CreateSubscription, DeleteSubscription, DescribeBackup, EmitterEntityKind,
@@ -222,6 +223,93 @@ fn bolero_expression_roundtrip_minimal_parentheses() {
                 .unwrap_or_else(|error| panic!("{expression:?} must render: {error:?}"));
             assert_every_entry_point_reads(&rendered, &expression);
         });
+}
+
+#[test]
+fn bolero_entity_presentations_keep_declared_rows_and_complete_configuration() {
+    bolero::check!()
+        .with_iterations(128)
+        .with_max_len(2048)
+        .for_each(|bytes: &[u8]| {
+            let mut statements = Vec::new();
+            for kind in IngestorEntityKind::all() {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
+                let ingestor = arbitrary.create_ingestor_from(kind);
+                let presentation = ingestor.input.entity_presentation();
+                assert_eq!(presentation.phrase(), kind.phrase());
+                assert_presentation_rows(&presentation, "from");
+                statements.push(ClientStatement::Server(Statement::Create(
+                    CreateStatement::new(Box::new(Model::Ingestor(ingestor)), false),
+                )));
+            }
+            for kind in EmitterEntityKind::all() {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
+                let emitter = arbitrary.create_emitter_to(kind);
+                let presentation = emitter
+                    .connector
+                    .entity_presentation()
+                    .unwrap_or_else(|error| panic!("the generated sink renders: {error:#}"));
+                assert_eq!(presentation.phrase(), kind.phrase());
+                assert_presentation_rows(&presentation, "to");
+                statements.push(ClientStatement::Server(Statement::Create(
+                    CreateStatement::new(Box::new(Model::Emitter(emitter)), false),
+                )));
+            }
+            assert_entity_round_trips(&statements);
+        });
+}
+
+/// Reuses each production grammar across this input's entities. Building the complete grammars
+/// for every entity dominated the bounded campaign without exercising another representation.
+fn assert_entity_round_trips(statements: &[ClientStatement]) {
+    let sources = statements
+        .iter()
+        .map(|statement| {
+            let canonical = statement
+                .to_canonical_plexus()
+                .unwrap_or_else(|error| panic!("{statement:?} must render: {error:?}"));
+            let lexed = crate::parser_support::lex_input(&canonical)
+                .unwrap_or_else(|error| panic!("{canonical}\nmust lex: {error:?}"));
+            (canonical, lexed)
+        })
+        .collect::<Vec<_>>();
+    let client = crate::client_statement::client_statement_parser().then_ignore(end());
+    let server = crate::statement::statement_parser().then_ignore(end());
+    for (statement, (canonical, lexed)) in statements.iter().zip(&sources) {
+        let reparsed = client
+            .parse(lexed.tokens.as_slice())
+            .into_result()
+            .unwrap_or_else(|error| panic!("{canonical}\nmust reparse: {error:?}"));
+        assert_eq!(
+            &reparsed, statement,
+            "{canonical}\nchanged when it was reparsed"
+        );
+        let ClientStatement::Server(expected) = statement else {
+            panic!("entity creation must be a server statement: {statement:?}");
+        };
+        let served = server
+            .parse(lexed.tokens.as_slice())
+            .into_result()
+            .unwrap_or_else(|error| panic!("{canonical}\nmust reparse on a server: {error:?}"));
+        assert_eq!(
+            &served, expected,
+            "{canonical}\nchanged when a server reparsed it"
+        );
+    }
+}
+
+fn assert_presentation_rows(presentation: &nervix_models::EntityPresentation, reference: &str) {
+    let rows = presentation.describe_lines();
+    let keys = rows
+        .iter()
+        .map(|row| {
+            row.split_once(':')
+                .unwrap_or_else(|| panic!("inspection row needs a label: {row}"))
+                .0
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(keys, [reference, "options", "mode", "quiesce", "envelope"]);
+    assert!(rows[0].starts_with(&format!("{reference}: {} ", presentation.phrase())));
 }
 
 #[test]

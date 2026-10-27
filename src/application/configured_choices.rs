@@ -413,7 +413,7 @@ impl ConfiguredChoices {
                 {
                     ModelCandidate::new(
                         model.node_ref(),
-                        format!("{} client", kind.form_label()),
+                        format!("{} CLIENT", kind.connector().keyword()),
                         "Client source",
                         model.to_public_plexus(),
                     )?

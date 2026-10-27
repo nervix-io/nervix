@@ -60,6 +60,11 @@ plan identifies those relays; channel-generation retirement and record delivery 
 handles, without another recurring map lookup. Publication or domain teardown keeps ownership of
 the registry entries. The read guard ends before waiting for dispatch quiescence.
 
+`SHOW EMITTERS` is an observer path: it lists the selected domain's emitter identifiers and reads
+each current Model once through the registry, with the command work budget checked per entry.
+It adds no recurring data-plane access or retained map guard; concurrent deletion skips the
+vanished emitter, matching other configuration listings.
+
 The frequency of a map is its hottest access:
 
 - **per record**: once per accepted record, row or delivered message

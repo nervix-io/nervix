@@ -10973,14 +10973,18 @@ mod tests {
         let emitter = view_node(
             "emitter:redis",
             DataflowNodeRole::Emitter {
-                transport: "REDIS".to_string(),
+                transport: nervix_models::EmitterEntityKind::Redis(
+                    nervix_models::RedisEmitterEntity::PubSub,
+                )
+                .phrase()
+                .to_owned(),
             },
             None,
             &[],
         );
         assert_eq!(emitter.command_kind(), "EMITTER");
         assert_eq!(emitter.kind_label(), "EMITTER");
-        assert_eq!(emitter.detail_label(), "REDIS");
+        assert_eq!(emitter.detail_label(), "REDIS PUBSUB");
     }
 
     #[test]
@@ -12122,7 +12126,11 @@ mod tests {
             id,
             label,
             DataflowNodeRole::Emitter {
-                transport: "REDIS".to_string(),
+                transport: nervix_models::EmitterEntityKind::Redis(
+                    nervix_models::RedisEmitterEntity::PubSub,
+                )
+                .phrase()
+                .to_owned(),
             },
         )
         .with_branch(branch)

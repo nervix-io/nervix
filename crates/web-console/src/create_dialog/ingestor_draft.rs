@@ -301,15 +301,14 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
         BinaryOperator, CodecName, Expression, FieldName, FieldReference, FieldScope,
-        GeneralErrorPolicy, HttpIngestorEntity, IngestQuiesceOverflow, IngestorEntityKind,
-        Inheritance, Literal, ModelKind, ModelName, NodeRef,
+        GeneralErrorPolicy, HttpIngestorEntity, IngestQuiesceKind, IngestQuiesceOverflow,
+        IngestorEntityKind, Inheritance, Literal, ModelKind, ModelName, NodeRef,
     };
 
     use super::{IngestorDraft, TimestampDraft};
     use crate::create_dialog::{
         SelectedReference,
         ingestor_route_draft::{FlushDraft, InheritDraft, MessageErrorDraft},
-        ingestor_source_draft::QuiesceChoice,
     };
 
     fn node(kind: ModelKind, name: &str) -> NodeRef {
@@ -327,7 +326,7 @@ mod tests {
         draft
             .source
             .select_reference(&node(ModelKind::Endpoint, "edge"));
-        draft.source.quiesce = Some(QuiesceChoice::Buffer);
+        draft.source.quiesce = Some(IngestQuiesceKind::EndpointBuffer);
         draft.source.buffer_size = "1MiB".into();
         draft.source.overflow = Some(IngestQuiesceOverflow::DropOldest);
         draft.codec = Some(SelectedReference::chosen(
