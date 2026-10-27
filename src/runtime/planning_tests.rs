@@ -1247,6 +1247,7 @@ fn branched_node_specs_capture_downstream_processing_tree() {
                     body: nervix_models::EmitterBody::Codec {
                         codec: named("orders_codec"),
                     },
+                    envelope: nervix_models::EmitterEnvelope::default(),
                     connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
                         ZeroMqPushEmitter {
                             mode: nervix_models::ZeroMqPushPublishingMode::NoAck {

@@ -35,6 +35,8 @@ An emitter defines:
 - whether the branch is `ATTACHED` or `DETACHED`
 - route-local codec construction or a direct `VALUES` mapping
 - optional ordered header invocations on supported codec emitters
+- optional [envelope clauses](#envelope-clauses) and properties its entity declares, which set what
+  its transport carries beside each payload
 - optional ordered materialized-state dependencies
 
 ## Statement heads and external names
@@ -665,7 +667,8 @@ transformation built instead.
 
 The emitter walks the Arrow carriers released by one flush in arrival order, and each carrier's
 eligible rows in source order. A payload can span carriers only while their source relay, exact
-named and concrete branch, key, ordered written headers, ordering group and, with a `SYSLOG` codec,
+named and concrete branch, key, ordered written headers, ordering group, envelope and, with a
+`SYSLOG` codec,
 syslog header other than the timestamp agree. A different value seals the open payload before the
 next row is considered; no row is skipped over or reordered. A carrier retains its own execution
 snapshot and row membership for errors and acknowledgements. A payload with one member keeps the
@@ -895,9 +898,10 @@ with both phrases in the diagnostic. Changing that kind requires dropping the em
 one of the new kind.
 
 `SET TO` accepts that entity's complete body after `TO`: reference, quoted locator and entity
-options, required `MODE`, and its codec, direct `VALUES` mapping or explicit `WITHOUT BODY`.
-It replaces the payload selection. An explicitly written construction replaces the construction;
-omitting construction keeps the existing one. Batching and flush policies remain in place.
+options, required `MODE`, its codec, direct `VALUES` mapping or explicit `WITHOUT BODY`, and its
+[envelope clauses](#envelope-clauses). It replaces the payload selection and the envelope. An
+explicitly written construction replaces the construction; omitting construction keeps the existing
+one. Batching and flush policies remain in place.
 `SET MODE` accepts only policies that entity represents. `SET CLIENT` changes its client reference.
 `SET COMMIT` is available for Iceberg. `SET ENCODE USING` and `DROP ENCODE` are available only for
 encoded destinations; dropping an absent codec fails, and HTTP requires an explicit body selection.
@@ -1028,6 +1032,66 @@ Nested conditions and chained calls such as `contains(lower(trim(input.raw)), 'w
 before encoding.
 
 Client-backed emitters can use resource-mounted client config values for TLS material and other file-based settings. See [Resources](resources.md#client-config-mounts).
+
+## Envelope clauses
+
+An emitter sets what its transport carries beside each payload with envelope clauses. They follow
+the payload — `ENCODE USING <codec>`, `VALUES { … }` with its `ON CONFLICT`, `WITHOUT BODY`, or a
+client emitter's `MODE` — and come before the construction:
+
+```plexus,ignore
+TO <client> [<locator>] [<entity options>]
+  MODE <mode>
+  (ENCODE USING <codec> | VALUES { … } [ON CONFLICT …] | WITHOUT BODY)
+  [PERSISTENT] [MANDATORY] [RETAIN]
+  [TIMESTAMP <expression>]
+  [DELIVER AFTER <duration>] [DELAY <duration>]
+  [REPLY TO <expression>] [MESSAGE ID <expression>] [DEDUPLICATION ID <expression>]
+  [PROPERTIES { '<key>' = <expression>, … }]
+[INHERIT …] [SET …] [WHERE …] [INVOKE …]
+```
+
+A statement writes each clause at most once, in this order, and only where the emitter's entity
+declares it; completion offers exactly the clauses the entity declares. `PROPERTIES` sets keys of
+the entity's closed property set, each at most once and in any order. A clause or key the entity
+does not declare is refused where it is written, with the entity and the clause or key named, and
+the registry refuses it again in a Model that reaches it another way. The
+[capability matrix](connector-capabilities.md) lists the clauses and properties each entity
+declares, and each entity's section below says what its transport does with them. No entity
+declares one yet, so every emitter refuses every clause today.
+
+| Clause | Written with | Value every record carries |
+| --- | --- | --- |
+| `PERSISTENT`, `MANDATORY`, `RETAIN` | nothing | the flag, set |
+| `TIMESTAMP` | an expression | its non-null `DATETIME` |
+| `DELIVER AFTER`, `DELAY` | a duration literal | the duration, greater than zero |
+| `REPLY TO`, `MESSAGE ID`, `DEDUPLICATION ID` | an expression | its non-null `STRING` |
+| `PROPERTIES` key | an expression | its non-null value of the key's declared type: an unsigned or signed integer of a declared width, `BOOL`, `STRING`, `DATETIME` or `BYTES` |
+
+An envelope expression reads what a header write reads: the source record as `input`, the record
+the emitter publishes as `message`, and the output its route constructs as `output` where it
+constructs one — a codec or client emitter that writes a construction, or an HTTP emitter with an
+encoded body — together with the materialized state, lookups and UDFs the emitter may reach. An
+emitter without a construction publishes its source records, so its `message` is the source record
+and it has no `output`. Every value has the clause's or key's exact type and is statically non-null,
+and a sensitive value requires `leak_sensitive`, as `CREATE` and `ALTER` check with a message such
+as `envelope TIMESTAMP requires an exact, non-null, non-sensitive DATETIME value`.
+
+Nervix evaluates the envelope once for every batch it admits, after the route kept and finalized
+its rows, with the execution time and materialized-state snapshot the route used. A record whose
+envelope expression fails or produces no value is not sent. It follows `ON MESSAGE ERROR` as an
+`evaluation` error of the `publish` operation whose message begins `envelope` and names the clause
+or key, such as `envelope MESSAGE ID expression failed with division_by_zero at …`, and the
+emitter's other records are still sent. A record the route's `WHERE` drops is never evaluated.
+
+Each record reaches its connector with its evaluated envelope. Records whose envelopes differ never
+share a [batch payload](#batch-payloads). A payload is retained with its envelope until the
+connector answers for it, so every attempt, including the one after an unknown outcome, sends the
+envelope the first attempt sent. `DESCRIBE EMITTER` prints the envelope on its `envelope:` line as
+the statement writes it, or `envelope: none`, and `SHOW CREATE` writes it in the destination's
+section. `ALTER … SET TO` replaces the envelope with the rest of the destination body, so a body
+that writes no envelope clause removes them. A changed envelope is a destination change, applied
+with `ENTITY_PAUSE`.
 
 ## TLS Client Configuration
 

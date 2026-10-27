@@ -1064,8 +1064,14 @@ typed node identity, and a `ConnectorDeclarationIssue` naming the refused clause
 Duration failures retain the duration reader's typed cause; an unschedulable duration and an
 inverted retry range are distinct issues. A mapped-value type failure reports the declared type
 and the expression's inferred Arrow type, such as `VALUES key 'severity_number' requires I32,
-found Int64`. These are command refusals before publication, including during `ALTER`, rather
-than retried source or sink initialization failures. They never include a record's values.
+found Int64`. An envelope clause or `PROPERTIES` key the entity does not declare is
+`ConnectorDeclarationIssue::Envelope`, carrying the vocabulary's typed
+`EnvelopeDeclarationError` that names the entity and the clause or key; an envelope duration
+reuses the duration issues under `DELIVER AFTER` or `DELAY`, and an envelope expression that is
+not an exact, non-null, non-sensitive value of its type is `EnvelopeValue`, naming the clause or
+key and the expected type with the VM's compile failure beneath it. These are command refusals
+before publication, including during `ALTER`, rather than retried source or sink initialization
+failures. They never include a record's values.
 
 MySQL table-name construction refuses empty path parts and more than two parts with typed
 `ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through
@@ -1231,9 +1237,9 @@ recorded before it can fail, so an ingestor never shows a failure a later attemp
 
 Emitter execution planning has typed failures for missing source relays or codecs, an unresolved
 or mismatched client, unsupported publishing mode, an invalid source predicate or route, invalid
-HTTP request fields or SQS ordering group, empty or invalid row mappings, nonliteral OTEL resource
-attributes, and invalid Iceberg commit settings. Each report names the emitter and, for a source
-predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
+HTTP request fields, SQS ordering group or envelope, empty or invalid row mappings, nonliteral OTEL
+resource attributes, and invalid Iceberg commit settings. Each report names the emitter and, for a
+source predicate, its relay. The decision fails before a new emitter plan or remote consumer edge is
 published. Binding a valid plan against installed schemas and UDFs may still fail during startup;
 opening an external emitter may fail independently and follows the emitter's retry policy.
 
@@ -1273,11 +1279,11 @@ Starting an emitter on a node returns an `EmitterStartError` report. `EmitterSta
 names the emitter and its domain, and the step that failed stays beneath it: an input relay the
 node has no schema or resolved branching for, a client whose configuration does not resolve, a
 codec the node has not instantiated or that cannot hold a batch, a route, HTTP request fields,
-ordering group or `FROM WHERE` that does not compile, with the compile failure beneath it, and an
-invalid emitter client configuration or input collection policy. Starting a generator returns a
-`GeneratorError` report the same way: `GeneratorError::Start` names the generator and its domain
-above an output relay the node has not instantiated, an output program that does not compile, a
-cadence the domain clock cannot bind, an invalid output flush policy, or a source relay without a
+ordering group, envelope or `FROM WHERE` that does not compile, with the compile failure beneath
+it, and an invalid emitter client configuration or input collection policy. Starting a generator
+returns a `GeneratorError` report the same way: `GeneratorError::Start` names the generator and its
+domain above an output relay the node has not instantiated, an output program that does not compile,
+a cadence the domain clock cannot bind, an invalid output flush policy, or a source relay without a
 dispatch gate. The domain build keeps either report whole beneath
 `RuntimeError::BuildDomainExecution`, so a failed command renders it after the domain, such as
 `failed to build domain execution for 'edge': failed to start emitter 'audit' in domain 'edge': the
@@ -1544,7 +1550,11 @@ The error names the step that failed: preparing lookup inputs or the input batch
 program, materializing an error input row or the successful rows, building the output batch, a row
 sidecar whose count differs from the batch, a row selected outside the input, an output relay whose
 schema was not prepared or does not match, an ordering group column that is missing or not
-`STRING`, or the HTTP requests of the batch. It names the program by its clause, such as
+`STRING`, the HTTP requests of the batch, or the envelopes of the batch, whose
+`EmitterEnvelopeError` names a value column that is not the clause's type or the source records
+that could not be selected. A record whose own envelope fails keeps its `EnvelopeError` instead:
+the host rejects only that record, as an `evaluation` error of the `publish` operation whose message
+begins `envelope`. It names the program by its clause, such as
 `FILTER WHERE`, `FILTER-MAP` or branch construction, and the failure the step returned, such as the
 VM's `RuntimeError` or a `RuntimeSchemaError`, stays beneath it. The node's general or internal
 error policy renders the whole chain when it reports the failure and resolves the

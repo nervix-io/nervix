@@ -120,3 +120,14 @@ commit-size limit. Registry and Model archive properties compare those fields wi
 Model. The vocabulary owner separately checks namespace JSON/archive equality and backend
 conversions in `models-iceberg-declarations`; `client-config-schema` covers ordered owned and
 delegated configuration values through JSON/archive equality and public inspection.
+
+## Emitter Envelope Coverage
+
+The vocabulary domain of the emitter Model generator draws envelopes of every clause kind, with
+durations, expressions and properties of any name in written order. `models-archived-models`,
+`registry-archived-models`, `registry-stored-models`, `registry-stored-models-corruption` and the
+consensus Model targets carry them through their Model storage boundaries with the complete Model.
+`models-emitter-envelopes` compares the envelope alone through JSON and the archive, and
+`plexus-emitter-envelopes` reads its canonical section back through the shared envelope grammar.
+The Plexus domain draws only what an entity declares, so canonical statement round trips carry an
+envelope once a connector entity declares a clause.

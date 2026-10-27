@@ -227,6 +227,7 @@ mod emitter_buffer;
 mod emitter_client;
 mod emitter_connectors;
 mod emitter_encoding;
+mod emitter_envelope;
 mod emitter_http_requests;
 mod emitter_ordering_group;
 mod emitter_publishing;
@@ -413,6 +414,7 @@ use emitter_buffer::{
 use emitter_client::{ClientConsumerConnector, ClientPayload};
 use emitter_connectors::EmitterConnectorStarter;
 use emitter_encoding::EncodedRecordEmitter;
+use emitter_envelope::{CompiledEnvelope, EnvelopeError, EnvelopeInput, RowEnvelopes};
 use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, OrderingGroups};
 use emitter_publishing::{
     EmitterConnector, EmitterConnectorState, EmitterPublishBatchOwner, EmitterPublishControl,

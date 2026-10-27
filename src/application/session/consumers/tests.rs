@@ -27,6 +27,7 @@ impl Default for EndpointFixture {
                 name: named("output"),
                 from: ProcessorInputs::single(named("input")),
                 body: EmitterBody::Client,
+                envelope: nervix_models::EmitterEnvelope::default(),
                 connector: Box::new(EmitterEntity::Client(ClientEmitter::Consumer(
                     ClientConsumerEmitter {
                         mode: nervix_models::ClientConsumerPublishingMode::Ack {

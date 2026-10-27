@@ -76,6 +76,9 @@ struct EmitterBatchContext<'a> {
     source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
     ordering_group: Option<&'a CompiledOrderingGroup>,
+    /// The envelope the emitter evaluates for every record its route keeps, absent where it writes
+    /// none.
+    envelope: Option<&'a CompiledEnvelope>,
     /// The request fields an HTTP emitter evaluates for every record its route keeps, absent for
     /// every other emitter.
     http_requests: Option<&'a CompiledHttpRequestFields>,
@@ -855,6 +858,14 @@ impl EmitterTask {
                 .change_context(EmitterStartError::OrderingGroup)?,
             ),
         };
+        let envelope = CompiledEnvelope::for_emitter(
+            &emitter.name,
+            emitter.envelope.as_ref(),
+            &input_schema,
+            &output_compiled_schema,
+            compile_context,
+        )
+        .change_context(EmitterStartError::Envelope)?;
         let mut source_filters = HashMap::default();
         for input in &emitter.inputs {
             let Some(source_filter) = input.from_where.as_ref() else {
@@ -1087,6 +1098,7 @@ impl EmitterTask {
                 source_filters: &source_filters,
                 filter_map: filter_map.as_ref(),
                 ordering_group: ordering_group.as_ref(),
+                envelope: envelope.as_ref(),
                 http_requests: http_requests.as_ref(),
                 materialized_state: &task_materialized_state,
             };
@@ -1894,17 +1906,27 @@ impl EmitterBatchContext<'_> {
                     .await;
             }
             // Without a filter map every source row publishes as it arrived, so the groups
-            // already align with the batch row for row.
+            // already align with the batch row for row, and each row is its own envelope input.
             let publish_batch =
                 EmitterPublishBatch::from_input(input_relay.clone(), batch, execution_now);
+            let publish_batch = self
+                .with_envelopes(
+                    publish_batch,
+                    EnvelopeInput::Published,
+                    &materialized_values,
+                    execution_now,
+                )
+                .await?;
             return self.with_ordering_groups(publish_batch, ordering_groups);
         };
 
-        // The request fields of an HTTP emitter with a codec body read the original source record
-        // of every finalized record its route keeps, and the route consumes the source batch.
-        let source_records = match (self.http_requests, filter_map.codec_route) {
-            (Some(_), true) => Some(SourceRecords::of(&batch)),
-            (Some(_), false) | (None, _) => None,
+        // The request fields of an HTTP emitter with a codec body, and the envelope of any emitter
+        // whose route constructs its records, read the original source record of every finalized
+        // record the route keeps, and the route consumes the source batch.
+        let reads_source_records = self.http_requests.is_some() || self.envelope.is_some();
+        let source_records = match (reads_source_records, filter_map.codec_route) {
+            (true, true) => Some(SourceRecords::of(&batch)),
+            (true, false) | (false, _) => None,
         };
         let planned = plan_emitter_filter_map_batch(
             self.runtime.executor(),
@@ -1958,6 +1980,22 @@ impl EmitterBatchContext<'_> {
                     return None;
                 }
             };
+        let envelope_input = match &source_records {
+            Some(records) => EnvelopeInput::Source {
+                records,
+                rows: &plan.source_rows,
+            },
+            // A route without a codec only filters, so the rows it keeps are source records.
+            None => EnvelopeInput::Published,
+        };
+        let publish_batch = self
+            .with_envelopes(
+                publish_batch,
+                envelope_input,
+                &materialized_values,
+                execution_now,
+            )
+            .await?;
 
         // The plan reports the source row of every output row in output order, so selecting the
         // source groups through it keeps each published row with the group its own input
@@ -2018,6 +2056,39 @@ impl EmitterBatchContext<'_> {
             Ok(publish_batch) => Some(publish_batch),
             Err(error) => {
                 self.report_publish_batch_error(error);
+                None
+            }
+        }
+    }
+
+    /// `publish_batch` with the envelope of each of its rows, evaluated after the route kept and
+    /// finalized them, when the emitter writes one.
+    ///
+    /// A batch whose envelopes cannot be evaluated at all is reported and dropped. A row whose own
+    /// envelope cannot be evaluated keeps its reason and is rejected at the send.
+    async fn with_envelopes(
+        &self,
+        publish_batch: EmitterPublishBatch,
+        input: EnvelopeInput<'_>,
+        side_inputs: &HashMap<String, RuntimeValue>,
+        execution_now: Timestamp,
+    ) -> Option<EmitterPublishBatch> {
+        let Some(envelope) = self.envelope else {
+            return Some(publish_batch);
+        };
+        let enveloped = publish_batch
+            .with_evaluated_envelopes(
+                envelope,
+                self.runtime.executor(),
+                input,
+                side_inputs,
+                execution_now,
+            )
+            .await;
+        match enveloped {
+            Ok(publish_batch) => Some(publish_batch),
+            Err(failure) => {
+                self.report_general_error(failure.acks.iter(), &failure.error);
                 None
             }
         }
@@ -2155,6 +2226,7 @@ mod tests {
             source_filters,
             filter_map: None,
             ordering_group: None,
+            envelope: None,
             http_requests: None,
             materialized_state,
         }
