@@ -1072,7 +1072,10 @@ reserved raw representation stays inside the encoding's owner. That state record
 still count against ownership handoff; a message parked on materialized `REQUIRED WAIT` does not
 keep a handoff blocked, and neither does a row a window retains until the window steps past it.
 Both owners hold one park guard per retained message and drop it before they acknowledge, so the
-acknowledgement removes the share the holder owns.
+acknowledgement removes the share the holder owns. A processor keeps a parked message's guard while
+it re-evaluates the message and drops it only when the message leaves its park: a message whose
+dependency is still absent returns to its queue with the same guard, so the re-evaluation publishes
+no progress and makes no share active.
 Remote ACK progress publishes a monotonic sequence with the root's parked handoff state. An
 upstream remote share follows that state, and its root publishes the resulting transition farther
 upstream. A delayed progress event cannot reactivate a newer parked state. Terminal ACK resolution
@@ -1669,8 +1672,11 @@ and rebuild only isolated authored artifacts; the gate preserves `RUSTC_WRAPPER`
 `just test-typed-ratchet` qualifies APIs and source diagnostics in the legal modes, ordinary Bolero
 properties, stable gated syntax and paired Rust API doctests. `just qualify-typed-ratchet-cache`
 qualifies fresh/Cargo-fresh runs, an actual kache dependency hit, changed inputs, missing and
-interrupted output, and two worktrees. Native coverage uses the matching LLVM tools and records
-the driver executions that ran. Sanitizer campaigns follow the shared Bolero label policy.
+interrupted output, and two worktrees. Cache qualification keeps its verdict outside native
+coverage. The instrumented compiler-fixture producer includes its paired fixture doctests;
+product API doctests and modeled fixture checks finish outside instrumentation. Native coverage
+uses the matching LLVM tools and records the driver executions that ran. Sanitizer campaigns follow
+the shared Bolero label policy.
 Calibration, measured cost and complete generated evidence belong on
 [Typed Ratchet 02A](https://app.clickup.com/t/86bcau18u).
 

@@ -450,6 +450,49 @@ Feature: Resource lifecycle
       versions: 1
       """
 
+  @resource_upload_idempotency
+  Scenario Outline: A leader resumes an upload whose publication it refused from its own installed copy
+    Given a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "proto_dir" containing
+      """
+      {
+        "schema/root.proto": "syntax = \"proto3\";",
+        "schema/types/common.proto": "message Common {}"
+      }
+      """
+    And the active domain is "{{domain}}"
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE proto;
+      """
+    Then the current leader node is saved as placeholder "upload_leader"
+    Given node "{{upload_leader}}" refuses its next uploaded resource version publication as a lost leadership
+    And client "uploader" is connected to the leader node
+    When client "uploader" selects domain "{{domain}}"
+    And client "uploader" uploads resource "proto" from "{{proto_dir}}" with identity "refused-publication"
+    Then the last command output contains
+      """
+      uploaded resource version 1
+      """
+    And the last client upload recovered version 1 from an earlier upload
+    And node "{{upload_leader}}" refused the publication until its reconciliation took the upload up
+    When client "uploader" executes these Plexus commands
+      """
+      DESCRIBE RESOURCE proto;
+      """
+    Then the last command output contains
+      """
+      resource: proto
+      latest: 1
+      versions: 1
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Uploading a second resource version appends to the version list
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"

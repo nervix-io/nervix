@@ -158,7 +158,7 @@ Feature: Interconnect health coordination
       CREATE RELAY independent_health_events SCHEMA health_event UNBRANCHED;
       SHOW CLUSTER STATUS;
       """
-    Then the last cluster status reports interconnect to "node-3" as "connected"
+    Then node "node-1" reports interconnect to "node-3" as "connected"
     Then the last cluster status owner for scheduled "relay" "independent_health_events" is saved as placeholder "independent_health_owner"
     And the application revision response pause on node "node-2" is reached
     And the application revision response pause on node "node-3" is reached
@@ -166,3 +166,25 @@ Feature: Interconnect health coordination
     And application revision responses from node "node-3" are released
     And the health response pause from node "node-1" to node "node-2" is released
     Then node "node-1" eventually observes a stable leader
+
+  Scenario: A leader-following health probe observes its answering node after leadership moves
+    Given the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And node "node-1" eventually reports leader "node-1"
+    And the leader node is configured with these Plexus statements
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      START;
+      """
+    And client "health_probe" is connected to node "node-1"
+    When leadership is transferred to node "node-3"
+    Then within "20s" client "health_probe" completes these Plexus statements
+      """
+      CREATE USER health_probe_admin WITH PASSWORD 'created-password';
+      SHOW CLUSTER STATUS;
+      """
+    Then the last command output contains
+      """
+      raft.id: node-3
+      """
+    And the last cluster status reports interconnect to "node-1" as "connected"

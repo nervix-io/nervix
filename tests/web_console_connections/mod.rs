@@ -2,9 +2,9 @@
 //! lose its session connection.
 //!
 //! Layer: test harness.
-//! - **Owns.** Starting a console page with the connection recorder in `recorder.js`, reading the
-//!   page's record, closing the session connection the page holds, and the steps that check the
-//!   record against the consoles of the scenario's nodes and the leaders the nodes reported on it.
+//! - **Owns.** Starting a console page with its connection recorder and optional bounded initial
+//!   frame gate, reading the page's record, releasing the gate, closing the session connection the
+//!   page holds, and checking the record against the scenario's consoles and reported leaders.
 //! - **Depends on.** The scenario's browser page and cluster, and the console connection record
 //!   and its checks.
 //! - **Must not know.** How the console drives its session, or how a node serves it.
@@ -13,13 +13,26 @@ use cucumber::{then, when};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::websocket::CONSOLE_SESSION_PATH;
 
-use super::{ScenarioWorld, expand_placeholders};
+use super::{
+    ScenarioWorld, append_cucumber_log_line, assert_graph_probe, current_leader_node,
+    expand_placeholders, open_recorded_web_console_page,
+};
 use crate::common::console_connections::{
     ConsoleAddress, ConsoleConnectionRecord, ReportedLeaders,
 };
 
 /// What a console page runs before any script of its own.
 const RECORDER: &str = include_str!("recorder.js");
+
+/// Whether the initial session frames reach the page immediately or at the scenario's release.
+#[derive(Clone, Copy)]
+pub(super) enum InitialSession {
+    Deliver,
+    Hold,
+}
+
+/// A bounded gate installed after the recorder and before the console's own scripts.
+const HOLD_INITIAL_SESSION: &str = include_str!("hold_initial_session.js");
 
 /// Reads the page's record.
 const READ_RECORD: &str = "() => window.__nervixConsoleConnections.record()";
@@ -31,8 +44,51 @@ const LOSE_CONNECTION: &str = "(path) => window.__nervixConsoleConnections.lose(
 /// makes, from its first.
 pub(super) async fn record_console_connections(
     page: &playwright_rs::Page,
+    initial_session: InitialSession,
 ) -> playwright_rs::Result<()> {
-    page.add_init_script(RECORDER).await
+    let script = match initial_session {
+        InitialSession::Deliver => RECORDER.to_string(),
+        InitialSession::Hold => {
+            let path = serde_json::to_string(CONSOLE_SESSION_PATH)
+                .assured("the public session path serializes as JavaScript text");
+            let gate = HOLD_INITIAL_SESSION.replace("__NERVIX_CONSOLE_SESSION_PATH__", &path);
+            format!("{RECORDER}\n{gate}")
+        }
+    };
+    page.add_init_script(&script).await
+}
+
+#[when("the web console is opened on the leader node with its initial session frames held")]
+async fn when_web_console_opens_with_held_initial_session(world: &mut ScenarioWorld) {
+    super::close_browser(world).await;
+    let leader = current_leader_node(world).await;
+    let url = world
+        .cluster()
+        .web_console_url(&leader)
+        .assured("the started leader serves its console");
+    open_recorded_web_console_page(world, &url, InitialSession::Hold)
+        .await
+        .assured("the console starts with its initial session gate");
+    assert_graph_probe(
+        browser_page(world),
+        "() => window.__nervixInitialSession.pending() > 0 ? 'OK' : 'no session frame has reached \
+         the gate'",
+        "the initial session frames to reach the browser gate",
+    )
+    .await;
+}
+
+#[when("the held initial web console session frames are released")]
+async fn when_initial_web_console_session_is_released(world: &mut ScenarioWorld) {
+    let released = browser_page(world)
+        .evaluate::<(), usize>("() => window.__nervixInitialSession.release()", None::<&()>)
+        .await
+        .assured("the bounded initial session gate releases every frame in receive order");
+    assert!(released > 0, "the gate must hold an actual session frame");
+    append_cucumber_log_line(&format!(
+        "initial console session: released {released} frames for domain={}",
+        world.domain
+    ));
 }
 
 fn browser_page(world: &ScenarioWorld) -> &playwright_rs::Page {
