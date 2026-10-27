@@ -332,7 +332,7 @@ pub trait EmitterEntityBody: EmitterPublication {
 
     /// The commit cadence and maximum commit size as written, for a body that stages what it
     /// publishes and commits it separately.
-    fn commit_policy(&self) -> Option<(&str, &str)> {
+    fn commit_policy(&self) -> Option<(&str, crate::PayloadSizeLimit)> {
         None
     }
 }
@@ -493,7 +493,7 @@ impl EmitterEntity {
         self.capabilities().requires_batch_transformation
     }
 
-    pub fn commit_policy(&self) -> Option<(&str, &str)> {
+    pub fn commit_policy(&self) -> Option<(&str, crate::PayloadSizeLimit)> {
         self.body().commit_policy()
     }
 

@@ -17,9 +17,12 @@
 
 use std::time::Duration;
 
+use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
+use thiserror::Error;
+use url::Url;
 
 use super::{
     bounds::{
@@ -33,102 +36,112 @@ use crate::{
     ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
     EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
     EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, LocatorDeclaration,
-    LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
+    LocatorName, OptionDeclaration, OptionForm, OptionPresence, OptionValue, PayloadSizeLimit,
 };
 
 configured_client!(S3: unpooled, config CLIENT_CONFIG_S3, CreateClientS3 => S3ConfigEntry);
 
-/// The current keys this connector reads, shared by validation, completion and inspection.
+/// Nervix validates its options; namespaced Iceberg properties retain their driver's contract.
 const CLIENT_CONFIG_S3: crate::ClientConfigSchema = {
     use crate::{
-        ClientConfigKey as K, ClientConfigNamespace, ClientConfigSchema, ClientConfigValue as V,
+        ClientConfigKey as K, ClientConfigNamespace as N, ClientConfigSchema,
+        ClientConfigValue as V,
     };
     ClientConfigSchema::new(
         &[
-            K::optional("access_key_id", V::String).secret().driver(),
-            K::optional("allow_anonymous", V::Boolean).driver(),
-            K::optional("client_region", V::String).driver(),
-            K::optional("disable_ec2_metadata", V::Boolean).driver(),
-            K::optional("endpoint", V::Url(&["http", "https"])).driver(),
-            K::optional("path_style_access", V::Boolean).driver(),
-            K::optional("region", V::String).driver(),
-            K::optional("secret_access_key", V::String)
-                .secret()
-                .driver(),
-            K::optional("session_token", V::String).secret().driver(),
+            K::optional("access_key_id", V::String).secret(),
+            K::optional("allow_anonymous", V::Boolean),
+            K::optional("client_region", V::String),
+            K::optional("disable_config_load", V::Boolean),
+            K::optional("disable_ec2_metadata", V::Boolean),
+            K::optional("endpoint", V::Url(&["http", "https"])),
+            K::optional("path_style_access", V::Boolean),
+            K::optional("region", V::String),
+            K::optional("secret_access_key", V::String).secret(),
+            K::optional("session_token", V::String).secret(),
             K::TIMEOUT,
         ],
-        &[ClientConfigNamespace::All],
+        &[N::Prefix("s3."), N::Prefix("client.")],
         &[],
     )
 };
 configured_client!(Gcs: unpooled, config CLIENT_CONFIG_GCS, CreateClientGcs => GcsConfigEntry);
 
-/// The current keys this connector reads, shared by validation, completion and inspection.
+/// Credentials are inline JSON; the configured driver namespace is `gcs.*`.
 const CLIENT_CONFIG_GCS: crate::ClientConfigSchema = {
     use crate::{
-        ClientConfigKey as K, ClientConfigNamespace, ClientConfigSchema, ClientConfigValue as V,
+        ClientConfigKey as K, ClientConfigNamespace as N, ClientConfigSchema,
+        ClientConfigValue as V,
     };
     ClientConfigSchema::new(
         &[
-            K::optional(
-                "credential_path",
-                V::File(crate::ClientConfigFile::MountedFile),
-            )
-            .secret()
-            .driver(),
-            K::optional("no_auth", V::Boolean).driver(),
-            K::optional("service_path", V::Url(&["http", "https"])).driver(),
+            K::optional("allow_anonymous", V::Boolean),
+            K::optional("credentials_json", V::String).secret(),
+            K::optional("disable_config_load", V::Boolean),
+            K::optional("disable_vm_metadata", V::Boolean),
+            K::optional("no_auth", V::Boolean),
+            K::optional("service_path", V::Url(&["http", "https"])),
             K::TIMEOUT,
-            K::optional("token", V::String).secret().driver(),
+            K::optional("token", V::String).secret(),
         ],
-        &[ClientConfigNamespace::All],
+        &[N::Prefix("gcs.")],
         &[],
     )
 };
 configured_client!(AzureBlob: unpooled, config CLIENT_CONFIG_AZUREBLOB, CreateClientAzureBlob => AzureBlobConfigEntry);
 
-/// The current keys this connector reads, shared by validation, completion and inspection.
+/// The table location selects the Azure endpoint; this client supplies its authentication.
 const CLIENT_CONFIG_AZUREBLOB: crate::ClientConfigSchema = {
     use crate::{
-        ClientConfigKey as K, ClientConfigNamespace, ClientConfigSchema, ClientConfigValue as V,
+        ClientConfigKey as K, ClientConfigNamespace as N, ClientConfigSchema,
+        ClientConfigValue as V,
     };
     ClientConfigSchema::new(
         &[
-            K::optional("account_key", V::String).secret().driver(),
-            K::optional("account_name", V::String).driver(),
-            K::optional("authority_host", V::String).driver(),
-            K::optional("client_id", V::String).driver(),
-            K::optional("client_secret", V::String).secret().driver(),
-            K::optional("connection_string", V::String)
-                .secret()
-                .driver(),
-            K::optional("endpoint", V::Url(&["http", "https"])).driver(),
-            K::optional("sas_token", V::String).secret().driver(),
-            K::optional("tenant_id", V::String).driver(),
+            K::optional("account_key", V::String).secret(),
+            K::optional("account_name", V::String),
+            K::optional("authority_host", V::String),
+            K::optional("client_id", V::String),
+            K::optional("client_secret", V::String).secret(),
+            K::optional("sas_token", V::String).secret(),
+            K::optional("tenant_id", V::String),
             K::TIMEOUT,
         ],
-        &[ClientConfigNamespace::All],
+        &[N::Prefix("adls.")],
         &[],
     )
 };
 configured_client!(IcebergRest: unpooled, config CLIENT_CONFIG_ICEBERGREST, CreateClientIcebergRest => IcebergRestConfigEntry);
 
-/// The current keys this connector reads, shared by validation, completion and inspection.
+/// The catalog owns its locator; catalog headers and file-I/O properties are delegated.
 const CLIENT_CONFIG_ICEBERGREST: crate::ClientConfigSchema = {
     use crate::{
-        ClientConfigKey as K, ClientConfigNamespace, ClientConfigSchema, ClientConfigValue as V,
+        ClientConfigKey as K, ClientConfigNamespace as N, ClientConfigSchema,
+        ClientConfigValue as V,
     };
     ClientConfigSchema::new(
         &[
+            K::optional("audience", V::String).driver(),
             K::optional("credential", V::String).secret().driver(),
-            K::optional("oauth2-server-uri", V::Url(&["http", "https"])).driver(),
+            K::optional("disable-header-redaction", V::Boolean).driver(),
+            K::optional("oauth2-server-uri", V::Url(&["http", "https"])),
+            K::optional("prefix", V::String).driver(),
+            K::optional("resource", V::String).driver(),
             K::optional("scope", V::String).driver(),
+            K::TLS_CA,
+            K::TLS_CERT,
+            K::TLS_KEY,
             K::optional("token", V::String).secret().driver(),
-            K::required("uri", V::Url(&["http", "https"])).driver(),
-            K::optional("warehouse", V::String).driver(),
+            K::required("uri", V::Url(&["http", "https"])),
+            K::optional("warehouse", V::String),
         ],
-        &[ClientConfigNamespace::All],
+        &[
+            N::Prefix("header."),
+            N::Prefix("s3."),
+            N::Prefix("client."),
+            N::Prefix("gcs."),
+            N::Prefix("adls."),
+        ],
         &[],
     )
 };
@@ -145,11 +158,12 @@ pub struct IcebergTableEmitter {
     /// The object-store client, whose connector selects the planned storage backend.
     pub client: ClientName,
     pub table: IcebergTableName,
+    pub namespace: IcebergNamespace,
     pub values: Vec<IcebergValueMapping>,
     pub location: String,
     pub catalog: IcebergCatalog,
     pub commit_each: String,
-    pub max_commit_size: String,
+    pub max_commit_size: PayloadSizeLimit,
 }
 
 #[derive(
@@ -209,6 +223,73 @@ impl IcebergStorageBackend {
             Self::AzureBlob => ConnectorKind::AzureBlob,
         }
     }
+
+    /// The object-location URL schemes this backend accepts.
+    pub const fn location_schemes(self) -> &'static [&'static str] {
+        match self {
+            Self::S3 => &["s3"],
+            Self::Gcs => &["gs"],
+            Self::AzureBlob => &["wasb", "wasbs", "abfs", "abfss"],
+        }
+    }
+
+    /// Checks a table location against the backend the declared storage client selects.
+    pub fn validate_location(self, location: &str) -> Result<(), Report<IcebergLocationError>> {
+        let url = Url::parse(location).map_err(|source| {
+            Report::new(source).change_context(IcebergLocationError::Malformed)
+        })?;
+        if !self.location_schemes().contains(&url.scheme()) {
+            return Err(Report::new(IcebergLocationError::Scheme {
+                backend: self,
+                found: url.scheme().to_string(),
+            }));
+        }
+        if url.host_str().is_none() {
+            return Err(Report::new(IcebergLocationError::MissingAuthority));
+        }
+        Ok(())
+    }
+}
+
+/// Why a connector kind cannot select an Iceberg object store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "converting a connector kind is a pure selection refusal"
+    )
+)]
+#[error("{found} is not an Iceberg object-store client")]
+pub struct IcebergStorageBackendError {
+    pub found: ConnectorKind,
+}
+
+impl TryFrom<ConnectorKind> for IcebergStorageBackend {
+    type Error = IcebergStorageBackendError;
+
+    fn try_from(found: ConnectorKind) -> Result<Self, Self::Error> {
+        match found {
+            ConnectorKind::S3 => Ok(Self::S3),
+            ConnectorKind::Gcs => Ok(Self::Gcs),
+            ConnectorKind::AzureBlob => Ok(Self::AzureBlob),
+            _ => Err(IcebergStorageBackendError { found }),
+        }
+    }
+}
+
+/// Why a declared location cannot identify an object under its storage client.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum IcebergLocationError {
+    #[error("LOCATION must be an absolute object-store URL")]
+    Malformed,
+    #[error("LOCATION scheme '{found}' does not match {} storage; expected {}", .backend.connector(), .backend.location_schemes().join(", "))]
+    Scheme {
+        backend: IcebergStorageBackend,
+        found: String,
+    },
+    #[error("LOCATION must name an object-store bucket or container authority")]
+    MissingAuthority,
 }
 
 /// What the connector of a ICEBERG TABLE holds and how long it waits.
@@ -261,6 +342,14 @@ impl EmitterDeclaration for IcebergTableEmitter {
         }),
         options: &[
             OptionDeclaration {
+                keywords: "NAMESPACE",
+                presence: OptionPresence::Required,
+                form: OptionForm::Value {
+                    value: OptionValue::Text,
+                    example: "NAMESPACE 'Analytics.Events'",
+                },
+            },
+            OptionDeclaration {
                 keywords: "LOCATION",
                 presence: OptionPresence::Required,
                 form: OptionForm::Value {
@@ -312,8 +401,8 @@ impl EmitterEntityBody for IcebergTableEmitter {
         EmitterValueMappings::values(&self.values)
     }
 
-    fn commit_policy(&self) -> Option<(&str, &str)> {
-        Some((self.commit_each.as_str(), self.max_commit_size.as_str()))
+    fn commit_policy(&self) -> Option<(&str, PayloadSizeLimit)> {
+        Some((self.commit_each.as_str(), self.max_commit_size))
     }
 }
 
@@ -339,4 +428,26 @@ super::external_name::external_names! {
     /// The case-preserving external table identifier this connector publishes to.
     pub struct IcebergTableName => super::external_name::external_identifier,
         label "iceberg_table", example "Orders";
+    /// The case-preserving, dot-separated catalog namespace of a table.
+    pub struct IcebergNamespace => iceberg_namespace_rule,
+        label "iceberg_namespace", example "Analytics.Events";
 }
+
+fn iceberg_namespace_rule(text: &str) -> Result<(), super::external_name::ExternalNameError> {
+    super::external_name::external_identifier(text)?;
+    if text.split('.').any(str::is_empty) {
+        return Err(super::external_name::ExternalNameError::EmptyLevel { separator: '.' });
+    }
+    Ok(())
+}
+
+impl IcebergNamespace {
+    /// Catalog levels, preserving each level's case and spelling.
+    pub fn levels(&self) -> impl Iterator<Item = &str> {
+        self.as_str().split('.')
+    }
+}
+
+#[cfg(test)]
+#[path = "iceberg_tests.rs"]
+mod tests;
