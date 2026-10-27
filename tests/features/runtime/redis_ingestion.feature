@@ -163,7 +163,7 @@ Feature: Redis ingestion
           'idle_timeout_ms' = '30000'
         };
         CREATE REDIS PUBSUB INGESTOR redis_notifications
-        FROM redis_main CHANNEL 'notifications_{{test_id}}' MODE NO ACK
+        FROM redis_main CHANNEL '<channel>_{{test_id}}' MODE NO ACK
         ON QUIESCE DROP DECODE USING notification_codec
         TO notifications
         INHERIT ALL
@@ -175,7 +175,7 @@ Feature: Redis ingestion
         CREATE SUBSCRIPTION notifications_subscription TO notifications;
         START;
       """
-    And Redis message is published to channel "notifications_{{test_id}}"
+    When Redis message is published to channel "<channel>_{{test_id}}"
       """
       {"user_id":42}
       """
@@ -184,12 +184,16 @@ Feature: Redis ingestion
       "user_id":42
       """
     And the last relay subscription payload contains key fragment '{"user_id":42}'
+    # The broker's channel subscriber count identifies the exact CHANNEL used for delivery.
+    And Redis channel "<channel>_{{test_id}}" eventually has 1 subscribers
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | channel       |
+      | 1            | 0             | notifications |
+      | 3            | 0             | notifications |
+      | 3            | 1             | notifications |
+      | 1            | 0             | Orders:EU/*   |
+      | 3            | 0             | Orders:EU/*   |
 
   @retained_task_handles
   Scenario Outline: Redis ingestor reports transient source failures and recovers

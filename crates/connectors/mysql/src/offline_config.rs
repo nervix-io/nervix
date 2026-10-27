@@ -14,9 +14,10 @@
     nervix::input(plans, reason = "the host supplies the client's resolved entries")
 )]
 
-use error_stack::ResultExt as _;
+use error_stack::{Report, ResultExt as _};
 use nervix_connector::{OfflineClientConfigError, client_config_value};
-use nervix_models::{ClientConfigEntry, ConnectorKind};
+use nervix_models::{ClientConfigEntry, ClientPooling, ConnectorKind};
+use url::Url;
 
 /// Parse the current address without opening a connection or resolving its host.
 pub fn validate_client_configuration(
@@ -24,6 +25,14 @@ pub fn validate_client_configuration(
 ) -> error_stack::Result<(), OfflineClientConfigError> {
     let address = client_config_value(config, "addr", ConnectorKind::MySql.keyword())
         .change_context(OfflineClientConfigError::key("addr"))?;
+    let url = Url::parse(&address).change_context(OfflineClientConfigError::key("addr"))?;
+    for (key, _) in url.query_pairs() {
+        if ClientPooling::Pooled.reserves_config_key(&key) {
+            return Err(Report::new(OfflineClientConfigError::PoolSizing {
+                key: key.into_owned(),
+            }));
+        }
+    }
     mysql_async::Opts::from_url(&address).change_context(OfflineClientConfigError::key("addr"))?;
     Ok(())
 }
@@ -31,6 +40,36 @@ pub fn validate_client_configuration(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_pool_overrides_are_refused_by_the_shared_declaration_without_values() {
+        for key in ClientPooling::Pooled.reserved_config_keys() {
+            let config = [ClientConfigEntry {
+                key: "addr".to_string(),
+                value: format!("mysql://user:private-password@127.0.0.1/database?{key}=9876"),
+            }];
+            let error =
+                validate_client_configuration(&config).expect_err("POOL SIZE owns capacity");
+            assert!(
+                matches!(error.current_context(), OfflineClientConfigError::PoolSizing { key: found } if found == key)
+            );
+            let message = format!("{error:?}");
+            assert!(message.contains("POOL SIZE"));
+            assert!(!message.contains("private-password"));
+            assert!(!message.contains("9876"));
+        }
+        for (parameter, decoded) in [("pool%5Fmax", "pool_max"), ("POOL_MIN", "POOL_MIN")] {
+            let config = [ClientConfigEntry {
+                key: "addr".to_string(),
+                value: format!("mysql://127.0.0.1/database?{parameter}=1"),
+            }];
+            let error =
+                validate_client_configuration(&config).expect_err("decoded pool keys are reserved");
+            assert!(
+                matches!(error.current_context(), OfflineClientConfigError::PoolSizing { key } if key == decoded)
+            );
+        }
+    }
 
     #[test]
     fn offline_address_check_uses_the_driver_without_a_server() {

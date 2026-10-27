@@ -87,21 +87,6 @@ impl OpenClientError {
     }
 }
 
-/// Configuration keys and address parameters that would size a pool behind Plexus's back.
-///
-/// Each driver reads at least one of these: `mysql_async` takes `pool_min`/`pool_max` from its URL
-/// and the MongoDB driver takes `minPoolSize`/`maxPoolSize` from its own. Whichever won would be a
-/// silent, per-driver answer to a question the client already answers, so both are refused.
-const POOL_SIZING_KEYS: &[&str] = &[
-    "maxpoolsize",
-    "max_pool_size",
-    "minpoolsize",
-    "min_pool_size",
-    "pool_max",
-    "pool_min",
-    "pool_size",
-];
-
 /// Reject connector configuration that tries to size the connection pool.
 ///
 /// Capacity is declared once, in the client's `POOL SIZE` clause. A raw entry or address parameter
@@ -121,7 +106,7 @@ fn reject_pool_sizing(
         })
     };
     for entry in config {
-        if POOL_SIZING_KEYS.contains(&entry.key.to_ascii_lowercase().as_str()) {
+        if nervix_models::ClientPooling::Pooled.reserves_config_key(&entry.key) {
             return Err(rejected(&entry.key));
         }
         // Only an address carries query parameters, and only its parameters can reach a driver's
@@ -133,7 +118,7 @@ fn reject_pool_sizing(
             continue;
         };
         for (key, _) in url.query_pairs() {
-            if POOL_SIZING_KEYS.contains(&key.to_ascii_lowercase().as_str()) {
+            if nervix_models::ClientPooling::Pooled.reserves_config_key(&key) {
                 return Err(rejected(&key));
             }
         }

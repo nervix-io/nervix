@@ -45,6 +45,17 @@ checkpoint, and the WASM targets listed in the
 [WASM representation coverage map](./wasm-representation-coverage.md) for guest checkpoints and for
 the segment set a current chunk key projects to.
 
+The shared name and Model generators include case-preserving MySQL table and database/table
+paths. `models-external-names` compares their exact spelling through parsing, conversions, JSON
+and the archive. `models-archived-models`, `registry-archived-models`, `registry-stored-models`
+and `registry-stored-models-corruption` carry those current names through their Model storage
+boundaries. Scheduled Models, commit-plan transitions and queued statements also carry them
+through `consensus-state-records`, `consensus-state-corruption` and `consensus-raft-records`.
+The Iceberg namespace and table Model recipe reaches those same consensus consumers through
+schedules, commit-plan transitions and queued statements; their domains advance with it too.
+Their domain versions and case/input budgets are listed in the
+[target register](../docs/src/property-testing-and-fuzzing.md#target-and-representation-register).
+
 Kafka native restore and archive capture preserve the exact optional applied-start generation
 in addition to the complete ordered partition positions: `restore-native-kafka` and
 `backup-native-kafka` compare that identity without deriving it from the domain start version.
