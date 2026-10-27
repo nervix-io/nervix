@@ -708,11 +708,26 @@ document, and an answer outside its schema is reported rather than read. The out
 | `read-only` | Kache made the job's remote read-only, as for a scheduled or manually dispatched run | Nothing: such a job publishes nothing |
 | `not-run` | The job's work failed or was cancelled, so publication returns at once | Queued uploads go to the shutdown drain |
 | `unavailable` | The job has no kache command or no manifest key, or its daemon does not answer | Whatever a stopped daemon left queued: publication asks `kache --json daemon status` first because `kache stats` would start a new daemon |
-| `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the phase the step reached |
+| `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the first signal and the phase in which the step received it |
 
 Publication never changes the job's verdict. Every outcome exits `0` except `cancelled`, whose step
-ends with the signal's status, as the runner asked. `incomplete`, `unavailable` and `cancelled` also
-add a workflow warning. A job that failed before its checkout has no script to run, so its step
+ends with the first signal's status, as the runner asked. `incomplete`, `unavailable` and
+`cancelled` also add a workflow warning.
+
+A termination signal never interrupts cleanup. Python runs a signal handler between any two
+bytecodes, so a handler that raised at once could land inside library cleanup. On Python 3.12.3, a
+signal just after `shutil.rmtree` closed a telemetry directory's descriptor made it close that
+descriptor again, and the failure replaced the cancellation before the record was written; later
+Python releases leave the directory behind instead. Publication therefore records the first signal
+when it arrives and raises it only where publication can stop cleanly. Inside a wait for a kache
+command or for the next poll it raises at once and only once, so the interrupted command is killed
+and reaped, and the telemetry directory it was writing is removed. A signal received anywhere else
+is raised when the next wait begins or the current phase ends, so the record names the phase in
+which the step received it. Once the record is written the step stops listening: a signal received
+until then ends the step with the first signal's status, and later ones are ignored, because
+Python's exit restores the default handlers and would let a later signal end the step with its own
+status. A signal that arrives before publication installs its handlers ends the step without a
+record. A job that failed before its checkout has no script to run, so its step
 adds only a notice. The record, `publication.json` and `publication.md`, lands in
 `$RUNNER_TEMP/kache-report`, which the kache report artifact uploads where the job has one, and in
 the job summary. An image build runs `publish --job-status success` as the last command of its
