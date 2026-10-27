@@ -16,6 +16,7 @@
     )
 )]
 
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_backup::{
     ArchiveRecord, BRANCH_STATE_GROUP_BYTES, DeduplicatorStateDescriptor, DelayedHistogramRemoval,
@@ -27,7 +28,7 @@ use nervix_models::{DomainName, DomainSchedule, NodeRef, SchemaFingerprint};
 
 use super::{
     CaptureSectionKey, CapturedSection,
-    interconnect::{CaptureDomainStateRequest, failed},
+    interconnect::{CaptureDomainStateRequest, failed, failure_context},
 };
 use crate::{
     application::session_service::SessionServiceImpl,
@@ -43,7 +44,7 @@ impl SessionServiceImpl {
         captured: Vec<CapturedBranchState>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
+    ) -> Result<Vec<CapturedSection>, Report<RemoteOperationFailure>> {
         let mut staged = Vec::new();
         if captured.is_empty() {
             return Ok(staged);
@@ -52,8 +53,10 @@ impl SessionServiceImpl {
             .inner
             .registry
             .transaction_planning_models(&request.domain);
-        let schemas = BranchStateSchemas::resolve(&request.domain, &models)
-            .map_err(|error| failed(&request.domain, &format!("{error:#}")))?;
+        let schemas =
+            BranchStateSchemas::resolve(&request.domain, &models).change_context_lazy(|| {
+                failure_context(&request.domain, "backup state section operation failed")
+            })?;
         for captured in captured {
             nervix_primitives::task::consume_budget().await;
             let placement = &captured.placement;
@@ -93,7 +96,7 @@ impl SessionServiceImpl {
         schema: SchemaFingerprint,
         schemas: &BranchStateSchemas,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
+    ) -> Result<Vec<CapturedSection>, Report<RemoteOperationFailure>> {
         let domain = &request.domain;
         let entity = captured.placement.identifier.clone();
         let Some(key_schema) = schemas.deduplicator(&entity) else {
@@ -108,10 +111,10 @@ impl SessionServiceImpl {
                 .open_keyspace(&self.inner.runtime)
                 .await
                 .map_err(|error| {
-                    failed(
+                    error.change_context(failure_context(
                         domain,
-                        &format!("stored keyspace of '{entity}' could not be read: {error:#}"),
-                    )
+                        &format!("stored keyspace of '{entity}' could not be read"),
+                    ))
                 })?,
             _ => return Ok(Vec::new()),
         };
@@ -128,9 +131,9 @@ impl SessionServiceImpl {
             groups: u32::try_from(groups.len())
                 .map_err(|_| failed(domain, "too many deduplicator key groups"))?,
         };
-        let bytes = descriptor
-            .encode()
-            .map_err(|error| failed(domain, &error.to_string()))?;
+        let bytes = descriptor.encode().change_context_lazy(|| {
+            failure_context(domain, "backup state section operation failed")
+        })?;
         let mut staged = vec![CapturedSection {
             key: capture_key(
                 request,
@@ -146,7 +149,9 @@ impl SessionServiceImpl {
             let keys = keyspace
                 .encode_group(executor, key_schema, group)
                 .await
-                .map_err(|error| failed(domain, &format!("{error:#}")))?;
+                .change_context_lazy(|| {
+                    failure_context(domain, "backup state section operation failed")
+                })?;
             staged.push(CapturedSection {
                 key: capture_key(
                     request,
@@ -165,7 +170,7 @@ impl SessionServiceImpl {
         schema: SchemaFingerprint,
         schemas: &BranchStateSchemas,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
+    ) -> Result<Vec<CapturedSection>, Report<RemoteOperationFailure>> {
         let domain = &request.domain;
         let entity = captured.placement.identifier.clone();
         let Some(window_schemas) = schemas.window(&entity) else {
@@ -185,10 +190,10 @@ impl SessionServiceImpl {
                 )
                 .await
                 .map_err(|error| {
-                    failed(
+                    error.change_context(failure_context(
                         domain,
-                        &format!("stored window of '{entity}' could not be read: {error:#}"),
-                    )
+                        &format!("stored window of '{entity}' could not be read"),
+                    ))
                 })?,
             _ => return Ok(Vec::new()),
         };
@@ -196,9 +201,9 @@ impl SessionServiceImpl {
         let Some(window) = window else {
             return Ok(Vec::new());
         };
-        let accumulators = window
-            .accumulators()
-            .map_err(|error| failed(domain, &format!("{error:#}")))?;
+        let accumulators = window.accumulators().change_context_lazy(|| {
+            failure_context(domain, "backup state section operation failed")
+        })?;
         let mut records = Vec::with_capacity(accumulators.len());
         for accumulator in accumulators {
             records.push(archive_accumulator(accumulator));
@@ -221,9 +226,9 @@ impl SessionServiceImpl {
                 .map_err(|_| failed(domain, "too many window row groups"))?,
             accumulators: records,
         };
-        let bytes = descriptor
-            .encode()
-            .map_err(|error| failed(domain, &error.to_string()))?;
+        let bytes = descriptor.encode().change_context_lazy(|| {
+            failure_context(domain, "backup state section operation failed")
+        })?;
         let mut staged = vec![CapturedSection {
             key: capture_key(
                 request,
@@ -238,7 +243,9 @@ impl SessionServiceImpl {
             let input = window
                 .encode_input_group(executor, &group)
                 .await
-                .map_err(|error| failed(domain, &format!("{error:#}")))?;
+                .change_context_lazy(|| {
+                    failure_context(domain, "backup state section operation failed")
+                })?;
             staged.push(CapturedSection {
                 key: capture_key(
                     request,
@@ -250,7 +257,9 @@ impl SessionServiceImpl {
             let arguments = window
                 .encode_argument_group(executor, &group)
                 .await
-                .map_err(|error| failed(domain, &format!("{error:#}")))?;
+                .change_context_lazy(|| {
+                    failure_context(domain, "backup state section operation failed")
+                })?;
             staged.push(CapturedSection {
                 key: capture_key(
                     request,
@@ -268,7 +277,7 @@ impl SessionServiceImpl {
         &self,
         bytes: ChargedBytes,
         domain: &DomainName,
-    ) -> Result<StagedArtifact, RemoteOperationFailure> {
+    ) -> Result<StagedArtifact, Report<RemoteOperationFailure>> {
         let length = u64::try_from(bytes.len()).verified("an encoded group fits 64 bits");
         if length > BRANCH_STATE_GROUP_BYTES {
             return Err(failed(
@@ -281,15 +290,15 @@ impl SessionServiceImpl {
             .runtime
             .try_stage_artifact(length)
             .await
-            .map_err(|error| failed(domain, &error.to_string()))?;
-        writer
-            .write_chunk(bytes)
-            .await
-            .map_err(|error| failed(domain, &error.to_string()))?;
-        writer
-            .finish_artifact()
-            .await
-            .map_err(|error| failed(domain, &error.to_string()))
+            .change_context_lazy(|| {
+                failure_context(domain, "backup state section operation failed")
+            })?;
+        writer.write_chunk(bytes).await.change_context_lazy(|| {
+            failure_context(domain, "backup state section operation failed")
+        })?;
+        writer.finish_artifact().await.change_context_lazy(|| {
+            failure_context(domain, "backup state section operation failed")
+        })
     }
 }
 

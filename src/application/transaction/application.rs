@@ -28,6 +28,7 @@ use nervix_models::{
     TransactionOperationRange,
 };
 use nervix_primitives::time::sleep;
+use nervix_recovery::Reported as _;
 use tracing::warn;
 
 use super::{TransactionApplicationAttempt, TransactionCommitError, TransactionStepImpactRecorder};
@@ -51,7 +52,14 @@ impl SessionServiceImpl {
         } else {
             match &applying.effect {
                 Some(TransactionStepEffect::CreateResourceCatalog { .. }) | None => {
-                    if self.wait_for_authoritative_visibility().await.is_err() {
+                    if self
+                        .wait_for_authoritative_visibility()
+                        .await
+                        .inspect_err(|error| {
+                            Err::<(), _>(error).reported("wait for transaction catalog visibility")
+                        })
+                        .is_err()
+                    {
                         sleep(Duration::from_millis(100)).await;
                         return Ok(TransactionApplicationAttempt::Retry);
                     }
@@ -98,6 +106,11 @@ impl SessionServiceImpl {
                                 if self
                                     .wait_for_runtime_revision(applying.effect_revision)
                                     .await
+                                    .inspect_err(|error| {
+                                        Err::<(), _>(error).reported(
+                                            "wait for reapplied transaction runtime revision",
+                                        )
+                                    })
                                     .is_err()
                                 {
                                     sleep(Duration::from_millis(100)).await;
@@ -407,6 +420,9 @@ impl SessionServiceImpl {
                 if self
                     .wait_for_authoritative_revision(finished.outcome_revision)
                     .await
+                    .inspect_err(|error| {
+                        Err::<(), _>(error).reported("wait for transaction completion visibility")
+                    })
                     .is_ok()
                 {
                     break;

@@ -31,7 +31,7 @@ use std::{
     num::NonZeroUsize,
 };
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_bounded_write::{BoundedWrite, BoundedWriter};
 use nervix_jaq::{JaqNativeFormat, JaqProgramError};
@@ -253,7 +253,9 @@ impl CompiledCodec {
         output: &mut BoundedWriter,
     ) -> error_stack::Result<(), BatchContainerError> {
         let encoding = self.wire_schema.encoding_name();
-        let unwritable = |_: io::Error| Report::new(BatchContainerError::Unwritable { encoding });
+        let unwritable = |cause: io::Error| {
+            Report::new(cause).change_context(BatchContainerError::Unwritable { encoding })
+        };
         match &self.wire_schema {
             CompiledWireSchema::Json(_) => {
                 output.write_all(b"[").map_err(unwritable)?;
@@ -293,7 +295,7 @@ impl CompiledCodec {
                 if let Some(program) = protobuf.transformations.on_emitting_batch.as_deref() {
                     let value = run_batch_transformation(program, members)?;
                     let encoded = encode_protobuf_payload(batch_message, &value)
-                        .map_err(|_| BatchContainerError::Unwritable { encoding })?;
+                        .change_context(BatchContainerError::Unwritable { encoding })?;
                     return output.write_all(&encoded).map_err(unwritable);
                 }
                 // The batch message's one field repeats the member message, so its encoding is
@@ -322,7 +324,9 @@ impl CompiledCodec {
                 native
                     .format
                     .write_value_into(&value, output)
-                    .map_err(|_| Report::new(BatchContainerError::Unwritable { encoding }))
+                    .map_err(|cause| {
+                        cause.change_context(BatchContainerError::Unwritable { encoding })
+                    })
             }
             CompiledWireSchema::Syslog(_) => {
                 let mut syslog_members = Vec::with_capacity(members.len());

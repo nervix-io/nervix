@@ -438,8 +438,8 @@ impl Runtime {
                     &entry.value,
                     &context,
                 )
-                .map_err(|_| {
-                    Report::new(RuntimeResourceError::ClientConfigTemplate {
+                .map_err(|cause| {
+                    cause.change_context(RuntimeResourceError::ClientConfigTemplate {
                         key: entry.key.clone(),
                     })
                 })?;
@@ -502,8 +502,8 @@ impl Runtime {
         for entry in &mut entries {
             entry.value =
                 render_client_config_template(&template_engine, &entry.key, &entry.value, &context)
-                    .map_err(|_| {
-                        Report::new(RuntimeResourceError::ClientConfigTemplate {
+                    .map_err(|cause| {
+                        cause.change_context(RuntimeResourceError::ClientConfigTemplate {
                             key: entry.key.clone(),
                         })
                     })?;
@@ -941,6 +941,12 @@ mod tests {
             RuntimeResourceError::ClientConfigTemplate { key }
                 if key == "tls_ca_file"
         ));
+        assert!(
+            error
+                .downcast_ref::<nervix_connector::ClientConfigError>()
+                .is_some()
+        );
+        assert!(error.downcast_ref::<upon::Error>().is_some());
     }
 
     #[test]

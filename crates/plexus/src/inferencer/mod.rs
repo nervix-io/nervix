@@ -38,12 +38,13 @@ fn tensor_schema<'src>()
         kw(Identifier::Batch).to(InferencerTensorDimension::Batch),
         kw(Identifier::Dynamic).to(InferencerTensorDimension::Dynamic),
         select! { Token::NumberLiteral(raw) => raw }.try_map(|raw, span| {
-            let size = raw.parse::<NonZeroU32>().map_err(|_| {
-                Rich::custom(
-                    span,
-                    "tensor dimension must be a positive integer, DYNAMIC, or BATCH",
-                )
-            })?;
+            let size =
+                crate::parser_support::integer_literal::<NonZeroU32>(&raw).map_err(|_| {
+                    Rich::custom(
+                        span,
+                        "tensor dimension must be a positive integer, DYNAMIC, or BATCH",
+                    )
+                })?;
             Ok(InferencerTensorDimension::Fixed(size))
         }),
     ));

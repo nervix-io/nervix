@@ -664,7 +664,11 @@ mod tests {
         let cases = [
             (
                 zeromq_client(None, "ipc://{{ feed }}/ingest.sock"),
-                "client configuration entry 'addr' has an invalid template",
+                concat!(
+                    "client configuration entry 'addr' has an invalid template: ",
+                    "failed to render client config template for key 'addr': ",
+                    "render error: not found in this scope",
+                ),
             ),
             (
                 zeromq_client(Some(feed), "ipc://{{ feed }}/ingest.sock"),

@@ -88,6 +88,15 @@ pub(crate) trait Browser {
     type Archive: DownloadedArchive;
 
     /// Opens a console WebSocket at `url`, or `None` when the browser refuses to.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::error_boundary(
+            outcome,
+            reason = "a backup or restore attempt asks whether the browser provides an open \
+                      socket; an unavailable browser capability becomes the existing not-ready \
+                      outcome, with no transport error contract exposed by this adapter"
+        )
+    )]
     fn open(&self, url: &str) -> Option<Self::Socket>;
 
     /// Waits for `duration` as the browser's timers measure it.

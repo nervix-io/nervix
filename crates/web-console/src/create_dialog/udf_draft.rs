@@ -70,8 +70,8 @@ impl UdfDraft {
     }
 
     pub(super) fn build(&self) -> error_stack::Result<CreateUdf, UdfDraftError> {
-        let name =
-            UdfName::parse(self.name.trim()).map_err(|_| Report::new(UdfDraftError::Name))?;
+        let name = UdfName::parse(self.name.trim())
+            .map_err(|cause| cause.change_context(UdfDraftError::Name))?;
         if !(1..=8).contains(&self.arguments.len()) {
             return Err(Report::new(UdfDraftError::ArgumentCount));
         }
@@ -80,7 +80,7 @@ impl UdfDraft {
         for (index, argument) in self.arguments.iter().enumerate() {
             let position = index + 1;
             let name = FieldName::parse(argument.name.trim())
-                .map_err(|_| Report::new(UdfDraftError::ArgumentName { position }))?;
+                .map_err(|cause| cause.change_context(UdfDraftError::ArgumentName { position }))?;
             if !seen.insert(name.clone()) {
                 return Err(Report::new(UdfDraftError::DuplicateArgument { name }));
             }

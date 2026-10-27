@@ -499,6 +499,12 @@ impl ConfiguredChoices {
         if let Some(input) = input {
             let definition = input
                 .to_canonical_plexus()
+                .inspect_err(|error| {
+                    nervix_recovery::Reported::reported(
+                        Err::<(), _>(error),
+                        "resolve configured choices",
+                    )
+                })
                 .map_err(|_| ChoiceStatus::LookupFailed)?;
             hash_choice_text(&mut digest, &definition);
         }
@@ -627,9 +633,21 @@ impl ConfiguredChoices {
         // Every configured Model renders; one that cannot is a lookup that failed.
         let relay_definition = relay
             .to_canonical_plexus()
+            .inspect_err(|error| {
+                nervix_recovery::Reported::reported(
+                    Err::<(), _>(error),
+                    "resolve configured choices",
+                )
+            })
             .map_err(|_| ChoiceStatus::LookupFailed)?;
         let schema_definition = schema
             .to_canonical_plexus()
+            .inspect_err(|error| {
+                nervix_recovery::Reported::reported(
+                    Err::<(), _>(error),
+                    "resolve configured choices",
+                )
+            })
             .map_err(|_| ChoiceStatus::LookupFailed)?;
         let mut digest = blake3::Hasher::new();
         hash_choice_text(&mut digest, &relay_definition);
@@ -657,9 +675,21 @@ impl ConfiguredChoices {
         };
         let codec_definition = codec
             .to_canonical_plexus()
+            .inspect_err(|error| {
+                nervix_recovery::Reported::reported(
+                    Err::<(), _>(error),
+                    "resolve configured choices",
+                )
+            })
             .map_err(|_| ChoiceStatus::LookupFailed)?;
         let schema_definition = schema
             .to_canonical_plexus()
+            .inspect_err(|error| {
+                nervix_recovery::Reported::reported(
+                    Err::<(), _>(error),
+                    "resolve configured choices",
+                )
+            })
             .map_err(|_| ChoiceStatus::LookupFailed)?;
         let mut digest = blake3::Hasher::new();
         hash_choice_text(&mut digest, &codec_definition);
@@ -693,12 +723,24 @@ impl ConfiguredChoices {
             &mut digest,
             &branch
                 .to_canonical_plexus()
+                .inspect_err(|error| {
+                    nervix_recovery::Reported::reported(
+                        Err::<(), _>(error),
+                        "resolve configured choices",
+                    )
+                })
                 .map_err(|_| ChoiceStatus::LookupFailed)?,
         );
         hash_choice_text(
             &mut digest,
             &schema
                 .to_canonical_plexus()
+                .inspect_err(|error| {
+                    nervix_recovery::Reported::reported(
+                        Err::<(), _>(error),
+                        "resolve configured choices",
+                    )
+                })
                 .map_err(|_| ChoiceStatus::LookupFailed)?,
         );
         let choices = schema
@@ -749,7 +791,14 @@ impl ModelCandidate {
         group: &str,
         definition: error_stack::Result<String, CanonicalPlexusError>,
     ) -> Result<Self, ChoiceStatus> {
-        let definition = definition.map_err(|_| ChoiceStatus::LookupFailed)?;
+        let definition = definition
+            .inspect_err(|error| {
+                nervix_recovery::Reported::reported(
+                    Err::<(), _>(error),
+                    "resolve configured choices",
+                )
+            })
+            .map_err(|_| ChoiceStatus::LookupFailed)?;
         Ok(Self {
             choice: Choice {
                 presentation: ChoicePresentation {

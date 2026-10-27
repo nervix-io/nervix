@@ -92,7 +92,7 @@ ahash = { workspace = true }
 anyhow = { workspace = true }
 apache-avro = { workspace = true }
 arch-into = { workspace = true }
-argon2 = { workspace = true }
+argon2 = { workspace = true, features = ["std"] }
 arrow-arith = { workspace = true }
 arrow-array = { workspace = true }
 arrow-buffer = { workspace = true }
@@ -752,6 +752,7 @@ sqlx = { version = "0.9", default-features = false, features = [
 ] }
 storekey = "0.5"
 strum = "0.26"
+sync_wrapper = "1"
 tar = "0.4"
 tempfile = "3"
 testcontainers = { version = "0.27.3", default-features = false, features = [
@@ -843,6 +844,12 @@ overflow-checks = true
 [profile.fuzz.package.nervix-server]
 debug = 0
 opt-level = 1
+
+# The scenario suite parses each Plexus command it runs on the one thread that polls every scenario,
+# and the client library parses it again there. That thread was on a CPU for most of the suite, and
+# an unoptimized parse takes about five times as long. Debug assertions and overflow checks stay on.
+[profile.dev.package.nervix-plexus]
+opt-level = 2
 
 [profile.dev.package."wasmtime"]
 opt-level = 3
