@@ -200,6 +200,7 @@ fn validate_driver(
         ConnectorKind::Kafka => nervix_connector_kafka::validate_client_configuration(config),
         ConnectorKind::Postgres => nervix_connector_postgres::validate_client_configuration(config),
         ConnectorKind::MySql => nervix_connector_mysql::validate_client_configuration(config),
+        ConnectorKind::MongoDb => nervix_connector_mongodb::validate_client_configuration(config),
         ConnectorKind::Redis => nervix_connector_redis::validate_client_configuration(config),
         ConnectorKind::RabbitMq => nervix_connector_rabbitmq::validate_client_configuration(config),
         ConnectorKind::Nats => nervix_connector_nats::validate_client_configuration(config),

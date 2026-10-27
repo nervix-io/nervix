@@ -68,13 +68,18 @@ Database conflict clauses follow `VALUES`.
 External locators are string literals and retain their exact spelling, including case. Each
 entity validates its own name: Kafka and Pulsar topics, RabbitMQ and SQS queues, Redis channels,
 MQTT publication topics and NATS publication subjects. Publication names contain no MQTT or NATS
-subscription wildcards. Table and collection names contain 1–128 ASCII letters, digits, `_`, `-`,
-`~` or `.`, with uppercase letters preserved: `TABLE 'public.Orders'` and `COLLECTION 'Orders'`
+subscription wildcards. Table names contain 1–128 ASCII letters, digits, `_`, `-`,
+`~` or `.`, with uppercase letters preserved. MongoDB collection names follow their own
+[namespace rule](#mongodb), including spaces and Unicode: `TABLE 'public.Orders'` and `COLLECTION 'Orders'`
 refer to those exact external names. Nervix references such as clients, schemas and codecs remain
 bare identifiers. The [capability reference](connector-capabilities.md) gives each locator's rule.
 
 `DESCRIBE EMITTER` exposes the kind and reference on its `to:` line. Dataflow transport labels use
-the same connector/entity phrase. `SHOW CREATE EMITTER` renders the complete current statement.
+the same connector/entity phrase. `SHOW EMITTERS;` lists the domain's emitters with that phrase
+as `to=<CONNECTOR> <ENTITY>`, the codec or `none`, and attachment mode. `SHOW CREATE EMITTER` renders
+the complete current statement. The shared [inspection block](connector-contract.md#shared-entity-presentation)
+shows options, mode, quiesce, envelope, batch, flush and error policies in that order. Emitter
+quiesce and envelope are `none` for the current Models.
 
 ## Branch Semantics
 
@@ -539,12 +544,17 @@ appears as its `leak_sensitive(...)` call and never as a value. `DESCRIBE EMITTE
 reports the request contract of the `deliver_event` example above in these lines:
 
 ```text
-codec: event_body_codec
-body: codec
-to: HTTP REQUEST api METHOD input.request_method PATH input.request_path
+to: HTTP REQUEST api
+options: METHOD input.request_method PATH input.request_path
+mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+quiesce: none
+envelope: none
 batch: none
 flush: FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+from: outgoing
+codec: event_body_codec
+body: codec
 ```
 
 `body` reads `codec` for `ENCODE USING`, and `without body`, with `codec: none`, for `WITHOUT BODY`.
@@ -631,8 +641,8 @@ The codec forms are described in [Schemas and codecs](schemas-and-codecs.md#batc
 These checks cover the whole candidate graph, so replacing a codec that a batching emitter uses
 is validated against that emitter too.
 
-`SHOW CREATE EMITTER` renders the clause between the emitter clause and `FLUSH`, with the size in the
-unit it was written in. `DESCRIBE EMITTER` reports it on the line after `to:`, as
+`SHOW CREATE EMITTER` renders the clause between the entity clause and `FLUSH`, with the size in the
+unit it was written in. `DESCRIBE EMITTER` reports it on its `batch:` line, as
 `batch: MAX MESSAGES 500 MAX SIZE 1MiB` or `batch: none`.
 
 The complete contract for batch payloads — packing, containers per wire format, exact size
@@ -2488,8 +2498,27 @@ on that server's answer alone: if the deployment later rolls the write back, for
 the primary that applied it stepped down before a majority of the replica set held it, the
 document is lost, and the emitter can neither see nor repair that.
 
-Every mapped integer is written as a BSON 64-bit signed integer, and a `U64` value above that range
-has no BSON integer at all. Such a record is rejected before its document is written: it follows
+MongoDB maps values to these native BSON types. Nullability is preserved, including null elements
+inside arrays, and BSON field order follows `VALUES` order.
+
+| Nervix value | BSON value |
+| --- | --- |
+| `BOOL` | Boolean |
+| `I8`, `I16`, `I32`, `U8`, `U16` | Int32 |
+| `I64`, `U32` | Int64 |
+| `U64` | Int64 when at most `i64::MAX`; otherwise a record rejection |
+| `F32`, `F64` | Double, including non-finite values |
+| `STRING` | String |
+| `BYTES` | Binary with the Generic subtype |
+| `DATETIME` | Date, rounded down to whole Unix milliseconds |
+| `ARRAY`, `VEC` | Array, with each element mapped by this table |
+
+These integer widths and native dates are the current encoding contract. Recreate collections
+whose validators, indexes or queries require another stored representation; Nervix provides no
+conversion of existing documents. Unsupported mapped types and repeated `VALUES` keys are refused
+before a graph starts.
+
+A `U64` value above the signed 64-bit range has no BSON integer. Such a record is rejected before its document is written: it follows
 `ON MESSAGE ERROR` with a `validation` error whose affected field is `mongodb.<column>`, it is never
 inserted, and its value is never used as an `ON CONFLICT` target. The rejection is permanent, so the
 record does not retry. Every other record in the same write is unaffected, and a mapped value that
@@ -2529,13 +2558,20 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
 | Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait and a write: unbounded |
-| Driver limits | A document above 16 MiB is rejected. |
+| Driver limits | A document above the declared BSON document limit is rejected. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MONGODB COLLECTION capability and mirror reference](connector-capabilities.md#mongodb-collection-emit).
 <!-- connector-matrix:emit-mongodb-collection:end -->
 
 MongoDB conflict policies require a target list because the emitter must build an explicit upsert filter. Target fields must be mapped in `VALUES`. `DO UPDATE` updates every mapped field except the conflict target fields and inserts the full mapped document when no existing document matches. `DO NOTHING` inserts only when no document matches the target.
+
+`COLLECTION` preserves its literal text, including case, spaces and Unicode. A collection name
+must be nonempty, contain neither NUL nor `$`, not start with `system.`, and not contain
+`.system.`. The database, one separating dot and the collection must fit Nervix's declared 120-byte
+namespace budget. The locator reserves at least two bytes for the database and separator; the
+complete namespace is checked against the resolved database before the emitter opens. Database
+and collection lengths are UTF-8 byte lengths.
 
 Emitters using either MongoDB `ON CONFLICT` form require MongoDB 8.0 or newer because those modes
 execute each write as one client bulk write.
@@ -2551,6 +2587,12 @@ CREATE MONGODB CLIENT mongodb
     'database' = 'nervix'
   };
 ```
+
+The client requires an `addr` using `mongodb://`. Its query options are delegated to the MongoDB
+driver and validated at `CREATE` without resolving a hostname or connecting. Pool options in that
+URL are refused with a `POOL SIZE` diagnostic: the clause owns both bounds. `database` is optional
+when the URL supplies a database path; an explicit value overrides that path. Unknown CONFIG keys
+are refused. Public inspection redacts address credentials and query options.
 
 For TLS connections, include `tls=true`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path.
 

@@ -114,6 +114,11 @@ pub enum IngestQuiesceKind {
 }
 
 impl IngestQuiesceKind {
+    /// The control value of the declared quiesce keyword in a visual editor.
+    pub fn form_key(self) -> String {
+        self.keyword().to_ascii_lowercase()
+    }
+
     /// The keyword that opens the mode after `ON QUIESCE`.
     pub const fn keyword(self) -> &'static str {
         match self {
@@ -180,6 +185,19 @@ pub enum IngestDeliveryKind {
 }
 
 impl IngestDeliveryKind {
+    /// The control value of the declared delivery phrase in a visual editor.
+    pub fn form_key(self) -> String {
+        self.phrase().to_ascii_lowercase().replace(' ', "-")
+    }
+
+    /// Whether delivery waits for a downstream acknowledgement.
+    pub const fn acknowledged(self) -> bool {
+        match self {
+            Self::NoAck => false,
+            Self::AckRequest | Self::AckSequential | Self::AckParallel => true,
+        }
+    }
+
     /// How a `MODE` clause names it.
     pub const fn phrase(self) -> &'static str {
         match self {

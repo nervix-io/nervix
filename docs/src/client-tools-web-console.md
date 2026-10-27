@@ -189,7 +189,10 @@ preview and command preserve the order and raw program text. Both forms use the 
 command dispatcher and retain rejected drafts, transaction positions, and reconnect handling.
 
 A client form offers every current transport as a typed selection. Connector `CONFIG` remains an
-ordered key/value editor whose keys and values are passed to the connector unchanged; the form
+ordered key/value editor whose key hints come from the selected connector's declaration. Switching
+connectors refreshes those hints. The server validates the declared key schema before admission;
+the [Connector Capabilities](./connector-capabilities.md) tables describe required keys, types and
+delegated namespaces. Accepted keys and values are passed to the connector unchanged; the form
 does not provision external services, topics, buckets, tables, or other objects. Redis, Postgres,
 MySQL, and MongoDB clients require explicit minimum and maximum pool sizes. A client may mount an
 existing resource and a completed version. A WebSocket client may select a configured signaling
@@ -236,8 +239,18 @@ An ingestor form offers every connector and entity an ingestor reads through a t
 `RABBITMQ QUEUE`, `REDIS PUBSUB`, `PROMETHEUS QUERY`, `ZEROMQ PULL`, `SQS QUEUE`,
 `WEBSOCKETS CONNECTION`, `WEBSOCKETS ENDPOINT`, and `SYSLOG LISTENER`. Its client or endpoint is a
 typed choice limited to that pair: clients of its connector, or endpoints of the `TYPE` its head
-names. The preview writes the statement under that pair's head. The source's own fields,
-delivery mode, quiesce mode, and required durations or sizes appear as explicit controls. A topic,
+names. The preview writes the statement under that pair's head. The entity declaration supplies
+the locator, options, option choices, delivery modes and quiesce modes in declared order. Controls
+use the declaration's keywords, and optional value placeholders
+show declared defaults, including Prometheus `MAX BODY SIZE` (`16MiB`). HTTP and WebSocket endpoints
+offer `NO ACK` and `ACK`; choosing `ACK` exposes its maximum and timeout and requires `REJECT`
+on quiesce. Buttons whose declared option requirements are unmet stay disabled, including MQTT
+ACK or SUSPEND without `SESSION PERSISTENT QOS 1`. The draft validates those requirements too.
+Switching sources refreshes the option controls and quiesce choices from the selected entity.
+A WebSocket connection edits literal upgrade headers as
+ordered name/value rows. A RabbitMQ queue offers its declared `NO ACK`, `ACK SEQUENTIAL` and
+`ACK PARALLEL` modes; the parallel window, batch timeout and retry settings are retained in the
+preview and submitted command. A topic,
 queue, subject, channel, consumer group, queue group or subscription keeps its text exactly as
 typed, case and spaces included, and the form refuses a name its entity's rule refuses. A
 `PULSAR TOPIC` subscription also requires an explicit ownership choice, `OWNED BY INGESTOR` or

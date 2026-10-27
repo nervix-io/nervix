@@ -28,7 +28,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Roto language syntax for UDF bodies | `Roto Language Reference` |
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
 | Resources, uploads, mounts, and TLS files | `Resources` |
-| Syslog wire schema, codec fields, UDP/TCP/TLS framing, clients, sources, and emitters | `Common` → `Syslog` |
+| Syslog wire schema, codec fields, UDP/TCP/TLS framing, per-connection versus total buffer bounds, clients, sources, and emitters | `Common` → `Syslog`, and `Connector Capabilities` |
 | Source transports, delivery modes, headers, and ingestor routes | `Ingestors` |
 | Kafka domain offsets across explicit starts, reconnects, instance changes and restored backups | `Ingestors` → `Kafka`, and `Backup And Restore` |
 | Plexus entity modes, ordered options, typed metadata, generated client CONFIG key/type/confidentiality tables and directional differences | `Connector Capabilities`, then the entity's `Ingestors` or `Emitters` section |
@@ -37,6 +37,7 @@ Always read `Plexus Overview`. Add the indexed topics relevant to the requested 
 | Junctions, deduplication, ordering, windows, inference, WASM, correlation, reingestion, and error routes | `Runtime Nodes` |
 | Timed generation from materialized state | `Plexus Overview` and `Examples` |
 | Emitter transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
+| MongoDB collection names, native BSON widths/date precision, conflict filters and client URL configuration | `Emitters` → `MongoDB`, then `Connector Capabilities` |
 | MySQL table path parts, exact value bindings, duplicate-key actions and client pool options | `Emitters` → `MySQL`, and `Database Client Connection Pools` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
@@ -478,6 +479,8 @@ Choose checks relevant to the configured graph:
   client ingestor's admission, producers, outstanding batches and bytes, and admitted batches. A
   client emitter's description also counts active consumers, forwarded credit and retained output,
   incomplete application batches, retries, ACKs and rejections.
+- Read `Ingestors` and `Emitters` for the `SHOW INGESTORS`, `SHOW EMITTERS` and `DESCRIBE`
+  inspection contracts, including effective options versus canonical `SHOW CREATE` configuration.
 - The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
   including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
   Observability` for the current histogram buckets. The endpoint also reports

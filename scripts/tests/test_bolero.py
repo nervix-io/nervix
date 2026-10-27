@@ -144,6 +144,8 @@ class InventoryTests(unittest.TestCase):
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
             "client-config-schema",
+            "connector-entity-presentation",
+            "console-ingestor-source-drafts",
             "materialized-publication-lifetimes",
             "task-status-transitions",
             "entity-freeze-transitions",
@@ -346,6 +348,7 @@ class InventoryTests(unittest.TestCase):
             "postgres-insert-measures",
             "mysql-insert-measures",
             "mongodb-write-answers",
+            "mongodb-bson-mapping",
             "websocket-signaling-protobuf-values",
             "websocket-acknowledgement-values",
             "websocket-signaling-protobuf-malformed",

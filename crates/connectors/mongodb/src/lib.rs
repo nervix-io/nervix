@@ -19,3 +19,6 @@
 
 pub mod collection;
 pub use collection::*;
+
+mod offline_config;
+pub use offline_config::validate_client_configuration;

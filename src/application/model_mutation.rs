@@ -165,6 +165,7 @@ fn requires_leader(statement: &Statement) -> bool {
             | Statement::ShowCreate(_)
             | Statement::ShowUdfs(_)
             | Statement::ShowIngestors(_)
+            | Statement::ShowEmitters(_)
             | Statement::ShowPlacements(_)
             | Statement::ShowRelayMaterializedState(_)
     )
@@ -2510,6 +2511,12 @@ impl SessionServiceImpl {
                     .as_ref()
                     .verified("this statement requires a request domain, which was resolved above");
                 self.show_ingestors(domain).await
+            }
+            Statement::ShowEmitters(_) => {
+                let domain = domain
+                    .as_ref()
+                    .verified("this statement requires a request domain, which was resolved above");
+                self.show_emitters(domain).await
             }
             Statement::ShowClusterStatus(_) => {
                 command_ok(render_cluster_status(&self.inner.cluster, &self.inner.consensus).await)

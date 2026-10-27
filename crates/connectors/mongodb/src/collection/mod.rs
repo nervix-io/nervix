@@ -39,7 +39,7 @@ use arrow_array::{
 };
 use async_trait::async_trait;
 use chrono::DateTime;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use mongodb::{
     Client as DriverClient, Collection, Namespace,
@@ -49,8 +49,7 @@ use mongodb::{
         WriteConcernError,
     },
     options::{
-        ClientOptions, Tls, TlsOptions, UpdateOneModel as MongoDbUpdateOneModel,
-        WriteModel as MongoDbWriteModel,
+        Tls, TlsOptions, UpdateOneModel as MongoDbUpdateOneModel, WriteModel as MongoDbWriteModel,
     },
 };
 use nervix_connector::{
@@ -60,26 +59,26 @@ use nervix_connector::{
     RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits, optional_client_config_value,
 };
 use nervix_models::{
-    ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, FieldPath, MongoDbCollectionName,
-    Timestamp,
+    ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, FieldPath, MONGODB_MAX_DOCUMENT_BYTES,
+    MongoDbCollectionName, Timestamp,
 };
 use nervix_primitives::time::Instant;
 use tracing::{debug, trace};
+
+use crate::offline_config::MongoDbClientConfiguration;
 
 const MONGODB: &str = "mongodb";
 
 /// What `MAX SIZE` measures on a MongoDB write, which an oversized row's rejection names.
 const MEASURED_REQUEST: &str = "MongoDB write";
 
-/// The largest document MongoDB stores: the BSON document limit every server applies. The driver
-/// refuses a larger document before sending the write that carries it, so such a row is rejected
-/// here instead of failing every other row of that write.
-const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
-
 /// The `_id` MongoDB gives a document that carries none: its element type, the name `_id` and its
 /// terminator, and a twelve-byte ObjectId. The driver prepends it to an inserted document before
 /// sending it, and the server adds it to a document an upsert inserts.
 const GENERATED_ID_BYTES: u64 = 17;
+
+#[cfg(test)]
+mod mapping_tests;
 
 /// The node's shared MongoDB client for one named client, whose driver pools per server.
 #[derive(Clone)]
@@ -126,13 +125,9 @@ impl MongoDbClient {
         config: &[ClientConfigEntry],
         bounds: ClientPoolBounds,
     ) -> EmitterStartResult<Self> {
-        let invalid = || Report::new(EmitterOpenError::InvalidConfiguration { connector: MONGODB });
-        let Some(addr) = optional_client_config_value(config, "addr") else {
-            return Err(invalid().attach_printable("missing MongoDB client config key 'addr'"));
-        };
-        let mut options = ClientOptions::parse(addr).await.map_err(|source| {
-            invalid().attach_printable(format!("failed to parse client addr: {source}"))
-        })?;
+        let mut options = MongoDbClientConfiguration::parse(config)
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: MONGODB })?
+            .into_options();
         if let Some(ca_file) = optional_client_config_value(config, "tls_ca_file") {
             options.tls = Some(Tls::Enabled(
                 TlsOptions::builder()
@@ -143,40 +138,13 @@ impl MongoDbClient {
         options.min_pool_size = Some(bounds.minimum());
         options.max_pool_size = Some(bounds.maximum().get());
         let client = DriverClient::with_options(options)
-            .map_err(|source| invalid().attach_printable(source.to_string()))?;
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: MONGODB })?;
         client
             .database("admin")
             .run_command(doc! { "ping": 1 })
             .await
-            .map_err(|source| {
-                Report::new(EmitterOpenError::Initialize { connector: MONGODB })
-                    .attach_printable(format!("failed to validate connection: {source}"))
-            })?;
+            .change_context(EmitterOpenError::Initialize { connector: MONGODB })?;
         Ok(Self(client))
-    }
-}
-
-/// The database an emitter writes into, from the client's own configuration.
-///
-/// The database belongs to the client's configuration rather than to its connections, so it is
-/// read per user while the driver client itself is shared.
-fn database_name(config: &[ClientConfigEntry]) -> EmitterStartResult<String> {
-    if let Some(database) = optional_client_config_value(config, "database") {
-        return Ok(database.to_owned());
-    }
-    let invalid = || Report::new(EmitterOpenError::InvalidConfiguration { connector: MONGODB });
-    let missing = || invalid().attach_printable("missing MongoDB client config key 'database'");
-    let Some(addr) = optional_client_config_value(config, "addr") else {
-        return Err(invalid().attach_printable("missing MongoDB client config key 'addr'"));
-    };
-    let Some((_, tail)) = addr.rsplit_once('/') else {
-        return Err(missing());
-    };
-    let database = tail.split('?').next().unwrap_or_default();
-    if database.is_empty() {
-        Err(missing())
-    } else {
-        Ok(database.to_string())
     }
 }
 
@@ -256,11 +224,16 @@ impl MongoDbCollectionEmitter {
             conflict_action,
             batch,
         } = config;
+        let configuration = MongoDbClientConfiguration::parse(&config)
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: MONGODB })?;
+        collection
+            .validate_namespace(configuration.database())
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: MONGODB })?;
         // MAX MESSAGES never exceeds 65,536, below the 100,000 writes a server takes in one
         // command, so the emitter's limits are the only ones a write keeps to.
         Ok(Self {
             client,
-            database: database_name(&config)?,
+            database: configuration.database().to_owned(),
             collection,
             conflict_action,
             limits: RowRequestLimits::from(batch),
@@ -784,7 +757,7 @@ struct StorableDocument {
 enum UnstorableDocument {
     #[error(
         "MongoDB document of one row measures {stored_bytes} bytes, above the \
-         {MAX_DOCUMENT_BYTES} bytes one MongoDB document holds"
+         {MONGODB_MAX_DOCUMENT_BYTES} bytes one MongoDB document holds"
     )]
     AboveDocumentLimit { stored_bytes: u64 },
     #[error("MongoDB VALUES field names cannot be written as a BSON document")]
@@ -811,7 +784,7 @@ impl StorableDocument {
                 .checked_add(GENERATED_ID_BYTES)
                 .assured("one document this node holds in memory")
         };
-        if stored_bytes > MAX_DOCUMENT_BYTES {
+        if stored_bytes > MONGODB_MAX_DOCUMENT_BYTES {
             return Err(UnstorableDocument::AboveDocumentLimit { stored_bytes });
         }
         Ok(Self {
@@ -1220,8 +1193,8 @@ impl<'a> MappedBsonColumn<'a> {
 
     /// The BSON value one row carries, read from the column that holds it.
     ///
-    /// Every integer width writes as a 64-bit integer, and an unsigned value above that range has
-    /// no BSON integer at all, so its row is rejected rather than written as a value it is not.
+    /// Integer widths use the declaration's native BSON width, and an unsigned value above the
+    /// signed 64-bit range has no BSON integer, so its row is rejected.
     /// The field names the mapped column this value belongs to, including for a list element,
     /// whose failure belongs to the list its row carries.
     fn value(&self, row: usize, field: &str) -> Result<Bson, UnencodableMappedValue> {
@@ -1230,12 +1203,12 @@ impl<'a> MappedBsonColumn<'a> {
         }
         let value = match self {
             Self::Bool(values) => Bson::Boolean(values.value(row)),
-            Self::U8(values) => Bson::Int64(i64::from(values.value(row))),
-            Self::I8(values) => Bson::Int64(i64::from(values.value(row))),
-            Self::U16(values) => Bson::Int64(i64::from(values.value(row))),
-            Self::I16(values) => Bson::Int64(i64::from(values.value(row))),
+            Self::U8(values) => Bson::Int32(i32::from(values.value(row))),
+            Self::I8(values) => Bson::Int32(i32::from(values.value(row))),
+            Self::U16(values) => Bson::Int32(i32::from(values.value(row))),
+            Self::I16(values) => Bson::Int32(i32::from(values.value(row))),
             Self::U32(values) => Bson::Int64(i64::from(values.value(row))),
-            Self::I32(values) => Bson::Int64(i64::from(values.value(row))),
+            Self::I32(values) => Bson::Int32(values.value(row)),
             Self::U64(values) => {
                 let Ok(value) = i64::try_from(values.value(row)) else {
                     return Err(UnencodableMappedValue::UnsignedIntegerRange {
@@ -1252,11 +1225,9 @@ impl<'a> MappedBsonColumn<'a> {
                 subtype: BinarySubtype::Generic,
                 bytes: values.value(row).to_vec(),
             }),
-            Self::Datetime(values) => Bson::String(
-                DateTime::from_timestamp_nanos(values.value(row))
-                    .fixed_offset()
-                    .to_rfc3339(),
-            ),
+            Self::Datetime(values) => Bson::DateTime(mongodb::bson::DateTime::from_millis(
+                DateTime::from_timestamp_nanos(values.value(row)).timestamp_millis(),
+            )),
             Self::List { offsets, elements } => {
                 let offsets = offsets.value_offsets();
                 let non_negative = "Arrow builds list offsets as non-negative element positions";
@@ -1455,7 +1426,7 @@ mod tests {
                 "id": 7_i64,
                 "score": 1.5_f64,
                 "name": "first",
-                "at": "2023-11-14T22:13:20.123456789+00:00",
+                "at": mongodb::bson::DateTime::from_millis(1_700_000_000_123),
             }
         );
         assert_eq!(
@@ -1994,7 +1965,7 @@ mod tests {
         let Err(UnstorableDocument::AboveDocumentLimit { stored_bytes }) = rejected else {
             panic!("a document above 16 MiB must be unstorable");
         };
-        assert!(stored_bytes > MAX_DOCUMENT_BYTES);
+        assert!(stored_bytes > MONGODB_MAX_DOCUMENT_BYTES);
         assert!(
             UnstorableDocument::AboveDocumentLimit { stored_bytes }
                 .to_string()

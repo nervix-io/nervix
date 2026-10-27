@@ -14,11 +14,13 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
-Client inspection during incoming preflight may refuse full command-memory or filesystem queue
-capacity. An accepted transaction or restore model step waits for that capacity instead: temporary
-pressure is not an invalid configuration or a failed restore step. Oversized charges and closed
-executors retain their typed admission causes beneath the inspection context. Existing service-task
-cancellation ends a waiting inspection without converting it into an invalid-key diagnosis.
+MongoDB's explicit-seed URL and delegated options are checked by its native parser without
+network I/O. Pool query options produce the typed `PoolSizing` outcome naming `POOL SIZE`;
+other native refusals retain the driver's error beneath the value-free key context. Its resolved
+database is required, and the collection checks the complete namespace budget before opening.
+Client initialization also preserves the driver cause of option installation and the validation
+ping. Public command refusal projection renders the reviewed key/pool context rather than driver
+input.
 
 The ClickHouse declaration checks a required positive `timeout_ms` and the address/TLS pairing
 before inspecting mounted files or opening a client. Missing timeout or HTTPS trust is a
@@ -298,6 +300,11 @@ sequenceDiagram
     Registry-->>Session: Report with owning node and route context
     Session-->>Client: Failed command with diagnostic and source span
 ```
+
+Connector inspection renders configured error-policy expressions through the same canonical owner
+as Plexus output. A canonical-rendering failure remains `CanonicalPlexusError` until the command
+response boundary; `DESCRIBE INGESTOR` and `DESCRIBE EMITTER` return that failure instead of a
+partially rendered description.
 
 ## Ownership And Propagation
 
@@ -1164,6 +1171,14 @@ memory capacity and reserved bytes beside configured workers, running jobs and p
 operator can distinguish memory waiting, worker waiting and dependency work. These are
 observations of the run; a successful later inspection does not identify the cause of an earlier
 timeout.
+
+### Client Inspection Admission
+
+Client inspection during incoming preflight may refuse full command-memory or filesystem queue
+capacity. An accepted transaction or restore model step waits for that capacity instead: temporary
+pressure is not an invalid configuration or a failed restore step. Oversized charges and closed
+executors retain their typed admission causes beneath the inspection context. Existing service-task
+cancellation ends a waiting inspection without converting it into an invalid-key diagnosis.
 
 ### Runtime Installation
 

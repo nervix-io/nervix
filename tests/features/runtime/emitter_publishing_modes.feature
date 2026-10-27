@@ -225,7 +225,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      publishing mode: ACK PARALLEL MAX 3 ACK TIMEOUT 3s RETRY POLICY BACKOFF 30ms MAX 3s
+      mode: ACK PARALLEL MAX 3 ACK TIMEOUT 3s RETRY POLICY BACKOFF 30ms MAX 3s
       """
     When these Plexus commands are executed on the leader node
       """
@@ -337,7 +337,14 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      to: SQS QUEUE sqs_main QUEUE 'sqs_fifo.fifo' FIFO GROUP FROM BRANCH
+      to: SQS QUEUE sqs_main QUEUE 'sqs_fifo.fifo'
+      options: FIFO GROUP FROM BRANCH
+      mode: SINGLE RETRY POLICY BACKOFF 165ms MAX 16s
+      quiesce: none
+      envelope: none
+      batch: none
+      flush: FLUSH IMMEDIATE
+      errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       """
     When these Plexus commands are executed on the leader node
       """
@@ -366,8 +373,13 @@ Feature: Emitter publishing modes
     Then the last command output contains
       """
       to: CLICKHOUSE TABLE clickhouse_main TABLE 'clickhouse_events'
+      options: none
+      mode: ACK RETRY POLICY BACKOFF 180ms MAX 18s
+      quiesce: none
+      envelope: none
       batch: MAX MESSAGES 2 MAX SIZE 1MiB
       flush: FLUSH IMMEDIATE
+      errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       """
     And the last command output contains
       """

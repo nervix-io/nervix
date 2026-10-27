@@ -632,7 +632,7 @@ impl ActiveNode {
             format!("client_emitter:{}", client.as_str()),
             client.as_str(),
             DataflowNodeRole::Client {
-                transport: emitter.connector.transport_label().to_string(),
+                transport: emitter.connector.kind().phrase().to_string(),
             },
         ))
     }
@@ -877,7 +877,7 @@ fn emitter_subtype(model: &Model) -> &str {
     let Model::Emitter(emitter) = model else {
         return "EMITTER";
     };
-    emitter.connector.transport_label()
+    emitter.connector.kind().phrase()
 }
 
 const fn dataflow_processor_kind(kind: ModelKind) -> Option<DataflowProcessorKind> {

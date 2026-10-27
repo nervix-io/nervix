@@ -48,7 +48,7 @@ Feature: MongoDB emission
           'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
         };
-        CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications TO mongodb_client COLLECTION 'notifications_mongodb_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        CREATE MONGODB COLLECTION EMITTER to_mongodb FROM notifications TO mongodb_client COLLECTION 'notifications_mongodb_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mongodb_user_id" = input.user_id, "mongodb_small" = 42 AS I32, "mongodb_date" = '2000-01-01T00:00:00Z' AS DATETIME, "mongodb_now" = NOW() AS STRING, "mongodb_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -72,6 +72,10 @@ Feature: MongoDB emission
     And the MongoDB collection eventually contains a document
       """
       {"mongodb_user_id":42,"mongodb_action":"open"}
+      """
+    And the MongoDB collection eventually matches this BSON filter
+      """
+      {"mongodb_user_id":{"$type":"long"},"mongodb_small":{"$type":"int"},"mongodb_date":{"$type":"date"}}
       """
 
     Examples:

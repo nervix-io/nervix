@@ -40,7 +40,7 @@ pub(super) fn ClientEditor(
         <fieldset class="create-choice-group create-client-type">
             <legend>"Connector"</legend>
             <div class="create-choice-buttons">
-                <For each=move || ClientTransport::ALL.to_vec()
+                <For each={move || ClientTransport::all().collect::<Vec<_>>()}
                     key=|transport| transport.key()
                     children=move |transport| view! {
                         <button type="button" data-client-type=transport.key()
