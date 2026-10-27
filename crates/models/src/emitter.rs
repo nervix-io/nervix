@@ -34,7 +34,7 @@ pub struct CreateEmitter {
     pub body: EmitterBody,
     /// The envelope clauses and properties the statement writes after the payload, which set what
     /// the transport carries beside each payload.
-    pub envelope: crate::EmitterEnvelope,
+    pub envelope: Box<crate::EmitterEnvelope>,
     pub connector: Box<EmitterEntity>,
     /// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, absent when the emitter publishes one record per
     /// message. A emitter whose [`EmitterEntity::batch_legality`] requires it never omits it.
@@ -340,7 +340,7 @@ pub enum AlterEmitterOperation {
     SetTo {
         destination: Box<EmitterEntity>,
         body: EmitterBody,
-        envelope: crate::EmitterEnvelope,
+        envelope: Box<crate::EmitterEnvelope>,
         construction: Option<crate::RouteConstruction>,
     },
     SetClient {

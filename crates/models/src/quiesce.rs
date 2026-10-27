@@ -1486,7 +1486,7 @@ mod tests {
             body: EmitterBody::Codec {
                 codec: named("event_codec"),
             },
-            envelope: crate::EmitterEnvelope::default(),
+            envelope: Box::new(crate::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
                 ZeroMqPushEmitter {
                     mode: crate::ZeroMqPushPublishingMode::NoAck {

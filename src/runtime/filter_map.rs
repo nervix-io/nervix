@@ -2284,7 +2284,7 @@ mod tests {
             body: nervix_models::EmitterBody::Codec {
                 codec: named("notification_codec"),
             },
-            envelope: nervix_models::EmitterEnvelope::default(),
+            envelope: Box::new(nervix_models::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::Kafka(KafkaEmitter::Topic(
                 KafkaTopicEmitter {
                     mode: nervix_models::KafkaTopicPublishingMode::NoAck {

@@ -860,7 +860,7 @@ fn emitter_header_invocations_are_rejected_for_unsupported_emitters() {
         body: nervix_models::EmitterBody::Codec {
             codec: named("events_codec"),
         },
-        envelope: nervix_models::EmitterEnvelope::default(),
+        envelope: Box::new(nervix_models::EmitterEnvelope::default()),
         connector: Box::new(EmitterEntity::ZeroMq(ZeroMqEmitter::Push(
             ZeroMqPushEmitter {
                 mode: nervix_models::ZeroMqPushPublishingMode::NoAck {
@@ -961,7 +961,7 @@ fn a_repeated_literal_header_write_is_refused_where_the_emitter_keeps_one_value_
         body: nervix_models::EmitterBody::Codec {
             codec: named("events_codec"),
         },
-        envelope: nervix_models::EmitterEnvelope::default(),
+        envelope: Box::new(nervix_models::EmitterEnvelope::default()),
         connector: Box::new(EmitterEntity::Pulsar(PulsarEmitter::Topic(
             PulsarTopicEmitter {
                 mode: nervix_models::PulsarTopicPublishingMode::NoAck {

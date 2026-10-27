@@ -661,7 +661,7 @@ mod tests {
             name: named("output"),
             from: ProcessorInputs::single(named("input_relay")),
             body,
-            envelope: nervix_models::EmitterEnvelope::default(),
+            envelope: Box::new(nervix_models::EmitterEnvelope::default()),
             connector: Box::new(connector),
             batch: None,
             flush_policy: FlushPolicy::Immediate,
@@ -807,13 +807,13 @@ mod tests {
     #[test]
     fn an_envelope_plans_its_fixed_clauses_and_one_program_computing_its_values_in_order() {
         let mut enveloped = zero_mq(codec_body());
-        enveloped.envelope = nervix_models::EmitterEnvelope {
+        enveloped.envelope = Box::new(nervix_models::EmitterEnvelope {
             persistent: true,
             deliver_after: Some("5s".to_string()),
             timestamp: Some(expression("now()")),
             message_id: Some(expression("'event-1'")),
             ..nervix_models::EmitterEnvelope::default()
-        };
+        });
 
         let plan = EmitterEnvelopePlan::decide(&enveloped, false)
             .expect("the envelope plans")

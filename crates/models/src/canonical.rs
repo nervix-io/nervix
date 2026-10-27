@@ -4467,7 +4467,7 @@ mod tests {
                 body: EmitterBody::Codec {
                     codec: named("orders_codec"),
                 },
-                envelope: crate::EmitterEnvelope::default(),
+                envelope: Box::new(crate::EmitterEnvelope::default()),
                 connector: Box::new(connector),
                 batch: None,
                 flush_policy: FlushPolicy::Each {
@@ -4617,7 +4617,7 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            envelope: crate::EmitterEnvelope::default(),
+            envelope: Box::new(crate::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::Postgres(PostgresEmitter::Table(
                 PostgresTableEmitter {
                     mode: crate::PostgresTablePublishingMode::Ack {
@@ -4675,7 +4675,7 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            envelope: crate::EmitterEnvelope::default(),
+            envelope: Box::new(crate::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::MySql(MySqlEmitter::Table(
                 MySqlTableEmitter {
                     mode: crate::MySqlTablePublishingMode::Ack {
@@ -4731,7 +4731,7 @@ mod tests {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
             body: EmitterBody::Values,
-            envelope: crate::EmitterEnvelope::default(),
+            envelope: Box::new(crate::EmitterEnvelope::default()),
             connector: Box::new(EmitterEntity::MongoDb(MongoDbEmitter::Collection(
                 MongoDbCollectionEmitter {
                     mode: crate::MongoDbCollectionPublishingMode::Ack {

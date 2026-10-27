@@ -64,7 +64,7 @@ impl Arbitrary<'_> {
             name: self.name(),
             from: self.processor_inputs(true),
             body,
-            envelope,
+            envelope: Box::new(envelope),
             connector: Box::new(connector),
             batch,
             flush_policy: self.flush_policy(),

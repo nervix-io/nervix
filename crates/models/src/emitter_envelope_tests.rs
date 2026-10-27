@@ -302,7 +302,7 @@ fn an_emitter_statement_writes_its_envelope_after_its_payload() {
         body: crate::EmitterBody::Codec {
             codec: crate::CodecName::try_from("events_codec").expect("valid codec name"),
         },
-        envelope: EmitterEnvelope {
+        envelope: Box::new(EmitterEnvelope {
             persistent: true,
             message_id: Some(text("id")),
             properties: vec![
@@ -313,7 +313,7 @@ fn an_emitter_statement_writes_its_envelope_after_its_payload() {
                 },
             ],
             ..EmitterEnvelope::default()
-        },
+        }),
         connector: Box::new(crate::EmitterEntity::ZeroMq(crate::ZeroMqEmitter::Push(
             crate::ZeroMqPushEmitter {
                 mode: crate::ZeroMqPushPublishingMode::NoAck {

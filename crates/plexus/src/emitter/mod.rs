@@ -414,7 +414,7 @@ pub fn create_emitter_parser<'src>()
                         materialized_state: declared.materialized_state,
                         connector: Box::new(parsed.destination),
                         body: parsed.body,
-                        envelope: parsed.envelope,
+                        envelope: Box::new(parsed.envelope),
                         batch: parsed.batch,
                         construction: parsed.construction.unwrap_or_default(),
                         mode: mode.unwrap_or(AckMode::Attached),
@@ -506,7 +506,7 @@ where
         .map(|parsed| AlterEmitterOperation::SetTo {
             destination: Box::new(parsed.destination.into()),
             body: parsed.body,
-            envelope: parsed.envelope,
+            envelope: Box::new(parsed.envelope),
             construction: parsed.construction,
         });
     let set_collect = kw(Identifier::Set)
