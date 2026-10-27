@@ -26196,32 +26196,22 @@ async fn when_syslog_tcp_messages_are_published_with_mixed_framing_to(
         2,
         "mixed Syslog TCP framing step requires exactly two messages"
     );
-    let mut stream = connect_syslog_tcp(&addr).await;
-    let octet_counted = messages[0].as_bytes();
-    stream
-        .write_all(octet_counted.len().to_string().as_bytes())
-        .await
-        .expect("failed to write Syslog octet count");
-    stream
-        .write_all(b" ")
-        .await
-        .expect("failed to write Syslog octet-count delimiter");
-    stream
-        .write_all(octet_counted)
-        .await
-        .expect("failed to write octet-counted Syslog message");
-    stream
-        .write_all(messages[1].as_bytes())
-        .await
-        .expect("failed to write non-transparent Syslog message");
-    stream
-        .write_all(b"\r\n")
-        .await
-        .expect("failed to terminate non-transparent Syslog message");
-    stream
-        .shutdown()
-        .await
-        .expect("failed to close Syslog TCP test sender");
+    let mut frames = syslog_stream_frame("octet-counted", &messages[0]);
+    frames.extend_from_slice(&syslog_stream_frame("non-transparent", &messages[1]));
+    // The listener's idle deadline also runs while Cucumber polls other scenarios. Keep
+    // connection establishment and the complete publication on an owned runtime task.
+    crate::common::runner_observation::observe_off_the_runner(async move {
+        let mut stream = connect_syslog_tcp(&addr).await;
+        stream
+            .write_all(&frames)
+            .await
+            .expect("failed to write mixed-framing Syslog messages");
+        stream
+            .shutdown()
+            .await
+            .expect("failed to close Syslog TCP test sender");
+    })
+    .await;
 }
 
 #[when(expr = "a Syslog TCP sender publishes {int} numbered frames to node {string} at {string}")]
