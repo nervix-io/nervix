@@ -141,6 +141,11 @@ through evaluation and dispatch. Neither active nor retained source views occupy
 capacity that their evaluation, IPC encoding and remote acknowledgement storage need to finish.
 Retention adds no wait, worker pool or execution-mode backend.
 
+A snapshot decoder already holds its encoded input under bulk admission. Its additional scratch
+request therefore refuses immediately when no room is available, releasing the input so another
+read can progress. Metadata and Arrow sections follow the same rule; framing reads release their
+charges before reading the next frame.
+
 The runtime attributes build the selected runtime through a crate path fixed to the boundary: Tokio's
 attribute builds whatever runtime its crate path names, and an attribute that named `tokio` at the
 call site would construct whichever crate a package happened to call `tokio`. Shuttle's own test

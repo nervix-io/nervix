@@ -1330,6 +1330,10 @@ An opening refused solely for request capacity is retried within one 30-second o
 other failures end the fetch. The captured stage remains unconsumed on an admission refusal.
 Completed backup and materialized-state response streams release their request admission and
 connection-stream permits before local file verification or Arrow decoding.
+Materialized metadata and Arrow decoders refuse additional bulk scratch without queueing while
+their encoded input holds a charge in that pool. Refusal releases the local input and preserves
+its typed admission cause; a generator retries a complete read on its next occurrence. No stream
+or request permit survives for that retry.
 
 The coordinator streams native lifecycle and Kafka metadata into quota-owned files before
 installation. It retains the verified description's separate `restore_metadata` preparation

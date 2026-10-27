@@ -1006,6 +1006,14 @@ An incoming materialized snapshot releases its response stream at EOF, before lo
 or Arrow decoding. Those local operations retain their own staging and memory admission; they do
 not keep Snapshot request or connection-stream permits while waiting for executor work.
 
+Metadata and Arrow decoding retain encoded input charged to the bulk pool. Additional scratch
+admission cannot wait behind those inputs: it refuses without queueing and releases the input,
+so concurrent reads can free room for one another. Framing input is released before the next read
+to avoid retaining a stored reader's working charge across another admission. A generator reports
+the typed refusal and retries a complete read on its next occurrence. The bounded memory owner
+tests and the public relocated-generator contention scenario exercise this progress contract;
+these async admission waits remain outside Deloxide's tracked locks.
+
 A generator task retains at most one decoded remote source generation, including its metadata and
 column admission charges. Optional retention first reserves the complete charge from the
 independent `state_read_cache` pool, whose capacity equals the relay pool's, then returns the
