@@ -3,6 +3,15 @@ Feature: Plexus file formatting
   The formatter is an offline tool: it never starts a cluster or opens a session, so these
   scenarios exercise the executable directly rather than a one-node and three-node topology.
 
+  Scenario: An unreadable Plexus file reports its UTF-8 decoding cause
+    Given a Plexus file "pipeline.plexus" with invalid UTF-8
+    When nervix-plexus-format formats the Plexus file "pipeline.plexus"
+    Then the formatter exits with code 4
+    And the last command error contains
+      """
+      invalid utf-8 sequence of 1 bytes from index 0
+      """
+
   Scenario: The formatter help lists its formatting flags
     When the nervix-plexus-format help is requested
     Then the last command output contains

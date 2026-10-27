@@ -22,6 +22,7 @@ use crate::contracts::{Flow, INVALID_CONTRACT, Message, contract_attribute};
 declare_tool_lint! { pub nervix::BARE_ERROR_SIGNATURE, Deny, "Nervix failure contracts require contextual reports", report_in_external_macro: true }
 declare_tool_lint! { pub nervix::DISCARDED_OUTCOME, Deny, "discarded failure outcomes require explicit classification", report_in_external_macro: true }
 declare_tool_lint! { pub nervix::BARE_PANIC, Deny, "Option and Result panic operations require a stated guarantee", report_in_external_macro: true }
+declare_tool_lint! { pub nervix::REPLACED_ERROR, Deny, "informative failures retain their typed cause beneath replacement context", report_in_external_macro: true }
 
 #[derive(Clone, Copy)]
 enum Boundary {
@@ -46,6 +47,15 @@ fn return_boundary(tcx: TyCtxt<'_>, definition: DefId) -> Option<Boundary> {
     }
     let item = tcx.opt_associated_item(definition)?;
     boundary(tcx, item.trait_item_def_id()?)
+}
+
+pub(crate) fn implements_trait<'tcx>(
+    cx: &LateContext<'tcx>,
+    value: Ty<'tcx>,
+    trait_id: DefId,
+) -> bool {
+    let (infcx, environment) = cx.tcx.infer_ctxt().build_with_typing_env(cx.typing_env());
+    type_known_to_meet_bound_modulo_regions(&infcx, environment, value, trait_id)
 }
 
 fn parse_boundary(attribute: &rustc_hir::Attribute) -> Option<Boundary> {
@@ -117,6 +127,101 @@ pub struct ErrorRules {
 }
 
 impl ErrorRules {
+    /// These foreign definitions expose ordinary conversion/closed-channel/permit outcomes.
+    /// They cannot carry our source attribute; match their complete resolved owner, never an
+    /// error suffix or the name through which a caller imported them.
+    fn foreign_outcome(&self, cx: &LateContext<'_>, definition: DefId) -> bool {
+        matches!(
+            crate::definition_path(cx.tcx, definition).as_str(),
+            "core::num::error::TryFromIntError"
+                | "core::fmt::Error"
+                | "tokio::sync::mpsc::error::SendError"
+                | "tokio::sync::mpsc::error::TrySendError"
+                | "tokio::sync::watch::error::SendError"
+                | "tokio::sync::batch_semaphore::TryAcquireError"
+                | "shuttle_engine::future::batch_semaphore::TryAcquireError"
+                | "concurrent_queue::PopError"
+        )
+    }
+
+    /// A failed comparison or search returns its observed value or insertion point. It is not
+    /// an operation failure, even when that value has a nonzero layout.
+    fn foreign_return_outcome(&self, cx: &LateContext<'_>, definition: DefId) -> bool {
+        let Some(implementation) = cx.tcx.inherent_impl_of_assoc(definition) else {
+            return false;
+        };
+        let owner = cx
+            .tcx
+            .type_of(implementation)
+            .instantiate_identity()
+            .skip_norm_wip();
+        let name = cx.tcx.item_name(definition);
+        if cx.tcx.crate_name(definition.krate).as_str() == "core"
+            && matches!(owner.kind(), ty::Slice(_))
+            && matches!(
+                name.as_str(),
+                "binary_search" | "binary_search_by" | "binary_search_by_key"
+            )
+        {
+            return true;
+        }
+        let ty::Adt(adt, _) = owner.kind() else {
+            return false;
+        };
+        let path = crate::definition_path(cx.tcx, adt.did());
+        if path == "arrow_schema::schema::Schema"
+            && matches!(name.as_str(), "index_of" | "field_with_name")
+        {
+            // These methods report only that the requested field is absent. Other Arrow
+            // operations retain their informative decoding, allocation and kernel failures.
+            return true;
+        }
+        let atomic = path.starts_with("core::sync::atomic::")
+            || path.starts_with("loom::sync::atomic::")
+            || path.starts_with("shuttle_std::sync::atomic::");
+        atomic
+            && matches!(
+                name.as_str(),
+                "compare_exchange" | "compare_exchange_weak" | "fetch_update" | "try_update"
+            )
+    }
+
+    pub fn replacement(
+        &self,
+        cx: &LateContext<'_>,
+        replacement: crate::audit::Replacement,
+        flow: &mut Flow,
+    ) {
+        // A semantic row/wire outcome is a fixed projection, not a replacement report.
+        for definition in [replacement.error_definition, replacement.outcome_definition]
+            .into_iter()
+            .flatten()
+        {
+            if matches!(boundary(cx.tcx, definition), Some(Boundary::Outcome))
+                || self.foreign_outcome(cx, definition)
+            {
+                return;
+            }
+        }
+        if let Some(definition) = replacement.source_contract
+            && (matches!(return_boundary(cx.tcx, definition), Some(Boundary::Outcome))
+                || self.foreign_return_outcome(cx, definition))
+        {
+            return;
+        }
+        flow.diagnostic(
+            cx,
+            replacement.node,
+            replacement.span,
+            REPLACED_ERROR,
+            format!(
+                "this replacement drops informative failure {}; retain the failure beneath its \
+                 context or classify its exact outcome boundary",
+                replacement.error_type
+            ),
+        );
+    }
+
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
@@ -151,11 +256,6 @@ impl ErrorRules {
             Ok(value) => value,
             Err(_) => value,
         }
-    }
-
-    fn implements<'tcx>(&self, cx: &LateContext<'tcx>, value: Ty<'tcx>, trait_id: DefId) -> bool {
-        let (infcx, environment) = cx.tcx.infer_ctxt().build_with_typing_env(cx.typing_env());
-        type_known_to_meet_bound_modulo_regions(&infcx, environment, value, trait_id)
     }
 
     fn shared_owner(&self, tcx: TyCtxt<'_>, definition: DefId) -> bool {
@@ -258,7 +358,7 @@ impl ErrorRules {
             if let Some(error_type) = self.owned_failure(cx, error)
                 && boundary(cx.tcx, error_type).is_none()
                 && let Some(error_trait) = cx.tcx.get_diagnostic_item(Symbol::intern("Error"))
-                && self.implements(cx, error, error_trait)
+                && implements_trait(cx, error, error_trait)
                 && !self.report_carrier(cx, error, &mut HashSet::new())
             {
                 return Some(error);
@@ -268,14 +368,14 @@ impl ErrorRules {
         // Resolve associated outputs, rather than walking all generic arguments: a Result in a
         // batch's success value is a separate per-row channel, not this function's failure.
         if let Some(future) = cx.tcx.lang_items().future_trait()
-            && self.implements(cx, value, future)
+            && implements_trait(cx, value, future)
             && let Some(output) = cx.get_associated_type(value, future, Symbol::intern("Output"))
             && let Some(error) = self.bare_error(cx, output, seen)
         {
             return Some(error);
         }
         if let Some(stream) = self.stream_trait(cx.tcx)
-            && self.implements(cx, value, stream)
+            && implements_trait(cx, value, stream)
             && let Some(item) = cx.get_associated_type(value, stream, Symbol::intern("Item"))
         {
             return self.bare_error(cx, item, seen);
@@ -394,7 +494,7 @@ impl ErrorRules {
                     return false;
                 }
                 if let Some(error_trait) = cx.tcx.get_diagnostic_item(Symbol::intern("Error"))
-                    && self.implements(cx, value, error_trait)
+                    && implements_trait(cx, value, error_trait)
                     && self.report_carrier(cx, value, &mut HashSet::new())
                 {
                     return true;

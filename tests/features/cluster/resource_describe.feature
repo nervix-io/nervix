@@ -1,5 +1,24 @@
 Feature: Resource lifecycle
 
+  Scenario Outline: A malformed resource archive retains its storage decoding cause
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE DOMAIN {{domain}};
+      CREATE RESOURCE malformed;
+      """
+    When a malformed archive upload of resource "malformed" is sent to the leader node
+    Then the last command error contains
+      """
+      failed to read entire block
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario: Describing a missing resource version reports a clear error
     Given a 1 node nervix cluster is started
     And the active domain is "{{domain}}"

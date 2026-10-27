@@ -804,13 +804,14 @@ fn iceberg_emitter() -> IcebergTableEmitter {
         },
         client: named("lake"),
         table: named("events"),
+        namespace: named("Analytics.Events"),
         values: vec![mapping("value")],
         location: "s3://lake/events".to_owned(),
         catalog: IcebergCatalog::Rest {
             client: named("catalog"),
         },
         commit_each: "30s".to_owned(),
-        max_commit_size: "64MiB".to_owned(),
+        max_commit_size: "64MiB".parse().expect("valid commit size"),
     }
 }
 
@@ -830,7 +831,10 @@ fn an_iceberg_destination_retains_its_storage_client_for_resolution() {
             connector: ConnectorKind::IcebergRest,
         })
     );
-    assert_eq!(connector.commit_policy(), Some(("30s", "64MiB")));
+    assert_eq!(
+        connector.commit_policy(),
+        Some(("30s", "64MiB".parse().expect("valid commit size")))
+    );
     let EmitterEntity::Iceberg(IcebergEmitter::Table(table)) = &connector else {
         panic!("an Iceberg table emitter was built, found {connector:?}");
     };
@@ -993,13 +997,14 @@ fn direct_value_mappings_cover_all_external_value_sections() {
             },
             client: client.clone(),
             table: named("events"),
+            namespace: named("Analytics.Events"),
             values: single_value(),
             location: "s3://bucket/events".to_owned(),
             catalog: IcebergCatalog::Rest {
                 client: client.clone(),
             },
             commit_each: "1s".to_owned(),
-            max_commit_size: "1MB".to_owned(),
+            max_commit_size: "1MB".parse().expect("valid commit size"),
         })),
     ];
 

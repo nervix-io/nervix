@@ -532,8 +532,9 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `CREATE HTTP REQUEST EMITTER`, `CREATE OTEL METRICS EMITTER`, or `CREATE ICEBERG TABLE EMITTER`.
   After `TO`, write its reference, quoted external locator and entity options, then `MODE`, then
   its codec, `VALUES` mapping or `WITHOUT BODY`. Client consumers use `TO SCHEMA <schema> MODE ACK`.
-  Iceberg resolves its storage backend from its client; put `LOCATION`, `CATALOG` and `COMMIT EACH`
-  before `MODE`. Put OTEL attributes, resource and scope with `VALUES` after `MODE`.
+  Iceberg resolves its storage backend from its client; put required `NAMESPACE`, then `LOCATION`,
+  `CATALOG` and `COMMIT EACH` before `MODE`. Put OTEL attributes, resource and scope with `VALUES`
+  after `MODE`.
   Use the stored kind in every emitter ALTER head. `SET TO` requires that entity's complete body,
   including its payload selection; changing the connector or entity requires drop and create.
   External table and collection names retain case. Keep client/schema/codec references as identifiers.

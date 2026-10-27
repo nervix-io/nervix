@@ -225,22 +225,18 @@ impl ClientDraft {
     }
 
     pub(super) fn build(&self) -> error_stack::Result<CompletedClient, ClientDraftError> {
-        let name =
-            ClientName::parse(self.name.trim()).map_err(|_| Report::new(ClientDraftError::Name))?;
+        let name = ClientName::parse(self.name.trim())
+            .map_err(|cause| cause.change_context(ClientDraftError::Name))?;
         let transport = self
             .transport
             .ok_or_else(|| Report::new(ClientDraftError::Transport))?;
         let pool = if transport.pooled() {
-            let minimum = self
-                .minimum
-                .trim()
-                .parse::<u32>()
-                .map_err(|_| Report::new(ClientDraftError::PoolMinimum))?;
-            let maximum = self
-                .maximum
-                .trim()
-                .parse::<NonZeroU32>()
-                .map_err(|_| Report::new(ClientDraftError::PoolMaximum))?;
+            let minimum = self.minimum.trim().parse::<u32>().map_err(|cause| {
+                Report::new(cause).change_context(ClientDraftError::PoolMinimum)
+            })?;
+            let maximum = self.maximum.trim().parse::<NonZeroU32>().map_err(|cause| {
+                Report::new(cause).change_context(ClientDraftError::PoolMaximum)
+            })?;
             Some({
                 let mapping_input = ClientPoolBounds::new(minimum, maximum);
                 match mapping_input {

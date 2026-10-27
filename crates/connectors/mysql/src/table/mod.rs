@@ -49,6 +49,7 @@ use nervix_models::{
     ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, MYSQL_MAX_PLACEHOLDERS, MySqlTableName,
 };
 use nervix_primitives::{sync::atomic::Ordering, time::Instant};
+use nervix_recovery::Reported as _;
 use tracing::{debug, trace};
 
 const MYSQL: &str = "mysql";
@@ -230,9 +231,12 @@ async fn maintain_minimum(pool: DriverPool, minimum: usize) {
         for _ in 0..shortfall {
             match pool.get_conn().await {
                 Ok(conn) => opened.push(conn),
-                // A database that cannot supply the minimum is a client infrastructure condition
-                // reported by whoever tries to write; maintenance simply retries on the next tick.
-                Err(_) => break,
+                // Keep this attempt's diagnostic before maintenance retries on its next tick.
+                // A writer still reports the result of its own connection attempt separately.
+                Err(error) => {
+                    Err::<(), _>(Report::new(error)).reported("maintain MySQL connection pool");
+                    break;
+                }
             }
         }
         drop(opened);
@@ -454,8 +458,7 @@ impl RowEmitter for MySqlTableEmitter {
                 Ok(columns) => carriers.push(columns),
                 Err(error) => {
                     outcome.fail(
-                        Report::new(EmitterWriteError::Publish { connector: MYSQL })
-                            .attach_printable(error.to_string()),
+                        error.change_context(EmitterWriteError::Publish { connector: MYSQL }),
                     );
                     return outcome;
                 }
@@ -719,13 +722,6 @@ impl BoundValues {
 /// A mapped column this emitter cannot bind, named with the exact type it carries.
 #[derive(Debug, thiserror::Error)]
 #[error("MySQL VALUES column '{column}' has unsupported exact type {data_type}")]
-#[cfg_attr(
-    nervix_lint,
-    nervix::error_boundary(
-        outcome,
-        reason = "unsupported mapped columns produce definitive semantic record rejections"
-    )
-)]
 struct UnsupportedMappedColumn {
     column: String,
     data_type: arrow_schema::DataType,
@@ -746,13 +742,15 @@ impl<'a> MappedMySqlColumns<'a> {
     fn new(
         batch: &'a RecordBatch,
         target_columns: &[String],
-    ) -> Result<Self, UnsupportedMappedColumn> {
+    ) -> error_stack::Result<Self, UnsupportedMappedColumn> {
         let mut values = Vec::with_capacity(target_columns.len());
         for (index, column) in target_columns.iter().enumerate() {
             let array = batch.column(index);
-            let mapped = MappedMySqlColumn::new(array).ok_or_else(|| UnsupportedMappedColumn {
-                column: column.clone(),
-                data_type: array.data_type().clone(),
+            let mapped = MappedMySqlColumn::new(array).ok_or_else(|| {
+                Report::new(UnsupportedMappedColumn {
+                    column: column.clone(),
+                    data_type: array.data_type().clone(),
+                })
             })?;
             values.push(mapped);
         }
@@ -1401,6 +1399,48 @@ mod tests {
         let report = MySqlWriteError::into_report(error);
         assert!(report.contains::<MySqlWriteError>());
         assert!(format!("{report:?}").contains("pool-acquire-detail"));
+    }
+
+    #[nervix_primitives::test]
+    async fn an_unsupported_mapped_column_keeps_its_exact_cause_and_fails_the_publish() {
+        let mut connector = test_emitter(MySqlConflictAction::None);
+        let batch = RecordBatch::try_new(
+            StdArc::new(Schema::new(vec![Field::new(
+                "partition",
+                DataType::Date32,
+                false,
+            )])),
+            vec![StdArc::new(arrow_array::Date32Array::from(vec![1, 2]))],
+        )
+        .expect("the foreign Arrow batch matches its exact schema");
+        let target_columns = ["partition".to_string()];
+        let selected_rows = [0, 1];
+        let parts = connector
+            .publish(MappedEmitterRows {
+                target_columns: &target_columns,
+                carriers: vec![nervix_connector::MappedEmitterCarrier {
+                    batch_index: 0,
+                    batch: &batch,
+                    selected_rows: &selected_rows,
+                    occurred_at: nervix_models::Timestamp::from_unix_nanos(5),
+                    acknowledgements: None,
+                }],
+            })
+            .await
+            .into_parts();
+        assert!(parts.delivered.is_empty());
+        assert!(parts.rejected.is_empty());
+        let report = parts
+            .infrastructure_error
+            .expect("the publish fails as a whole");
+        let cause = report
+            .downcast_ref::<UnsupportedMappedColumn>()
+            .expect("the exact column refusal remains typed");
+        assert_eq!(cause.column, "partition");
+        assert_eq!(cause.data_type, DataType::Date32);
+        let rendered = format!("{report:#}");
+        assert!(rendered.contains("partition"), "{rendered}");
+        assert!(rendered.contains("Date32"), "{rendered}");
     }
 
     /// The measured size is the statement a candidate executes and every value exactly as the

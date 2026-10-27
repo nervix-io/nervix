@@ -27,7 +27,7 @@ use nervix_models::{DomainSchedule, NodeRef};
 
 use super::{
     CaptureSectionKey, CapturedSection,
-    interconnect::{CaptureDomainStateRequest, failed},
+    interconnect::{CaptureDomainStateRequest, failed, failure_context},
 };
 use crate::{
     application::session_service::SessionServiceImpl,
@@ -40,7 +40,7 @@ impl SessionServiceImpl {
         captured: Vec<CapturedMaterializedRelay>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
+    ) -> Result<Vec<CapturedSection>, Report<RemoteOperationFailure>> {
         let mut staged = Vec::new();
         let executor = self.inner.runtime.executor();
         for captured in captured {
@@ -78,9 +78,9 @@ impl SessionServiceImpl {
                 groups: u32::try_from(groups.len())
                     .map_err(|_| failed(&request.domain, "too many materialized groups"))?,
             };
-            let bytes = descriptor
-                .encode()
-                .map_err(|error| failed(&request.domain, &error.to_string()))?;
+            let bytes = descriptor.encode().change_context_lazy(|| {
+                failure_context(&request.domain, "backup state section operation failed")
+            })?;
             let artifact = self.stage_captured_section(bytes, &request.domain).await?;
             let key = |path: SectionPath| CaptureSectionKey {
                 coordination: request.coordination.clone(),
@@ -101,8 +101,8 @@ impl SessionServiceImpl {
                 let reservation = executor
                     .reserve(MemoryClass::Bulk, 4 * MATERIALIZED_IDENTITIES_BYTES)
                     .await
-                    .map_err(|_| {
-                        failed(&request.domain, "materialized identities admission failed")
+                    .change_context_lazy(|| {
+                        failure_context(&request.domain, "materialized identities admission failed")
                     })?;
                 let captured = generation.clone();
                 let range = group.clone();
@@ -136,8 +136,12 @@ impl SessionServiceImpl {
                         ))
                     })
                     .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
+                    .change_context_lazy(|| {
+                        failure_context(&request.domain, "backup state section operation failed")
+                    })?
+                    .change_context_lazy(|| {
+                        failure_context(&request.domain, "backup state section operation failed")
+                    })?;
                 let mut writer = self
                     .inner
                     .runtime
@@ -145,15 +149,15 @@ impl SessionServiceImpl {
                         u64::try_from(bytes.len()).verified("bounded identities fit"),
                     )
                     .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                writer
-                    .write_chunk(bytes)
-                    .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                let artifact = writer
-                    .finish_artifact()
-                    .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
+                    .change_context_lazy(|| {
+                        failure_context(&request.domain, "backup state section operation failed")
+                    })?;
+                writer.write_chunk(bytes).await.change_context_lazy(|| {
+                    failure_context(&request.domain, "backup state section operation failed")
+                })?;
+                let artifact = writer.finish_artifact().await.change_context_lazy(|| {
+                    failure_context(&request.domain, "backup state section operation failed")
+                })?;
                 staged.push(CapturedSection {
                     key: key(SectionPath::materialized_identities(
                         &request.domain,
@@ -166,7 +170,9 @@ impl SessionServiceImpl {
                 let columns = generation
                     .encode_columns(executor, &group)
                     .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
+                    .change_context_lazy(|| {
+                        failure_context(&request.domain, "backup state section operation failed")
+                    })?;
                 let length = u64::try_from(columns.len()).verified("bounded Arrow columns fit");
                 if length > MATERIALIZED_COLUMNS_BYTES {
                     return Err(failed(
@@ -179,15 +185,15 @@ impl SessionServiceImpl {
                     .runtime
                     .try_stage_artifact(length)
                     .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                writer
-                    .write_chunk(columns)
-                    .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
-                let artifact = writer
-                    .finish_artifact()
-                    .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
+                    .change_context_lazy(|| {
+                        failure_context(&request.domain, "backup state section operation failed")
+                    })?;
+                writer.write_chunk(columns).await.change_context_lazy(|| {
+                    failure_context(&request.domain, "backup state section operation failed")
+                })?;
+                let artifact = writer.finish_artifact().await.change_context_lazy(|| {
+                    failure_context(&request.domain, "backup state section operation failed")
+                })?;
                 staged.push(CapturedSection {
                     key: key(SectionPath::materialized_columns(
                         &request.domain,

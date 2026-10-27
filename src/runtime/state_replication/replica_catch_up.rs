@@ -22,6 +22,7 @@
 use nervix_interconnect::{
     BranchCheckpointCursor, BranchCheckpointListingRequest, StateSyncRequest,
 };
+use nervix_recovery::Reported as _;
 
 use super::*;
 use crate::runtime::branch_lifecycle_state::NamedBranches;
@@ -280,9 +281,14 @@ impl Runtime {
         };
         // A lifecycle read from storage is held without being decoded, and one that does not
         // decode named no branch the task acted on, so every branch the new one names is new to it.
-        let previous = previous
-            .as_ref()
-            .and_then(|previous| previous.branches().ok());
+        let previous = previous.as_ref().and_then(|previous| {
+            previous
+                .branches()
+                .inspect_err(|error| {
+                    Err::<(), _>(error).reported("decode preceding replica lifecycle checkpoint")
+                })
+                .ok()
+        });
         checkpoints.follow_lifecycle(previous, current);
     }
 

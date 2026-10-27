@@ -515,7 +515,7 @@ fn emitter_alter_reports_name_and_commit_policy_errors() {
                 emitter: named("event_emitter"),
                 operations: vec![AlterEmitterOperation::SetCommit {
                     commit_each: "1m".to_string(),
-                    max_commit_size: "1GiB".to_string(),
+                    max_commit_size: "1GiB".parse().expect("valid commit size"),
                 }],
             },
             AlterEmitterError::CommitPolicyUnsupported,

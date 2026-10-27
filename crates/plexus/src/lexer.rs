@@ -400,6 +400,7 @@ pub enum Identifier {
     Mount,
     Config,
     Table,
+    Namespace,
     Catalog,
     Same,
     Location,

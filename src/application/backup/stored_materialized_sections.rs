@@ -26,7 +26,7 @@ use nervix_models::{DomainName, DomainSchedule, NodeRef};
 
 use super::{
     CaptureSectionKey, CapturedSection,
-    interconnect::{CaptureDomainStateRequest, failed},
+    interconnect::{CaptureDomainStateRequest, failure_context},
 };
 use crate::{
     application::session_service::SessionServiceImpl,
@@ -39,7 +39,7 @@ impl SessionServiceImpl {
         captured: Vec<CapturedStoredMaterializedRelay>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
+    ) -> Result<Vec<CapturedSection>, Report<RemoteOperationFailure>> {
         let mut staged = Vec::new();
         let executor = self.inner.runtime.executor();
         for captured in captured {
@@ -63,7 +63,9 @@ impl SessionServiceImpl {
                 .checkpoint
                 .open(executor)
                 .await
-                .map_err(|error| failed(&request.domain, &error.to_string()))?;
+                .change_context_lazy(|| {
+                    failure_context(&request.domain, "backup state section operation failed")
+                })?;
             let header = reader.summary();
             let descriptor = MaterializedRelayDescriptor {
                 domain: request.domain.clone(),
@@ -80,9 +82,9 @@ impl SessionServiceImpl {
                 domain: request.domain.clone(),
                 path: path.to_string(),
             };
-            let bytes = descriptor
-                .encode()
-                .map_err(|error| failed(&request.domain, &error.to_string()))?;
+            let bytes = descriptor.encode().change_context_lazy(|| {
+                failure_context(&request.domain, "backup state section operation failed")
+            })?;
             let artifact = self.stage_captured_section(bytes, &request.domain).await?;
             staged.push(CapturedSection {
                 key: key(SectionPath::materialized_descriptor(
@@ -100,12 +102,16 @@ impl SessionServiceImpl {
                     MATERIALIZED_COLUMNS_BYTES,
                 )
                 .await
-                .map_err(|error| failed(&request.domain, &error.to_string()))?
+                .change_context_lazy(|| {
+                    failure_context(&request.domain, "backup state section operation failed")
+                })?
             {
                 let charge = executor
                     .reserve(MemoryClass::Bulk, 4 * MATERIALIZED_IDENTITIES_BYTES)
                     .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?;
+                    .change_context_lazy(|| {
+                        failure_context(&request.domain, "backup state section operation failed")
+                    })?;
                 let domain = request.domain.clone();
                 let entity = placement.identifier.clone();
                 let bytes = executor
@@ -136,9 +142,14 @@ impl SessionServiceImpl {
                         ))
                     })
                     .await
-                    .map_err(|error| failed(&request.domain, &error.to_string()))?
+                    .change_context_lazy(|| {
+                        failure_context(&request.domain, "backup state section operation failed")
+                    })?
                     .map_err(|error: Report<nervix_backup::ArchiveWriteError>| {
-                        failed(&request.domain, &error.to_string())
+                        error.change_context(failure_context(
+                            &request.domain,
+                            "backup state section operation failed",
+                        ))
                     })?;
                 let artifact = self
                     .stage_materialized_section(bytes, &request.domain)
@@ -174,20 +185,20 @@ impl SessionServiceImpl {
         &self,
         bytes: ChargedBytes,
         domain: &DomainName,
-    ) -> Result<StagedArtifact, RemoteOperationFailure> {
+    ) -> Result<StagedArtifact, Report<RemoteOperationFailure>> {
         let mut writer = self
             .inner
             .runtime
             .try_stage_artifact(u64::try_from(bytes.len()).verified("bounded group bytes fit"))
             .await
-            .map_err(|error| failed(domain, &error.to_string()))?;
-        writer
-            .write_chunk(bytes)
-            .await
-            .map_err(|error| failed(domain, &error.to_string()))?;
-        writer
-            .finish_artifact()
-            .await
-            .map_err(|error| failed(domain, &error.to_string()))
+            .change_context_lazy(|| {
+                failure_context(domain, "backup state section operation failed")
+            })?;
+        writer.write_chunk(bytes).await.change_context_lazy(|| {
+            failure_context(domain, "backup state section operation failed")
+        })?;
+        writer.finish_artifact().await.change_context_lazy(|| {
+            failure_context(domain, "backup state section operation failed")
+        })
     }
 }

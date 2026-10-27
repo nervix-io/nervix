@@ -82,8 +82,8 @@ impl SchemaTypeDraft {
                     element: Box::new(ty),
                 },
                 CollectionLayer::Array { length } => {
-                    let parsed = length.trim().parse::<NonZeroU32>().map_err(|_| {
-                        Report::new(SchemaDraftError::ArrayLength {
+                    let parsed = length.trim().parse::<NonZeroU32>().map_err(|cause| {
+                        Report::new(cause).change_context(SchemaDraftError::ArrayLength {
                             field,
                             layer: position + 1,
                         })
@@ -164,7 +164,7 @@ impl SchemaDraft {
 
     pub(super) fn build(&self) -> error_stack::Result<CreateSchema, SchemaDraftError> {
         let name = SchemaName::parse(self.name.trim())
-            .map_err(|_| Report::new(SchemaDraftError::SchemaName))?;
+            .map_err(|cause| cause.change_context(SchemaDraftError::SchemaName))?;
         if self.fields.is_empty() {
             return Err(Report::new(SchemaDraftError::FieldsRequired));
         }
@@ -173,7 +173,7 @@ impl SchemaDraft {
         for (index, draft) in self.fields.iter().enumerate() {
             let field = index + 1;
             let name = FieldName::parse(draft.name.trim())
-                .map_err(|_| Report::new(SchemaDraftError::FieldName { field }))?;
+                .map_err(|cause| cause.change_context(SchemaDraftError::FieldName { field }))?;
             if !names.insert(name.clone()) {
                 return Err(Report::new(SchemaDraftError::DuplicateField { name }));
             }
@@ -269,7 +269,7 @@ impl WireSchemaDraft {
 
     pub(super) fn build(&self, format: WireFormat) -> error_stack::Result<Model, SchemaDraftError> {
         let name = WireSchemaName::parse(self.name.trim())
-            .map_err(|_| Report::new(SchemaDraftError::WireSchemaName))?;
+            .map_err(|cause| cause.change_context(SchemaDraftError::WireSchemaName))?;
         let Some(strictness) = self.mode else {
             return Err(Report::new(SchemaDraftError::WireModeRequired));
         };
@@ -282,8 +282,9 @@ impl WireSchemaDraft {
                 let mut fields = Vec::<WireSchemaField<CborType>>::with_capacity(self.fields.len());
                 for (index, draft) in self.fields.iter().enumerate() {
                     let field = index + 1;
-                    let field_name = FieldName::parse(draft.name.trim())
-                        .map_err(|_| Report::new(SchemaDraftError::FieldName { field }))?;
+                    let field_name = FieldName::parse(draft.name.trim()).map_err(|cause| {
+                        cause.change_context(SchemaDraftError::FieldName { field })
+                    })?;
                     if !names.insert(field_name.clone()) {
                         return Err(Report::new(SchemaDraftError::DuplicateField {
                             name: field_name,
@@ -313,8 +314,9 @@ impl WireSchemaDraft {
                 let mut fields = Vec::with_capacity(self.fields.len());
                 for (index, draft) in self.fields.iter().enumerate() {
                     let field = index + 1;
-                    let field_name = FieldName::parse(draft.name.trim())
-                        .map_err(|_| Report::new(SchemaDraftError::FieldName { field }))?;
+                    let field_name = FieldName::parse(draft.name.trim()).map_err(|cause| {
+                        cause.change_context(SchemaDraftError::FieldName { field })
+                    })?;
                     if !names.insert(field_name.clone()) {
                         return Err(Report::new(SchemaDraftError::DuplicateField {
                             name: field_name,
@@ -396,7 +398,7 @@ impl BranchDraft {
 
     pub(super) fn build(&self) -> error_stack::Result<CreateBranch, SchemaDraftError> {
         let name = BranchName::parse(self.name.trim())
-            .map_err(|_| Report::new(SchemaDraftError::BranchName))?;
+            .map_err(|cause| cause.change_context(SchemaDraftError::BranchName))?;
         let Some(schema) = &self.schema else {
             return Err(Report::new(SchemaDraftError::SchemaReferenceRequired));
         };
@@ -408,11 +410,13 @@ impl BranchDraft {
             return Err(Report::new(SchemaDraftError::TtlRequired));
         }
         let eviction = if self.limit_instances {
-            let max_instances = self
-                .max_instances
-                .trim()
-                .parse::<NonZeroU64>()
-                .map_err(|_| Report::new(SchemaDraftError::MaxInstances))?;
+            let max_instances =
+                self.max_instances
+                    .trim()
+                    .parse::<NonZeroU64>()
+                    .map_err(|cause| {
+                        Report::new(cause).change_context(SchemaDraftError::MaxInstances)
+                    })?;
             Some(BranchEviction::Lru { max_instances })
         } else {
             None

@@ -894,8 +894,13 @@ pub(in crate::registry) fn validate_http_emitter_client(
     };
 
     let endpoint = entry("endpoint").ok_or_else(|| invalid("HTTP client requires endpoint"))?;
-    let origin = HttpOrigin::parse(endpoint)
-        .map_err(|_| invalid("HTTP client endpoint must be an http or https origin"))?;
+    let origin = HttpOrigin::parse(endpoint).map_err(|cause| {
+        cause.change_context(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "HTTP client endpoint must be an http or https origin".to_string(),
+        })
+    })?;
 
     let kind = <nervix_models::HttpRequestEmitter as nervix_models::EmitterEntityModel>::KIND;
     let timeout = entry("timeout_ms")
@@ -954,14 +959,23 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
                 ));
             }
         };
-        HttpMethod::parse(value, body)
-            .map_err(|error| invalid(format!("HTTP publish method {}", error.current_context())))?;
+        HttpMethod::parse(value, body).map_err(|cause| {
+            cause.change_context(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "HTTP publish method is invalid".to_string(),
+            })
+        })?;
     }
 
     if let Expression::Literal(nervix_models::Literal::String(value)) = path {
-        origin
-            .target(value)
-            .map_err(|_| invalid("HTTP publish path is invalid".to_string()))?;
+        origin.target(value).map_err(|cause| {
+            cause.change_context(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "HTTP publish path is invalid".to_string(),
+            })
+        })?;
     }
 
     let mut known_headers = Vec::new();
@@ -974,20 +988,26 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
             continue;
         };
         let name = if let Expression::Literal(nervix_models::Literal::String(name)) = name {
-            Some(HttpHeaderName::parse(name).map_err(|_| {
-                invalid(format!(
-                    "HTTP invoke #{invocation_index} header name is invalid or reserved"
-                ))
+            Some(HttpHeaderName::parse(name).map_err(|cause| {
+                cause.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "HTTP invoke #{invocation_index} header name is invalid or reserved"
+                    ),
+                })
             })?)
         } else {
             all_headers_known = false;
             None
         };
         let value = if let Expression::Literal(nervix_models::Literal::String(value)) = value {
-            Some(HttpHeaderValue::parse(value).map_err(|_| {
-                invalid(format!(
-                    "HTTP invoke #{invocation_index} header value is invalid"
-                ))
+            Some(HttpHeaderValue::parse(value).map_err(|cause| {
+                cause.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("HTTP invoke #{invocation_index} header value is invalid"),
+                })
             })?)
         } else {
             all_headers_known = false;
@@ -1019,11 +1039,15 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
         let mut headers = HttpApplicationHeaders::default();
         let final_invocation = known_headers.last().map(|header| header.invocation);
         for known in known_headers {
-            headers.insert(known.name, known.value).map_err(|_| {
-                invalid(format!(
-                    "HTTP invoke #{} application headers exceed the count or 32 KiB limit",
-                    known.invocation
-                ))
+            headers.insert(known.name, known.value).map_err(|cause| {
+                cause.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "HTTP invoke #{} application headers exceed the count or 32 KiB limit",
+                        known.invocation
+                    ),
+                })
             })?;
         }
         if headers.validate_total().is_err() {

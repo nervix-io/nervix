@@ -14,6 +14,18 @@ use crate::{Arbitrary, Domain, route::RouteShape};
 const ITEMS: usize = 3;
 
 impl Arbitrary<'_> {
+    /// A case-preserving catalog namespace, including multiple levels and the length boundary.
+    pub fn iceberg_namespace(&mut self) -> IcebergNamespace {
+        let text = self.entropy.pick([
+            "Analytics".to_string(),
+            "Analytics.Events".to_string(),
+            "a.B-c.d_e~f".to_string(),
+            "N".repeat(128),
+        ]);
+        IcebergNamespace::try_from(text)
+            .verified("all generated catalog namespaces satisfy their rule")
+    }
+
     /// An emitter publishing to any emitter, in a publishing mode and with a body that emitter accepts,
     /// batching where the emitter requires it and optionally where it allows it.
     pub fn create_emitter(&mut self) -> CreateEmitter {
@@ -285,11 +297,12 @@ impl Arbitrary<'_> {
                     table: self.emitter_table_name(),
                     values: self.value_mappings(1),
                     location: self.string(),
+                    namespace: self.iceberg_namespace(),
                     catalog: IcebergCatalog::Rest {
                         client: self.name(),
                     },
                     commit_each: self.duration(),
-                    max_commit_size: self.byte_size(),
+                    max_commit_size: self.payload_size_limit(),
                 }))
             }
         }

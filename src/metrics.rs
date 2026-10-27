@@ -47,7 +47,7 @@ use nervix_primitives::{
     },
     time::Instant,
 };
-use nervix_recovery::Discarded as _;
+use nervix_recovery::{Discarded as _, Reported as _};
 use nervix_simd_kernels::{ElapsedHistogram, ElapsedLayout, elapsed_nanos};
 use prometheus::{
     Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
@@ -2340,10 +2340,20 @@ impl PrometheusMetrics {
         }
         metric_families.retain(|family| !family.get_metric().is_empty());
         let mut buffer = Vec::new();
-        if encoder.encode(&metric_families, &mut buffer).is_err() {
+        if encoder
+            .encode(&metric_families, &mut buffer)
+            .inspect_err(|error| Err::<(), _>(error).reported("encode Prometheus metrics"))
+            .is_err()
+        {
             return String::new();
         }
-        String::from_utf8(buffer).unwrap_or_default()
+        match String::from_utf8(buffer) {
+            Ok(text) => text,
+            Err(error) => {
+                Err::<(), _>(error).reported("decode Prometheus text exposition");
+                String::new()
+            }
+        }
     }
 }
 

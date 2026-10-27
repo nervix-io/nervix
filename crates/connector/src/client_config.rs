@@ -93,19 +93,17 @@ pub fn render_client_config_template<T: serde::Serialize>(
     context: &T,
 ) -> ClientConfigResult<String> {
     let template = template_engine.compile(value).map_err(|source| {
-        Report::new(ClientConfigError::CompileTemplate {
+        Report::new(source).change_context(ClientConfigError::CompileTemplate {
             key: key.to_string(),
         })
-        .attach_printable(source.to_string())
     })?;
     template
         .render(template_engine, context)
         .to_string()
         .map_err(|source| {
-            Report::new(ClientConfigError::RenderTemplate {
+            Report::new(source).change_context(ClientConfigError::RenderTemplate {
                 key: key.to_string(),
             })
-            .attach_printable(source.to_string())
         })
 }
 
@@ -264,6 +262,16 @@ mod tests {
             template.current_context(),
             ClientConfigError::CompileTemplate { key } if key == "password"
         ));
+        assert!(template.downcast_ref::<upon::Error>().is_some());
+
+        let rendering = render_client_config_template(
+            &TemplateEngine::new(),
+            "password",
+            "{{missing}}",
+            &serde_json::json!({}),
+        )
+        .expect_err("a missing template variable must fail rendering");
+        assert!(rendering.downcast_ref::<upon::Error>().is_some());
 
         let tls = ClientTlsPaths {
             ca_file: None,

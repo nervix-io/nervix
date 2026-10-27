@@ -27,6 +27,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{ResourceName, RestoreStep, SchemaFingerprint};
 use nervix_primitives::task::AbortOnDropHandle;
+use nervix_server::RestoreStagingKind;
 
 use super::*;
 use crate::common::{
@@ -261,45 +262,87 @@ fn then_restore_state_publication_failure_state(
     domain: String,
     state: String,
 ) {
-    let expected = match state.as_str() {
-        "pending" => Some(false),
-        "delivered" => Some(true),
-        "disabled" => None,
-        _ => panic!("unknown durable state publication failure state: {state}"),
-    };
     assert_eq!(
         world
             .fault_injection
             .restore_state_publication_failure_delivered(&scenario_domain(world, &domain)),
-        expected,
+        injected_restore_failure_delivery(&state),
         "the durable state publication failure of restoring domain '{domain}' is {state}"
     );
 }
 
-#[given(expr = "restoring domain {string} fails before installing its first WASM checkpoint")]
-fn given_restored_wasm_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
-    world
-        .fault_injection
-        .fail_restored_wasm_checkpoint(scenario_domain(world, &domain));
+/// Arms a failure that every staging of the domain's restored checkpoints of one kind meets until
+/// a step clears it, so a restore that recovery resumes under the same execution reference fails
+/// again rather than completing after a failure that was never recorded.
+#[given(
+    regex = "^(WASM|materialized|deduplicator and window) checkpoint stagings of restoring domain \
+             \"([^\"]*)\" fail$"
+)]
+fn given_restore_checkpoint_stagings_fail(world: &mut ScenarioWorld, kind: String, domain: String) {
+    world.fault_injection.fail_restore_checkpoint_stagings(
+        scenario_domain(world, &domain),
+        restore_staging_kind(&kind),
+    );
 }
 
-#[given(
-    expr = "restoring domain {string} fails before installing its first materialized checkpoint"
+#[when(
+    regex = "^the (WASM|materialized|deduplicator and window) checkpoint staging failure of \
+             restoring domain \"([^\"]*)\" is cleared$"
 )]
-fn given_restored_materialized_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
+fn when_restore_checkpoint_staging_failure_is_cleared(
+    world: &mut ScenarioWorld,
+    kind: String,
+    domain: String,
+) {
     world
         .fault_injection
-        .fail_restored_materialized_checkpoint(scenario_domain(world, &domain));
+        .clear_restore_checkpoint_staging_failure(
+            &scenario_domain(world, &domain),
+            restore_staging_kind(&kind),
+        );
 }
 
-#[given(
-    expr = "restoring domain {string} fails before installing its first deduplicator or window \
-            checkpoint"
+#[then(
+    regex = "^restoring domain \"([^\"]*)\" has (WASM|materialized|deduplicator and window) \
+             checkpoint staging failure state (\\w+)$"
 )]
-fn given_restored_branch_state_checkpoint_fails(world: &mut ScenarioWorld, domain: String) {
-    world
-        .fault_injection
-        .fail_restored_branch_state_checkpoint(scenario_domain(world, &domain));
+fn then_restore_checkpoint_staging_failure_state(
+    world: &mut ScenarioWorld,
+    domain: String,
+    kind: String,
+    state: String,
+) {
+    assert_eq!(
+        world
+            .fault_injection
+            .restore_checkpoint_staging_failure_delivered(
+                &scenario_domain(world, &domain),
+                restore_staging_kind(&kind),
+            ),
+        injected_restore_failure_delivery(&state),
+        "the {kind} checkpoint staging failure of restoring domain '{domain}' is {state}"
+    );
+}
+
+/// The checkpoint kind a staging failure step names.
+fn restore_staging_kind(kind: &str) -> RestoreStagingKind {
+    match kind {
+        "WASM" => RestoreStagingKind::Guest,
+        "materialized" => RestoreStagingKind::Materialized,
+        "deduplicator and window" => RestoreStagingKind::BranchState,
+        _ => panic!("unknown restore checkpoint staging kind: {kind}"),
+    }
+}
+
+/// The delivery an injected restore failure control reports in the state a step names: pending
+/// once armed, delivered once a restore met it, and disabled while nothing arms it.
+fn injected_restore_failure_delivery(state: &str) -> Option<bool> {
+    match state {
+        "pending" => Some(false),
+        "delivered" => Some(true),
+        "disabled" => None,
+        _ => panic!("unknown injected restore failure state: {state}"),
+    }
 }
 
 #[then(expr = "client {string} observes resumed clock progress beyond backup {string}'s frontier")]
@@ -518,13 +561,7 @@ async fn then_restore_eventually_completes(
     )
     .await
     .assured("restore completes under the new coordinator");
-    assert!(
-        matches!(
-            restore_outcome(&end).disposition,
-            CommandDisposition::Completed { .. }
-        ),
-        "restore recovery completes: {end:?}"
-    );
+    assert_restore_completed(&end);
     world.last_restore_end = Some(end);
 }
 
@@ -1722,6 +1759,19 @@ fn assert_restore_outcome(end: &TestRestoreEnd, disposition: &str, origin: &str)
     assert_eq!(outcome.origin, expected, "{}", outcome.message);
 }
 
+/// Requires the known outcome of a restore to have completed it. Its origin is the answering
+/// attempt's own, so an outcome a later attempt learned for a restore an earlier attempt admitted
+/// is recovered.
+fn assert_restore_completed(end: &TestRestoreEnd) {
+    let outcome = restore_outcome(end);
+    assert!(
+        matches!(outcome.disposition, CommandDisposition::Completed { .. }),
+        "the restore completes: {:?}: {}",
+        outcome.disposition,
+        outcome.message
+    );
+}
+
 #[then(expr = "the restore stream's outcome is {string} as {string}")]
 fn then_restore_stream_outcome(world: &mut ScenarioWorld, disposition: String, origin: String) {
     let end = world
@@ -1759,13 +1809,7 @@ async fn then_background_restore_stream_completes(world: &mut ScenarioWorld) {
         .task
         .await
         .assured("the background restore completion probe does not panic");
-    let outcome = restore_outcome(&end);
-    assert!(
-        matches!(outcome.disposition, CommandDisposition::Completed { .. }),
-        "the background restore completes: {:?}: {}",
-        outcome.disposition,
-        outcome.message
-    );
+    assert_restore_completed(&end);
     world.last_restore_end = Some(end);
 }
 
