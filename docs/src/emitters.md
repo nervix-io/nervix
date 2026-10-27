@@ -1587,7 +1587,13 @@ ingestor renders it, so it can name the client's `MOUNT`; see
 [Client Config Mounts](resources.md#client-config-mounts).
 
 `CREATE CLIENT` checks `addr` with the socket driver's TCP/IPC endpoint parser, including after
-rendering an address template. This check opens no socket and performs no name lookup.
+rendering an address template. This check opens no socket and performs no name lookup. A TCP
+hostname on a connecting PUSH socket uses the ZeroMQ driver's system resolver, not the node's
+configured resolver; see [Name Resolution](name-resolution.md#residual-resolution).
+
+Each publish sends one payload frame, including when `BATCH` packs several records into one
+encoded message. The PUSH socket offers no transport headers, multipart envelope or delivery
+receipt from a PULL peer.
 
 A client that connects rather than binds connects when the emitter starts. The driver retries a
 refused connection on its own and waits for the peer's ZMTP handshake, so the client's
