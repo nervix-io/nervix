@@ -1909,9 +1909,12 @@ The public gossip-completion qualification holds the two followers' revision rep
 sampling and a peer's health reply. One client connects before those faults, then creates a user,
 creates a relay and reads cluster status in order within one twenty-second harness budget. That
 budget includes margin over the measured multi-stage gossip propagation under parallel bulk load;
-it is not a product deadline. The retained status must still report the connected follower as
-connected and name the new relay's owner before releasing any reply. The adjacent health-only
-qualification keeps its nine-second sequential probe.
+it is not a product deadline. The retained client status must name the new relay's owner before
+releasing any reply. A separate direct status request to node-1 checks that node-3 is connected
+while the replies remain held, so a client redirect cannot substitute another node's peer table.
+A controlled leader-transfer case checks that a probe redirected to node-3 identifies node-3 and
+reports its connected node-1 peer. The adjacent health-only qualification keeps its nine-second
+sequential probe.
 
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
