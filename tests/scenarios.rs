@@ -28838,158 +28838,55 @@ async fn then_relay_subscription_payloads_share_field(
     );
 }
 
+impl common::generator_cadence::GeneratorSubscription for TestSession {
+    async fn next(&mut self, budget: Duration) -> std::io::Result<Option<String>> {
+        let event = self.try_next_subscription(budget).await?;
+        Ok(event.map(|event| event.payload))
+    }
+}
+
 #[then(
-    expr = "within {string} {int} generator occurrences preserve branches {string} in field \
-            {string} with shared timestamp field {string}"
+    expr = "within {string} {int} generator occurrences preserve rows by {string} on {string} \
+            logical cadence with shared timestamp field {string}"
 )]
 async fn then_generator_occurrences_preserve_branches(
     world: &mut ScenarioWorld,
     duration: String,
     expected_occurrences: usize,
-    branches: String,
     branch_field: String,
+    cadence: String,
     timestamp_field: String,
+    #[step] step: &Step,
 ) {
     let duration = match parse_duration_text(&duration) {
         Ok(duration) => duration,
         Err(error) => panic!("step duration must be valid: {error}"),
     };
-    let branches = expand_placeholders(world, &branches);
-    let expected_branches = branches
-        .split(',')
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty())
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
-    assert!(
-        expected_branches.len() >= 2,
-        "generator cadence step requires at least two distinct branches"
+    let cadence = match parse_duration_text(&cadence) {
+        Ok(cadence) => cadence,
+        Err(error) => panic!("logical cadence must be valid: {error}"),
+    };
+    let expected = expand_placeholders(world, docstring(step));
+    let rows = match serde_json::from_str::<Vec<serde_json::Value>>(&expected) {
+        Ok(rows) => rows,
+        Err(error) => panic!("expected generator source rows must be valid JSON: {error}"),
+    };
+    let mut observation = common::generator_cadence::GeneratorCadenceObservation::new(
+        rows,
+        expand_placeholders(world, &branch_field),
+        expand_placeholders(world, &timestamp_field),
+        cadence,
+        expected_occurrences,
     );
-    let branch_field = expand_placeholders(world, &branch_field);
-    let timestamp_field = expand_placeholders(world, &timestamp_field);
     let mut session = world
         .active_session
         .take()
         .assured("an active session with subscription must exist");
-    let deadline = Instant::now()
-        .checked_add(duration)
-        .assured("scenario durations fit Tokio's monotonic instant range");
-    let mut last_payload = world.last_subscription_payload.take();
-    let (session, last_payload) =
-        crate::common::runner_observation::observe_off_the_runner(async move {
-            let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
-            let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
-            let mut observed = Vec::new();
-
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                let complete_occurrences = branches_by_timestamp
-                    .values()
-                    .filter(|branches| *branches == &expected_branches)
-                    .count();
-                if complete_occurrences >= expected_occurrences {
-                    assert_eq!(
-                        complete_occurrences, expected_occurrences,
-                        "generator produced more complete occurrences than the assertion consumed"
-                    );
-                    return (session, last_payload);
-                }
-                let now = Instant::now();
-                assert!(
-                    now < deadline,
-                    "timed out after observing {complete_occurrences} of {expected_occurrences} \
-                     complete generator occurrences for branches {expected_branches:?}: \
-                     {observed:?}"
-                );
-                let remaining = deadline
-                    .checked_duration_since(now)
-                    .verified("the deadline comparison above established remaining scenario time");
-                let event = match session.try_next_subscription(remaining).await {
-                    Ok(Some(event)) => event,
-                    Ok(None) => panic!(
-                        "timed out after observing {complete_occurrences} of \
-                         {expected_occurrences} complete generator occurrences for branches \
-                         {expected_branches:?}: {observed:?}"
-                    ),
-                    Err(error) => panic!("failed while waiting for subscription payloads: {error}"),
-                };
-                let payload = event.payload;
-                let (key, payload_json) =
-                    if let Some((key, payload_json)) = payload.split_once(" payload=") {
-                        (key.strip_prefix("key="), payload_json)
-                    } else {
-                        (None, payload.as_str())
-                    };
-                let parsed = match serde_json::from_str::<serde_json::Value>(payload_json) {
-                    Ok(parsed) => parsed,
-                    Err(error) => panic!("subscription payload is not valid JSON: {error}"),
-                };
-                let Some(branch) = parsed.get(&branch_field) else {
-                    panic!("subscription payload has no field '{branch_field}': {payload}");
-                };
-                let Some(branch) = branch.as_str() else {
-                    panic!(
-                        "subscription payload field '{branch_field}' is not a string: {payload}"
-                    );
-                };
-                assert!(
-                    expected_branches.contains(branch),
-                    "generator produced unexpected branch '{branch}': {payload}"
-                );
-                if let Some(key) = key {
-                    let key = match serde_json::from_str::<serde_json::Value>(key) {
-                        Ok(key) => key,
-                        Err(error) => panic!("subscription key is not valid JSON: {error}"),
-                    };
-                    assert_eq!(
-                        key.get(&branch_field),
-                        parsed.get(&branch_field),
-                        "generator output did not preserve branch field '{branch_field}': \
-                         {payload}"
-                    );
-                }
-                let Some(timestamp) = parsed.get(&timestamp_field) else {
-                    panic!("subscription payload has no field '{timestamp_field}': {payload}");
-                };
-                let Some(timestamp) = timestamp.as_str() else {
-                    panic!(
-                        "subscription payload field '{timestamp_field}' is not a string: {payload}"
-                    );
-                };
-                let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp) {
-                    Ok(timestamp) => timestamp,
-                    Err(error) => {
-                        panic!(
-                            "subscription payload field '{timestamp_field}' is not RFC 3339: \
-                             {error}"
-                        )
-                    }
-                };
-                let timestamp = timestamp
-                    .timestamp_nanos_opt()
-                    .assured("generator scenario timestamps fit signed Unix nanoseconds");
-                if let Some(previous) =
-                    latest_timestamp_by_branch.insert(branch.to_string(), timestamp)
-                {
-                    assert!(
-                        timestamp > previous,
-                        "generator timestamps for branch '{branch}' did not increase: \
-                         {observed:?}, {payload}"
-                    );
-                }
-                let inserted = branches_by_timestamp
-                    .entry(timestamp)
-                    .or_default()
-                    .insert(branch.to_string());
-                assert!(
-                    inserted,
-                    "generator repeated an occurrence for branch '{branch}': {payload}"
-                );
-                last_payload = Some(payload.clone());
-                observed.push(payload);
-            }
-        })
-        .await;
+    let (session, last_payload) = common::runner_observation::observe_off_the_runner(async move {
+        observation.observe(duration, &mut session).await;
+        (session, observation.last_payload().cloned())
+    })
+    .await;
     world.active_session = Some(session);
     world.last_subscription_payload = last_payload;
 }
