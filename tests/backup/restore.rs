@@ -1662,7 +1662,7 @@ async fn then_background_restore_outcome_is_held(world: &mut ScenarioWorld, node
         nervix_primitives::select! {
             biased;
             () = fault_injection.wait_for_command_finalization_pause(&node) => {},
-            ended = &mut background => {
+            ended = &mut background.task => {
                 let ended = ended.assured("the background restore task does not panic");
                 panic!("restore ended before its outcome was held: {ended:?}");
             }
