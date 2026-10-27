@@ -192,3 +192,88 @@ pub(super) fn metrics_body<'src>()
             }),
     )
 }
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "checks the OTEL declaration grammar")
+)]
+mod tests {
+    //! Layer: test harness.
+    //! - **Owns.** Parsing and mapping order for every declared OTEL signal field.
+    //! - **Depends on.** The composed emitter parser and public field declarations.
+    //! - **Must not know.** Registry decisions, OTLP encoding or runtime publication.
+
+    use meticulous::ResultExt as _;
+    use nervix_models::{
+        OTEL_HISTOGRAM_VALUE_FIELDS, OTEL_LOG_VALUE_FIELDS, OTEL_NUMBER_VALUE_FIELDS,
+        OTEL_TRACE_VALUE_FIELDS, OtelValueField,
+    };
+
+    #[test]
+    fn every_declared_otel_value_key_parses_and_keeps_its_written_order() {
+        struct Shape {
+            signal: &'static str,
+            metric: &'static str,
+            fields: &'static [OtelValueField],
+        }
+        let shapes = [
+            Shape {
+                signal: "LOGS",
+                metric: "",
+                fields: OTEL_LOG_VALUE_FIELDS,
+            },
+            Shape {
+                signal: "TRACES",
+                metric: "",
+                fields: OTEL_TRACE_VALUE_FIELDS,
+            },
+            Shape {
+                signal: "METRICS",
+                metric: "METRIC 'events' UNIT '1' GAUGE",
+                fields: OTEL_NUMBER_VALUE_FIELDS,
+            },
+            Shape {
+                signal: "METRICS",
+                metric: "METRIC 'events' UNIT '1' SUM MONOTONIC DELTA",
+                fields: OTEL_NUMBER_VALUE_FIELDS,
+            },
+            Shape {
+                signal: "METRICS",
+                metric: "METRIC 'events' UNIT '1' HISTOGRAM CUMULATIVE",
+                fields: OTEL_HISTOGRAM_VALUE_FIELDS,
+            },
+        ];
+        for Shape {
+            signal,
+            metric,
+            fields,
+        } in shapes
+        {
+            let values: Vec<_> = fields
+                .iter()
+                .map(|field| format!("'{}' = input.{}", field.key, field.key))
+                .collect();
+            let text = format!(
+                "CREATE OTEL {signal} EMITTER outgoing FROM events TO collector {metric} MODE ACK \
+                 RETRY POLICY BACKOFF 1s MAX 30s VALUES {{ {} }} ATTRIBUTES {{'nested' = [true, \
+                 false]}} RESOURCE {{'service.name' = 'nervix'}} SCOPE 'nervix' VERSION '1' FLUSH \
+                 IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+                values.join(", ")
+            );
+            let emitter = crate::emitter::parse_create_emitter(&text)
+                .assured("every declared signal field belongs to its VALUES grammar");
+            let nervix_models::EmitterEntity::Otel(connector) = emitter.connector.as_ref() else {
+                panic!("the selected OTEL grammar produces its connector");
+            };
+            let keys: Vec<_> = connector
+                .mappings()
+                .values
+                .iter()
+                .map(|mapping| mapping.column.as_str())
+                .collect();
+            let expected: Vec<_> = fields.iter().map(|field| field.key).collect();
+            assert_eq!(keys, expected);
+        }
+    }
+}

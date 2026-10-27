@@ -7,7 +7,7 @@ Feature: Nervix refuses connector declarations that cannot execute
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( event_ts DATETIME, body STRING );
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE OTEL CLIENT destination CONFIG { 'endpoint' = 'http://127.0.0.1:4317', 'protocol' = 'grpc' };
+      CREATE OTEL CLIENT destination CONFIG { 'endpoint' = 'http://127.0.0.1:4317', 'protocol' = 'grpc', 'timeout_ms' = 5000 };
       """
     When these Plexus statements fail with "RESOURCE"
       """
@@ -30,7 +30,7 @@ Feature: Nervix refuses connector declarations that cannot execute
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( event_ts DATETIME, body STRING, severity I32 );
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE OTEL CLIENT destination CONFIG { 'endpoint' = 'http://127.0.0.1:4317', 'protocol' = 'grpc' };
+      CREATE OTEL CLIENT destination CONFIG { 'endpoint' = 'http://127.0.0.1:4317', 'protocol' = 'grpc', 'timeout_ms' = 5000 };
       """
     When these Plexus statements are executed on the leader node
       """
@@ -134,7 +134,7 @@ Feature: Nervix refuses connector declarations that cannot execute
       CREATE UNPACED DOMAIN {{domain}};
       CREATE SCHEMA event ( event_ts DATETIME, body STRING );
       CREATE RELAY events SCHEMA event UNBRANCHED;
-      CREATE OTEL CLIENT destination CONFIG { 'endpoint' = 'http://127.0.0.1:4317', 'protocol' = 'grpc' };
+      CREATE OTEL CLIENT destination CONFIG { 'endpoint' = 'http://127.0.0.1:4317', 'protocol' = 'grpc', 'timeout_ms' = 5000 };
       """
     When these Plexus statements fail with "VALUES key 'severity_number' requires I32, found Int64"
       """

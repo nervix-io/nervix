@@ -141,11 +141,11 @@ use crate::common::{
         SessionScope, TestSubscriptionEvent, TestUpload, TestUploadPart, WireOutcome as _,
         command_output, fresh_execution_reference, outcome_awaits_leader,
     },
-    runner_lag::RunnerLagObserver,
+    runner_lag::{RunnerLagObserver, purge_freed_memory_in_the_background},
     runner_observation::ArrivalObservation,
     scenario_phase::{
         ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
-        begin_suite_measurement, suite_summary,
+        begin_suite_measurement, record_runner_tick, suite_summary,
     },
     scenario_schedule::{
         FeatureLimit, SCENARIO_RETRIES, ScenarioAdmission, ScenarioLength, ScenarioRunSlots,
@@ -14402,20 +14402,99 @@ fn resource_directory_ca_pem(world: &ScenarioWorld, placeholder: &str) -> String
         })
 }
 
-fn plexus_statements(input: &str) -> Vec<String> {
-    if let Ok(statements) = nervix_plexus::client_statement::parse_client_statement_sources(input) {
-        return statements
-            .iter()
-            .map(|statement| statement.source(input).to_string())
-            .collect();
+/// A Plexus command document a step runs, read once.
+///
+/// The harness decides how to send a document, sends each of its statements and records what the
+/// scenario needs from it, all on the runner task that polls every scenario. The document is parsed
+/// once and asked each of those questions, so the parser does not run on that task for every one
+/// of them.
+struct CommandDocument<'a> {
+    source: &'a str,
+    /// The statements the parser read, or nothing when the document does not parse. The harness
+    /// then sends its `;`-separated pieces as written, so the server reports what is wrong.
+    parsed: Option<Vec<nervix_plexus::client_statement::ParsedClientStatement>>,
+}
+
+impl<'a> CommandDocument<'a> {
+    fn read(source: &'a str) -> Self {
+        let parsed = nervix_plexus::client_statement::parse_client_statement_sources(source).ok();
+        Self { source, parsed }
     }
 
-    input
-        .split(';')
-        .map(str::trim)
-        .filter(|statement| !statement.is_empty())
-        .map(|statement| format!("{statement};"))
-        .collect()
+    /// The source text of each statement, in order.
+    fn statements(&self) -> Vec<String> {
+        let Some(parsed) = &self.parsed else {
+            return self
+                .source
+                .split(';')
+                .map(str::trim)
+                .filter(|statement| !statement.is_empty())
+                .map(|statement| format!("{statement};"))
+                .collect();
+        };
+        parsed
+            .iter()
+            .map(|statement| statement.source(self.source).to_string())
+            .collect()
+    }
+
+    /// Whether a statement of the document needs the session it runs on to stay open: a
+    /// subscription, or a transaction.
+    fn requires_persistent_session(&self) -> bool {
+        for statement in self.statements() {
+            let normalized = statement.trim().to_ascii_uppercase();
+            if normalized.starts_with("CREATE SUBSCRIPTION ")
+                || normalized == "BEGIN;"
+                || normalized == "COMMIT;"
+                || normalized == "REVERT;"
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether the session holds a subscription once the document has run, given whether it held
+    /// one before.
+    fn updates_subscription_state(&self, current: bool) -> bool {
+        let mut state = current;
+        for command in self.statements() {
+            state = command_updates_subscription_state(state, &command);
+        }
+        state
+    }
+
+    /// The statements of a document whose server statements follow a subscription, when it holds
+    /// only server statements and subscriptions. The harness sends those server statements
+    /// through the client and opens a raw session for the subscription alone.
+    fn subscription_graph(
+        &self,
+    ) -> Option<&[nervix_plexus::client_statement::ParsedClientStatement]> {
+        let statements = self.parsed.as_deref()?;
+        let mut saw_subscription = false;
+        let mut server_follows_subscription = false;
+        for statement in statements {
+            match statement.statement {
+                nervix_plexus::client_statement::ClientStatement::CreateSubscription(_) => {
+                    saw_subscription = true;
+                }
+                nervix_plexus::client_statement::ClientStatement::Server(_) => {
+                    if saw_subscription {
+                        server_follows_subscription = true;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        if !server_follows_subscription {
+            return None;
+        }
+        Some(statements)
+    }
+}
+
+fn plexus_statements(input: &str) -> Vec<String> {
+    CommandDocument::read(input).statements()
 }
 
 fn payload_matches_expected(actual: &str, expected: &str) -> bool {
@@ -14426,16 +14505,6 @@ fn payload_matches_expected(actual: &str, expected: &str) -> bool {
         return actual_json == expected_json;
     }
     actual.contains(expected)
-}
-
-fn requires_persistent_session(commands: &str) -> bool {
-    plexus_statements(commands).iter().any(|statement| {
-        let normalized = statement.trim().to_ascii_uppercase();
-        normalized.starts_with("CREATE SUBSCRIPTION ")
-            || normalized == "BEGIN;"
-            || normalized == "COMMIT;"
-            || normalized == "REVERT;"
-    })
 }
 
 fn command_updates_subscription_state(current: bool, command: &str) -> bool {
@@ -14450,15 +14519,11 @@ fn command_updates_subscription_state(current: bool, command: &str) -> bool {
 }
 
 fn commands_update_subscription_state(current: bool, commands: &str) -> bool {
-    plexus_statements(commands)
-        .into_iter()
-        .fold(current, |state, command| {
-            command_updates_subscription_state(state, &command)
-        })
+    CommandDocument::read(commands).updates_subscription_state(current)
 }
 
-fn record_avro_wire_optional_fields(world: &mut ScenarioWorld, commands: &str) {
-    for statement in plexus_statements(commands) {
+fn record_avro_wire_optional_fields(world: &mut ScenarioWorld, document: &CommandDocument<'_>) {
+    for statement in document.statements() {
         let normalized = statement.trim_start().to_ascii_uppercase();
         if !normalized.starts_with("CREATE WIRE AVRO SCHEMA ") {
             continue;
@@ -14481,19 +14546,18 @@ fn record_avro_wire_optional_fields(world: &mut ScenarioWorld, commands: &str) {
     }
 }
 
-fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
-    let Ok(parsed) = nervix_plexus::client_statement::parse_client_statement_sources(commands)
-    else {
+fn record_mqtt_ingestors(world: &mut ScenarioWorld, document: &CommandDocument<'_>) {
+    let Some(parsed) = &document.parsed else {
         return;
     };
     for statement in parsed {
         let nervix_plexus::client_statement::ClientStatement::Server(
             nervix_models::Statement::Create(create),
-        ) = statement.statement
+        ) = &statement.statement
         else {
             continue;
         };
-        let nervix_models::Model::Ingestor(ingestor) = *create.body else {
+        let nervix_models::Model::Ingestor(ingestor) = &*create.body else {
             continue;
         };
         let Some(nervix_models::IngestorEntity::Mqtt(_)) = ingestor.input.transport_entity() else {
@@ -14507,56 +14571,26 @@ fn record_mqtt_ingestors(world: &mut ScenarioWorld, commands: &str) {
     }
 }
 
-/// The statements of a command document whose server statements follow a subscription, when it
-/// holds only server statements and subscriptions. The harness sends those server statements
-/// through the client and opens a raw session for the subscription alone.
-fn subscription_graph_statements(
-    commands: &str,
-) -> Option<Vec<nervix_plexus::client_statement::ParsedClientStatement>> {
-    nervix_plexus::client_statement::parse_client_statement_sources(commands)
-        .ok()
-        .filter(|statements| {
-            let mut saw_subscription = false;
-            let server_follows_subscription = statements.iter().any(|statement| {
-                if matches!(
-                    statement.statement,
-                    nervix_plexus::client_statement::ClientStatement::CreateSubscription(_)
-                ) {
-                    saw_subscription = true;
-                    false
-                } else {
-                    saw_subscription
-                        && matches!(
-                            statement.statement,
-                            nervix_plexus::client_statement::ClientStatement::Server(_)
-                        )
-                }
-            });
-            server_follows_subscription
-                && statements.iter().all(|statement| {
-                    matches!(
-                        statement.statement,
-                        nervix_plexus::client_statement::ClientStatement::Server(_)
-                            | nervix_plexus::client_statement::ClientStatement::CreateSubscription(
-                                _
-                            )
-                    )
-                })
-        })
-}
-
 async fn execute_plexus_commands_on_node(
     world: &mut ScenarioWorld,
     node_id: &str,
     commands: &str,
 ) -> Result<TestSession, String> {
-    record_avro_wire_optional_fields(world, commands);
+    execute_command_document_on_node(world, node_id, &CommandDocument::read(commands)).await
+}
+
+async fn execute_command_document_on_node(
+    world: &mut ScenarioWorld,
+    node_id: &str,
+    document: &CommandDocument<'_>,
+) -> Result<TestSession, String> {
+    record_avro_wire_optional_fields(world, document);
     append_cucumber_log_line(&format!(
         "plexus commands on node {node_id}: {}",
-        commands.replace('\n', "\\n")
+        document.source.replace('\n', "\\n")
     ));
-    if !requires_persistent_session(commands) {
-        for command in plexus_statements(commands) {
+    if !document.requires_persistent_session() {
+        for command in document.statements() {
             append_cucumber_log_line(&format!("plexus command on node {node_id}: {command}"));
             let output = world
                 .cluster()
@@ -14565,7 +14599,7 @@ async fn execute_plexus_commands_on_node(
                 .map_err(|error| error.to_string())?;
             world.last_command_output = Some(output);
         }
-        record_mqtt_ingestors(world, commands);
+        record_mqtt_ingestors(world, document);
         return world
             .cluster()
             .open_session(node_id, &world.domain)
@@ -14573,10 +14607,10 @@ async fn execute_plexus_commands_on_node(
             .map_err(|error| error.to_string());
     }
 
-    if let Some(statements) = subscription_graph_statements(commands) {
+    if let Some(statements) = document.subscription_graph() {
         let mut session = None;
         for statement in statements {
-            let command = statement.source(commands);
+            let command = statement.source(document.source);
             append_cucumber_log_line(&format!("plexus command with subscription: {command}"));
             let output = match statement.statement {
                 nervix_plexus::client_statement::ClientStatement::Server(_) => world
@@ -14605,7 +14639,7 @@ async fn execute_plexus_commands_on_node(
             };
             world.last_command_output = Some(output);
         }
-        record_mqtt_ingestors(world, commands);
+        record_mqtt_ingestors(world, document);
         return Ok(session.expect("subscription graph contains a subscription"));
     }
 
@@ -14615,7 +14649,7 @@ async fn execute_plexus_commands_on_node(
         .await
         .map_err(|error| error.to_string())?;
 
-    for command in plexus_statements(commands) {
+    for command in document.statements() {
         append_cucumber_log_line(&format!("plexus command on session {node_id}: {command}"));
         match session.run_command(&command).await {
             Ok(output) => world.last_command_output = Some(output),
@@ -14623,7 +14657,7 @@ async fn execute_plexus_commands_on_node(
         }
     }
 
-    record_mqtt_ingestors(world, commands);
+    record_mqtt_ingestors(world, document);
     Ok(session)
 }
 
@@ -14689,17 +14723,24 @@ async fn execute_plexus_commands_on_leader(
     world: &mut ScenarioWorld,
     commands: &str,
 ) -> Result<NodeSession, String> {
+    execute_command_document_on_leader(world, &CommandDocument::read(commands)).await
+}
+
+async fn execute_command_document_on_leader(
+    world: &mut ScenarioWorld,
+    document: &CommandDocument<'_>,
+) -> Result<NodeSession, String> {
     let node = current_leader_node(world).await;
-    if !requires_persistent_session(commands) || subscription_graph_statements(commands).is_some() {
+    if !document.requires_persistent_session() || document.subscription_graph().is_some() {
         // The client library sends each command and recovers its outcome itself, the server
         // statements of a subscription graph included.
-        let session = execute_plexus_commands_on_node(world, &node, commands).await?;
+        let session = execute_command_document_on_node(world, &node, document).await?;
         return Ok(NodeSession { node, session });
     }
-    record_avro_wire_optional_fields(world, commands);
+    record_avro_wire_optional_fields(world, document);
     append_cucumber_log_line(&format!(
         "plexus commands on node {node}: {}",
-        commands.replace('\n', "\\n")
+        document.source.replace('\n', "\\n")
     ));
     let routes = world.cluster().leader_routes();
     let session = world
@@ -14709,7 +14750,7 @@ async fn execute_plexus_commands_on_leader(
         .map_err(|error| error.to_string())?;
     let mut current = NodeSession { node, session };
     let mut session_bound = false;
-    for command in plexus_statements(commands) {
+    for command in document.statements() {
         nervix_primitives::task::consume_budget().await;
         append_cucumber_log_line(&format!(
             "plexus command on session {}: {command}",
@@ -14743,7 +14784,7 @@ async fn execute_plexus_commands_on_leader(
             session_bound = true;
         }
     }
-    record_mqtt_ingestors(world, commands);
+    record_mqtt_ingestors(world, document);
     Ok(current)
 }
 
@@ -15461,13 +15502,14 @@ async fn run_plexus_commands_on_active_session(
     world: &mut ScenarioWorld,
     commands: &str,
 ) -> Result<(), String> {
-    record_avro_wire_optional_fields(world, commands);
+    let document = CommandDocument::read(commands);
+    record_avro_wire_optional_fields(world, &document);
     append_cucumber_log_line(&format!(
         "plexus commands on active session: {}",
         commands.replace('\n', "\\n")
     ));
     let routes = world.cluster().leader_routes();
-    for command in plexus_statements(commands) {
+    for command in document.statements() {
         nervix_primitives::task::consume_budget().await;
         append_cucumber_log_line(&format!("plexus command on active session: {command}"));
         let session = world
@@ -15479,7 +15521,7 @@ async fn run_plexus_commands_on_active_session(
         world.active_session_has_subscription =
             command_updates_subscription_state(world.active_session_has_subscription, &command);
     }
-    record_mqtt_ingestors(world, commands);
+    record_mqtt_ingestors(world, &document);
     Ok(())
 }
 
@@ -15674,12 +15716,13 @@ async fn when_these_plexus_commands_are_executed(world: &mut ScenarioWorld, #[st
             .expect("failed to execute Plexus command on active session");
         return;
     }
-    let ran = execute_plexus_commands_on_leader(world, &commands)
+    let document = CommandDocument::read(&commands);
+    let ran = execute_command_document_on_leader(world, &document)
         .await
         .expect("failed to execute Plexus setup command");
     world.active_session = Some(ran.session);
     world.active_session_node = Some(ran.node);
-    world.active_session_has_subscription = commands_update_subscription_state(false, &commands);
+    world.active_session_has_subscription = document.updates_subscription_state(false);
 }
 
 #[when("these Plexus commands are executed through the client on a follower node")]
@@ -28812,158 +28855,55 @@ async fn then_relay_subscription_payloads_share_field(
     );
 }
 
+impl common::generator_cadence::GeneratorSubscription for TestSession {
+    async fn next(&mut self, budget: Duration) -> std::io::Result<Option<String>> {
+        let event = self.try_next_subscription(budget).await?;
+        Ok(event.map(|event| event.payload))
+    }
+}
+
 #[then(
-    expr = "within {string} {int} generator occurrences preserve branches {string} in field \
-            {string} with shared timestamp field {string}"
+    expr = "within {string} {int} generator occurrences preserve rows by {string} on {string} \
+            logical cadence with shared timestamp field {string}"
 )]
 async fn then_generator_occurrences_preserve_branches(
     world: &mut ScenarioWorld,
     duration: String,
     expected_occurrences: usize,
-    branches: String,
     branch_field: String,
+    cadence: String,
     timestamp_field: String,
+    #[step] step: &Step,
 ) {
     let duration = match parse_duration_text(&duration) {
         Ok(duration) => duration,
         Err(error) => panic!("step duration must be valid: {error}"),
     };
-    let branches = expand_placeholders(world, &branches);
-    let expected_branches = branches
-        .split(',')
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty())
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
-    assert!(
-        expected_branches.len() >= 2,
-        "generator cadence step requires at least two distinct branches"
+    let cadence = match parse_duration_text(&cadence) {
+        Ok(cadence) => cadence,
+        Err(error) => panic!("logical cadence must be valid: {error}"),
+    };
+    let expected = expand_placeholders(world, docstring(step));
+    let rows = match serde_json::from_str::<Vec<serde_json::Value>>(&expected) {
+        Ok(rows) => rows,
+        Err(error) => panic!("expected generator source rows must be valid JSON: {error}"),
+    };
+    let mut observation = common::generator_cadence::GeneratorCadenceObservation::new(
+        rows,
+        expand_placeholders(world, &branch_field),
+        expand_placeholders(world, &timestamp_field),
+        cadence,
+        expected_occurrences,
     );
-    let branch_field = expand_placeholders(world, &branch_field);
-    let timestamp_field = expand_placeholders(world, &timestamp_field);
     let mut session = world
         .active_session
         .take()
         .assured("an active session with subscription must exist");
-    let deadline = Instant::now()
-        .checked_add(duration)
-        .assured("scenario durations fit Tokio's monotonic instant range");
-    let mut last_payload = world.last_subscription_payload.take();
-    let (session, last_payload) =
-        crate::common::runner_observation::observe_off_the_runner(async move {
-            let mut branches_by_timestamp = BTreeMap::<_, BTreeSet<String>>::new();
-            let mut latest_timestamp_by_branch = BTreeMap::<String, i64>::new();
-            let mut observed = Vec::new();
-
-            loop {
-                nervix_primitives::task::consume_budget().await;
-                let complete_occurrences = branches_by_timestamp
-                    .values()
-                    .filter(|branches| *branches == &expected_branches)
-                    .count();
-                if complete_occurrences >= expected_occurrences {
-                    assert_eq!(
-                        complete_occurrences, expected_occurrences,
-                        "generator produced more complete occurrences than the assertion consumed"
-                    );
-                    return (session, last_payload);
-                }
-                let now = Instant::now();
-                assert!(
-                    now < deadline,
-                    "timed out after observing {complete_occurrences} of {expected_occurrences} \
-                     complete generator occurrences for branches {expected_branches:?}: \
-                     {observed:?}"
-                );
-                let remaining = deadline
-                    .checked_duration_since(now)
-                    .verified("the deadline comparison above established remaining scenario time");
-                let event = match session.try_next_subscription(remaining).await {
-                    Ok(Some(event)) => event,
-                    Ok(None) => panic!(
-                        "timed out after observing {complete_occurrences} of \
-                         {expected_occurrences} complete generator occurrences for branches \
-                         {expected_branches:?}: {observed:?}"
-                    ),
-                    Err(error) => panic!("failed while waiting for subscription payloads: {error}"),
-                };
-                let payload = event.payload;
-                let (key, payload_json) =
-                    if let Some((key, payload_json)) = payload.split_once(" payload=") {
-                        (key.strip_prefix("key="), payload_json)
-                    } else {
-                        (None, payload.as_str())
-                    };
-                let parsed = match serde_json::from_str::<serde_json::Value>(payload_json) {
-                    Ok(parsed) => parsed,
-                    Err(error) => panic!("subscription payload is not valid JSON: {error}"),
-                };
-                let Some(branch) = parsed.get(&branch_field) else {
-                    panic!("subscription payload has no field '{branch_field}': {payload}");
-                };
-                let Some(branch) = branch.as_str() else {
-                    panic!(
-                        "subscription payload field '{branch_field}' is not a string: {payload}"
-                    );
-                };
-                assert!(
-                    expected_branches.contains(branch),
-                    "generator produced unexpected branch '{branch}': {payload}"
-                );
-                if let Some(key) = key {
-                    let key = match serde_json::from_str::<serde_json::Value>(key) {
-                        Ok(key) => key,
-                        Err(error) => panic!("subscription key is not valid JSON: {error}"),
-                    };
-                    assert_eq!(
-                        key.get(&branch_field),
-                        parsed.get(&branch_field),
-                        "generator output did not preserve branch field '{branch_field}': \
-                         {payload}"
-                    );
-                }
-                let Some(timestamp) = parsed.get(&timestamp_field) else {
-                    panic!("subscription payload has no field '{timestamp_field}': {payload}");
-                };
-                let Some(timestamp) = timestamp.as_str() else {
-                    panic!(
-                        "subscription payload field '{timestamp_field}' is not a string: {payload}"
-                    );
-                };
-                let timestamp = match chrono::DateTime::parse_from_rfc3339(timestamp) {
-                    Ok(timestamp) => timestamp,
-                    Err(error) => {
-                        panic!(
-                            "subscription payload field '{timestamp_field}' is not RFC 3339: \
-                             {error}"
-                        )
-                    }
-                };
-                let timestamp = timestamp
-                    .timestamp_nanos_opt()
-                    .assured("generator scenario timestamps fit signed Unix nanoseconds");
-                if let Some(previous) =
-                    latest_timestamp_by_branch.insert(branch.to_string(), timestamp)
-                {
-                    assert!(
-                        timestamp > previous,
-                        "generator timestamps for branch '{branch}' did not increase: \
-                         {observed:?}, {payload}"
-                    );
-                }
-                let inserted = branches_by_timestamp
-                    .entry(timestamp)
-                    .or_default()
-                    .insert(branch.to_string());
-                assert!(
-                    inserted,
-                    "generator repeated an occurrence for branch '{branch}': {payload}"
-                );
-                last_payload = Some(payload.clone());
-                observed.push(payload);
-            }
-        })
-        .await;
+    let (session, last_payload) = common::runner_observation::observe_off_the_runner(async move {
+        observation.observe(duration, &mut session).await;
+        (session, observation.last_payload().cloned())
+    })
+    .await;
     world.active_session = Some(session);
     world.last_subscription_payload = last_payload;
 }
@@ -32816,11 +32756,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // hooks; the harness permits below are the only run capacity charged to a scenario.
     cli.runner.concurrency = None;
     let run_slots = StdArc::new(ScenarioRunSlots::new(effective_max_concurrent_scenarios));
+    // Every scenario's steps run on this thread, so it must not also wait for the TLB shootdowns
+    // jemalloc's purges cost in a process of this many threads.
+    purge_freed_memory_in_the_background();
     truncate_cucumber_log();
     begin_suite_measurement(effective_max_concurrent_scenarios, watchdog.budget());
     append_cucumber_log_line(&format!(
         "scenario parallelism: run_slots={effective_max_concurrent_scenarios} \
-         concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?}",
+         concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?} \
+         freed_memory_purged_by=jemalloc_background_threads",
         parallelism.tokio_worker_threads(),
         watchdog.budget()
     ));
@@ -32960,7 +32904,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                         if teardown.left_nodes_stopping() {
                             // A node that outlasts its cleanup is usually one that stopped beside
                             // work heavy enough to starve it, so name what else was live.
-                            for active in ActiveScenario::active() {
+                            for active in ActiveScenario::running() {
                                 append_cucumber_log_line(&format!(
                                     "scenario live during unfinished cleanup: {active}"
                                 ));
@@ -33019,9 +32963,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     // A step that blocks the runner task holds every scenario and the watchdog alike, and nothing
     // polled on that task can end it, so each such stall is logged with the scenarios live during
     // it.
-    let run = SCENARIO_RUNNER_LAG.observe(run, |stall| {
+    let run = SCENARIO_RUNNER_LAG.observe(run, |tick| {
+        record_runner_tick(tick);
+        let Some(stall) = tick.stall() else {
+            return;
+        };
         append_cucumber_log_line(&stall.to_string());
-        for active in ActiveScenario::active() {
+        // Only a scenario that holds its run slots runs steps or cleanup that can hold the task; the
+        // scenarios still queued for their permits run nothing.
+        for active in ActiveScenario::running() {
             append_cucumber_log_line(&format!("scenario live during runner stall: {active}"));
         }
     });
