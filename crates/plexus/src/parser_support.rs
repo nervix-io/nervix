@@ -13,6 +13,7 @@
 use std::{
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::Range,
+    str::FromStr,
 };
 
 use chumsky::{
@@ -45,6 +46,22 @@ use crate::{
         read_expression_prefix, read_route_construction_prefix,
     },
 };
+
+/// Whether source text fits the integer literal's declared range. The grammar supplies its
+/// span-bound diagnostic when this validity check refuses the text.
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "integer literal validation answers whether text fits a grammar value; the \
+                  composed parser owns the syntax diagnostic at that source span"
+    )
+)]
+pub(crate) fn integer_literal<T: FromStr<Err = std::num::ParseIntError>>(
+    text: &str,
+) -> Result<T, std::num::ParseIntError> {
+    text.parse()
+}
 
 macro_rules! boxed_choice {
     ($($parser:expr),+ $(,)?) => {
@@ -372,7 +389,7 @@ pub fn u64_value<'src>(
         word_raw().labelled(label),
     ))
     .try_map(|raw, span| {
-        raw.parse::<u64>()
+        integer_literal::<u64>(&raw)
             .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
     })
     .boxed()
@@ -427,7 +444,7 @@ pub fn u32_value<'src>(
         word_raw().labelled(label),
     ))
     .try_map(|raw, span| {
-        raw.parse::<u32>().map_err(|_| {
+        integer_literal::<u32>(&raw).map_err(|_| {
             Rich::custom(
                 span,
                 format!("invalid integer '{raw}'; expected 0 through {}", u32::MAX),

@@ -18,8 +18,11 @@ use nervix_primitives::{
     time::Instant,
 };
 
-use super::scenario_schedule::{
-    AdmissionWait, LONG_RUNNING_ATTEMPT, LONG_RUNNING_TAG, ScenarioLength, ScenarioRun,
+use super::{
+    runner_lag::{RunnerLag, RunnerThread, RunnerTick, WorkerBusy},
+    scenario_schedule::{
+        AdmissionWait, LONG_RUNNING_ATTEMPT, LONG_RUNNING_TAG, ScenarioLength, ScenarioRun,
+    },
 };
 
 /// Where one scenario is between its first step and the end of its cleanup.
@@ -51,6 +54,21 @@ pub(crate) enum ScenarioPhase {
     /// The scenario and its cleanup have both ended.
     #[strum(serialize = "finished")]
     Finished,
+}
+
+impl ScenarioPhase {
+    /// Whether a scenario in this phase holds its run slots: from its first step through the end
+    /// of its cleanup.
+    pub(crate) fn holds_run_slots(self) -> bool {
+        match self {
+            Self::Queued | Self::Finished => false,
+            Self::Body
+            | Self::BodyComplete
+            | Self::TeardownStarted
+            | Self::Diagnostics
+            | Self::Stopping => true,
+        }
+    }
 }
 
 /// Which scenario of which feature an entry belongs to.
@@ -122,9 +140,37 @@ impl ActiveScenario {
         self.phase_started_at.elapsed()
     }
 
-    /// Every scenario that has started and not yet finished, oldest registration first.
+    /// Every scenario the suite has taken up and not yet dropped, oldest registration first. A
+    /// finished attempt stays here while Cucumber holds its world, as it does for a failed attempt
+    /// it reports at the end of the run.
     pub(crate) fn active() -> Vec<Self> {
         ACTIVE_SCENARIOS.lock().entries.values().cloned().collect()
+    }
+
+    /// Every scenario waiting for its permits or running, oldest registration first: the active
+    /// scenarios less the attempts that have finished.
+    pub(crate) fn unfinished() -> Vec<Self> {
+        let registry = ACTIVE_SCENARIOS.lock();
+        let mut unfinished = Vec::new();
+        for active in registry.entries.values() {
+            if active.phase != ScenarioPhase::Finished {
+                unfinished.push(active.clone());
+            }
+        }
+        unfinished
+    }
+
+    /// Every scenario that holds its run slots, oldest registration first: the scenarios whose
+    /// steps or cleanup run, without the ones still queued for their permits.
+    pub(crate) fn running() -> Vec<Self> {
+        let registry = ACTIVE_SCENARIOS.lock();
+        let mut running = Vec::new();
+        for active in registry.entries.values() {
+            if active.phase.holds_run_slots() {
+                running.push(active.clone());
+            }
+        }
+        running
     }
 
     pub(crate) fn suite_age() -> Duration {
@@ -221,18 +267,85 @@ struct SuiteMeasurements {
     retry_extra_slot_work: Duration,
     waiting: BTreeMap<AdmissionWait, Duration>,
     completed: Vec<AttemptTime>,
+    /// How late the runner task polled its ticks over the run.
+    runner_lag: RunnerLag,
+    /// The thread that polls the run, named when the run began.
+    runner_thread: Option<RunnerThread>,
+    /// How busy the runtime's workers had been when the run began, when it began inside one.
+    workers_began: Option<WorkerBusy>,
 }
 
 static MEASUREMENTS: LazyLock<Mutex<SuiteMeasurements>> =
     LazyLock::new(|| Mutex::new(SuiteMeasurements::default()));
 
+impl SuiteMeasurements {
+    /// How busy the runner task was over a run of `length`: how late its ticks were polled, and
+    /// how long the thread that polls every scenario ran on a CPU and waited for one.
+    fn runner_task_line(&self, length: Duration) -> String {
+        let lag = &self.runner_lag;
+        let Some(thread) = &self.runner_thread else {
+            return format!("Runner task: {lag}; no measurement named its thread.");
+        };
+        let times = match thread.since_began() {
+            Ok(times) => times,
+            Err(kind) => {
+                return format!(
+                    "Runner task: {lag}; its thread's CPU time could not be read: {kind}."
+                );
+            }
+        };
+        let share = if length.is_zero() {
+            0.0
+        } else {
+            100.0 * times.on_cpu.as_secs_f64() / length.as_secs_f64()
+        };
+        format!(
+            "Runner task: {lag}; its thread ran {:.1}s on a CPU, {share:.1}% of the run, and \
+             waited {:.1}s for one.",
+            times.on_cpu.as_secs_f64(),
+            times.run_queue_wait.as_secs_f64()
+        )
+    }
+
+    /// How busy the runtime's workers, which run every in-process node, were over a run of
+    /// `length`.
+    fn workers_line(&self, length: Duration) -> String {
+        let Some(began) = self.workers_began else {
+            return "Runtime workers: no runtime was measured when the run began.".to_string();
+        };
+        let Some(now) = WorkerBusy::of_current_runtime() else {
+            return "Runtime workers: the summary was taken outside the run's runtime.".to_string();
+        };
+        let busy = now.since(began);
+        let capacity = length.as_secs_f64() * now.workers.approx_into::<f64>();
+        let share = if capacity > 0.0 {
+            100.0 * busy.as_secs_f64() / capacity
+        } else {
+            0.0
+        };
+        format!(
+            "Runtime workers: {} busy for {:.1}s together, {share:.1}% of their time over the run.",
+            now.workers,
+            busy.as_secs_f64()
+        )
+    }
+}
+
+/// Starts measuring a run of `slots` run slots and `budget`, polled on the calling thread.
 pub(crate) fn begin_suite_measurement(slots: usize, budget: Duration) {
     *MEASUREMENTS.lock() = SuiteMeasurements {
         began: Some(Instant::now()),
         slots,
         budget,
+        runner_thread: Some(RunnerThread::current()),
+        workers_began: WorkerBusy::of_current_runtime(),
         ..SuiteMeasurements::default()
     };
+}
+
+/// Adds one tick of the runner task to the run's measurement.
+pub(crate) fn record_runner_tick(tick: RunnerTick) {
+    MEASUREMENTS.lock().runner_lag.record(tick);
 }
 
 /// Snapshot completed and still-running work before the watchdog drops a timed-out run.
@@ -304,6 +417,8 @@ pub(crate) fn suite_summary() -> String {
                 .count(),
             retry_extra_slot_work.as_secs_f64()
         ),
+        measurements.runner_task_line(length),
+        measurements.workers_line(length),
         String::new(),
         "| Waiting reason | Cumulative time |".to_string(),
         "| --- | ---: |".to_string(),

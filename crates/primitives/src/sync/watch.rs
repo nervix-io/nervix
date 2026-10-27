@@ -59,9 +59,9 @@ pub mod error {
     #[cfg_attr(
         nervix_lint,
         nervix::error_boundary(
-            library,
-            reason = "the modeled watch adapter must keep the external channel's returned value \
-                      and error contract"
+            outcome,
+            reason = "a closed watch channel returns the unaccepted value; there is no underlying \
+                      operation failure to preserve"
         )
     )]
     pub struct SendError<T>(pub T);

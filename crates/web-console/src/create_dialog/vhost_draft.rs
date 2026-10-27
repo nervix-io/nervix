@@ -54,8 +54,8 @@ impl VhostDraft {
     pub(super) fn build(
         &self,
     ) -> error_stack::Result<CreateVhost<RequestedResourceVersion>, VhostDraftError> {
-        let name =
-            VhostName::parse(self.name.trim()).map_err(|_| Report::new(VhostDraftError::Name))?;
+        let name = VhostName::parse(self.name.trim())
+            .map_err(|cause| cause.change_context(VhostDraftError::Name))?;
         let mut hostnames = Vec::with_capacity(self.hostnames.len());
         for (index, hostname) in self.hostnames.iter().enumerate() {
             let hostname = hostname.trim();

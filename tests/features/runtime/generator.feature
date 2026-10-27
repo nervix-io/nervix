@@ -507,7 +507,7 @@ Feature: Generator node
 
       CREATE BRANCH tenant_branch
         SCHEMA tenant_branch_schema
-        TTL 5m;
+        TTL 2d;
 
       CREATE RELAY notifications
         SCHEMA notification BRANCHED BY tenant_branch
@@ -537,7 +537,7 @@ Feature: Generator node
 
       CREATE GENERATOR synth_notifications
         USING MATERIALIZED STATE notifications
-        EACH 2s
+        EACH <cadence>
         BRANCHED BY tenant_branch
         TO generated_notifications
           SET tenant = relay_state.notifications.tenant,
@@ -548,7 +548,7 @@ Feature: Generator node
           ON MESSAGE ERROR LOG;
 
       CREATE SUBSCRIPTION generated_notifications_subscription TO generated_notifications;
-      START AT NOW TIME RATE 20.0;
+      START AT NOW TIME RATE <time_rate>;
       """
     When http payload is posted to host "http-{{test_id}}.example.com" path "/ingest"
       """
@@ -558,13 +558,22 @@ Feature: Generator node
       """
       {"tenant":"beta","user_id":84,"amount":9}
       """
-    Then within "750ms" 3 generator occurrences preserve branches "acme,beta" in field "tenant" with shared timestamp field "generated_at"
+    Then within "30s" 4 generator occurrences preserve rows by "tenant" on "<cadence>" logical cadence with shared timestamp field "generated_at"
+      """
+      [
+        {"tenant":"acme","user_id":42,"amount":7},
+        {"tenant":"beta","user_id":84,"amount":9}
+      ]
+      """
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | cadence | time_rate |
+      | 1            | 0             | 2s      | 20.0      |
+      | 3            | 0             | 2s      | 20.0      |
+      | 3            | 1             | 2s      | 20.0      |
+      | 1            | 0             | 200ms   | 0.1       |
+      | 3            | 0             | 200ms   | 0.1       |
+      | 3            | 1             | 200ms   | 0.1       |
 
   @domain_execution_time
   Scenario Outline: Generator routes share one immutable state snapshot per tick

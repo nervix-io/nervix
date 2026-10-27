@@ -4292,7 +4292,13 @@ fn append_borrowed_json_value_to_arrow(
         }
         ParseAsType::Datetime => {
             let value = value.as_str().ok_or_else(incompatible)?;
-            let value = DateTime::parse_from_rfc3339(value).map_err(|_| incompatible())?;
+            let value = DateTime::parse_from_rfc3339(value).map_err(|cause| {
+                Report::new(cause).change_context(RuntimeSchemaError::JsonValueTypeMismatch {
+                    location: location.to_runtime_location(),
+                    expected: ty.clone(),
+                    found: JsonValueKind::String,
+                })
+            })?;
             let value = value.timestamp_nanos_opt().ok_or_else(incompatible)?;
             typed_arrow_builder::<TimestampNanosecondBuilder>(builder, expected, location)?
                 .append_value(value);

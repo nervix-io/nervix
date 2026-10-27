@@ -894,8 +894,13 @@ pub(in crate::registry) fn validate_http_emitter_client(
     };
 
     let endpoint = entry("endpoint").ok_or_else(|| invalid("HTTP client requires endpoint"))?;
-    let origin = HttpOrigin::parse(endpoint)
-        .map_err(|_| invalid("HTTP client endpoint must be an http or https origin"))?;
+    let origin = HttpOrigin::parse(endpoint).map_err(|cause| {
+        cause.change_context(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "HTTP client endpoint must be an http or https origin".to_string(),
+        })
+    })?;
 
     let kind = <nervix_models::HttpRequestEmitter as nervix_models::EmitterEntityModel>::KIND;
     let timeout = entry("timeout_ms")
@@ -948,14 +953,23 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
                 ));
             }
         };
-        HttpMethod::parse(value, body)
-            .map_err(|error| invalid(format!("HTTP publish method {}", error.current_context())))?;
+        HttpMethod::parse(value, body).map_err(|cause| {
+            cause.change_context(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "HTTP publish method is invalid".to_string(),
+            })
+        })?;
     }
 
     if let Expression::Literal(nervix_models::Literal::String(value)) = path {
-        origin
-            .target(value)
-            .map_err(|_| invalid("HTTP publish path is invalid".to_string()))?;
+        origin.target(value).map_err(|cause| {
+            cause.change_context(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "HTTP publish path is invalid".to_string(),
+            })
+        })?;
     }
 
     for (index, invocation) in emitter.construction.invocations.iter().enumerate() {
@@ -966,17 +980,23 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
             continue;
         };
         if let Expression::Literal(nervix_models::Literal::String(name)) = name {
-            HttpHeaderName::parse(name).map_err(|_| {
-                invalid(format!(
-                    "HTTP invoke #{invocation_index} header name is invalid or reserved"
-                ))
+            HttpHeaderName::parse(name).map_err(|cause| {
+                cause.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "HTTP invoke #{invocation_index} header name is invalid or reserved"
+                    ),
+                })
             })?;
         }
         if let Expression::Literal(nervix_models::Literal::String(value)) = value {
-            HttpHeaderValue::parse(value).map_err(|_| {
-                invalid(format!(
-                    "HTTP invoke #{invocation_index} header value is invalid"
-                ))
+            HttpHeaderValue::parse(value).map_err(|cause| {
+                cause.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("HTTP invoke #{invocation_index} header value is invalid"),
+                })
             })?;
         }
     }

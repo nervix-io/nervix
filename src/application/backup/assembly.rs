@@ -348,13 +348,25 @@ fn verify_document(
 }
 
 /// The number a reparsed binding names. A rendering of a stored Model never writes `LATEST`.
+#[derive(Debug, thiserror::Error)]
+#[error("resource '{0}' requires a pinned version")]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "a reparsed binding either names a concrete version or refuses an unpinned \
+                  resource; this is a validity check on the rendered configuration"
+    )
+)]
+struct UnpinnedResourceVersion(ResourceName);
+
 fn pinned_version(
     resource: &ResourceName,
     requested: RequestedResourceVersion,
-) -> Result<u64, ResourceName> {
+) -> Result<u64, UnpinnedResourceVersion> {
     match requested {
         RequestedResourceVersion::Number(version) => Ok(version),
-        RequestedResourceVersion::Latest => Err(resource.clone()),
+        RequestedResourceVersion::Latest => Err(UnpinnedResourceVersion(resource.clone())),
     }
 }
 

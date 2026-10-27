@@ -13,6 +13,8 @@
     )
 )]
 
+use nervix_recovery::Reported as _;
+
 use super::*;
 
 impl TransportState {
@@ -40,8 +42,9 @@ impl TransportState {
         }
 
         for (node, endpoint) in accepted {
-            if let Ok(outbound) =
-                self.install_outbound_target(node, endpoint, OutboundDial::Advertised)
+            if let Ok(outbound) = self
+                .install_outbound_target(node, endpoint, OutboundDial::Advertised)
+                .inspect_err(|error| Err::<(), _>(error).reported("replace outbound peer target"))
             {
                 self.ensure_preconnected_slots(&outbound);
             }

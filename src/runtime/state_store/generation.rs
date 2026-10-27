@@ -287,9 +287,9 @@ pub(super) fn visit_chunks(
     let mut offset = 0_u64;
     let mut hasher = blake3::Hasher::new();
     for item in view.prefix(chunks, &prefix) {
-        let (key, bytes) = item
-            .into_inner()
-            .map_err(|_| RuntimePersistenceError::ReadValue)?;
+        let (key, bytes) = item.into_inner().map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+        })?;
         let Some(suffix) = key.strip_prefix(prefix.as_slice()) else {
             return Err(Report::new(
                 RuntimePersistenceError::InvalidCheckpointChunks,
@@ -340,9 +340,9 @@ pub(super) fn read_checkpoint(
             let capacity = usize::try_from(length)
                 .map_err(|_| RuntimePersistenceError::InvalidCheckpointChunks)?;
             let mut payload = Vec::new();
-            payload
-                .try_reserve_exact(capacity)
-                .map_err(|_| RuntimePersistenceError::ReadValue)?;
+            payload.try_reserve_exact(capacity).map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+            })?;
             visit_chunks(view, chunks, placement_key, &checkpoint, |bytes| {
                 payload.extend_from_slice(bytes);
                 Ok(())
@@ -373,7 +373,9 @@ pub(super) fn remove_bounded(
     let mut reclaimed = 0_u64;
     for item in keyspace.prefix(prefix) {
         check()?;
-        let key = item.key().map_err(|_| RuntimePersistenceError::ReadValue)?;
+        let key = item.key().map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+        })?;
         if !select(&key)? {
             continue;
         }
@@ -398,17 +400,17 @@ pub(super) fn remove_bounded(
             .ok_or(RuntimePersistenceError::WriteValue)?;
         batch.remove(keyspace, key);
         if bytes >= DELETE_BATCH_BYTES {
-            batch
-                .commit()
-                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+            batch.commit().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+            })?;
             batch = db.batch();
             bytes = 0;
         }
     }
     if bytes > 0 {
-        batch
-            .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        batch.commit().map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
     }
     Ok(reclaimed)
 }

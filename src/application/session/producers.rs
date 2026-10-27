@@ -413,8 +413,14 @@ impl SessionProducers {
         }
         let target = service
             .ingestor_target_from_schedule(&domain, &ingestor)
-            .await;
-        let Ok(Some((model, scheduled))) = target else {
+            .await
+            .map_err(|error| {
+                OpenRefusal::new(
+                    ClientProducerRefusal::EndpointUnavailable,
+                    format!("ingestor target could not be inspected: {error:#}"),
+                )
+            })?;
+        let Some((model, scheduled)) = target else {
             return Err(OpenRefusal::new(
                 ClientProducerRefusal::IngestorNotFound,
                 format!(

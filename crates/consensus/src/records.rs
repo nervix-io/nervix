@@ -15,7 +15,7 @@
 
 use std::{borrow::Borrow, collections::BTreeMap, io, num::NonZeroU64};
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use imbl::{OrdMap, ordmap::DiffItem};
 use meticulous::ResultExt as _;
 use nervix_models::{
@@ -246,7 +246,8 @@ where
             return Err(io::Error::other(StorageFailure::InvalidState));
         };
         let key: K = storekey::deserialize(encoded)
-            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+            .change_context(StorageFailure::InvalidState)
+            .map_err(crate::durable_batch::storage_report_io)?;
         if Self::key(tag, &key)? != stored {
             return Err(io::Error::other(StorageFailure::InvalidState));
         }
@@ -378,10 +379,10 @@ impl ResourceRecords {
     /// Refuses a recovered catalog that assigns one version to two uploads. Every mutation
     /// allocates a version of its own, and every reader of the catalog relies on that.
     pub(crate) fn check_recovered(&self) -> io::Result<()> {
-        if ResourceUploads::try_from_uploads(self.uploads.values().cloned()).is_err() {
-            return Err(io::Error::other(StorageFailure::InvalidState));
-        }
-        Ok(())
+        ResourceUploads::try_from_uploads(self.uploads.values().cloned())
+            .map(|_| ())
+            .change_context(StorageFailure::InvalidState)
+            .map_err(crate::durable_batch::storage_report_io)
     }
 
     /// How many keyed records the catalog stores.

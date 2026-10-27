@@ -147,6 +147,15 @@ pub(in crate::application) enum GrpcAuthenticationError {
 
 /// Why presented credentials did not authenticate a caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "credential checks expose one deliberate rejection for invalid user names, \
+                  unknown users and wrong passwords; verification failures have their own \
+                  operator diagnostic and never reveal credential details to the caller"
+    )
+)]
 pub(in crate::application) enum CredentialRejection {
     /// The user is unknown, the password is wrong, or the stored hash could not be verified.
     Failed,
@@ -243,7 +252,9 @@ async fn hash_password(
                 let salt = SaltString::generate(&mut OsRng);
                 match argon2.hash_password(password.as_bytes(), &salt) {
                     Ok(hash) => Ok(hash.to_string()),
-                    Err(_) => Err(Report::new(PasswordHashError::Compute)),
+                    Err(cause) => {
+                        Err(Report::new(cause).change_context(PasswordHashError::Compute))
+                    }
                 }
             },
         )

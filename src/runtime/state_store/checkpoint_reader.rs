@@ -140,9 +140,9 @@ impl RuntimeStateStore {
         let namespace =
             backup::active_namespace(&view, &self.restore_publications, &placement.domain)?;
         let key = namespace.key(placement)?;
-        let Some(raw) = view
-            .get(&self.latest, &key)
-            .map_err(|_| RuntimePersistenceError::ReadValue)?
+        let Some(raw) = view.get(&self.latest, &key).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+        })?
         else {
             return Ok(None);
         };
@@ -225,10 +225,9 @@ impl ListedCheckpoint {
     }
 
     fn raw(&self) -> error_stack::Result<fjall::Slice, RuntimePersistenceError> {
-        let raw = self
-            .view
-            .get(&self.latest, &self.key)
-            .map_err(|_| RuntimePersistenceError::ReadValue)?;
+        let raw = self.view.get(&self.latest, &self.key).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+        })?;
         // A value the listing's snapshot listed stays readable through it, so its absence is a
         // storage failure rather than a checkpoint that ended.
         raw.ok_or_else(|| Report::new(RuntimePersistenceError::ReadValue))

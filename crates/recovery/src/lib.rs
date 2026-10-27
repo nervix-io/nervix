@@ -83,7 +83,7 @@ pub trait Reported {
 impl<T, E: Display> Reported for Result<T, E> {
     fn reported(self, operation: &str) {
         if let Err(error) = self {
-            debug!(%error, operation, "recovered from a failed operation");
+            debug!(error = %format_args!("{error:#}"), operation, "recovered from a failed operation");
         }
     }
 }
@@ -195,6 +195,18 @@ mod tests {
             logs.contains("persist offsets") && logs.contains("the store rejected the write"),
             "a report must carry the operation and the error, got: {logs}"
         );
+    }
+
+    #[test]
+    fn a_reported_failure_keeps_its_context_chain() {
+        let logs = capturing(|| {
+            let report = error_stack::Report::new(io::Error::other("storage decoding cause"))
+                .change_context(io::Error::other("checkpoint read failed"));
+            Result::<(), _>::Err(report).reported("read checkpoint");
+        });
+        assert!(logs.contains("read checkpoint"));
+        assert!(logs.contains("checkpoint read failed"));
+        assert!(logs.contains("storage decoding cause"), "{logs}");
     }
 
     #[test]

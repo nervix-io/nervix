@@ -934,10 +934,14 @@ impl LatestSnapshotWriter {
             let encoded = StoredCheckpoint::Inline(entry).encode()?;
             self.latest
                 .insert(placement_key.clone(), encoded)
-                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+                .map_err(|cause| {
+                    Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+                })?;
             self.lsm_index
                 .insert(index_key(&placement_key, lsm), placement_key)
-                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+                .map_err(|cause| {
+                    Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+                })?;
             Ok(true)
         })
     }
@@ -960,7 +964,7 @@ impl LatestSnapshotWriter {
     fn persist(&self, mode: PersistMode) -> error_stack::Result<(), RuntimePersistenceError> {
         self.db
             .persist(mode)
-            .map_err(|_| Report::new(RuntimePersistenceError::WriteValue))
+            .map_err(|cause| Report::new(cause).change_context(RuntimePersistenceError::WriteValue))
     }
 
     fn latest_lsm(
@@ -972,7 +976,9 @@ impl LatestSnapshotWriter {
             backup::active_namespace(&view, &self.restore_publications, &placement.domain)?;
         let Some(raw) = view
             .get(&self.latest, namespace.key(placement)?)
-            .map_err(|_| RuntimePersistenceError::ReadValue)?
+            .map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+            })?
         else {
             return Ok(None);
         };
@@ -1499,10 +1505,12 @@ impl RuntimeStateStore {
         let encoded = Self::encode_handoff_preparation(transition, checkpoints)?;
         self.handoff_preparations
             .insert(key, encoded)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.db
-            .persist(PersistMode::SyncAll)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+            .map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+            })?;
+        self.db.persist(PersistMode::SyncAll).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
         Ok(())
     }
 
@@ -1531,12 +1539,12 @@ impl RuntimeStateStore {
         batch.remove(&self.handoff_preparations, replaced_key.clone());
         batch.remove(&self.handoff_activations, replaced_key);
         batch.insert(&self.handoff_preparations, replacement_key, encoded);
-        batch
-            .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.db
-            .persist(PersistMode::SyncAll)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        batch.commit().map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
+        self.db.persist(PersistMode::SyncAll).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
         Ok(())
     }
 
@@ -1553,7 +1561,9 @@ impl RuntimeStateStore {
         if let Some(raw) = self
             .forced_recovery_completions
             .get(&key)
-            .map_err(|_| RuntimePersistenceError::ReadValue)?
+            .map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+            })?
         {
             let completed = Self::decode_forced_recovery_completion(raw.as_ref())?;
             if completed.matches(transition) {
@@ -1564,12 +1574,12 @@ impl RuntimeStateStore {
         let mut batch = self.db.batch();
         batch.remove(&self.forced_recovery_completions, key.clone());
         batch.insert(&self.forced_recovery_preparations, key, encoded);
-        batch
-            .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.db
-            .persist(PersistMode::SyncAll)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        batch.commit().map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
+        self.db.persist(PersistMode::SyncAll).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
         Ok(())
     }
 
@@ -1592,7 +1602,9 @@ impl RuntimeStateStore {
         if let Some(raw) = self
             .forced_recovery_completions
             .get(&key)
-            .map_err(|_| RuntimePersistenceError::ReadValue)?
+            .map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+            })?
         {
             let completed = Self::decode_forced_recovery_completion(raw.as_ref())?;
             if completed.matches(transition) {
@@ -1603,7 +1615,9 @@ impl RuntimeStateStore {
         let prepared = self
             .forced_recovery_preparations
             .get(&key)
-            .map_err(|_| RuntimePersistenceError::ReadValue)?;
+            .map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+            })?;
         let checkpoints = match prepared {
             Some(prepared) => {
                 let prepared = Self::decode_forced_recovery_preparation(prepared.as_ref())?;
@@ -1638,12 +1652,12 @@ impl RuntimeStateStore {
         let mut batch = self.db.batch();
         batch.remove(&self.forced_recovery_preparations, key.clone());
         batch.insert(&self.forced_recovery_completions, key, encoded);
-        batch
-            .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.db
-            .persist(PersistMode::SyncAll)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        batch.commit().map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
+        self.db.persist(PersistMode::SyncAll).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
         Ok(Some(checkpoints))
     }
 
@@ -1660,12 +1674,12 @@ impl RuntimeStateStore {
         let mut batch = self.db.batch();
         batch.remove(&self.handoff_preparations, key.clone());
         batch.remove(&self.handoff_activations, key);
-        batch
-            .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.db
-            .persist(PersistMode::SyncAll)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        batch.commit().map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
+        self.db.persist(PersistMode::SyncAll).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
         Ok(())
     }
 
@@ -1676,9 +1690,9 @@ impl RuntimeStateStore {
             .handoff_preparations
             .iter()
             .map(|item| {
-                let value = item
-                    .value()
-                    .map_err(|_| RuntimePersistenceError::ReadValue)?;
+                let value = item.value().map_err(|cause| {
+                    Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+                })?;
                 Self::decode_handoff_preparation(value.as_ref())
             })
             .collect::<Result<Vec<_>, Report<RuntimePersistenceError>>>()?;
@@ -1696,10 +1710,9 @@ impl RuntimeStateStore {
     {
         let key =
             Self::handoff_preparation_key(coordination, operation_id, domain, kind, identifier);
-        let Some(raw) = self
-            .handoff_activations
-            .get(key)
-            .map_err(|_| RuntimePersistenceError::ReadValue)?
+        let Some(raw) = self.handoff_activations.get(key).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+        })?
         else {
             return Ok(None);
         };
@@ -1736,7 +1749,7 @@ impl RuntimeStateStore {
         let stored = self
             .handoff_preparations
             .get(&preparation_key)
-            .map_err(|_| RuntimePersistenceError::ReadValue)?
+            .map_err(|cause| Report::new(cause).change_context(RuntimePersistenceError::ReadValue))?
             .ok_or(RuntimePersistenceError::MissingHandoffPreparation)?;
         if stored.as_ref() != expected {
             return Err(Report::new(
@@ -1745,26 +1758,27 @@ impl RuntimeStateStore {
         }
 
         let domain_prefix = namespace.prefix(&transition.entity.domain);
-        let latest_keys = self
-            .latest
-            .prefix(domain_prefix)
-            .map(|item| {
-                let key = {
-                    let mapping_input = item.key().map(|key| key.as_ref().to_vec());
-                    match mapping_input {
-                        Ok(mapped_value) => Ok(mapped_value),
-                        Err(_) => Err(RuntimePersistenceError::ReadValue),
-                    }
-                }?;
-                let (_, stored) = physical_placement(&key)?;
-                Ok((stored.kind == transition.entity.kind()
-                    && stored.identifier == *transition.entity.identifier())
-                .then_some(key))
-            })
-            .collect::<Result<Vec<_>, Report<RuntimePersistenceError>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+        let latest_keys =
+            self.latest
+                .prefix(domain_prefix)
+                .map(|item| {
+                    let key = {
+                        let mapping_input = item.key().map(|key| key.as_ref().to_vec());
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(cause) => Err(Report::new(cause)
+                                .change_context(RuntimePersistenceError::ReadValue)),
+                        }
+                    }?;
+                    let (_, stored) = physical_placement(&key)?;
+                    Ok((stored.kind == transition.entity.kind()
+                        && stored.identifier == *transition.entity.identifier())
+                    .then_some(key))
+                })
+                .collect::<Result<Vec<_>, Report<RuntimePersistenceError>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
         let mut lsm_keys = Vec::new();
         for latest_key in &latest_keys {
             let mut lsm_prefix = latest_key.clone();
@@ -1811,12 +1825,12 @@ impl RuntimeStateStore {
             ),
             expected,
         );
-        batch
-            .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.db
-            .persist(PersistMode::SyncAll)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        batch.commit().map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
+        self.db.persist(PersistMode::SyncAll).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
         Ok(())
     }
 
@@ -1898,24 +1912,25 @@ impl RuntimeStateStore {
         let namespace =
             backup::active_namespace(&self.db.snapshot(), &self.restore_publications, domain)?;
         let domain_prefix = namespace.prefix(domain);
-        let latest_keys = self
-            .latest
-            .prefix(domain_prefix)
-            .map(|item| {
-                let key = {
-                    let mapping_input = item.key().map(|key| key.as_ref().to_vec());
-                    match mapping_input {
-                        Ok(mapped_value) => Ok(mapped_value),
-                        Err(_) => Err(RuntimePersistenceError::ReadValue),
-                    }
-                }?;
-                let (_, stored) = physical_placement(&key)?;
-                Ok((stored.kind == kind && stored.identifier == *identifier).then_some(key))
-            })
-            .collect::<Result<Vec<_>, Report<RuntimePersistenceError>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+        let latest_keys =
+            self.latest
+                .prefix(domain_prefix)
+                .map(|item| {
+                    let key = {
+                        let mapping_input = item.key().map(|key| key.as_ref().to_vec());
+                        match mapping_input {
+                            Ok(mapped_value) => Ok(mapped_value),
+                            Err(cause) => Err(Report::new(cause)
+                                .change_context(RuntimePersistenceError::ReadValue)),
+                        }
+                    }?;
+                    let (_, stored) = physical_placement(&key)?;
+                    Ok((stored.kind == kind && stored.identifier == *identifier).then_some(key))
+                })
+                .collect::<Result<Vec<_>, Report<RuntimePersistenceError>>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
         let mut lsm_keys = Vec::new();
         for latest_key in &latest_keys {
             let mut lsm_prefix = latest_key.clone();
@@ -1949,12 +1964,12 @@ impl RuntimeStateStore {
                 placement_key,
             );
         }
-        batch
-            .commit()
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
-        self.db
-            .persist(PersistMode::SyncAll)
-            .map_err(|_| RuntimePersistenceError::WriteValue)?;
+        batch.commit().map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
+        self.db.persist(PersistMode::SyncAll).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+        })?;
         Ok(())
     }
 
@@ -1997,9 +2012,9 @@ impl RuntimeStateStore {
         let namespace =
             backup::active_namespace(&view, &self.restore_publications, &placement.domain)?;
         let key = namespace.key(placement)?;
-        let Some(raw) = view
-            .get(&self.latest, &key)
-            .map_err(|_| RuntimePersistenceError::ReadValue)?
+        let Some(raw) = view.get(&self.latest, &key).map_err(|cause| {
+            Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+        })?
         else {
             return Ok(None);
         };
@@ -2099,7 +2114,9 @@ impl RuntimeStateStore {
                 let mapping_input = item.key().map(|key| key.as_ref().to_vec());
                 match mapping_input {
                     Ok(mapped_value) => Ok(mapped_value),
-                    Err(_) => Err(RuntimePersistenceError::ReadValue),
+                    Err(cause) => {
+                        Err(Report::new(cause).change_context(RuntimePersistenceError::ReadValue))
+                    }
                 }
             }?;
             let (_, stored) = physical_placement(&key)?;
@@ -2145,7 +2162,7 @@ impl RuntimeStateStore {
         }
         batch
             .commit()
-            .map_err(|_| Report::new(RuntimePersistenceError::WriteValue))
+            .map_err(|cause| Report::new(cause).change_context(RuntimePersistenceError::WriteValue))
     }
 }
 
@@ -2190,9 +2207,11 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
         return Err(StoredStateIssue::KeyModelKindSeparator.decode_failure());
     };
     let kind = std::str::from_utf8(&key[kind_start..kind_end])
-        .map_err(|_| StoredStateIssue::KeyModelKind.decode_failure())?;
-    let kind =
-        ModelKind::from_str(kind).map_err(|_| StoredStateIssue::KeyModelKind.decode_failure())?;
+        .change_context(StoredStateIssue::KeyModelKind)
+        .change_context(RuntimePersistenceError::DecodeState)?;
+    let kind = ModelKind::from_str(kind)
+        .change_context(StoredStateIssue::KeyModelKind)
+        .change_context(RuntimePersistenceError::DecodeState)?;
     let identifier_start = kind_end
         .checked_add(1)
         .verified("the model-kind separator position is an index into this key");
@@ -2204,9 +2223,11 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
         return Err(StoredStateIssue::KeyIdentifierSeparator.decode_failure());
     };
     let identifier = std::str::from_utf8(&key[identifier_start..identifier_end])
-        .map_err(|_| StoredStateIssue::KeyIdentifier.decode_failure())?;
+        .change_context(StoredStateIssue::KeyIdentifier)
+        .change_context(RuntimePersistenceError::DecodeState)?;
     let identifier = ModelName::decode(identifier)
-        .map_err(|_| StoredStateIssue::KeyIdentifier.decode_failure())?;
+        .change_context(StoredStateIssue::KeyIdentifier)
+        .change_context(RuntimePersistenceError::DecodeState)?;
     let lifetime_start = identifier_end
         .checked_add(1)
         .verified("the identifier separator position is an index into this key");
@@ -2229,7 +2250,8 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
                 .checked_add(1)
                 .verified("the branch flag read above is inside this key");
             let text = std::str::from_utf8(&key[text_start..])
-                .map_err(|_| StoredStateIssue::KeyBranchKey.decode_failure())?;
+                .change_context(StoredStateIssue::KeyBranchKey)
+                .change_context(RuntimePersistenceError::DecodeState)?;
             Some(BranchKeyFingerprint::of_canonical_text(text))
         }
         _ => {
@@ -2364,7 +2386,8 @@ fn stored_state_generation(
     let generation = <[u8; 8]>::try_from(generation)
         .verified("the generation slice above is exactly eight bytes long");
     let generation = WasmStateGeneration::try_from(u64::from_be_bytes(generation))
-        .map_err(|_| StoredStateIssue::KeyStateGenerationInvalid.decode_failure())?;
+        .change_context(StoredStateIssue::KeyStateGenerationInvalid)
+        .change_context(RuntimePersistenceError::DecodeState)?;
     if key.get(generation_end) != Some(&0) {
         return Err(StoredStateIssue::KeyStateGenerationSeparator.decode_failure());
     }

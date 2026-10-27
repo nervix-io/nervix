@@ -178,6 +178,13 @@ path = "src/cluster.rs"
 reason = "Chitchat hands out Tokio's own lock and watch receiver and runs on Tokio's runtime, so the transport tasks it drives wait on Tokio's primitives."
 
 [[permission]]
+items = ["sync::watch"]
+limit = "The fixtures exercise Tokio's watch behavior; no model check covers Chitchat's membership gossip."
+owner = "The native cluster-state watcher unit tests."
+path = "src/cluster/tests.rs"
+reason = "The cluster-state watcher's live-set input is Chitchat's Tokio watch receiver, so its native unit fixtures construct that same external type."
+
+[[permission]]
 items = ["sync::OnceLock"]
 limit = "The detected level is process-wide; no check covers detection."
 owner = "The SIMD kernels' instruction-level detection."

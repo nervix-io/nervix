@@ -83,8 +83,9 @@ impl CommandExecutionReference {
     pub fn retry_issued_at(
         &self,
     ) -> Result<Timestamp, Report<CommandExecutionReferenceTimestampError>> {
-        let value = uuid::Uuid::parse_str(self.as_str())
-            .map_err(|_| Report::new(CommandExecutionReferenceTimestampError::NotUuidV7))?;
+        let value = uuid::Uuid::parse_str(self.as_str()).map_err(|cause| {
+            Report::new(cause).change_context(CommandExecutionReferenceTimestampError::NotUuidV7)
+        })?;
         if value.get_version() != Some(uuid::Version::SortRand) {
             return Err(Report::new(
                 CommandExecutionReferenceTimestampError::NotUuidV7,

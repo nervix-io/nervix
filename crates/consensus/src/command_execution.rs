@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use imbl::OrdSet;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
@@ -787,9 +787,11 @@ impl CommandExecutionRecords {
                 }
                 CommandExecutionState::Expired => {
                     // Only a retry identity whose issue time reads back is ever expired.
-                    let issued_at = execution.reference.retry_issued_at().map_err(|_| {
-                        io::Error::other(crate::durable_batch::StorageFailure::InvalidState)
-                    })?;
+                    let issued_at = execution
+                        .reference
+                        .retry_issued_at()
+                        .change_context(crate::durable_batch::StorageFailure::InvalidState)
+                        .map_err(crate::durable_batch::storage_report_io)?;
                     expired.insert(ExpiredCommandExecutionKey {
                         issued_at,
                         reference: execution.reference.clone(),

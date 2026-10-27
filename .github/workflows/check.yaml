@@ -717,17 +717,18 @@ jobs:
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # The harness derives 75 minutes of scenarios from this limit, with 30 for setup/builds and
+    # The harness derives 105 minutes of scenarios from this limit, with 35 for setup/builds and
     # 15 for cleanup/export/uploads. Keep tests/common/suite_watchdog.rs in step.
-    timeout-minutes: 120
+    timeout-minutes: 155
     permissions:
       contents: read
     env:
       NO_COLOR: "1"
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
-      # Keep the qualified 48-slot load. Recent slow runs need more time at this concurrency:
-      # 39656928785 used 117,587 slot-seconds with 833 attempts still active after 41 minutes.
+      # 48 slots on the 16-CPU runner. Every scenario's steps run on one runner thread, and 64 slots
+      # (Check 40358096404) kept that thread on a CPU for 86% of the run, made every scenario about
+      # 45% slower and raised no throughput; see the run slots in docs/src/integration-test-lifecycle.md.
       NERVIX_TEST_CONCURRENCY_FACTOR: "3"
     steps:
       - name: Checkout

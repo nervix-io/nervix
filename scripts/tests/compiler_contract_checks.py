@@ -89,10 +89,11 @@ class CompilerContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def compile(self, name: str, *arguments: str, crate_name: str = "contract",
-                source: pathlib.Path | None = None, source_root: pathlib.Path = ROOT) -> subprocess.CompletedProcess[str]:
+                source: pathlib.Path | None = None, source_root: pathlib.Path = ROOT,
+                fixture_mode: str = "ordinary") -> subprocess.CompletedProcess[str]:
         target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
         runner = Runner(ROOT, target)
-        output = target / "typed-ratchet/contracts" / name
+        output = target / "typed-ratchet/contracts" / (name if fixture_mode == "ordinary" else name + "-" + fixture_mode)
         output.mkdir(parents=True, exist_ok=True)
         env = dict(runner.environment)
         env.update({
@@ -102,7 +103,7 @@ class CompilerContractTests(unittest.TestCase):
             "NERVIX_LINT_REPORTS": str(output),
             "NERVIX_LINT_DRIVER": str(runner.driver),
             "NERVIX_LINT_ADMISSION": runner.admission.encode(),
-            "KACHE_KEY_SALT": runner.identity + ":contract:" + name,
+            "KACHE_KEY_SALT": runner.identity + ":contract:" + name + ":" + fixture_mode,
         })
         compiler = subprocess.run(["rustup", "which", "--toolchain", TOOLCHAIN, "rustc"],
                                   check=True, text=True, capture_output=True).stdout.strip()
@@ -111,7 +112,7 @@ class CompilerContractTests(unittest.TestCase):
                    "--crate-type=lib", "--emit=metadata", "--out-dir", str(output),
                    str(source or ROOT / "tools/nervix-lint/fixtures/tests/semantics" / (name + ".rs")),
                    *arguments]
-        fixture = json.loads((target / "typed-ratchet/fixture-ordinary.json").read_text())
+        fixture = json.loads((target / f"typed-ratchet/fixture-{fixture_mode}.json").read_text())
         metadata = next(path for entry in fixture["evidence"] for path in entry["files"]
                         if pathlib.Path(path).name.startswith("libnervix_lint_fixtures-") and path.endswith(".rmeta"))
         build = pathlib.Path(fixture["evidence"][0]["build_directory"])
@@ -248,6 +249,42 @@ class CompilerContractTests(unittest.TestCase):
             with self.subTest(name=name):
                 result = self.compile(name)
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_informative_error_replacement_retains_its_cause(self) -> None:
+        result = self.compile("error_replacement", "--error-format=json")
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        diagnostics = [json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")]
+        findings = [item for item in diagnostics if (item.get("code") or {}).get("code") == "nervix::replaced_error"]
+        self.assertEqual(len(findings), 16, result.stderr)
+        source = (ROOT / "tools/nervix-lint/fixtures/tests/semantics/error_replacement.rs").read_bytes()
+        for finding in findings:
+            primary = [span for span in finding["spans"] if span["is_primary"]]
+            self.assertEqual(len(primary), 1, finding)
+            span = primary[0]
+            self.assertTrue(span["file_name"].endswith("error_replacement.rs"), finding)
+            snippet = source[span["byte_start"]:span["byte_end"]].decode()
+            self.assertTrue(any(token in snippet for token in ("map_err", "or_else", "unwrap_or_else", "Err(_)", "Ok(value)")), snippet)
+        allowed = self.compile("error_replacement_allowed")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        expected = self.compile("error_replacement_expected")
+        self.assertEqual(expected.returncode, 0, expected.stderr)
+        for name, diagnostic in (("error_replacement_unfulfilled", "expectation is unfulfilled"),
+                                 ("error_replacement_wide", "covers 2 distinct operations")):
+            with self.subTest(name=name):
+                refused = self.compile(name)
+                self.assertNotEqual(refused.returncode, 0, refused.stderr)
+                self.assertIn(diagnostic, refused.stderr)
+
+    def test_replacement_classification_crosses_metadata(self) -> None:
+        target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+        result = self.compile("error_replacement_metadata", crate_name="callee")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = target / "typed-ratchet/contracts/error_replacement_metadata/libcallee.rmeta"
+        accepted = self.compile("error_replacement_metadata_allowed", "--extern=callee=" + str(metadata))
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        rejected = self.compile("error_replacement_metadata_rejected", "--extern=callee=" + str(metadata))
+        self.assertNotEqual(rejected.returncode, 0, rejected.stderr)
+        self.assertIn("nervix::replaced_error", rejected.stderr)
 
     def test_error_classifications_cross_crate_metadata(self) -> None:
         target = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))

@@ -19,6 +19,7 @@ use std::{
     num::NonZeroUsize,
 };
 
+use error_stack::{Report, ResultExt as _};
 use fjall::{Database, Keyspace, PersistMode};
 use nervix_execution::Reservation;
 use nervix_models::RaftLogDurability;
@@ -57,6 +58,19 @@ pub enum StorageFailure {
     Encode(#[source] RkyvError),
     #[error("consensus database write failed")]
     Write(#[source] fjall::Error),
+}
+
+/// The storage traits require I/O errors. Their carrier keeps the complete typed report and
+/// renders its chain when a later report formats the I/O error as one of its own contexts.
+#[derive(Debug, Error)]
+#[error("{0:#}")]
+pub(crate) struct StorageReport<C>(pub(crate) Report<C>);
+
+pub(crate) fn storage_report_io<C>(report: Report<C>) -> io::Error
+where
+    C: std::error::Error + Send + Sync + 'static,
+{
+    io::Error::other(StorageReport(report))
 }
 
 pub(crate) enum Mutation {
@@ -114,10 +128,12 @@ where
             );
             let archived =
                 access_with_context::<T::Archived, _, RkyvError>(&aligned, &mut validator)
-                    .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+                    .change_context(StorageFailure::InvalidState)
+                    .map_err(storage_report_io)?;
             let mut deserializer = Pool::default();
             deserialize_using::<T, _, RkyvError>(archived, &mut deserializer)
-                .map_err(|_| io::Error::other(StorageFailure::InvalidState))
+                .change_context(StorageFailure::InvalidState)
+                .map_err(storage_report_io)
         };
 
         #[cfg(test)]
@@ -389,6 +405,28 @@ mod tests {
     use rkyv::rancor::Source as _;
 
     use super::*;
+
+    #[test]
+    fn a_record_decoding_cause_survives_its_io_and_outer_report_boundaries() {
+        let failure = <u64 as StorageDecode>::decode_record(&[0xff])
+            .expect_err("a byte cannot hold the current u64 archive");
+        let typed = failure
+            .get_ref()
+            .and_then(|error| error.downcast_ref::<StorageReport<StorageFailure>>())
+            .expect("the I/O boundary retains its typed report");
+        assert!(matches!(
+            typed.0.current_context(),
+            StorageFailure::InvalidState
+        ));
+        assert!(typed.0.downcast_ref::<RkyvError>().is_some());
+        let carried = format!("{failure:#}");
+        let report = error_stack::Report::new(failure).change_context(StorageFailure::InvalidState);
+        let rendered = format!("{report:#}");
+        assert!(
+            rendered.contains(&carried),
+            "carried: {carried}; rendered: {rendered}"
+        );
+    }
 
     #[test]
     fn a_failed_write_or_encoding_names_its_cause_once_in_a_rendered_chain() {

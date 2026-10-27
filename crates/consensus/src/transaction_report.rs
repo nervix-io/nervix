@@ -557,7 +557,7 @@ impl TransactionReportRecords {
         }
         candidate
             .report(&identity)
-            .map_err(|_| Report::new(TransactionReportStoreError::InvalidArchive))?;
+            .map_err(|cause| cause.change_context(TransactionReportStoreError::InvalidArchive))?;
         *self = candidate;
         Ok(())
     }
@@ -642,7 +642,7 @@ impl TransactionReportRecords {
             .ok_or_else(|| Report::new(TransactionReportStoreError::StepMismatch))?;
         let mut graphs = BTreeMap::new();
         let stored = StoredExecutionStepImpactReport::archive(impact, &mut graphs)
-            .map_err(|_| Report::new(TransactionReportStoreError::InvalidArchive))?;
+            .map_err(|cause| cause.change_context(TransactionReportStoreError::InvalidArchive))?;
         let graphs = graphs
             .into_iter()
             .map(|(id, topology)| ArchivedImpactTopology { id, topology })
@@ -654,7 +654,7 @@ impl TransactionReportRecords {
             .insert(TransactionReportItemKey::new(identity, step_index), stored);
         candidate
             .report(identity)
-            .map_err(|_| Report::new(TransactionReportStoreError::InvalidArchive))?;
+            .map_err(|cause| cause.change_context(TransactionReportStoreError::InvalidArchive))?;
         *self = candidate;
         Ok(())
     }
@@ -667,7 +667,7 @@ impl TransactionReportRecords {
     ) -> error_stack::Result<usize, TransactionReportStoreError> {
         let report = self
             .report(identity)
-            .map_err(|_| Report::new(TransactionReportStoreError::InvalidArchive))?;
+            .map_err(|cause| cause.change_context(TransactionReportStoreError::InvalidArchive))?;
         if !report
             .completeness()
             .diagnostics()
@@ -718,8 +718,9 @@ impl TransactionReportRecords {
         }
         let mut supplied_graphs = BTreeMap::new();
         for graph in &archive.graphs {
-            let id = ImpactTopologyId::for_topology(&graph.topology)
-                .map_err(|_| Report::new(TransactionReportStoreError::InvalidArchive))?;
+            let id = ImpactTopologyId::for_topology(&graph.topology).map_err(|cause| {
+                cause.change_context(TransactionReportStoreError::InvalidArchive)
+            })?;
             if id != graph.id {
                 return Err(Report::new(TransactionReportStoreError::InvalidArchive));
             }
@@ -729,9 +730,9 @@ impl TransactionReportRecords {
                 return Err(Report::new(TransactionReportStoreError::ConflictingArchive));
             }
             if self.topology_headers.contains_key(&id) {
-                let retained = self
-                    .restore_graph(id)
-                    .map_err(|_| Report::new(TransactionReportStoreError::InvalidArchive))?;
+                let retained = self.restore_graph(id).map_err(|cause| {
+                    cause.change_context(TransactionReportStoreError::InvalidArchive)
+                })?;
                 if retained != graph.topology {
                     return Err(Report::new(TransactionReportStoreError::ConflictingArchive));
                 }
@@ -806,7 +807,7 @@ impl TransactionReportRecords {
             operations,
             execution_steps,
         )
-        .map_err(|_| Report::new(TransactionReportReadError::InvalidReport))
+        .map_err(|cause| cause.change_context(TransactionReportReadError::InvalidReport))
     }
 
     fn restore_topology(
