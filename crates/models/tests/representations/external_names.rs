@@ -157,7 +157,10 @@ fn bolero_external_names_round_trip_through_every_representation() {
         .with_max_len(512)
         .for_each(|bytes: &[u8]| {
             let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
-            assert_external_name_round_trips!(ClickHouseTableName, arbitrary.emitter_table_name());
+            assert_external_name_round_trips!(
+                ClickHouseTableName,
+                arbitrary.clickhouse_table_name()
+            );
             assert_external_name_round_trips!(PostgresTableName, arbitrary.emitter_table_name());
             assert_external_name_round_trips!(MySqlTableName, arbitrary.mysql_table_name());
             assert_external_name_round_trips!(
@@ -400,10 +403,6 @@ fn mysql_table_paths_keep_one_or_two_nonempty_parts() {
     }
     assert_eq!(
         refusal!(MySqlTableName, "region.Shop.Orders"),
-        ExternalNameError::TooManyLevels {
-            separator: '.',
-            max: 2,
-            actual: 3
-        }
+        ExternalNameError::TooManyLevels { max: 2, actual: 3 }
     );
 }

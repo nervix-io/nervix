@@ -249,7 +249,6 @@ fn table_path(text: &str) -> Result<(), super::external_name::ExternalNameError>
     let levels = text.split('.').count();
     if levels > MAX_PARTS {
         return Err(ExternalNameError::TooManyLevels {
-            separator: '.',
             max: MAX_PARTS,
             actual: levels,
         });

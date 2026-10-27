@@ -26,8 +26,8 @@ Feature: MySQL declarations describe the table and client Nervix can execute
       | 3     | shop.         | empty level |
       | 1     | shop..Orders  | empty level |
       | 3     | shop..Orders  | empty level |
-      | 1     | a.shop.Orders | 2 levels    |
-      | 3     | a.shop.Orders | 2 levels    |
+      | 1     | a.shop.Orders | at most 2   |
+      | 3     | a.shop.Orders | at most 2   |
 
   Scenario Outline: MySQL client declarations reserve URL pool sizing for POOL SIZE on <nodes> nodes
     Given a <nodes> node nervix cluster is started
