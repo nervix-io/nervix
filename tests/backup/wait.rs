@@ -23,6 +23,14 @@ use crate::common::runner_observation::observe_off_the_runner;
 /// the backup pause steps' bound is.
 const CUT_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// What each cut of the independent-budget probe keeps of its budget beyond its hold, for its
+/// lease, its pause, its drain and its capture. The budget runs from before the cut's lease, and a
+/// leader whose raft lease lapsed refuses every proposal, the cut's lease included, until the
+/// lease recovers. Loaded runs keep a backup's lease refused for seconds at a time, so a probe that
+/// left a held cut less than several such refusals and a loaded drain could expire it while the
+/// product keeps its contract.
+const HELD_CUT_MARGIN: Duration = Duration::from_secs(18);
+
 /// The controlled capture gate of one domain's quiesced cuts, where each cut of the domain waits
 /// after draining it until the scenario releases the gate or the cut's timed hold ends.
 struct CaptureGate {
@@ -88,6 +96,47 @@ impl CaptureGate {
 struct DelayedCut {
     gate: CaptureGate,
     hold: Duration,
+}
+
+/// The cut budget a cluster backup gives each of its two domains, and how long the cuts of each
+/// domain are held.
+#[derive(Debug)]
+struct IndependentCutBudgets {
+    /// The backup's `TIMEOUT`: the budget of each domain's quiesced cut.
+    budget: Duration,
+    /// How long the first domain's cuts are held.
+    first: Duration,
+    /// How long the second domain's cuts are held.
+    second: Duration,
+}
+
+impl IndependentCutBudgets {
+    /// Panics unless the probe tells budgets of their own from one budget the two cuts share, and
+    /// leaves each held cut its margin. The two holds together must outlast one budget, so a
+    /// shared budget would expire the second cut.
+    fn assert_probes_independent_budgets(&self) {
+        for hold in [self.first, self.second] {
+            let left = self.left_by(hold);
+            assert!(
+                left >= HELD_CUT_MARGIN,
+                "a hold of {hold:?} leaves its cut {left:?} of its budget, less than its \
+                 {HELD_CUT_MARGIN:?} margin: {self:?}"
+            );
+        }
+        assert!(
+            self.second > self.left_by(self.first),
+            "the two holds must together outlast one cut budget, or one budget the two cuts \
+             shared would pass the probe as well: {self:?}"
+        );
+    }
+
+    /// What a hold leaves its cut of the budget.
+    fn left_by(&self, hold: Duration) -> Duration {
+        let Some(left) = self.budget.checked_sub(hold) else {
+            panic!("a hold of {hold:?} outlasts its whole cut budget: {self:?}");
+        };
+        left
+    }
 }
 
 /// Holds every cut of the domain that reaches its capture, a cut of a backup that runs again under
@@ -243,8 +292,27 @@ async fn then_cli_recovers_archive_to_stdout(world: &mut ScenarioWorld) {
     assert_eq!(report["output"], "-");
 }
 
-#[when(expr = "a Plexus cluster backup crosses two delayed cuts into {string}")]
-async fn when_plexus_cluster_backup_crosses_delayed_cuts(world: &mut ScenarioWorld, file: String) {
+/// Backs up the cluster through one Plexus statement whose `TIMEOUT` gives each domain's cut a
+/// budget of its own, while every cut of each domain is held for its seconds. The client keeps
+/// 20-second request and retry deadlines, so a backup whose holds together outlast them receives its
+/// outcome beyond those deadlines.
+#[when(
+    expr = "a Plexus cluster backup with a {int} second cut budget crosses cuts delayed for {int} \
+            and {int} seconds into {string}"
+)]
+async fn when_plexus_cluster_backup_crosses_delayed_cuts(
+    world: &mut ScenarioWorld,
+    budget_seconds: u64,
+    first_seconds: u64,
+    second_seconds: u64,
+    file: String,
+) {
+    let probe = IndependentCutBudgets {
+        budget: Duration::from_secs(budget_seconds),
+        first: Duration::from_secs(first_seconds),
+        second: Duration::from_secs(second_seconds),
+    };
+    probe.assert_probes_independent_budgets();
     let archive = archive_path(world, &file);
     let leader = current_leader_node(world).await;
     let uri = world
@@ -257,12 +325,14 @@ async fn when_plexus_cluster_backup_crosses_delayed_cuts(world: &mut ScenarioWor
     let client = Client::connect_with_options(&uri, client_domain(&world.domain), options)
         .await
         .assured("the backup client connects");
-    let query = format!("BACKUP CLUSTER TO '{}' TIMEOUT 20s;", archive.display());
+    let query = format!(
+        "BACKUP CLUSTER TO '{}' TIMEOUT {budget_seconds}s;",
+        archive.display()
+    );
     let mut task = nervix_primitives::task::spawn(async move { client.execute(query).await });
     let mut delayed = Vec::new();
-    for (suffix, seconds) in [("_a", 12), ("_b", 14)] {
+    for (suffix, hold) in [("_a", probe.first), ("_b", probe.second)] {
         let gate = CaptureGate::of(world, &format!("{{{{backup_base}}}}{suffix}"));
-        let hold = Duration::from_secs(seconds);
         gate.hold_each_cut_for(hold);
         delayed.push(DelayedCut { gate, hold });
     }
@@ -427,15 +497,23 @@ async fn then_archive_retains_native_recovery_cuts(
     }
 }
 
-#[then(expr = "backup archive {string} contains both delayed quiesced domain cuts")]
-async fn then_archive_contains_delayed_cuts(world: &mut ScenarioWorld, file: String) {
+#[then(
+    expr = "backup archive {string} contains quiesced domain cuts delayed for {int} and {int} \
+            seconds"
+)]
+async fn then_archive_contains_delayed_cuts(
+    world: &mut ScenarioWorld,
+    file: String,
+    first_seconds: u64,
+    second_seconds: u64,
+) {
     let description = described_archive(archive_path(world, &file)).await;
     let domains: BTreeMap<_, _> = description
         .domains
         .iter()
         .map(|domain| (domain.record.domain.clone(), &domain.capture.cut))
         .collect();
-    for (suffix, seconds) in [("_a", 12), ("_b", 14)] {
+    for (suffix, seconds) in [("_a", first_seconds), ("_b", second_seconds)] {
         let domain = scenario_domain(world, &format!("{{{{backup_base}}}}{suffix}"));
         let cut = domains
             .get(&domain)
