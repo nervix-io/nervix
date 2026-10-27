@@ -460,9 +460,31 @@ for a detach reply can queue ticks that arrived before the reply; the post-detac
 the recorded wire order, clears those already queued frames, and waits for any new frame. An unread
 pre-reply tick therefore does not masquerade as delivery after detach.
 
-The generator cadence assertion groups equal logical timestamps across concrete branches and
-checks increasing timestamps within each branch. It allows records from separate branch tasks to
-arrive in either order, as their delivery has no shared ordering contract.
+The generator cadence assertion checks execution timestamps rather than subscription throughput.
+Every row must preserve the expected source fields and its concrete branch key, timestamps must
+increase within each branch, and a complete occurrence has one shared timestamp across both
+branches. Rows from different branches may arrive in either order. Early rows from the first branch
+remain checked while the second branch becomes ready; they do not count as complete occurrences.
+
+The observation runs on a runtime worker independently of the cooperative scenario runner and has
+a 30-second physical liveness budget for four complete occurrences. Delayed subscription reads can
+consume already queued rows, so their arrival spacing cannot measure generation rate. The occurrence
+timestamps must span at least one logical cadence interval. A pending execution can finish late and
+be followed by a coalesced occurrence;
+the next boundary may also be close. Requiring equal gaps would reject that supported behavior,
+while four complete occurrences within less than one interval expose a catch-up burst.
+
+`Paced generators follow domain logical time` covers `EACH 2s` at rate `20.0` and `EACH 200ms` at
+rate `0.1`, with the same one- and three-node examples and replica counts. The slow-rate profile
+discriminates against scheduling in physical time: four 200ms physical occurrences would span only
+60ms of logical time, below the required 200ms. Longer gaps from missed/coalesced periods remain
+valid. The fixture's two-day logical branch TTL exceeds the current 75-minute suite budget at
+rate `20.0` (25 logical hours); branch expiry is not the subject of this scenario.
+
+The focused observation regressions use a paused test clock to delay nineteen subscription reads
+by a second each, including eleven rows from the first branch before both branches appear. They
+retain the same field, key, ordering and shared-timestamp checks, and separately reject a catch-up
+burst, physical scheduling at the slow rate, corrupt rows and a stalled or failed subscription.
 
 `tests-deps` builds the CLI, the Plexus formatter, the paced simulation's Rust driver and the shared
 C binding its Python driver loads in the normal target directory. The full and focused
@@ -737,11 +759,26 @@ document, and an answer outside its schema is reported rather than read. The out
 | `read-only` | Kache made the job's remote read-only, as for a scheduled or manually dispatched run | Nothing: such a job publishes nothing |
 | `not-run` | The job's work failed or was cancelled, so publication returns at once | Queued uploads go to the shutdown drain |
 | `unavailable` | The job has no kache command or no manifest key, or its daemon does not answer | Whatever a stopped daemon left queued: publication asks `kache --json daemon status` first because `kache stats` would start a new daemon |
-| `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the phase the step reached |
+| `cancelled` | The step received `SIGINT` or `SIGTERM` | The record names the first signal and the phase in which the step received it |
 
 Publication never changes the job's verdict. Every outcome exits `0` except `cancelled`, whose step
-ends with the signal's status, as the runner asked. `incomplete`, `unavailable` and `cancelled` also
-add a workflow warning. A job that failed before its checkout has no script to run, so its step
+ends with the first signal's status, as the runner asked. `incomplete`, `unavailable` and
+`cancelled` also add a workflow warning.
+
+A termination signal never interrupts cleanup. Python runs a signal handler between any two
+bytecodes, so a handler that raised at once could land inside library cleanup. On Python 3.12.3, a
+signal just after `shutil.rmtree` closed a telemetry directory's descriptor made it close that
+descriptor again, and the failure replaced the cancellation before the record was written; later
+Python releases leave the directory behind instead. Publication therefore records the first signal
+when it arrives and raises it only where publication can stop cleanly. Inside a wait for a kache
+command or for the next poll it raises at once and only once, so the interrupted command is killed
+and reaped, and the telemetry directory it was writing is removed. A signal received anywhere else
+is raised when the next wait begins or the current phase ends, so the record names the phase in
+which the step received it. Once the record is written the step stops listening: a signal received
+until then ends the step with the first signal's status, and later ones are ignored, because
+Python's exit restores the default handlers and would let a later signal end the step with its own
+status. A signal that arrives before publication installs its handlers ends the step without a
+record. A job that failed before its checkout has no script to run, so its step
 adds only a notice. The record, `publication.json` and `publication.md`, lands in
 `$RUNNER_TEMP/kache-report`, which the kache report artifact uploads where the job has one, and in
 the job summary. An image build runs `publish --job-status success` as the last command of its

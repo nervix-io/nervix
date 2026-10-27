@@ -595,7 +595,9 @@ class PublicationTests(unittest.TestCase):
         self.clock = SteppingClock()
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            publication = kache_remote.publish(self.report, job_status, environment, self.clock, budget, 2.0)
+            publication = kache_remote.publish(
+                self.report, job_status, environment, kache_remote.Termination(), self.clock, budget, 2.0
+            )
         return publication, kache, output.getvalue()
 
     def recorded(self) -> dict:
@@ -762,7 +764,9 @@ class PublicationTests(unittest.TestCase):
         kache = FakeKache(self.directory, {})
         environment = kache.environment(KACHE_MANIFEST_KEY="docker-amd64", KACHE_NAMESPACE="docker-amd64")
         with contextlib.redirect_stdout(io.StringIO()):
-            publication = kache_remote.publish(self.report, "success", environment, SteppingClock(), 10.0, 2.0)
+            publication = kache_remote.publish(
+                self.report, "success", environment, kache_remote.Termination(), SteppingClock(), 10.0, 2.0
+            )
         self.assertEqual(publication.job, "docker-amd64")
         self.assertEqual(publication.outcome, Outcome.PUBLISHED)
 
@@ -798,32 +802,173 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(recorded["outcome"], "cancelled")
         self.assertEqual(recorded["reasons"], ["The step received SIGTERM while waiting for uploads."])
 
+    def test_a_termination_while_telemetry_is_removed_is_recorded_and_the_removal_completes(self) -> None:
+        # Python 3.12.3's rmtree, interrupted just after it closes a directory's descriptor, closes
+        # it again in a finally block, and that EBADF replaced the cancellation of Check run
+        # 40423033091 before its record was written; later releases leave the directory behind
+        # instead. The signal lands at that point, once while the daemon is asked and once while the
+        # wait polls.
+        handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+        self.addCleanup(lambda: [signal.signal(number, handler) for number, handler in handlers.items()])
+        real_close = os.close
+        for removal, phase in ((1, "asking the daemon"), (2, "waiting for uploads")):
+            with self.subTest(phase=phase):
+                subprocess.run(["rm", "-rf", str(self.directory / "bin")], check=True)
+                kache = FakeKache(self.directory, {"pending": [4]})
+                temporary = self.directory / f"tmp-{removal}"
+                temporary.mkdir()
+                telemetry_closes = []
+
+                def is_telemetry_directory(descriptor: int) -> bool:
+                    opened = os.fstat(descriptor)
+                    for created in temporary.glob("kache-telemetry-*"):
+                        if os.path.samestat(opened, created.stat()):
+                            return True
+                    return False
+
+                def close(descriptor: int) -> None:
+                    # A close after the signal is not examined: Python 3.12.3 then closes the same
+                    # descriptor again, and that close must fail as it did in CI.
+                    closes_telemetry = len(telemetry_closes) < removal and is_telemetry_directory(descriptor)
+                    real_close(descriptor)
+                    if closes_telemetry:
+                        telemetry_closes.append(descriptor)
+                        if len(telemetry_closes) == removal:
+                            signal.raise_signal(signal.SIGTERM)
+
+                environment = kache.environment(
+                    GITHUB_JOB="scenarios",
+                    KACHE_MANIFEST_KEY="scenarios-Linux-X64",
+                    KACHE_NAMESPACE="scenarios-Linux-X64",
+                )
+                with (
+                    mock.patch.dict(os.environ, environment, clear=True),
+                    mock.patch.object(tempfile, "tempdir", str(temporary)),
+                    mock.patch.object(os, "close", close),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    status = kache_remote.main(["publish", "--job-status", "success", str(self.report)])
+
+                self.assertEqual(len(telemetry_closes), removal)
+                self.assertEqual(status, 128 + signal.SIGTERM)
+                recorded = self.recorded()
+                self.assertEqual(recorded["outcome"], "cancelled")
+                self.assertEqual(recorded["reasons"], [f"The step received SIGTERM while {phase}."])
+                self.assertIn("### Kache publication: cancelled", (self.report / "publication.md").read_text())
+                self.assertEqual(sorted(temporary.iterdir()), [])
+                # No later signal can replace that status while the interpreter exits.
+                self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+                self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
+
     def test_a_termination_is_recorded_and_raised_again(self) -> None:
+        termination = kache_remote.Termination()
+
         class TerminatedWhileWaiting(SteppingClock):
             def sleep(self, seconds: float) -> None:
-                kache_remote.raise_cancelled(signal.SIGINT, None)
+                termination.handle(signal.SIGINT, None)
 
         kache = FakeKache(self.directory, {"pending": [2]})
         environment = kache.environment(KACHE_MANIFEST_KEY="tests-Linux-X64", GITHUB_JOB="tests")
         with contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(kache_remote.Cancelled) as raised:
-            kache_remote.publish(self.report, "success", environment, TerminatedWhileWaiting(), 10.0, 2.0)
+            kache_remote.publish(self.report, "success", environment, termination, TerminatedWhileWaiting(), 10.0, 2.0)
 
         self.assertEqual(raised.exception.signal_number, signal.SIGINT)
         self.assertEqual(self.recorded()["reasons"], ["The step received SIGINT while waiting for uploads."])
         self.assertIn("::warning title=kache publication cancelled::", output.getvalue())
+
+    def test_a_termination_before_publication_begins_runs_no_kache_command(self) -> None:
+        termination = kache_remote.Termination()
+        termination.handle(signal.SIGTERM, None)
+        kache = FakeKache(self.directory, {})
+        environment = kache.environment(KACHE_MANIFEST_KEY="tests-Linux-X64", GITHUB_JOB="tests")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(kache_remote.Cancelled) as raised:
+            kache_remote.publish(self.report, "success", environment, termination, SteppingClock(), 10.0, 2.0)
+
+        self.assertEqual(raised.exception.signal_number, signal.SIGTERM)
+        self.assertEqual(self.recorded()["outcome"], "cancelled")
+        self.assertEqual(self.recorded()["reasons"], ["The step received SIGTERM while starting."])
+        self.assertEqual(kache.calls(), [])
+
+    def test_a_termination_interrupts_only_a_wait_and_keeps_its_first_signal(self) -> None:
+        # Outside a wait a signal is only recorded, and a later one does not replace it.
+        termination = kache_remote.Termination()
+        termination.handle(signal.SIGINT, None)
+        termination.handle(signal.SIGTERM, None)
+        waited = []
+        with self.assertRaises(kache_remote.Cancelled) as raised, termination.interruptible():
+            waited.append(True)
+        self.assertEqual(raised.exception.signal_number, signal.SIGINT)
+        self.assertEqual(waited, [])
+
+        # Inside a wait the signal is raised at once and only once, so the wait's cleanup runs to its
+        # end whatever signal follows.
+        termination = kache_remote.Termination()
+        cleaned = []
+        with self.assertRaises(kache_remote.Cancelled) as raised, termination.interruptible():
+            try:
+                termination.handle(signal.SIGTERM, None)
+            finally:
+                termination.handle(signal.SIGINT, None)
+                cleaned.append(True)
+        self.assertEqual(raised.exception.signal_number, signal.SIGTERM)
+        self.assertEqual(cleaned, [True])
+        with self.assertRaises(kache_remote.Cancelled) as raised:
+            termination.check()
+        self.assertEqual(raised.exception.signal_number, signal.SIGTERM)
 
     def test_main_publishes_with_the_step_handlers_installed(self) -> None:
         handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
         self.addCleanup(lambda: [signal.signal(number, handler) for number, handler in handlers.items()])
         kache = FakeKache(self.directory, {})
         environment = kache.environment(GITHUB_STEP_SUMMARY=str(self.summary))
-        with mock.patch.dict(os.environ, environment, clear=True), contextlib.redirect_stdout(io.StringIO()):
+        real_publish = kache_remote.publish
+        published = []
+
+        def publish(report: Path, job_status: str, environment: dict[str, str], termination: kache_remote.Termination) -> Publication:
+            # Both signals reach the termination that publication raises.
+            for number in (signal.SIGINT, signal.SIGTERM):
+                handler = signal.getsignal(number)
+                self.assertIs(handler.__self__, termination)
+                self.assertIs(handler.__func__, kache_remote.Termination.handle)
+            published.append(report)
+            return real_publish(report, job_status, environment, termination)
+
+        with (
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch.object(kache_remote, "publish", publish),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             status = kache_remote.main(["publish", "--job-status", "failure", str(self.report)])
 
         self.assertEqual(status, 0)
-        self.assertIs(signal.getsignal(signal.SIGTERM), kache_remote.raise_cancelled)
+        self.assertEqual(published, [self.report])
+        # Once the record is written, no signal can change the step's status.
+        self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+        self.assertEqual(signal.getsignal(signal.SIGTERM), signal.SIG_IGN)
         self.assertEqual(self.recorded()["outcome"], "not-run")
         self.assertEqual(kache.calls(), [])
+
+    def test_a_termination_after_publication_still_ends_the_step_with_its_status(self) -> None:
+        handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+        self.addCleanup(lambda: [signal.signal(number, handler) for number, handler in handlers.items()])
+        kache = FakeKache(self.directory, {})
+        real_publish = kache_remote.publish
+
+        def publish(report: Path, job_status: str, environment: dict[str, str], termination: kache_remote.Termination) -> Publication:
+            publication = real_publish(report, job_status, environment, termination)
+            # The signal lands after publication's last check, before the step stops listening.
+            signal.raise_signal(signal.SIGTERM)
+            return publication
+
+        with (
+            mock.patch.dict(os.environ, kache.environment(), clear=True),
+            mock.patch.object(kache_remote, "publish", publish),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            status = kache_remote.main(["publish", "--job-status", "failure", str(self.report)])
+
+        self.assertEqual(status, 128 + signal.SIGTERM)
+        self.assertEqual(self.recorded()["outcome"], "not-run")
 
 
 class StartTests(unittest.TestCase):
