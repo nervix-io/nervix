@@ -73,10 +73,20 @@ Feature: Syslog support
       transient error: -
       reconnect backoff: -
       reconnect wait: -
+      """
+    And the last command output contains
+      """
+      to: SYSLOG COLLECTOR syslog_forwarder
+      options: none
+      mode: NO ACK RETRY POLICY BACKOFF 50ms MAX 1s
+      quiesce: none
+      envelope: none
+      batch: none
+      flush: FLUSH IMMEDIATE
+      errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
       from: syslog_events
       codec: syslog_codec
       body: codec
-      to: SYSLOG COLLECTOR syslog_forwarder
       """
     When Syslog UDP message is published to "{{syslog_ingest_addr}}"
       """
