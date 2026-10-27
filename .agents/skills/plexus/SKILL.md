@@ -416,8 +416,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   replacement attempt. Design
   application effects for duplicates and uncertain ACK confirmation. Read `Emitters` → `Client emitters`,
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
-- Request/response emitters do not take `ACK TIMEOUT`. A ClickHouse client requires a positive
-  `timeout_ms`; SQS, Sentry, OTEL, or Iceberg object-store clients use it when a request
+- Request/response emitters do not take `ACK TIMEOUT`. ClickHouse and OTEL clients require a positive
+  `timeout_ms`; SQS, Sentry, or Iceberg object-store clients use it when a request
   needs an explicit bound. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
   resource, while HTTP refuses TLS file keys. Its table locator has one or two case-preserving
   dot-separated parts, each quoted by the connector when sent. The emitter's declared retry

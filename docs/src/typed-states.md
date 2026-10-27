@@ -943,3 +943,8 @@ emitter plans, configurations and concrete types. `IngestorConnector::KIND` and
 `EmitterLifecycle::kind()` expose the vocabulary identity; composition asserts the declared kind
 at compile time. Shared private encoding or endpoint intake state does not add an entity selector
 to those public configurations. A new entity adds a typed variant and implementation.
+
+OTEL field rules carry their exact type with the constraint that requires it: a histogram count
+cannot be declared with a floating-point descriptor. Required, optional and required-for-DELTA
+presence are distinct vocabulary states. Opening an OTEL client validates its required positive
+deadline before constructing settings; the installed settings hold a duration with no absent state.
