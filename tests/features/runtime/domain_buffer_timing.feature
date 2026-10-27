@@ -69,12 +69,14 @@ Feature: Domain-paced branch buffering
       """
       {"tenant":"beta","sequence":2,"path":"fast"}
       """
-    Then within "800ms" the relay subscription receives payloads
+    # The caller deliberately resumes after the receive budget. The independent reader must
+    # still collect all rows before 800ms, below either one-second physical cadence.
+    Then within "800ms" the relay subscription receives payloads with its caller delayed by "1s"
       """
-      {"path":"fast","sequence":1,"tenant":"alpha"}
-      {"path":"fast","sequence":2,"tenant":"alpha"}
-      {"path":"fast","sequence":1,"tenant":"beta"}
-      {"path":"fast","sequence":2,"tenant":"beta"}
+      key={"tenant":"alpha"} payload={"path":"fast","sequence":1,"tenant":"alpha"}
+      key={"tenant":"alpha"} payload={"path":"fast","sequence":2,"tenant":"alpha"}
+      key={"tenant":"beta"} payload={"path":"fast","sequence":1,"tenant":"beta"}
+      key={"tenant":"beta"} payload={"path":"fast","sequence":2,"tenant":"beta"}
       """
 
     Examples:

@@ -172,7 +172,7 @@ resubmitting an outcome that might already have produced output.
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Unaccepted addresses | No task: a listening socket at a chosen loopback address and the one connection that fills its accept queue, so the kernel drops every later handshake. The scenario world owns both until the scenario ends | `tests/common/unaccepted_address.rs` |
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
-| Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
+| Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact payload multiplicities, generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs` and `subscription_payloads.rs`, used by the payload, generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
 | Syslog TLS publication and split-frame writes | One abort-on-drop task on the binary's runtime, owning TCP connection establishment, the TLS handshake and the complete prepared write. Publication closes the connection there; a split-frame write returns its sender for the later remainder | `tests/common/syslog_tls.rs`, using `tests/common/runner_observation.rs` |
@@ -835,6 +835,20 @@ bound from dispatch on a runtime worker, waits independently for both controlled
 through a fresh client under the original reference. The recovery orchestration also runs off the
 runner, so delayed step polling cannot restart the wait bound or leave the second cut held. The
 archive must retain both quiesced cuts and the measured first hold.
+
+The paced branch-buffering outline keeps its one-second logical input flush and collection, rate
+20, and 800 ms physical receive budget. Its bounded payload sample owns the raw session on a
+runtime task and records every receipt instant, while Cucumber only awaits the completed sample.
+Checking the deadline between rows on the runner task could fail after the first tenant rows even
+when both second rows were already queued within the budget. A paused-clock regression supplies
+those rows at 100 ms and delays the caller past 800 ms; another requires a missing second row to
+expire at exactly 800 ms despite a duplicate first row. A transport disconnect instead fails
+immediately with its cause. The public outline checks each concrete tenant key and both exact
+payloads while deliberately delaying collection of the result for one second, beyond the
+unchanged receive budget. That delay yields to the runtime and other scenarios; it does not block
+the shared runner. A scripted one-second physical cadence still expires the same 800 ms sample.
+Offloading removes runner polling gaps; it neither extends the budget nor proves that runtime
+workers cannot be delayed.
 
 The duration window outline establishes its observation boundary through a public subscription:
 it first waits for a probe branch's window to emit, then submits all four interleaved tenant rows
