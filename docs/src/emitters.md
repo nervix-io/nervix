@@ -166,9 +166,10 @@ The shared variables are:
 
 Request/response emitters—SQS, Sentry, OTEL, HTTP, the databases, and Iceberg—do not take
 `ACK TIMEOUT`. Except for Iceberg, their client request timeout bounds the response: SQS, Sentry,
-OTEL, and ClickHouse clients expose that bound as the optional `timeout_ms` CONFIG key, and a client
-an HTTP emitter uses must declare it. An Iceberg emitter's object-store client bounds each storage
-call with its own optional `timeout_ms`, while Nervix sets no deadline on its REST catalog requests,
+OTEL clients expose that bound as the optional `timeout_ms` CONFIG key. ClickHouse clients and a
+client an HTTP emitter uses must declare it. An Iceberg emitter's object-store client bounds each
+storage call with its own optional `timeout_ms`, while Nervix sets no deadline on its REST catalog
+requests,
 as [Iceberg retries](#iceberg-retries) describes. For every emitter, Nervix accounts for records
 individually wherever the transport exposes individual results: delivered records acknowledge
 upstream, definitively invalid records follow `ON MESSAGE ERROR`, and a retry resends only records
@@ -1048,7 +1049,8 @@ Transport-specific expectations:
   client's `tls_ca_file`, `tls_cert_file`, and `tls_key_file`.
 - `OTEL`: use an `https://...` `endpoint`; Nervix honors `tls_ca_file`, `tls_cert_file`, and
   `tls_key_file` for both OTLP/gRPC and OTLP/HTTP-protobuf.
-- `CLICKHOUSE`: use an `https://...` `addr`; Nervix honors `tls_ca_file` and optional `timeout_ms`.
+- `CLICKHOUSE`: use an `https://...` `addr` with mounted `tls_ca_file` and required positive
+  `timeout_ms`; HTTP addresses refuse TLS file keys.
 - `POSTGRES`: use `sslmode=verify-full` in the `addr` URL; Nervix honors `tls_ca_file`, `tls_cert_file`, and `tls_key_file`. `sslmode=disable` is the only other accepted policy.
 - `MYSQL`: include `require_ssl=true` in `addr`; Nervix honors `tls_ca_file`.
 - `SYSLOG`: select `'protocol' = 'tls'`. Optional `tls_ca_file` adds a server trust root;
@@ -2100,7 +2102,7 @@ endpoint must already exist; an unreachable endpoint remains an initialization o
 ```plexus,ignore
 CREATE CLICKHOUSE TABLE EMITTER <name>
   FROM <relay>
-  TO <client> TABLE 'Orders'
+  TO <client> TABLE 'sales.Orders'
     MODE <mode>
     VALUES { '<field>' = <expression>, ... }
   <construction>
@@ -2115,7 +2117,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Capability | Declaration |
 | --- | --- |
 | Reference | CLICKHOUSE client |
-| Locator and validation rule | TABLE 'Orders' (clickhouse_table) |
+| Locator and validation rule | TABLE 'sales.Orders' (clickhouse_table) |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
@@ -2126,7 +2128,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Envelope | Not offered: This implementation maps payloads; it declares no additional per-record envelope clauses for this entity. |
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | The connector holds no buffer between its transport and the host. |
-| Network waits | an insert: connection, TLS, upload and the response: `timeout_ms`; unbounded when omitted |
+| Network waits | an insert: connection, TLS, upload and the response: `timeout_ms`; required |
 | Driver limits | None declared. |
 | Stalled-peer checks | `STALLED PEER timeout_ms` |
 
@@ -2159,10 +2161,12 @@ CREATE CLICKHOUSE CLIENT ch
   };
 ```
 
-Optional config keys are `'user'`, `'password'`, `'database'`, and `'timeout_ms'`. The timeout
-bounds both sending an insert body and waiting for ClickHouse to finish the insert and return its
-result.
-For HTTPS endpoints, mount a TLS resource and set `'tls_ca_file'` to the mounted CA path.
+`'addr'` and a positive `'timeout_ms'` are required. Optional keys are `'user'`, `'password'`,
+`'database'`, `'tls_ca_file'`, `'tls_cert_file'`, and `'tls_key_file'`; unknown keys are refused.
+The timeout bounds both sending an insert body and waiting for ClickHouse to finish the insert and
+return its result. An `https` address requires `'tls_ca_file'` pointing to mounted trust material.
+An `http` address refuses all three TLS file keys. A client certificate and key must be supplied
+together.
 
 The client resolves the host in `addr` through the node's asynchronous resolver for each new
 connection and tries the answers in order; a literal IPv4 or IPv6 address is dialled as written.
@@ -2179,7 +2183,29 @@ ClickHouse requires the [batching clause](#batching). A flush is written as inse
 ClickHouse writes each `JSONEachRow` line directly from the mapped Arrow columns in `VALUES`
 order, using the same typed JSON column writer as schemaful JSON emission. Null mapped values are
 written as `null`, including null list elements. Column names are escaped once for each write, and
-string values use their carrier's escape classification.
+string values use their carrier's escape classification. `TABLE` names preserve their case and
+contain one part (`'Orders'`) or two nonempty dot-separated parts (`'sales.Orders'`). Nervix quotes
+each part with backticks in the insert SQL, so `sales.Orders` is sent as
+`` `sales`.`Orders` ``. A third part or empty part is refused when the emitter is declared.
+
+The ClickHouse `VALUES` encoding contract is:
+
+| Plexus mapped type | `JSONEachRow` representation |
+| --- | --- |
+| `BOOL` | JSON boolean |
+| `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64` | JSON integer number, including the full `U64` range |
+| `F32`, `F64` | JSON number; `F32` is widened to `F64`; NaN and infinities become `null` |
+| `STRING` | JSON string with escaped quotes, backslashes, and control characters |
+| `BYTES` | Raw octets in a JSON string, escaping quote, backslash, and control octets; no base64 conversion |
+| `DATETIME` | RFC 3339 JSON string |
+| `ARRAY<T>` and `VEC<T>` | JSON array, recursively applying the element encoding, including for nested `BYTES` |
+
+An optional mapped value writes `null`, including an optional list element. Mappings whose inferred
+Arrow type is outside this domain are refused before the emitter starts: null-only values, decimals,
+structured or dictionary values, large strings or binaries, timestamps outside nanoseconds, and
+lists containing a refused element type. A `VALUES` target column name may appear only once.
+ClickHouse declares only `MODE ACK`; `ON CONFLICT`, per-record header writes, and an envelope are
+unavailable.
 `F32` columns keep ClickHouse's JSON number formatting after widening to `F64`; schemaful JSON
 codecs format `F32` directly. A `BYTES` value is written as its own octets, which a `String` column
 stores unchanged, where schemaful JSON codecs write padded base64.

@@ -8,10 +8,10 @@
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ExternalName, KafkaConsumerGroupName, KafkaTopicName, MONGODB_NAMESPACE_MAX_BYTES,
-    MongoDbCollectionName, MqttTopicFilter, MqttTopicName, NatsPublishSubjectName,
-    NatsQueueGroupName, NatsSubjectName, PulsarSubscriptionName, PulsarTopicName,
-    RabbitMqQueueName, RedisChannelName, SqsQueueName,
+    ClickHouseTableName, ExternalName, KafkaConsumerGroupName, KafkaTopicName,
+    MONGODB_NAMESPACE_MAX_BYTES, MongoDbCollectionName, MqttTopicFilter, MqttTopicName,
+    NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PulsarSubscriptionName,
+    PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
 };
 
 use crate::Arbitrary;
@@ -241,6 +241,20 @@ impl Arbitrary<'_> {
         );
         MongoDbCollectionName::parse(&format!("C{body}z"))
             .assured("the collection alphabet excludes NUL and dollar signs within its budget")
+    }
+
+    /// A ClickHouse table has one or two nonempty case-preserving identifier parts.
+    pub fn clickhouse_table_name(&mut self) -> ClickHouseTableName {
+        let pieces = ["a", "Z", "0", "9", "_", "-", "~"];
+        let text = if self.entropy.flag() {
+            let database = self.pieces_text(pieces, 64);
+            let table = self.pieces_text(pieces, 63);
+            format!("{database}.{table}")
+        } else {
+            self.pieces_text(pieces, 128)
+        };
+        ClickHouseTableName::parse(&text)
+            .assured("the generated ClickHouse locator has one or two nonempty parts")
     }
 
     /// An external table identifier within its current lexical bound, with both cases.

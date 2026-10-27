@@ -1017,9 +1017,7 @@ pub(super) async fn finish_rejected_records(
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use nervix_connector::{
-        EmitterCommitReport, EmitterRecordId, EmitterWriteResult, ParsedRetryPolicy,
-    };
+    use nervix_connector::{EmitterRecordId, ParsedRetryPolicy};
 
     use super::*;
     use crate::runtime::test_fixtures::{
@@ -1084,119 +1082,57 @@ mod tests {
         );
     }
 
-    /// A connector whose every write fails with a failure the emitter does not retry, so a test
-    /// drives the publish path up to the connector and observes what the host keeps afterwards.
-    struct UnencodableEmitter;
-
-    #[async_trait]
-    impl EmitterLifecycle for UnencodableEmitter {
-        fn kind(&self) -> nervix_models::EmitterEntityKind {
-            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
-        }
-
-        async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
-            Ok(EmitterFinish::NothingHeld)
-        }
-    }
-
-    #[async_trait]
-    impl EmitterConnector for UnencodableEmitter {
-        fn lifecycle(&self) -> &dyn EmitterLifecycle {
-            self
-        }
-
-        fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
-            self
-        }
-
-        async fn publish_batches(
-            &mut self,
-            _context: &EmitterConnectorContext,
-            _publication: EmitterPublication<'_>,
-        ) -> EmitterRuntimeResult<()> {
-            Err(Report::new(EmitterRuntimeError::EncodeBatch)
-                .attach_printable("the test emitter encodes no record"))
+    /// Exercise a real codec-initialization failure before the fake transport can be reached.
+    fn unencodable_emitter() -> super::super::emitter_encoding::EncodedRecordEmitter {
+        let schema = crate::runtime::test_fixtures::EntrypointTestDomain {
+            relays: &[],
+            fields: &[("another_field", ParseAsType::I64)],
+            branch_fields: &[],
+        };
+        super::super::emitter_encoding::EncodedRecordEmitter {
+            connector: Box::new(nervix_connector_fake::FakeEmitter::<
+                nervix_connector_fake::Records,
+            >::new([])),
+            codec: schema.codec(),
+            batch: None,
         }
     }
 
-    /// A connector that stages every row it is handed and publishes the rows only on its own
-    /// commit, which is due once `size_boundary` rows are staged and otherwise after `cadence`.
-    struct StagingEmitter {
+    /// Use the production mapped-row adapter for the fixture's staged connector.
+    fn staging_emitter(
         cadence: Duration,
         size_boundary: u64,
-        staged: u64,
-    }
-
-    impl StagingEmitter {
-        fn new(cadence: Duration, size_boundary: u64) -> Self {
-            Self {
-                cadence,
-                size_boundary,
-                staged: 0,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl EmitterLifecycle for StagingEmitter {
-        fn kind(&self) -> nervix_models::EmitterEntityKind {
-            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
-        }
-
-        async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
-            Ok(EmitterFinish::NothingHeld)
-        }
-
-        fn staged_commit(&self) -> Option<EmitterStagedCommit> {
-            if self.staged == 0 {
-                return None;
-            }
-            if self.staged >= self.size_boundary {
-                return Some(EmitterStagedCommit::SizeReached);
-            }
-            Some(EmitterStagedCommit::Cadence(self.cadence))
-        }
-
-        fn staged_messages(&self) -> u64 {
-            self.staged
-        }
-
-        async fn commit(&mut self) -> EmitterWriteResult<Option<EmitterCommitReport>> {
-            let messages = std::mem::take(&mut self.staged);
-            Ok(Some(EmitterCommitReport {
-                messages,
-                bytes: 0,
-                domain_timestamp: Timestamp::from_unix_nanos(100),
-            }))
-        }
-    }
-
-    #[async_trait]
-    impl EmitterConnector for StagingEmitter {
-        fn lifecycle(&self) -> &dyn EmitterLifecycle {
-            self
-        }
-
-        fn lifecycle_mut(&mut self) -> &mut dyn EmitterLifecycle {
-            self
-        }
-
-        async fn publish_batches(
-            &mut self,
-            _context: &EmitterConnectorContext,
-            publication: EmitterPublication<'_>,
-        ) -> EmitterRuntimeResult<()> {
-            for batch in publication.batches.iter_mut() {
-                for row in batch.pending_record_rows() {
-                    batch.mark_delivered(row, DeliveredAcknowledgements::Connector)?;
-                    self.staged = self
-                        .staged
-                        .checked_add(1)
-                        .expect("a test stages a handful of rows");
-                }
-            }
-            Ok(())
-        }
+    ) -> super::super::emitter_values::MappedRowEmitter {
+        let emitter = crate::runtime::test_fixtures::named("staging");
+        let values = [nervix_models::EmitterValueMapping {
+            column: "value".to_string(),
+            expression: crate::runtime::test_fixtures::expression("input.value"),
+        }];
+        let mapping = crate::emitter_start_plan::MappedValuesPlan::decide(
+            &emitter,
+            "ClickHouse",
+            "clickhouse",
+            &values,
+        )
+        .assured("the fixture maps its integer input unchanged");
+        let projection = super::super::emitter_values::MappedValuesProjection::compile(
+            super::super::emitter_values::MappedValuesProjectionInit {
+                label: "ClickHouse",
+                namespace: "clickhouse",
+                emitter: &emitter,
+                mapping: &mapping,
+                input_schema: crate::runtime::test_fixtures::input_schema().arrow_schema(),
+                udfs: None,
+            },
+        )
+        .assured("the fixture's input field is available to the mapping");
+        let publisher = nervix_connector_fake::FakeEmitter::<nervix_connector_fake::Rows>::new(
+            nervix_connector_fake::PublishScript::Repeat(
+                nervix_connector_fake::PublishAnswer::ConfirmAll,
+            ),
+        )
+        .staging(cadence, size_boundary);
+        super::super::emitter_values::MappedRowEmitter::new(Box::new(publisher), projection)
     }
 
     /// A buffer that releases every batch the moment it takes it, so the write that stages a batch
@@ -1245,7 +1181,7 @@ mod tests {
         let context = emitter_context();
         let cadence = Duration::from_millis(20);
         let mut connector =
-            EmitterConnectorState::opened(Box::new(StagingEmitter::new(cadence, u64::MAX)));
+            EmitterConnectorState::opened(Box::new(staging_emitter(cadence, u64::MAX)));
         let mut buffer = releasing_buffer();
 
         let before = context
@@ -1318,10 +1254,8 @@ mod tests {
             backoff: &mut backoff,
         };
         let context = emitter_context();
-        let mut connector = EmitterConnectorState::opened(Box::new(StagingEmitter::new(
-            Duration::from_secs(60),
-            1,
-        )));
+        let mut connector =
+            EmitterConnectorState::opened(Box::new(staging_emitter(Duration::from_secs(60), 1)));
         let mut buffer = releasing_buffer();
 
         let published = publish(
@@ -1360,7 +1294,7 @@ mod tests {
         context.clock = lifecycle
             .bind()
             .expect("the fixture installs an unpaced domain clock");
-        let mut connector = EmitterConnectorState::opened(Box::new(StagingEmitter::new(
+        let mut connector = EmitterConnectorState::opened(Box::new(staging_emitter(
             Duration::from_secs(60),
             u64::MAX,
         )));
@@ -1451,7 +1385,7 @@ mod tests {
             backoff: &mut backoff,
         };
         let context = emitter_context();
-        let mut connector = EmitterConnectorState::opened(Box::new(UnencodableEmitter));
+        let mut connector = EmitterConnectorState::opened(Box::new(unencodable_emitter()));
         let mut buffer = EmitterBatchBuffer::default();
         buffer.set_flush_policy(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
@@ -1516,7 +1450,7 @@ mod tests {
             backoff: &mut backoff,
         };
         let context = emitter_context();
-        let mut connector = EmitterConnectorState::opened(Box::new(UnencodableEmitter));
+        let mut connector = EmitterConnectorState::opened(Box::new(unencodable_emitter()));
         let mut buffer = EmitterBatchBuffer::default();
         buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
         buffer

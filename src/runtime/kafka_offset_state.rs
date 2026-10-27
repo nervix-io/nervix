@@ -67,8 +67,30 @@ struct KafkaTopicSchedulingSnapshot {
 
 #[derive(Debug, Clone, Archive, RkyvSerialize, RkyvDeserialize)]
 struct KafkaOffsetSnapshot {
+    applied_start_generation: Option<u64>,
     offsets: Vec<KafkaOffsetEntrySnapshot>,
     schedules: Vec<KafkaTopicSchedulingSnapshot>,
+    format: [u8; 16],
+}
+
+/// The current native checkpoint's required format identity, verified before interpreting state.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "the native Kafka checkpoint format reserves exactly these sixteen signature \
+                  bytes"
+    )
+)]
+const KAFKA_OFFSET_FORMAT: [u8; 16] = *b"NervixKafkaStart";
+
+#[derive(Debug, thiserror::Error)]
+enum KafkaOffsetCheckpointError {
+    #[error(
+        "Kafka offset checkpoint format signature does not match the current format; recreate the \
+         runtime state"
+    )]
+    FormatSignature,
 }
 
 /// Where each recorded partition resumes, and the schedule each topic was last rebalanced onto.
@@ -78,6 +100,8 @@ struct KafkaOffsetSnapshot {
 /// a partition the table already records moves that offset in place.
 #[derive(Debug, Clone, Default)]
 struct KafkaOffsetTable {
+    /// The most recent explicit domain start applied to every partition in this table.
+    applied_start_generation: Option<u64>,
     topics: HashMap<String, BTreeMap<i32, Arc<AtomicI64>>>,
     schedules: HashMap<String, KafkaTopicSchedulingState>,
 }
@@ -269,6 +293,10 @@ impl ReplicatedKafkaOffsetState {
 }
 
 impl KafkaOffsetStateRead {
+    pub(super) fn applied_start_generation(&self) -> Option<u64> {
+        self.state.offsets.load().applied_start_generation
+    }
+
     pub(super) fn placement(&self) -> &RuntimeStatePlacement {
         &self.state.placement
     }
@@ -394,17 +422,38 @@ impl KafkaOffsetStateOriginator {
         }
     }
 
-    /// Replace every recorded offset, as a new start point does, and encode the state that leaves.
-    pub(super) fn replace_offsets(
+    /// Apply an explicit domain start once, preserving commits when another instance resolved
+    /// that same start concurrently. A delayed earlier generation cannot replace a newer start.
+    /// The returned complete checkpoint must be persisted before the instance starts consuming.
+    pub(super) fn apply_start(
         &self,
+        generation: u64,
         offsets: Vec<KafkaOffsetPosition>,
     ) -> error_stack::Result<(u64, Vec<u8>), RuntimeStateOperationError> {
         let state = &self.read.state;
         let encoded = state
             .assignment
             .authorize_exclusive(self.assignment, StateCapability::Originate, || {
-                let schedules = state.offsets.load().schedules.clone();
-                let table = StdArc::new(KafkaOffsetTable::from_offsets(offsets, schedules));
+                let current = state.offsets.load();
+                let mut table;
+                match current.applied_start_generation {
+                    Some(applied) if applied > generation => {
+                        let lsm = state.current_lsm.current();
+                        return current.encode().map(|payload| (lsm, payload));
+                    }
+                    Some(applied) if applied == generation => {
+                        table = KafkaOffsetTable::clone(&current);
+                        if !table.record_unrecorded_starts(offsets) {
+                            let lsm = state.current_lsm.current();
+                            return current.encode().map(|payload| (lsm, payload));
+                        }
+                    }
+                    _ => {
+                        table = KafkaOffsetTable::from_offsets(offsets, current.schedules.clone());
+                        table.applied_start_generation = Some(generation);
+                    }
+                }
+                let table = StdArc::new(table);
                 state.offsets.store(table.clone());
                 let lsm = state.current_lsm.advance();
                 table.encode().map(|payload| (lsm, payload))
@@ -603,12 +652,26 @@ impl KafkaOffsetStatePersistence {
 }
 
 impl KafkaOffsetTable {
+    /// Another instance may have observed additional partitions while resolving the first start.
+    /// Keep every recorded slot, and install only starts the current table does not yet contain.
+    fn record_unrecorded_starts(&mut self, positions: Vec<KafkaOffsetPosition>) -> bool {
+        let mut changed = false;
+        for position in positions {
+            if self.slot(&position.topic, position.partition).is_none() {
+                self.record_partition(&position.topic, position.partition, position.offset);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// A table recording `offsets`, each partition in a slot of its own, beside `schedules`.
     fn from_offsets(
         offsets: Vec<KafkaOffsetPosition>,
         schedules: HashMap<String, KafkaTopicSchedulingState>,
     ) -> Self {
         let mut table = Self {
+            applied_start_generation: None,
             topics: HashMap::default(),
             schedules,
         };
@@ -685,8 +748,10 @@ impl KafkaOffsetTable {
             .collect::<Vec<_>>();
         schedule_entries.sort_by(|left, right| left.topic.cmp(&right.topic));
         rkyv::to_bytes::<rkyv::rancor::Error>(&KafkaOffsetSnapshot {
+            applied_start_generation: self.applied_start_generation,
             offsets: entries,
             schedules: schedule_entries,
+            format: KAFKA_OFFSET_FORMAT,
         })
         .map(|bytes| bytes.to_vec())
         .change_context(RuntimePersistenceError::EncodeState)
@@ -707,9 +772,14 @@ impl KafkaOffsetTable {
         mut check: impl FnMut() -> error_stack::Result<(), RuntimePersistenceError>,
     ) -> error_stack::Result<Self, RuntimePersistenceError> {
         check()?;
-        let snapshot = rkyv::access::<ArchivedKafkaOffsetSnapshot, rkyv::rancor::Error>(payload)
-            .change_context(RuntimePersistenceError::DecodeState)?;
-        let mut table = Self::default();
+        let snapshot = access_offset_snapshot(payload)?;
+        let mut table = Self {
+            applied_start_generation: snapshot
+                .applied_start_generation
+                .as_ref()
+                .map(|value| value.to_native()),
+            ..Self::default()
+        };
         for entry in snapshot.offsets.iter() {
             check()?;
             table.record_partition(
@@ -781,6 +851,15 @@ const _: () =
     assert!(std::mem::size_of::<ArchivedKafkaOffsetEntrySnapshot>() >= std::mem::size_of::<u32>());
 
 impl NativeKafkaOffsets {
+    pub(super) fn applied_start_generation(&self) -> Option<u64> {
+        let snapshot = access_offset_snapshot(&self.payload)
+            .verified("the checkpoint was validated and its bytes stay immutable");
+        snapshot
+            .applied_start_generation
+            .as_ref()
+            .map(|value| value.to_native())
+    }
+
     /// Validates the archived checkpoint and orders its partitions, running `check` before each.
     pub(super) fn validate(
         payload: rkyv::util::AlignedVec<16>,
@@ -824,8 +903,13 @@ impl NativeKafkaOffsets {
 fn access_offset_snapshot(
     payload: &[u8],
 ) -> error_stack::Result<&ArchivedKafkaOffsetSnapshot, RuntimePersistenceError> {
-    rkyv::access::<ArchivedKafkaOffsetSnapshot, rkyv::rancor::Error>(payload)
-        .change_context(RuntimePersistenceError::DecodeState)
+    let snapshot = rkyv::access::<ArchivedKafkaOffsetSnapshot, rkyv::rancor::Error>(payload)
+        .change_context(RuntimePersistenceError::DecodeState)?;
+    if snapshot.format != KAFKA_OFFSET_FORMAT {
+        return Err(Report::new(KafkaOffsetCheckpointError::FormatSignature)
+            .change_context(RuntimePersistenceError::DecodeState));
+    }
+    Ok(snapshot)
 }
 
 impl ArchivedKafkaOffsetEntrySnapshot {
@@ -876,17 +960,26 @@ struct StreamingKafkaOffsetSnapshot<
     'a,
     I: ExactSizeIterator<Item = KafkaOffsetEntrySnapshot> + Clone,
 > {
+    applied_start_generation: Option<u64>,
     #[rkyv(with = super::native_checkpoint_encoding::IteratorAsVec<super::native_checkpoint_encoding::CancellableEntry<'a, KafkaOffsetEntrySnapshot>>, omit_bounds)]
     offsets: super::native_checkpoint_encoding::CancellableIterator<'a, I>,
     schedules: Vec<KafkaTopicSchedulingSnapshot>,
+    format: [u8; 16],
 }
 
 pub(in crate::runtime) fn write_offset_payload(
+    applied_start_generation: Option<u64>,
     offsets: impl ExactSizeIterator<Item = (String, i32, i64)> + Clone,
     writer: &mut dyn std::io::Write,
     cancellation: &nervix_execution::Cancellation,
 ) -> error_stack::Result<(), RuntimePersistenceError> {
-    write_offset_snapshot(offsets, Vec::new(), writer, cancellation)
+    write_offset_snapshot(
+        applied_start_generation,
+        offsets,
+        Vec::new(),
+        writer,
+        cancellation,
+    )
 }
 
 #[cfg_attr(
@@ -897,6 +990,7 @@ pub(in crate::runtime) fn write_offset_payload(
     )
 )]
 fn write_offset_snapshot(
+    applied_start_generation: Option<u64>,
     offsets: impl ExactSizeIterator<Item = (String, i32, i64)> + Clone,
     schedules: Vec<KafkaTopicSchedulingSnapshot>,
     writer: &mut dyn std::io::Write,
@@ -931,6 +1025,7 @@ fn write_offset_snapshot(
     })?;
     let mut scratch = vec![std::mem::MaybeUninit::uninit(); capacity];
     let snapshot = StreamingKafkaOffsetSnapshot {
+        applied_start_generation,
         offsets: super::native_checkpoint_encoding::CancellableIterator {
             cancellation,
             entries: offsets.map(|(topic, partition, next_offset)| KafkaOffsetEntrySnapshot {
@@ -940,6 +1035,7 @@ fn write_offset_snapshot(
             }),
         },
         schedules,
+        format: KAFKA_OFFSET_FORMAT,
     };
     {
         let mapping_input = rkyv::api::low::to_bytes_in_with_alloc::<_, _, rkyv::rancor::Error>(
@@ -1033,7 +1129,13 @@ impl CapturedKafkaOffsets {
                     .collect(),
             })
             .collect();
-        write_offset_snapshot(offsets, schedules, writer, cancellation)
+        write_offset_snapshot(
+            self.table.applied_start_generation,
+            offsets,
+            schedules,
+            writer,
+            cancellation,
+        )
     }
 }
 
@@ -1075,6 +1177,7 @@ impl ExactSizeIterator for KafkaOffsetEntries<'_> {}
 #[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 struct KafkaOffsetView {
+    applied_start_generation: Option<u64>,
     offsets: BTreeMap<String, BTreeMap<i32, i64>>,
     schedules: BTreeMap<String, KafkaScheduleView>,
 }
@@ -1113,7 +1216,11 @@ impl KafkaOffsetTable {
                 },
             );
         }
-        KafkaOffsetView { offsets, schedules }
+        KafkaOffsetView {
+            applied_start_generation: self.applied_start_generation,
+            offsets,
+            schedules,
+        }
     }
 
     /// Up to three recorded partitions of up to three topics at any offset, and up to three topic
@@ -1150,7 +1257,11 @@ impl KafkaOffsetTable {
                 },
             );
         }
-        Self::from_offsets(positions, schedules)
+        let mut table = Self::from_offsets(positions, schedules);
+        if arbitrary.entropy().byte() % 2 == 0 {
+            table.applied_start_generation = Some(arbitrary.entropy().any_u64());
+        }
+        table
     }
 }
 
@@ -1251,6 +1362,7 @@ mod tests {
     #[test]
     fn native_offsets_walk_partitions_in_order_and_keep_a_partition_s_later_record() {
         let snapshot = KafkaOffsetSnapshot {
+            applied_start_generation: Some(0),
             offsets: vec![
                 entry("beta", 1, 10),
                 entry("alpha", 2, 20),
@@ -1259,6 +1371,7 @@ mod tests {
                 entry("alpha", 10, 50),
             ],
             schedules: Vec::new(),
+            format: KAFKA_OFFSET_FORMAT,
         };
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
             .assured("the unordered current shape encodes")
@@ -1293,12 +1406,14 @@ mod tests {
     #[test]
     fn validating_native_offsets_checks_between_entries_and_refuses_foreign_bytes() {
         let snapshot = KafkaOffsetSnapshot {
+            applied_start_generation: Some(u64::MAX),
             offsets: vec![
                 entry("alpha", 0, 1),
                 entry("alpha", 1, 2),
                 entry("alpha", 2, 3),
             ],
             schedules: Vec::new(),
+            format: KAFKA_OFFSET_FORMAT,
         };
         let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
             .assured("the current shape encodes")
@@ -1324,6 +1439,32 @@ mod tests {
             failure.current_context(),
             RuntimePersistenceError::DecodeState
         ));
+    }
+
+    #[test]
+    fn a_checkpoint_requires_its_current_format_signature() {
+        let mut format = KAFKA_OFFSET_FORMAT;
+        format[0] ^= 1;
+        let checkpoint = KafkaOffsetSnapshot {
+            applied_start_generation: Some(5),
+            offsets: vec![entry("events", 0, 9)],
+            schedules: Vec::new(),
+            format,
+        };
+        let payload = rkyv::to_bytes::<rkyv::rancor::Error>(&checkpoint)
+            .assured("the current checkpoint shape encodes");
+        let failure = KafkaOffsetTable::decode(&payload)
+            .err()
+            .assured("a corrupt current format signature is refused");
+        assert!(failure.contains::<KafkaOffsetCheckpointError>());
+        assert!(matches!(
+            failure.current_context(),
+            RuntimePersistenceError::DecodeState
+        ));
+        let captured = NativeKafkaOffsets::validate(aligned(&payload), || Ok(()))
+            .err()
+            .assured("capture uses the same format validation");
+        assert!(captured.contains::<KafkaOffsetCheckpointError>());
     }
 
     #[test]
@@ -1853,6 +1994,77 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_explicit_start_preserves_its_generations_commits_and_survives_checkpoint_loading() {
+        let state = Arc::new(
+            ReplicatedKafkaOffsetState::new(offset_placement(), None)
+                .assured("empty offsets initialize"),
+        );
+        let originator =
+            ReplicatedKafkaOffsetState::bind(&state, StateReplicationRoles::owned_by(None), None)
+                .originator
+                .assured("the local owner originates offsets");
+        let starts = || {
+            vec![KafkaOffsetPosition {
+                topic: "events".into(),
+                partition: 0,
+                offset: 0,
+            }]
+        };
+        originator
+            .apply_start(3, starts())
+            .assured("the first explicit start applies");
+        let committed = originator
+            .apply_committed_offset(&KafkaOffsetPosition {
+                topic: "events".into(),
+                partition: 0,
+                offset: 9,
+            })
+            .assured("the owner acknowledges work after its start");
+        for generation in [3, 2] {
+            let (revision, payload) = originator
+                .apply_start(generation, starts())
+                .assured("an already applied start retains the complete checkpoint");
+            assert_eq!(revision, committed);
+            let decoded = KafkaOffsetTable::decode(&payload).assured("the checkpoint decodes");
+            assert_eq!(decoded.applied_start_generation, Some(3));
+            assert_eq!(decoded.next_offset("events", 0), Some(9));
+        }
+        let mut expanded = starts();
+        expanded.push(KafkaOffsetPosition {
+            topic: "events".into(),
+            partition: 1,
+            offset: 5,
+        });
+        originator
+            .apply_start(3, expanded)
+            .assured("a concurrent initializer may have observed a new partition");
+        assert_eq!(originator.read().next_offset("events", 0), Some(9));
+        assert_eq!(originator.read().next_offset("events", 1), Some(5));
+        originator
+            .apply_start(4, starts())
+            .assured("the next explicit generation resets offsets");
+        originator
+            .apply_committed_offset(&KafkaOffsetPosition {
+                topic: "events".into(),
+                partition: 1,
+                offset: 5,
+            })
+            .assured("a new partition can record its timestamp-resolved start");
+        let checkpoint = originator
+            .read()
+            .latest_snapshot()
+            .assured("the complete state encodes");
+        let restored = Arc::new(
+            ReplicatedKafkaOffsetState::new(offset_placement(), Some(checkpoint))
+                .assured("the current checkpoint loads"),
+        );
+        let read = ReplicatedKafkaOffsetState::read(&restored);
+        assert_eq!(read.applied_start_generation(), Some(4));
+        assert_eq!(read.next_offset("events", 0), Some(0));
+        assert_eq!(read.next_offset("events", 1), Some(5));
+    }
+
     /// The memory-ordering claim of a Kafka offset snapshot, explored by Loom over the production
     /// offset state.
     ///
@@ -1951,6 +2163,66 @@ mod tests {
         use nervix_primitives::{sync::blocking::mpsc, thread};
 
         use super::*;
+
+        /// Concurrent instances may both resolve the first start, but neither can reset offsets
+        /// another instance already acknowledged in that generation.
+        #[test]
+        fn shuttle_instances_apply_a_generation_start_once_without_rewinding_commits() {
+            check_interleavings(|| {
+                let state = Arc::new(
+                    ReplicatedKafkaOffsetState::new(offset_placement(), None)
+                        .assured("empty offsets initialize"),
+                );
+                let originator = ReplicatedKafkaOffsetState::bind(
+                    &state,
+                    StateReplicationRoles::owned_by(None),
+                    None,
+                )
+                .originator
+                .assured("the local owner originates offsets");
+                let mut instances = Vec::new();
+                for partition in [0, 1] {
+                    let originator = originator.clone();
+                    instances.push(thread::spawn(move || {
+                        let mut starts = [0, 1]
+                            .into_iter()
+                            .map(|partition| KafkaOffsetPosition {
+                                topic: "events".into(),
+                                partition,
+                                offset: 0,
+                            })
+                            .collect::<Vec<_>>();
+                        if partition == 1 {
+                            starts.push(KafkaOffsetPosition {
+                                topic: "events".into(),
+                                partition: 2,
+                                offset: 0,
+                            });
+                        }
+                        originator
+                            .apply_start(7, starts)
+                            .assured("the start is assignment-qualified");
+                        originator
+                            .apply_committed_offset(&KafkaOffsetPosition {
+                                topic: "events".into(),
+                                partition,
+                                offset: i64::from(partition) + 1,
+                            })
+                            .assured("each instance commits only its own partition");
+                    }));
+                }
+                for instance in instances {
+                    instance
+                        .join()
+                        .assured("a failing model participant fails the entire execution");
+                }
+                let read = originator.read();
+                assert_eq!(read.applied_start_generation(), Some(7));
+                assert_eq!(read.next_offset("events", 0), Some(1));
+                assert_eq!(read.next_offset("events", 1), Some(2));
+                assert_eq!(read.next_offset("events", 2), Some(0));
+            });
+        }
 
         /// The owner commits a recorded partition's offset and checks its replica quorum while
         /// another thread holds the assignment barrier, which that thread releases only after both

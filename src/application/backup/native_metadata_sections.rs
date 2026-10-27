@@ -247,6 +247,7 @@ impl NativeSection {
                         entity: entity(),
                         schema: *schema,
                         revision: offsets.revision,
+                        applied_start_generation: offsets.applied_start_generation(),
                         offsets: positions.map(KafkaPartitionOffset::from),
                     };
                     let scratch_bytes = record.scratch_bytes().change_context_lazy(|| {
