@@ -12394,6 +12394,34 @@ async fn given_resource_installation_failure(world: &mut ScenarioWorld, node_id:
         .fail_next_resource_installation_on(crate::common::cluster::node_name(&node_id));
 }
 
+#[given(
+    expr = "node {string} refuses its next uploaded resource version publication as a lost \
+            leadership"
+)]
+async fn given_resource_publication_refusal(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .refuse_next_resource_publication_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} refused the publication until its reconciliation took the upload up")]
+async fn then_refused_resource_publication_was_taken_up(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let taken_up = world
+        .fault_injection
+        .refused_resource_publication_taken_up(&crate::common::cluster::node_name(&node_id));
+    assert_eq!(
+        taken_up,
+        Some(true),
+        "node '{node_id}' must refuse an uploaded version's publication and its reconciliation \
+         must take that upload up"
+    );
+}
+
 #[given(expr = "the next HTTPS listener installation on node {string} fails")]
 async fn given_https_listener_installation_failure(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
@@ -12748,6 +12776,39 @@ async fn given_next_remote_acknowledgement_is_lost(
         crate::common::cluster::node_name(&resolver),
         crate::common::cluster::node_name(&registrar),
     );
+}
+
+/// Opens a gap for `missing` in the live view `observer`'s acknowledgement watchers read, holds it
+/// until one of those watchers has read it, and closes it again: the run of `missing` was absent
+/// for exactly one look, as a failure detector that briefly suspects a slow node leaves it.
+#[when(expr = "node {string} briefly misses node {string} in its live view")]
+async fn when_node_briefly_misses_node_in_its_live_view(
+    world: &mut ScenarioWorld,
+    observer: String,
+    missing: String,
+) {
+    let observer = crate::common::cluster::node_name(&expand_placeholders(world, &observer));
+    let missing = crate::common::cluster::node_name(&expand_placeholders(world, &missing));
+    world
+        .fault_injection
+        .open_live_view_gap(observer.clone(), missing.clone());
+    let read = nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_live_view_gap_read(&observer, &missing),
+    )
+    .await;
+    world
+        .fault_injection
+        .close_live_view_gap(&observer, &missing);
+    read.unwrap_or_else(|error| {
+        panic!(
+            "no acknowledgement watcher of node '{}' read the gap opened for node '{}': {error}",
+            observer.as_str(),
+            missing.as_str()
+        )
+    });
 }
 
 #[then(expr = "the record acknowledgement node {string} returned to node {string} was lost")]
@@ -15673,6 +15734,15 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
 }
 
 async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(), String> {
+    open_recorded_web_console_page(world, url, web_console_connections::InitialSession::Deliver)
+        .await
+}
+
+async fn open_recorded_web_console_page(
+    world: &mut ScenarioWorld,
+    url: &str,
+    initial_session: web_console_connections::InitialSession,
+) -> Result<(), String> {
     let playwright = Playwright::launch()
         .await
         .map_err(|error| error.to_string())?;
@@ -15690,7 +15760,7 @@ async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(
         .await
         .map_err(|error| error.to_string())?;
     page.set_default_timeout(10_000.0).await;
-    web_console_connections::record_console_connections(&page)
+    web_console_connections::record_console_connections(&page, initial_session)
         .await
         .map_err(|error| error.to_string())?;
     page.goto(url, None)
@@ -19540,7 +19610,16 @@ async fn then_selector_exists(world: &mut ScenarioWorld, selector: String) {
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let script = format!(
-        r#"() => document.querySelector({selector}) ? 'OK' : 'selector is absent'"#,
+        r#"() => {{
+            if (document.querySelector({selector})) return 'OK';
+            const text = (selector) => document.querySelector(selector)?.textContent?.trim();
+            return 'selector is absent; ' + JSON.stringify({{
+                domain: text('.domain-select'),
+                scope: text('.create-scope'),
+                choices: Array.from(document.querySelectorAll('.create-choice-state'))
+                    .map((state) => state.textContent.trim()),
+            }});
+        }}"#,
         selector = serde_json::to_string(&selector)
             .assured("the test selector serializes as JavaScript string text")
     );

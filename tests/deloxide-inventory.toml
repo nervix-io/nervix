@@ -121,6 +121,7 @@ tags = [
   "@syslog_suspend_handoff",
   "@syslog_listener_rebind",
   "@resource_source_discovery",
+  "@resource_upload_publication",
   "@deadlock_reports",
   "@memory_pressure_pause",
   "@client_io_03_consumer_restore",
@@ -1155,6 +1156,26 @@ id = "stress.resource-source-discovery"
 invariant = "A missing local resource copy stays pending until source discovery resumes, then the admitted upload completes and its replicated contents serve the lookup."
 invocation = "stress-scenarios"
 scenario = "A resource upload waits for a replica to discover its source"
+selections = ["deloxide-stress"]
+
+[[workload]]
+coverage = "The leader's installed manifest is read after its upload publication is refused, then reconciliation publishes the matching copy and completes the original upload on one and three nodes. The refusal map and watch are untracked; consensus storage and node lifecycle use tracked owners."
+examples = 2
+feature = "tests/features/cluster/resource_describe.feature"
+id = "scenario.resource-upload-publication"
+invariant = "An applying upload whose publication was refused is completed from its matching installed copy under the same identity, with exactly one published version."
+invocation = "scenarios"
+scenario = "A leader resumes an upload whose publication it refused from its own installed copy"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: one- and three-node recovery reads the installed manifest, republishes the matching copy and completes the original upload. The scenario refusal map and watch remain untracked."
+examples = 2
+feature = "tests/features/cluster/resource_describe.feature"
+id = "stress.resource-upload-publication"
+invariant = "An applying upload whose publication was refused is completed from its matching installed copy under the same identity, with exactly one published version."
+invocation = "stress-scenarios"
+scenario = "A leader resumes an upload whose publication it refused from its own installed copy"
 selections = ["deloxide-stress"]
 
 [[workload]]
@@ -2695,6 +2716,8 @@ path = "crates/consensus/src/storage.rs"
 workloads = [
   "scenario.resource-source-discovery",
   "stress.resource-source-discovery",
+  "scenario.resource-upload-publication",
+  "stress.resource-upload-publication",
   "scenario.diagnostic-nodes",
   "scenario.diagnostic-server-processes",
   "stress.diagnostic-nodes",
@@ -2911,6 +2934,8 @@ path = "src/cluster.rs"
 workloads = [
   "scenario.resource-source-discovery",
   "stress.resource-source-discovery",
+  "scenario.resource-upload-publication",
+  "stress.resource-upload-publication",
   "scenario.clock-takeover-local",
   "scenario.clock-takeover-observer",
   "stress.clock-takeover-local",

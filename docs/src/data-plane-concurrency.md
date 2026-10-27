@@ -1738,6 +1738,13 @@ reaches. The scenario's command-pause map, watch observation and source filter a
 outside Deloxide's tracked locks; they establish the public interleaving directly. No data-plane
 lock, memory-ordering protocol or production wait-and-notify mechanism changes.
 
+The resource-upload-publication workload reaches the recovery caller on one and three nodes: it
+refuses publication after installation, lets reconciliation read the matching local manifest and
+publish that copy, and observes the original upload complete with one version. Its active, order
+and stressed records reach the same consensus-storage and cluster owners. The scenario's refusal
+map and watch remain outside tracked-lock detection; the public assertions establish that recovery
+took up the refused upload before the client's retry could supply the archive again.
+
 A diagnostic node selects the `deloxide` mode. The `deloxide-order` feature adds historical order
 instrumentation to that same mode, and the `deloxide-stress` feature adds Deloxide's bounded
 scheduling disturbance to its active-only selection; neither is another execution mode, and the two
