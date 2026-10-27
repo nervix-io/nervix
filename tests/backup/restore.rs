@@ -493,13 +493,7 @@ async fn then_restore_eventually_completes(
     )
     .await
     .assured("restore completes under the new coordinator");
-    assert!(
-        matches!(
-            restore_outcome(&end).disposition,
-            CommandDisposition::Completed { .. }
-        ),
-        "restore recovery completes: {end:?}"
-    );
+    assert_restore_completed(&end);
     world.last_restore_end = Some(end);
 }
 
@@ -1680,6 +1674,19 @@ fn assert_restore_outcome(end: &TestRestoreEnd, disposition: &str, origin: &str)
     assert_eq!(outcome.origin, expected, "{}", outcome.message);
 }
 
+/// Requires the known outcome of a restore to have completed it. Its origin is the answering
+/// attempt's own, so an outcome a later attempt learned for a restore an earlier attempt admitted
+/// is recovered.
+fn assert_restore_completed(end: &TestRestoreEnd) {
+    let outcome = restore_outcome(end);
+    assert!(
+        matches!(outcome.disposition, CommandDisposition::Completed { .. }),
+        "the restore completes: {:?}: {}",
+        outcome.disposition,
+        outcome.message
+    );
+}
+
 #[then(expr = "the restore stream's outcome is {string} as {string}")]
 fn then_restore_stream_outcome(world: &mut ScenarioWorld, disposition: String, origin: String) {
     let end = world
@@ -1715,13 +1722,7 @@ async fn then_background_restore_stream_completes(world: &mut ScenarioWorld) {
     let end = task
         .await
         .assured("the background restore completion probe does not panic");
-    let outcome = restore_outcome(&end);
-    assert!(
-        matches!(outcome.disposition, CommandDisposition::Completed { .. }),
-        "the background restore completes: {:?}: {}",
-        outcome.disposition,
-        outcome.message
-    );
+    assert_restore_completed(&end);
     world.last_restore_end = Some(end);
 }
 

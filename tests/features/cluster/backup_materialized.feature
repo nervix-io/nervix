@@ -261,8 +261,12 @@ Feature: Materialized backup and archived lifecycle resumption
     Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
-    When restore "DOMAIN {{domain}} RESUME" of backup archive "retention.nvxb" is streamed to node "{{leader}}" under execution reference "retention-resume"
-    Then the restore stream's outcome is "completed" as "executed"
+    And command finalization on node "{{leader}}" pauses before its outcome is recorded
+    When restore "DOMAIN {{domain}} RESUME" of backup archive "retention.nvxb" is streamed to node "{{leader}}" under execution reference "retention-resume" in the background with outcome recovery
+    Then the background restore's outcome is held on node "{{leader}}" before it is recorded
+    When restore coordinator "{{leader}}" yields leadership in a multi-node cluster
+    And the command finalization pause on node "{{leader}}" is released
+    Then the background restore stream's outcome is "completed" as "<restore_origin>"
     And every node reports the resumed lifecycle archived in "retention.nvxb"
     When these Plexus commands are executed on the leader node
       """
@@ -278,9 +282,9 @@ Feature: Materialized backup and archived lifecycle resumption
     Then within "180s" the materialized generators report round 2, 1 KiB, 2 relays and 2 tenants
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | restore_origin |
+      | 1            | 0             | executed       |
+      | 3            | 1             | recovered      |
 
   @restore_installation @deloxide_stress_restore @long_running
   Scenario Outline: Materialized generations larger than the bulk budget resume on every assigned owner and replica
@@ -328,8 +332,8 @@ Feature: Materialized backup and archived lifecycle resumption
     Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
-    When restore "DOMAIN {{domain}} RESUME" of backup archive "large-materialized.nvxb" is streamed to node "{{leader}}" under execution reference "large-resume"
-    Then the restore stream's outcome is "completed" as "executed"
+    When restore "DOMAIN {{domain}} RESUME" of backup archive "large-materialized.nvxb" is streamed to node "{{leader}}" under execution reference "large-resume" in the background with outcome recovery
+    Then the background restore stream completes with a known outcome
     And the restore stream's report shows every step applied
     And every node reports the resumed lifecycle archived in "large-materialized.nvxb"
     When restore "DOMAIN {{domain}} RESUME" of backup archive "large-materialized.nvxb" is streamed to node "{{leader}}" under execution reference "large-resume"
