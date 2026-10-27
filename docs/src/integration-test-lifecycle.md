@@ -2502,6 +2502,11 @@ modeled, diagnostic and fuzz collections the run selected to form the
 [full workspace union](./coverage-reports.md#the-full-workspace-union); their counters never enter
 the ordinary report, its patch coverage or its CRAP report.
 
+The Deloxide lane's supervision qualification runs outside its coverage collection. Product API
+doctests, compiler-cache qualification, replay and deliberately weakened checks also retain their
+[independent verdicts](./coverage-reports.md#verification-outside-collected-counters).
+No absent counter turns one of those required checks into an optional execution.
+
 The scenario collector also starts coverage in each published Python paced driver using the shared
 `scripts/paced_simulation_coverage` startup hook and configuration. It combines those completed
 process reports into `target/paced-simulation/python.lcov`. CI merges this scenario report with the
