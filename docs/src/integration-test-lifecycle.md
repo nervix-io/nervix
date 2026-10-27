@@ -171,7 +171,7 @@ resubmitting an outcome that might already have produced output.
 | Endpoint response observations | One abort-on-drop task per named POST, owning the request through response-body collection. The HTTP client bounds it at 60 seconds; the collection step also bounds the join. Response arrival uses a monotonic instant, compared with a boundary recorded before a consumer ACK/NACK, so an early answer cannot pass an ordering assertion | `tests/endpoint_intake/requests.rs` and the endpoint ACK scenarios |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 | Unaccepted addresses | No task: a listening socket at a chosen loopback address and the one connection that fills its accept queue, so the kernel drops every later handshake. The scenario world owns both until the scenario ends | `tests/common/unaccepted_address.rs` |
-| Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
+| Backup cut holds | No harness task: the fault injector's lease or capture gate holds each backup cut that reaches it on that cut's own task in the node, until the scenario releases the gate or for the duration the scenario timed from the cut's arrival | `src/fault_injection/backup_cut.rs`, driven by the backup steps in `tests/backup/mod.rs` and `tests/backup/wait.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
@@ -816,16 +816,36 @@ asserting command completion. These are per-scenario injected conditions; their 
 bounds and do not shorten the product's completion deadline.
 
 An injected hold is the opposite case: a product deadline races it. The scenario holds a controlled
-operation at a gate for a workload duration, counted from the moment it observes the gate, and the
-node keeps its own deadline running while the operation waits. The backup wait scenarios hold one
-domain's quiesced cut for 12 seconds and the next one's for 14 seconds, each inside its own
-20-second cut budget. The scenario's margin is the part of the budget the hold leaves, and a runner
-task that another scenario's synchronous step stalls for longer than that margin would lengthen a
-hold timed on the runner task until the product deadline expires. `tests/common/injected_hold.rs`
-therefore waits for each gate, holds it for its duration and releases it on a task of its own, and
-the step that injects the holds only awaits that task. A stalled runner delays when the step learns
-of a release, never the release itself. When the command is expected to outlast every hold, the
-step still watches it and reports a command that ends early with its own outcome.
+operation at a gate for a workload duration, and the node keeps its own deadline running while the
+operation waits. The backup wait scenarios hold one domain's quiesced cuts for 12 seconds and the
+next one's for 14 seconds, each inside its own 20-second cut budget. The scenario's margin is the
+part of the budget the hold leaves, and a runner task that another scenario's synchronous step
+stalls for longer than that margin would lengthen a hold timed on the runner task until the product
+deadline expires. The backup cut gate in `src/fault_injection/backup_cut.rs` therefore times each
+hold itself, from the cut's own arrival and on the cut's own task in the node, and the step that
+injects the holds only learns when the first one ended. A stalled runner delays when the step
+learns of a release, never the release itself. When the command is expected to outlast every hold,
+the step still watches it and reports a command that ends early with its own outcome.
+
+A gate holds every cut that reaches it, not only the first. When the leader cannot record a
+backup's outcome, because leadership moved or because it could not confirm that it still leads,
+the backup runs again under its execution reference, and the outcome and the archive the client
+receives are that later run's. A gate that held only the first cut would let the later run pass
+unheld: its archive would record cuts the scenario never delayed, and a second cut held past its
+budget would complete instead of expiring. `A backup that runs again under its reference returns
+the second-domain quiesce expiry again` and `A cluster backup that runs again under its reference
+holds each delayed cut again` force that later run on three nodes: they hold the leader's command
+finalization and move leadership before releasing it. They give each cut a 30-second budget. A cut
+that passed its gate unheld lasts a few seconds whatever its budget, and the wider margin leaves the
+held cuts room for the new leader's first lease. The expiry outline's CLI wait covers a second run
+of its 12-second hold and 20-second cut budget.
+
+A step waits up to 120 seconds for a backup to reach a gate, as the pause steps do. A cut arrives
+only after its lease, its pause and its drain, which a loaded runner delays, and a run that starts
+again reaches a later gate only after the earlier gates have held its cuts too. A 30-second bound
+failed on loaded runners, both before a backup's first cut arrived and before the second cut of a
+backup that had started again arrived. The wait ends as soon as a cut arrives, and the bound
+neither measures nor shortens any hold or cut budget.
 
 The bounded native backup recovery outline instead expects the client's ten-second wait to end
 with typed uncertainty while the admitted backup continues. It uses both a two-second and a
@@ -3105,9 +3125,9 @@ contract.
    loop needs a bound of its own, as the port draw has, and blocking work belongs on a blocking or
    spawned task: a step hands its file, encoding, digest or database work to `off_the_runner` in
    `tests/common/runner_offload.rs` and awaits it, and the
-   [runner-lag observer](#runner-stalls) logs a step that still holds the task. A duration a scenario injects for a product deadline to race is timed on a task
-   of its own, as [injected holds](#product-deadlines-and-harness-deadlines) are, because another
-   scenario can still stall the runner task.
+   [runner-lag observer](#runner-stalls) logs a step that still holds the task. A duration a scenario injects for a product deadline to race is timed off the
+   runner task, as [backup cut holds](#product-deadlines-and-harness-deadlines) are at their gate,
+   because another scenario can still stall the runner task.
 6. **Make cancellation release it.** Whatever a scenario starts belongs to the scenario's world or
    its cluster, so dropping the run releases it: spawned work behind handles that abort on drop,
    child processes killed on drop, and node tasks through the single task owner, which asks a node
