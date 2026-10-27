@@ -477,12 +477,30 @@ including their instrumented builds. Coverage flags do not replace Wild linker s
 The suite has one pool of **run slots**. Its size is the number of CPUs times the concurrency
 factor, set by `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default;
 `--concurrency` sets an absolute slot count. The CI `scenarios` job uses factor `3`, so its
-16-CPU runner has 48 slots. The instrumented inventory consumed 78,433 slot-seconds with 115
-attempts still active, almost the entire 78,720 slot-seconds that 32 slots could supply in
-that run's 41-minute suite budget. The additional slots use the observed CPU and memory
-headroom; their complete-suite qualification retains runner load and the actual margin rather than
-assuming that work stays constant as concurrency changes. Cucumber may take up all parsed scenarios
-without charging a slot.
+16-CPU runner has 48 slots. Cucumber may take up all parsed scenarios without charging a slot.
+
+The slots are the suite's capacity, and the measurement of 26 October 2026 set their number. Over
+the retained artifacts of 20 Check runs, an ordinary run of one inventory of about 3,620 attempts
+used between 128,000 and 215,000 slot-seconds on 48 slots. The inventory did not decide that
+spread; the runner did. Every scenario of a run slows by the same factor: the median, over
+scenarios that passed their first attempt, of an attempt's time against that scenario's median
+across runs ranged from 0.74 to 1.25 from run to run, while inside one run half of the scenarios
+stayed within about a tenth of the run's own factor. The three slowest runs in that sample were
+the only Intel Xeon runners among the 17 whose runner diagnostics name the CPU, and they are the
+two passing runs that ended within 25 seconds of the 75-minute budget those runs had and the one
+that exhausted it.
+
+The suite waits, but not for the runner's CPUs. Once the long-running attempts that start
+together have ended, the runner's CPUs averaged 51 to 55 percent busy while every one of the 48
+slots held a scenario, and an ordinary scenario started during the 82 to 86 percent peak of the
+first fifteen minutes ran no slower, against its own median, than one started later. What every
+scenario waits for is the one thread that polls all of their steps, described under
+[Runner Stalls](#runner-stalls). Factor `4` was measured in Check run 40358096404: with 64 slots
+that thread ran on a CPU for 86 percent of the run, every scenario took about 1.45 times its
+median across the factor `3` runs, and the run needed 279,439 slot-seconds where 48 slots had
+needed at most 215,000. More slots added no throughput, so the job keeps factor `3`. Memory is
+no limit: the runner used at most 28 GiB of its 62.
+
 Admission grants feature capacity and the attempt's share of the run slots in one decision, after
 both are available. A scenario holds both through the end of teardown. A first run holds one slot.
 A retry holds a larger share, so it runs beside fewer scenarios than the run that failed. The first
@@ -876,18 +894,24 @@ The harness keeps these boundaries explicit.
   scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
   released observations. The scenario asserts the original execution reference's outcome and a
   dependent command through the public session protocol; it adds no setup delay or request retry.
-- **Restore publication failures.** A durable state publication failure armed for a restored
-  domain fails every publication of that domain's restored state, on whichever node publishes and
-  after the store has made the publication durable, until the scenario clears it. A failure that
-  the first publication consumed would let a leader that resumes the restore, because the failed
-  outcome was never recorded, publish again and complete the restore. The control keeps whether a
-  publication met it, so a scenario asserts the failure as pending before the restore and as
-  delivered once the restore failed, instead of inferring delivery from a successful publication.
-  Clearing it ends the condition without changing a recorded outcome, and the scenarios clear it
-  before asserting that the incomplete-state gate, not the injected failure, refuses `START`. The
-  three-node regression holds the first coordinator's failed outcome before it is recorded, moves
-  leadership, and requires recovery under the same execution reference to end failed and stay
-  failed once the condition is cleared.
+- **Restore publication and staging failures.** A durable state publication failure armed for a
+  restored domain fails every publication of that domain's restored state, on whichever node
+  publishes and after the store has made the publication durable, until the scenario clears it. A
+  checkpoint staging failure is armed for a restored domain and one checkpoint kind: WASM guest
+  state, materialized relay state, or deduplicator and window state. It fails every staging of
+  that domain's checkpoints of that kind, on whichever node stages and before the store stages
+  the checkpoint, until the scenario clears it. Each kind of one domain is armed, delivered and
+  cleared on its own. A failure that the first publication or staging consumed would let a leader
+  that resumes the restore, because the failed outcome was never recorded, publish or stage again
+  and complete the restore. Each control keeps whether a publication or staging met it, so a
+  scenario asserts the failure as pending before the restore and as delivered once the restore
+  failed, instead of inferring delivery from a later success. Clearing it ends the condition
+  without changing a recorded outcome, and the scenarios clear it before asserting that the
+  incomplete-state gate, not the injected failure, refuses `START`, and before a later restore of
+  the same domain. The three-node regression, an outline over a durable publication failure and a
+  materialized checkpoint staging failure, holds the first coordinator's failed outcome before it
+  is recorded, moves leadership, and requires recovery under the same execution reference to end
+  failed and stay failed once the condition is cleared.
 - **Console backup download pauses.** The console reload scenarios hold the archive's first
   download before it streams, so the reload interrupts a download in progress. The archive is
   assembled and served by the leader that completes the backup. A leadership move while the backup
@@ -1081,7 +1105,7 @@ second module runs the operation, it is named after the owner.
 | Text the interactive CLI is expected to display, its startup banner included | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds, pressing Enter every 250 milliseconds so the REPL draws a prompt and prints the events it queued; a row expected from repeated HTTP posts gets 2 seconds after each post within the same 60 | The step fails quoting the newest 40 lines the terminal displayed, with control sequences removed and repeated lines collapsed |
 | The interactive CLI's exit after the scenario types `exit` | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds | The step fails with the exit status or the elapsed wait, quoting the same transcript |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
-| The whole scenario run | `suite_watchdog.rs` | 75 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
+| The whole scenario run | `suite_watchdog.rs` | 105 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
 | Stopping the test dependencies after the run | `suite_watchdog.rs` | 2 minutes | The containers are left to the runner |
 | Dropping the runtime after the run | `suite_watchdog.rs`, run by `tests/scenarios.rs` | 60 seconds | Blocking tasks still running are abandoned |
 
@@ -1134,7 +1158,7 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Node startup, 84 seconds | Two budgeted attempts, each funding 36 seconds of readiness, 5 seconds of cleanup and a 1-second pause; cleanup and later attempts share the remaining total | Stays under a 90-second ceiling |
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
 | Upload command, 10 minutes | The slowest healthy upload of a 48 MiB archive, rounded up to 120 seconds, times a headroom of 5, and shorter than the suite budget | With 48 such uploads on one shared, disk-backed host, those that completed did so inside the client's 120-second window and 35 others expired it; 72 on an idle host took at most 52 seconds |
-| Suite, 75 minutes | The 120-minute scenario job limit, less 30 minutes for pre-suite work and a 15-minute reserve after it | Run 39569675589 completed 3,336 attempts in 34m28s; twice the rounded 35-minute healthy ceiling plus five minutes of slack fits the budget. Run 39656928785's partial progress projects about 55 minutes |
+| Suite, 105 minutes | The 155-minute scenario job limit, less 35 minutes for pre-suite work and a 15-minute reserve after it | Run 40419254390 completed 3,703 attempts in 49m31s once the parser was optimized; twice the rounded 50-minute healthy ceiling plus five minutes of slack fits the budget. Across 17 runs of one inventory, the slowest runners ran every scenario 1.7 times as long as the fastest |
 | CLI backup or restore, 900 seconds | The slowest healthy three-node restore, rounded up to 300 seconds, times three installations: a leader change while a restore installs its state makes the next leader install it again once the CLI sends the archive again | The three-node restores that completed in the scenarios jobs of Check runs 39683355582 and 39683521277, both on slow runners, took 291 seconds at the slowest for a 42 MB archive and 260 seconds for the 84 MB keyspace and window archives; restores that took longer ended at the former 300-second budget. Six concurrent local copies of the keyspace and window scenario saw a restore start installing its state three times |
 
 The assertions keep these orderings, among others:
@@ -1153,7 +1177,8 @@ The assertions keep these orderings, among others:
 The suite funds a runner at half the measured healthy throughput, with five further minutes for
 retries and the final active attempts. Slow-run variation multiplies the whole workload, so the
 headroom scales the measured ceiling instead of adding one fixed allowance to an increasingly
-large inventory. Increasing a measured input eventually fails the compile-time assertion. Measure
+large inventory. The factor of two covers the spread that 17 runs of 21-26 October on one
+inventory measured between runners. Increasing a measured input eventually fails the compile-time assertion. Measure
 again whenever the suite, its concurrency, or the runner changes. A harness regression compares
 the workflow's actual job limit with the limit that derives the suite budget.
 
@@ -2314,7 +2339,7 @@ and keeps the same 5-minute reserve.
 
 ## The Suite Watchdog
 
-The scenario run has one budget, 75 minutes from the moment it starts, which `--suite-budget` or
+The scenario run has one budget, 105 minutes from the moment it starts, which `--suite-budget` or
 `NERVIX_TEST_SUITE_BUDGET` replaces with a duration such as `4m`, read by the same guarded duration
 parser as a node's options. The budget is a clock rather than
 a count of failures. Cucumber's fail-fast stops scheduling scenarios and leaves those already
@@ -2353,6 +2378,14 @@ suite timeout: the <budget> suite budget expired with <n> scenario(s) active
 suite timeout cleanup: asked <n> node(s) to stop and waited <elapsed> of a 60s window; every node ended itself
 ```
 
+The active lines name every scenario still queued for its permits or running. An attempt that has
+finished is not active, even while its registration remains: Cucumber keeps the world of a failed
+attempt, and the registration with it, for the report it prints at the end of the run, long after the
+retry that followed has run. The timeout of Check run 40241968478 listed 13 such attempts of 12
+scenarios beside its 142 queued and running scenarios, and they read as retries that had never
+started. Every one of them had been followed by a retry that started between 1.8 and 10.3 seconds
+after it ended, and each scenario's last retry had passed.
+
 When a node is still running at the end of the window, the cleanup line names its cluster instead of
 reporting that every node ended itself, and the scenario log adds
 `suite timeout cleanup forced: the run was dropped with nodes still running`. A live cluster whose
@@ -2367,7 +2400,7 @@ held by a consensus commit delay that only its scenario's cleanup releases.
 
 The suite runs inside `just test-scenarios-coverage` in the CI `scenarios` job, after that job's
 instrumented server, CLI and paced simulation driver builds. The `tests` job runs at the same time
-on another runner. The `scenarios` job's `timeout-minutes` is 120, and the suite budget is derived
+on another runner. The `scenarios` job's `timeout-minutes` is 155, and the suite budget is derived
 from it so that the job ends on its own.
 
 For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
@@ -2397,9 +2430,9 @@ Deloxide selections reach its Rust and Python drivers on one-node and three-node
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
-| Work before the scenario binary starts | 30 minutes | Run 39656928785 took 13m40s; twice that measurement, rounded up, funds cold builds and setup variation |
-| The scenario run | 75 minutes | What the limit leaves; twice the rounded 35-minute healthy ceiling plus five minutes |
-| After the budget expires | 15-minute reserve | At most 60 seconds of cleanup, 2 minutes of dependency stop and 60 seconds of runtime shutdown; eleven further minutes fund slow coverage export, uploads and cache publication after a successful run |
+| Work before the scenario binary starts | 35 minutes | 5m42s to 16m54s across the scenarios jobs of 22 Check runs of 21-27 October 2026; twice the slowest, rounded up, funds cold builds and setup variation |
+| The scenario run | 105 minutes | What the limit leaves; twice the rounded 50-minute healthy ceiling plus five minutes |
+| After the budget expires | 15-minute reserve | At most 60 seconds of cleanup, 2 minutes of dependency stop and 60 seconds of runtime shutdown; eleven further minutes fund slow coverage export, uploads and cache publication after a successful run, which took 0.7 to 1.9 minutes in those 22 jobs |
 
 A healthy suite finishes inside its budget and exits `0` or reports its failures. A wedged one exits
 `124` with its diagnostic and leaves the upload its reserve. Either way, a step that runs whatever
@@ -2411,14 +2444,14 @@ manifest took 5 to 14 seconds in the scenario jobs measured on 2026-10-14, and t
 already published every entry those jobs built. A suite that fails or runs out of its budget leaves
 publication `not-run`, so the reserve stays with the cleanup.
 
-Run 39569675589 completed 3,336 attempts in 2,068.2 seconds with 99.0% utilization and
-98,309.3 slot-seconds. Run 39656928785 exhausted its 2,460-second allowance with 2,516 attempts
-completed and 833 active, including 785 waiting for a run slot. Its 117,587.3 slot-seconds divided
-by completed attempts, extended to all 3,349 registered attempts and divided by 48 slots, projects
-about 55 minutes. This projection assumes the remaining attempts cost as much as the completed
-ones; it is a sizing estimate, not evidence that the remaining scenarios passed. Independent
-Syslog run 39654966701 also exhausted that allowance; matching first attempts cost 1.486 times the
-slot time of the green run. Those distributed slowdowns justify proportional headroom.
+Run 40419254390 completed 3,703 attempts in 2,971.1 seconds with 98.9% utilization and
+141,081.3 slot-seconds, the first run after the scenario build optimized the parser that had held
+the runner thread (see [Runner Stalls](#runner-stalls)). The 17 runs of 21-26 October that came
+before it on one inventory of about 3,620 attempts took 2,688.7 to 4,501.9 seconds of a 75-minute
+budget: every scenario of a run took the same multiple of its median, from 0.74 to
+1.25, so the slowest runners ran the suite 1.7 times as long as the fastest, and the slowest run
+exhausted the budget. Those distributed slowdowns justify proportional headroom, and twice the
+measured ceiling covers that spread.
 
 The job's limit remains the emergency guard outside the budget rather than the mechanism that ends a
 wedged run. A job the limit cancels is killed wherever its scenarios are: the logs it uploads end
@@ -2428,14 +2461,15 @@ harness's copy of it change together.
 ### CI Budget Review
 
 The review of 21 October 2026 compares execution allowances with retained progress rather than
-restarting an unchanged run after its watchdog expires. The new suite allowance is 75 minutes in a
-120-minute job. Other narrow bounds use at least 1.5 times the observed duration or current shard
+restarting an unchanged run after its watchdog expires. Its suite allowance of 75 minutes in a
+120-minute job became 105 minutes in a 155-minute job on 27 October 2026, when the measurement in
+[The CI Reserve](#the-ci-reserve) replaced the 34-minute ceiling it rested on. Other narrow bounds use at least 1.5 times the observed duration or current shard
 estimate, with time left for their surrounding work. The rows below cover the workflow job families
 and their nested execution guards; a missing completion is reported as incomplete evidence.
 
 | Guard | Evidence | Current allowance and decision |
 | --- | --- | --- |
-| Scenario suite and job | 34m28s complete; about 55 minutes projected from the exhausted run | 75-minute suite, 120-minute job, including 30 minutes before and 15 after the suite |
+| Scenario suite and job | 49m31s complete in 40419254390; 17 earlier runs of one inventory took 44m49s to 75m02s with a 1.7-times spread between runners | 105-minute suite, 155-minute job, including 35 minutes before and 15 after the suite |
 | Ordinary Bolero job | 47m10s in run 39649567371 | 90 minutes; 1.5 times the measurement is 70m45s |
 | Sanitizer shards | The current 205-target, three-shard plan estimates at most 114 minutes before discovery, qualification and uploads | 240 minutes; 1.5 times the estimate is 171 minutes, leaving 69 for surrounding work and cold-build variation |
 | Ordinary image builds | 65m01s for amd64 in Docker Build 39534273321; 56m43s in 39654966533 | 120 minutes; 1.5 times the slower complete build is about 98 minutes |
@@ -2472,12 +2506,18 @@ The watchdog is polled on the runner task, so it cannot see, let alone end, a st
 task. The run is therefore polled beside a tick on the same task, due every 250 milliseconds. A step
 that blocks inside its poll delays the tick until it returns, so how late the tick is polled is how
 long the task was held. A stall of one second or more goes to the scenario log with every scenario
-live during it:
+that held its run slots during it:
 
 ```text
 runner task stalled for <duration>
 scenario live during runner stall: <identity> attempt=<n> phase=<phase> phase_age=<age> age=<age>
 ```
+
+A scenario still queued for its permits runs no step and no cleanup, so it cannot hold the task and
+the stall does not list it. Cucumber takes up every parsed scenario at once, so early in a run more
+than three thousand scenarios wait in that queue; listing them made each stall write thousands of
+lines from the runner task itself, which was more than half of the scenario log's 265 MB in Check
+run 40241030302.
 
 The log line is a diagnostic, not a failure: a stall delays every wait and bound the other scenarios
 measure, and the line says when and for how long. Backup steps hand their archive reads, rewrites,
@@ -2485,6 +2525,49 @@ digests and fixture generation, and the inspection of stopped nodes' databases, 
 the native metadata restore scenario, whose archive holds lifecycle and offset records above 32 MiB
 each, held the runner task for about 30 seconds while it inspected three restored nodes before they
 did.
+
+One poll of the run polls every scenario woken since the last one, so the task is also late when many
+scenarios each do a little synchronous work in the same poll, without any single step reaching a
+second. The suite summary therefore adds up the lateness of every tick, not only the stalls, and
+reads the scheduling counters of the thread that polls the run from its procfs `schedstat`: how long
+that thread ran on a CPU, and how long it was ready to run without one. Beside them it reports how
+long the runtime's workers, which run every in-process node, were busy together:
+
+```text
+Runner task: <n> ticks polled <late> late in total; <n> stalls took <stalled>, the longest <longest>; its thread ran <on-cpu> on a CPU, <share> of the run, and waited <wait> for one.
+Runtime workers: <n> busy for <busy> together, <share> of their time over the run.
+```
+
+A runner thread that is on a CPU for most of the run is what every scenario waits for. One that waits
+long for a CPU is starved by the rest of the runner rather than by its own steps. Workers busy for
+most of their time say that the nodes, not the steps, set the pace.
+
+The runner thread also allocates and frees for every scenario it polls, and jemalloc returns freed
+memory to the kernel from whichever thread is allocating when a purge falls due. In a process of
+several hundred threads each purge waits for a TLB shootdown across the CPUs that run them, which a
+virtual machine makes slow. At 64 slots the runner thread ran on a CPU for 86 percent of Check run
+40358096404. A profile of the same workload on a loaded development host found 88 percent of that
+thread's samples in the kernel, 79 percent in the cross-CPU call a TLB shootdown waits for, and its
+`madvise`, `brk` and `munmap` calls took 48, 421 and 100 milliseconds on average. The scenario
+process therefore turns on jemalloc's background threads before the run starts: they purge on the
+same decay schedule, and no thread that allocates waits for a purge. On that workload the runner
+thread's system time fell from 18 to 8 percent of the run, and its user time, the scenarios' own
+work, rose from 2 to 7 percent.
+
+Purging in the background did not free the thread on CI: at 48 slots it still ran on a CPU for 89
+percent of Check run 40404803351, about 0.95 seconds per attempt. Much of that was parsing. The
+runner thread parsed a command a scenario runs about eight times: the harness parsed the command's
+document six times to decide how to send it and what to record from it, parsed each statement again
+to size the client's wait, and the client library parsed the statement it sends. The 36,276
+statements of that run averaged 54 characters, and the scenario build compiled the parser without
+optimization: formatting a 140-character statement, which parses it, took about 38 milliseconds
+unoptimized and about 7 with only `nervix-plexus` optimized. The dev profile therefore builds
+`nervix-plexus` at `opt-level = 2`, keeping its debug assertions and overflow checks. In Check run
+40419254390, the first after that change, the runner thread ran on a CPU for 74 percent of a
+2,971-second run, 0.60 seconds per attempt, and its ticks were 883 seconds late in total rather
+than 1,705. The harness now also reads each command document once, as a `CommandDocument` that
+answers every question the harness asks of it, so a statement is parsed three times rather than
+eight: with its document, to size the client's wait, and in the client library.
 
 ## Diagnostic Lane
 
@@ -2819,17 +2902,34 @@ artifact carries `tests/logs`.
 | Cucumber report | Standard output | Every scenario and step result in order, the world of a failed step, the summary, and every failed scenario repeated at the end |
 | Harness transitions | Standard error | Node startup transitions and outcomes, the stops scenarios waited for, and a suite timeout's diagnostic and cleanup |
 | Scenario log | `tests/logs/cucumber.log` | The run's parallelism and suite budget, cluster start requests and failures, the Plexus statements scenarios run, every phase marker, teardown diagnostics and context, unfinished cleanups, and the suite timeout diagnostic |
-| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, wait time by reason, retries, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
+| Suite summary | `tests/logs/suite-summary.md` and the CI job summary | Length, budget and remaining margin, run-slot utilization and scenario work, retries, the runner task's tick lateness and stalls with its thread's CPU and run-queue time, how busy the runtime workers were, wait time by reason, the ten longest attempts, and every attempt that reached two minutes without declaring itself long-running; captured at watchdog expiry before cleanup on a timed-out run |
 | Runner load | `runner-load-tests` and `runner-load-scenarios` artifacts | Five-second CPU utilization and steal-time samples and their mean and peak |
 | Node traces | `tests/logs/scenarios.log` | The trace output of every in-process node of the run |
 
 Server processes write their logs into their own temporary directories, and a failure quotes the
 tail it needs.
 
+The materialized input round and the delayed-coordinator publication observation each own a
+`BackupPhase`. It captures the existing 120-second deadline before dispatching the operation through
+`observe_off_the_runner`; a runner delayed while polling other scenarios does not stop the input
+round from submitting its next row or the observer from recording a reached barrier. Reading the
+result later does not restart that deadline. Dropping the result future aborts its operation, and a
+real expiry still fails the step with its identity, budget and elapsed time. Producer close remains
+outside the input round's budget, as before.
+
+Input diagnostics retain domain, initial route, producer, attachment, generation, round, tenant,
+attempt and submission identity. A submission is logged separately from its ACK wait and terminal
+outcome. While an ACK is pending, a five-second progress observation records connection, admission,
+producer ending, pending submissions and remaining round budget. It does not resubmit unresolved
+work. Only a reported processing failure takes the fixture's existing replay path, preserving every
+row's event timestamp and complete value; the intentional successful replay also remains.
+
 The delayed-coordinator materialized restore fixture arms the existing publication hook on every
-candidate node, then captures the first coordinator that actually reaches it within the existing
-120-second bound. A terminal background outcome before that barrier is reported immediately. The
-fixture releases the unused hooks before transferring leadership, keeping only the captured
+candidate node, then captures the first coordinator that actually reaches it within that phase's
+deadline. The background task retains its immutable execution reference with its handle. Sending,
+reply and barrier observations retain that reference, route, archive size, candidate nodes and the
+coordinator that reached publication. A terminal background outcome before that barrier is reported
+immediately. The fixture releases the unused hooks before transferring leadership, keeping only the captured
 coordinator held while its successor completes the same immutable restore and produces new rows.
 Releasing that captured hook must be refused and must leave the complete materialized generations
 identical. The controlled first-route scenario moves leadership before submission as well; a saved
@@ -2927,7 +3027,7 @@ contract.
    endpoint or task, on a paused clock where the budget is long, so the bound is proven without
    production-scale waits, and run `just test-harness-liveness`. Run the affected features with
    `just test-scenarios --input <feature>` at the CI concurrency factor,
-   `NERVIX_TEST_CONCURRENCY_FACTOR=2`.
+   `NERVIX_TEST_CONCURRENCY_FACTOR=3`.
 9. **Keep this chapter current** in the same change.
 
 ## Guarantees And Limits
@@ -3033,7 +3133,11 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | A server process report names the listener another socket held only when its outermost context is a lost bind, read without its emphasis | `a_report_names_its_outermost_context_without_its_emphasis`, `the_last_report_a_launch_wrote_is_the_one_read`, `a_log_without_a_report_names_no_context`, `control_sequences_are_removed_and_the_text_between_them_is_kept`, `a_report_of_a_lost_bind_names_the_listener_the_next_launch_moves`, `a_report_of_any_other_failure_names_no_listener` |
 | A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
+| Every tick's lateness adds up beside the stalls, and the summary reports the runner thread's CPU and run-queue time and the runtime workers' busy time | `the_lateness_of_every_tick_adds_up_beside_the_stalls`, `a_tick_below_the_bound_counts_as_lateness_and_not_as_a_stall`, `a_thread_schedstat_reads_its_cpu_time_and_run_queue_wait`, `the_runner_thread_reads_the_cpu_time_it_spent_since_it_was_named`, `the_suite_summary_adds_up_every_runner_tick_beside_its_stalls` |
+| A stall lists only the scenarios that hold run slots, and a suite timeout counts only the scenarios still queued or running | `the_running_scenarios_are_those_that_hold_their_run_slots`, `a_suite_timeout_does_not_count_a_finished_attempt_as_active` |
+| jemalloc purges freed memory on its background threads once the scenario process asks, so the runner thread does not wait for a purge | `freed_memory_is_purged_on_jemalloc_background_threads` |
 | A step takes the messages a NATS observer's client already holds without a poll of the runner task for each one, in the order the server delivered them | `a_step_takes_buffered_deliveries_without_a_poll_per_message` |
+| A bounded backup phase keeps progressing while its caller is unpolled, retains the original deadline and identifies a genuine expiry | `a_backup_phase_progresses_while_its_runner_is_unpolled`, `a_stalled_backup_phase_fails_at_its_original_deadline`, `an_expired_backup_phase_does_not_start_another_budget` |
 | NATS driver diagnostics distinguish a deliberately overflowing subscription from a disconnected TCP peer, and a disconnect preserves all 32,768 deliveries already buffered | `an_observer_records_the_drivers_slow_consumer_notifications`, `a_disconnected_observer_keeps_its_buffered_burst_and_reports_the_connection_end` |
 | The actual sequence/header assertion drains all 32,768 messages while its caller is unpolled past its deadline, preserves each oracle and still fails a stalled delivery at the original deadline | `a_buffered_sequence_meets_its_deadline_while_the_runner_is_stalled`, `a_sequence_keeps_every_message_and_header_oracle`, `a_stalled_delivery_still_fails_at_the_captured_sequence_deadline` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |

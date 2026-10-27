@@ -168,6 +168,14 @@ def entity_rows(row, side, notes):
             ("PROPERTIES keys and exact types", "\n".join(row["properties"]) or absent(notes, row, "properties")),
         ])
         rows.extend(bounds_rows(row["bounds"]))
+        contract = row["value_contract"]
+        if contract is not None:
+            rows.extend([
+                ("VALUES fields, exact types and constraints", "\n".join(contract["fields"])),
+                ("ATTRIBUTES values", contract["attributes"]),
+                ("RESOURCE values", contract["resource"]),
+                ("Unsupported OTLP features and reasons", "\n".join(contract["unsupported"])),
+            ])
     return rows
 
 
@@ -199,6 +207,8 @@ def render_matrix(surface, notes):
         namespaces = ", ".join(client["namespaces"]) or "none; only declared keys are accepted"
         reserved = ", ".join(f"`{key}`" for key in client["reserved"]) or "none"
         lines.append(f"Delegated property namespaces: {namespaces}. Reserved keys: {reserved}.\n")
+        if client["constraints"]:
+            lines.append(table([("Additional declared constraints", "\n".join(client["constraints"]))]))
     return "\n".join(lines)
 
 
