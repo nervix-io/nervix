@@ -21,23 +21,33 @@ pub(crate) fn validate_resource_parameters(
     resources: &[nervix_models::ResourceVersion],
     parameters: &ClusterParameterValues,
 ) -> error_stack::Result<(), RegistryError> {
+    struct Requirement {
+        parameter: ClusterParameterKey,
+        actual: u64,
+        maximum: u64,
+    }
+
     for resource in resources {
-        for (parameter, actual, maximum) in [
-            (
-                ClusterParameterKey::ResourceMaxArchiveBytes,
-                resource.archive_bytes,
-                parameters.resource_max_archive_bytes(),
-            ),
-            (
-                ClusterParameterKey::ResourceMaxExtractedBytes,
-                resource.total_bytes,
-                parameters.resource_max_extracted_bytes(),
-            ),
-            (
-                ClusterParameterKey::ResourceMaxFileCount,
-                resource.file_count,
-                parameters.resource_max_file_count(),
-            ),
+        for Requirement {
+            parameter,
+            actual,
+            maximum,
+        } in [
+            Requirement {
+                parameter: ClusterParameterKey::ResourceMaxArchiveBytes,
+                actual: resource.archive_bytes,
+                maximum: parameters.resource_max_archive_bytes(),
+            },
+            Requirement {
+                parameter: ClusterParameterKey::ResourceMaxExtractedBytes,
+                actual: resource.total_bytes,
+                maximum: parameters.resource_max_extracted_bytes(),
+            },
+            Requirement {
+                parameter: ClusterParameterKey::ResourceMaxFileCount,
+                actual: resource.file_count,
+                maximum: parameters.resource_max_file_count(),
+            },
         ] {
             if actual > maximum {
                 return Err(Report::new(RegistryError::ResourceParameterLimit {
@@ -236,36 +246,122 @@ mod tests {
     }
 
     #[test]
+    fn resource_parameters_accept_exact_bounds_and_identify_each_exceeded_requirement() {
+        use nervix_models::{
+            ClusterNodeName, ResourceId, ResourceName, ResourceVersion, Timestamp,
+        };
+
+        struct RefusedResourceBound {
+            change: ClusterParameterChange,
+            parameter: ClusterParameterKey,
+            actual: u64,
+            maximum: u64,
+        }
+
+        let resource = ResourceVersion {
+            id: ResourceId::new(
+                DomainName::parse("scope").assured("the fixture domain name is valid"),
+                ResourceName::parse("bundle").assured("the fixture resource name is valid"),
+                1,
+            ),
+            root_checksum: "0".repeat(64),
+            manifest_checksum: "0".repeat(64),
+            file_count: 3,
+            total_bytes: 20,
+            archive_bytes: 10,
+            created_at: Timestamp::from_unix_nanos(0),
+            created_by_node: ClusterNodeName::parse("node-1")
+                .assured("the fixture node name is valid"),
+        };
+        let updates = ClusterParameterUpdates::try_from(vec![
+            ClusterParameterChange::ResourceMaxArchiveBytes(10),
+            ClusterParameterChange::ResourceMaxExtractedBytes(20),
+            ClusterParameterChange::ResourceMaxFileCount(3),
+        ])
+        .assured("the fixture assigns each resource bound once");
+        let exact = ClusterParameterValues::default()
+            .changed(&updates)
+            .assured("the fixture resource bounds are positive");
+        validate_resource_parameters(std::slice::from_ref(&resource), &exact)
+            .assured("an existing resource fits all three exact bounds");
+
+        for refused in [
+            RefusedResourceBound {
+                change: ClusterParameterChange::ResourceMaxArchiveBytes(9),
+                parameter: ClusterParameterKey::ResourceMaxArchiveBytes,
+                actual: 10,
+                maximum: 9,
+            },
+            RefusedResourceBound {
+                change: ClusterParameterChange::ResourceMaxExtractedBytes(19),
+                parameter: ClusterParameterKey::ResourceMaxExtractedBytes,
+                actual: 20,
+                maximum: 19,
+            },
+            RefusedResourceBound {
+                change: ClusterParameterChange::ResourceMaxFileCount(2),
+                parameter: ClusterParameterKey::ResourceMaxFileCount,
+                actual: 3,
+                maximum: 2,
+            },
+        ] {
+            let updates = ClusterParameterUpdates::try_from(vec![refused.change])
+                .assured("the fixture changes one bound");
+            let limits = exact
+                .changed(&updates)
+                .assured("each lower fixture bound is positive");
+            let error = validate_resource_parameters(std::slice::from_ref(&resource), &limits)
+                .expect_err("the resource exceeds the lower bound");
+            assert_eq!(
+                error.current_context(),
+                &RegistryError::ResourceParameterLimit {
+                    resource: resource.id.clone(),
+                    parameter: refused.parameter,
+                    actual: refused.actual,
+                    maximum: refused.maximum,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn dynamic_values_keep_every_known_header_name_in_the_parameter_requirements() {
+        struct RefusedTransition {
+            limits: ClusterParameterValues,
+            parameter: ClusterParameterKey,
+            actual: u64,
+            maximum: u64,
+        }
+
         let domain = DomainName::parse("scope").assured("the fixture domain name is valid");
         let model = emitter(vec![
             header(literal("x-first"), input("value")),
             header(literal("x-second"), input("value")),
         ]);
-        for (limits, parameter, actual, maximum) in [
-            (
-                parameters(1, 15),
-                ClusterParameterKey::HttpHeaderFields,
-                2,
-                1,
-            ),
-            (
-                parameters(2, 14),
-                ClusterParameterKey::HttpHeaderBytes,
-                15,
-                14,
-            ),
+        for refused in [
+            RefusedTransition {
+                limits: parameters(1, 15),
+                parameter: ClusterParameterKey::HttpHeaderFields,
+                actual: 2,
+                maximum: 1,
+            },
+            RefusedTransition {
+                limits: parameters(2, 14),
+                parameter: ClusterParameterKey::HttpHeaderBytes,
+                actual: 15,
+                maximum: 14,
+            },
         ] {
-            let error = validate_model_parameters(&domain, [&model], &limits)
+            let error = validate_model_parameters(&domain, [&model], &refused.limits)
                 .expect_err("the known header names exceed the proposed bound");
             assert_eq!(
                 error.current_context(),
                 &RegistryError::ClusterParameterLimit {
                     domain: domain.clone(),
                     node: model.node_ref(),
-                    parameter,
-                    actual,
-                    maximum,
+                    parameter: refused.parameter,
+                    actual: refused.actual,
+                    maximum: refused.maximum,
                 }
             );
         }

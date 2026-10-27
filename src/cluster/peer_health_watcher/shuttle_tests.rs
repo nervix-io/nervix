@@ -10,9 +10,13 @@
     nervix::layer(harness, reason = "owns the test harness boundary declared above")
 )]
 
-use nervix_model_harness::shuttle::check_interleavings;
+use nervix_model_harness::shuttle::{check_pct, check_random};
 
 use super::*;
+
+const RANDOM_ITERATIONS: usize = 1_000;
+const PCT_ITERATIONS: usize = 1_000;
+const PCT_DEPTH: usize = 3;
 
 fn a_policy_change_racing_a_retained_wait() {
     shuttle::future::block_on(async {
@@ -39,5 +43,11 @@ fn a_policy_change_racing_a_retained_wait() {
 
 #[test]
 fn shuttle_a_policy_change_racing_a_retained_health_wait_is_never_missed() {
-    check_interleavings(a_policy_change_racing_a_retained_wait);
+    // Fair select polling requests modeled random data, so both searches supply that data.
+    check_random(a_policy_change_racing_a_retained_wait, RANDOM_ITERATIONS);
+    check_pct(
+        a_policy_change_racing_a_retained_wait,
+        PCT_ITERATIONS,
+        PCT_DEPTH,
+    );
 }

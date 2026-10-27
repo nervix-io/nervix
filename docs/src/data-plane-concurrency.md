@@ -2724,6 +2724,9 @@ A live node-unavailability interval change wakes the existing control-plane heal
 watchers read the installed interval again when deriving their next deadline. The production-owner
 `cluster::peer_health_watcher::shuttle_tests::shuttle_a_policy_change_racing_a_retained_health_wait_is_never_missed`
 check, registered in the Shuttle inventory, races installation against wait registration without a
-peer deadline: a lost wake leaves it deadlocked. Paused-clock unit tests separately check elapsed
-transition timing and unchanged publication. This check establishes notification liveness under
-Shuttle; it makes no memory-ordering claim about the governed `ArcSwap` implementation.
+peer deadline: a lost wake leaves it deadlocked. It runs 1,000 random schedules and 1,000 PCT schedules
+at depth three, each with the harness's 10,000-step limit. These searches supply the modeled random
+data that fair `select!` polling requires. The separate nondeterminism run repeats 100 random
+schedules twice for each search. Paused-clock unit tests separately check elapsed transition timing
+and unchanged publication. This check establishes notification liveness for the explored schedules;
+it makes no memory-ordering claim about the governed `ArcSwap` implementation.
