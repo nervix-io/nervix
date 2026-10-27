@@ -960,6 +960,20 @@ The harness keeps these boundaries explicit.
   materialized checkpoint staging failure, holds the first coordinator's failed outcome before it
   is recorded, moves leadership, and requires recovery under the same execution reference to end
   failed and stay failed once the condition is cleared.
+- **Forced entity drain timeouts.** A forced entity drain timeout armed for a domain refuses the
+  next drain observed there, after one complete status round. When a durable execution owns the
+  domain's mutation at that drain, the timeout keeps refusing the same drain, the same purpose,
+  relays and entities, whenever that execution observes it again on whichever node coordinates it,
+  until another execution or none owns the domain. A drain that no execution owns meets the timeout
+  once. A timeout that only the first run met would let a leader that runs the command again under
+  the same execution reference, because the refused outcome was never recorded, drain and apply
+  the alteration, and the scenario would observe that success. The execution's other drains, such
+  as a source-intake drain before the full hold or the other units one node drain moves, are left
+  alone, and an alteration a scenario runs later owns the domain under its own reference and
+  drains normally. The three-node Syslog regression moves leadership while the alteration waits at
+  its entity gate pause, holds the new leader's run of the same transaction until the first run
+  has refused and released its hold, and requires the alteration to end refused with every frame
+  delivered once.
 - **Console backup download pauses.** The console reload scenarios hold the archive's first
   download before it streams, so the reload interrupts a download in progress. The archive is
   assembled and served by the leader that completes the backup. A leadership move while the backup

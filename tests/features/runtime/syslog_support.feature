@@ -456,6 +456,63 @@ Feature: Syslog support
       | 3            | 1             | node-2  |
       | 3            | 1             | node-3  |
 
+  Scenario: A forced drain refusal stays a Syslog suspension alteration's outcome when a new leader runs it again
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA syslog_message (message STRING);
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE CODEC syslog_alternate_codec FROM SYSLOG TO SCHEMA syslog_message;
+      CREATE RELAY syslog_events SCHEMA syslog_message UNBRANCHED CAPACITY 4;
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
+        'protocol' = 'tcp',
+        'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    Given ingestor "syslog_intake" pauses inside dispatch
+    And the entity gate for domain "{{domain}}" pauses after engagement
+    When a Syslog TCP sender publishes 80 numbered frames to node "{{old_leader}}" at "{{syslog_ingest_addr}}"
+    Then ingestor "syslog_intake" reaches the dispatch pause
+    When these Plexus commands begin executing in the background
+      """
+      ALTER SYSLOG LISTENER INGESTOR syslog_intake SET DECODE USING syslog_alternate_codec;
+      """
+    Then within "10s" node "{{old_leader}}" eventually reports describe ingestor "syslog_intake" as "status: quiesced"
+    When ingestor "syslog_intake" leaves the dispatch pause
+    Then the entity gate pause for domain "{{domain}}" is reached
+    And within "10s" node "{{old_leader}}" eventually reports describe ingestor "syslog_intake" as "ready: false"
+    # Leadership moves before the former leader records the refusal, so the command runs again
+    # under its execution reference. The new leader's run waits until the first run has refused.
+    Given transaction commit on node "{{new_leader}}" pauses after 0 statement
+    When leadership is transferred to node "{{new_leader}}"
+    Given the next pending entity drain in domain "{{domain}}" is forced to time out
+    When the entity gate pause for domain "{{domain}}" is released
+    Then within "10s" node "{{old_leader}}" eventually reports describe ingestor "syslog_intake" as "ready: true"
+    And the transaction commit pause on node "{{new_leader}}" after 0 statement is reached
+    When the transaction commit pause on node "{{new_leader}}" after 0 statement is released
+    Then the background Plexus execution fails with "timed out draining domain"
+    And within "30s" the relay subscription receives 80 numbered Syslog frames once
+    And the relay subscription does not receive a payload within "1s"
+
   @syslog_listener_rebind @deloxide_stress
   Scenario Outline: A Syslog accept error keeps an established TCP connection on <cluster_size> nodes via <node_id>
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
