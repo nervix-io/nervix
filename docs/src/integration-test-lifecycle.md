@@ -1329,6 +1329,21 @@ expiration, and the exact recreated keys and payloads on one- and three-node clu
 belong to the fixture and its observations; product retention and deadline policies keep their own
 contracts.
 
+The remote materialized reuse scenario requires the generator node's relay memory to read zero while
+that node retains the generation it reuses. Relay memory is a node-wide class: a delivery the node
+sends keeps its encoded body charged until the receiving owner admits it and its record storage
+until the outcomes of its records return, and a fan-out grant the node issues for one of its
+sessions' subscriptions reserves the body, the largest decoded batch and decode scratch. While the
+generator delivered each 100-millisecond occurrence to an output relay on another node, a
+200-millisecond poll read zero only between two deliveries, and a loaded runner can stretch each
+delivery until no poll falls between them. The scenario therefore makes the node idle before it
+reads the gauge: the output relay is relocated onto the generator's node, its last subscription is
+deleted, and the source owner fills its relay memory so that it refuses every relay grant, which
+keeps any delivery the generator's node still sends charged. Zero is then the steady state unless
+something retains relay memory, and the scenario also requires the retained generation's charge in
+`state_read_cache`. The 30-second waits and the five complete observations of each round are
+unchanged.
+
 Collection and route-flush timing assertions measure observed row arrival from the HTTP publication
 instant. Concurrent branch posts retain one publication origin, and every expected row must match
 its tenant and sequence and arrive after the declared lower bound, inside the unchanged delivery
