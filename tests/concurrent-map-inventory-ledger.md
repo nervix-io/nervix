@@ -377,6 +377,7 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::wasm_reset_publication_authority_losses` | Armed for one scenario domain; looked up once before a generation publication and by explicit harness observations; its bounded remaining/delivered counts remain until that world's injector is dropped; absent from product builds | test-only WASM publication fault control |
 | `FaultInjectionState::failed_wasm_reset_publications` | Armed before ordinary graph publications; only reset generation publication reads it, and delivery is recorded after unpublished preparation is aborted; it stays enabled through uncertain outcome recording, then is explicitly cleared before exact replay; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped WASM publication failure in `fault_injection/wasm_reset_publication.rs` |
 | `FaultInjectionState::failed_restore_state_publications` | Armed before a restore for one restored domain; a testing build's state owner looks the domain up once after each durable publication of that domain's restored state and records the delivery there; it stays enabled through uncertain outcome recording and a resumed restore, then is explicitly cleared; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped restore publication failure in `fault_injection/restore_publication.rs` |
+| `FaultInjectionState::failed_restore_checkpoint_stagings` | Armed before a restore for one restored domain and one checkpoint kind; a testing build's state owner looks the domain and kind up once before it stages each WASM, materialized, deduplicator or window checkpoint of that domain's restored state, and records the delivery there; it stays enabled through uncertain outcome recording and a resumed restore, then is explicitly cleared; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped restore checkpoint staging failure in `fault_injection/restore_staging.rs` |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
 
 A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in
@@ -523,12 +524,13 @@ its prepared state. They do not claim an end-to-end ingestion throughput improve
 
 ## Restore generation installation
 
-The restore failure-control maps are `failed_restore_state_installations`, keyed by domain and
-holding a typed one-shot guest, materialized or branch-state staging failure, and
-`failed_restore_state_publications`, keyed by domain and holding a durable-publication failure
-that stays armed until cleared. The first is reached once at the corresponding staging boundary
-and the second once after each durable generation publication, as test-only lifecycle control.
-Neither is reached from record or acknowledgement execution. The receiver upload map retains its
+The restore failure-control maps are `failed_restore_checkpoint_stagings`, keyed by domain and
+checkpoint kind and holding a guest, materialized or branch-state staging failure, and
+`failed_restore_state_publications`, keyed by domain and holding a durable-publication failure.
+Each failure stays armed until cleared. The first is reached once before each guest,
+materialized, deduplicator or window checkpoint is staged and the second once after each durable
+generation publication, as test-only lifecycle control. Neither is reached from record or
+acknowledgement execution. The receiver upload map retains its
 existing per-transfer lifetime and cadence; finalization moves the sealed file into the admitted storage job
 and keeps its disk-quota owner there. Successful generation publication clears runtime state maps
 under the same applied authority guard after durable pointer publication and bounded storage

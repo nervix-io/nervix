@@ -125,9 +125,11 @@ Feature: Materialized backup and archived lifecycle resumption
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
     And the active domain is saved as placeholder "source_domain"
-    And restoring domain "{{domain}}_staging_failure" fails before installing its first materialized checkpoint
+    And materialized checkpoint stagings of restoring domain "{{domain}}_staging_failure" fail
     When the CLI restores "domain {{domain}} --as {{domain}}_staging_failure --resume" from "materialized.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
+    And restoring domain "{{domain}}_staging_failure" has materialized checkpoint staging failure state delivered
+    When the materialized checkpoint staging failure of restoring domain "{{domain}}_staging_failure" is cleared
     Given the active domain is "{{source_domain}}_staging_failure"
     When these Plexus commands fail with "restore state installation is incomplete"
       """
@@ -413,7 +415,7 @@ Feature: Materialized backup and archived lifecycle resumption
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archives "large-before-stale.nvxb" and "large-after-stale.nvxb" have identical materialized generations
 
-  Scenario: A durable publication failure stays the restore outcome after its coordinator loses leadership before recording it
+  Scenario Outline: A <failure> failure stays the restore outcome after its coordinator loses leadership before recording it
     Given runtime replication is configured with replica count 1 and snapshot interval "10m"
     And the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -423,35 +425,40 @@ Feature: Materialized backup and archived lifecycle resumption
     Then within "180s" the materialized generators report round 1, 64 KiB, 1 relays and 2 tenants
     When the materialized summary subscription "summary_subscription" is closed
     Then the current leader node is saved as placeholder "leader"
-    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "durable-failure.nvxb" reporting JSON
+    When the CLI backs up "domain {{domain}} --timeout 120s" from node "{{leader}}" into "restore-failure.nvxb" reporting JSON
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     Given the cluster is replaced by a fresh 3 node cluster whose nodes are named "restored"
     Then the current leader node is saved as placeholder "leader"
     And a node other than placeholder "leader" is saved as placeholder "successor"
     Given the restore coordinator uses remote placement in a multi-node cluster
-    And durable state publications of restoring domain "{{domain}}_durable_failure" fail
+    And <failures> of restoring domain "{{domain}}_failure" fail
     And command finalization on node "{{leader}}" pauses before its outcome is recorded
-    Then restoring domain "{{domain}}_durable_failure" has durable state publication failure state pending
-    When restore "DOMAIN {{domain}} AS {{domain}}_durable_failure RESUME" of backup archive "durable-failure.nvxb" is streamed to node "{{leader}}" under execution reference "durable-failure-restore" in the background
+    Then restoring domain "{{domain}}_failure" has <failure> failure state pending
+    When restore "DOMAIN {{domain}} AS {{domain}}_failure RESUME" of backup archive "restore-failure.nvxb" is streamed to node "{{leader}}" under execution reference "failure-restore" in the background
     Then the background restore's outcome is held on node "{{leader}}" before it is recorded
-    And restoring domain "{{domain}}_durable_failure" has durable state publication failure state delivered
+    And restoring domain "{{domain}}_failure" has <failure> failure state delivered
     When leadership is transferred from node "{{leader}}" to node "{{successor}}"
     Then node "{{successor}}" eventually reports a leader other than "{{leader}}"
     And node "{{leader}}" eventually reports a leader other than "{{leader}}"
     When the command finalization pause on node "{{leader}}" is released
     Then the background restore stream's outcome is "leadership lost" as "executed"
-    When restore "DOMAIN {{domain}} AS {{domain}}_durable_failure RESUME" of backup archive "durable-failure.nvxb" is streamed to node "{{successor}}" under execution reference "durable-failure-restore" with outcome recovery
+    When restore "DOMAIN {{domain}} AS {{domain}}_failure RESUME" of backup archive "restore-failure.nvxb" is streamed to node "{{successor}}" under execution reference "failure-restore" with outcome recovery
     Then the restore stream's outcome is "failed" as "recovered"
     And the restore stream's outcome message contains "runtime state could not be read or published"
-    When the durable state publication failure of restoring domain "{{domain}}_durable_failure" is cleared
-    Then restoring domain "{{domain}}_durable_failure" has durable state publication failure state disabled
-    When restore "DOMAIN {{domain}} AS {{domain}}_durable_failure RESUME" of backup archive "durable-failure.nvxb" is streamed to node "{{successor}}" under execution reference "durable-failure-restore"
+    When the <failure> failure of restoring domain "{{domain}}_failure" is cleared
+    Then restoring domain "{{domain}}_failure" has <failure> failure state disabled
+    When restore "DOMAIN {{domain}} AS {{domain}}_failure RESUME" of backup archive "restore-failure.nvxb" is streamed to node "{{successor}}" under execution reference "failure-restore"
     Then the restore stream's outcome is "failed" as "recovered"
-    Given the active domain is "{{domain}}_durable_failure"
+    Given the active domain is "{{domain}}_failure"
     When these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
+
+    Examples:
+      | failure                         | failures                         |
+      | durable state publication       | durable state publications       |
+      | materialized checkpoint staging | materialized checkpoint stagings |
 
 
   @restore_installation @deloxide_stress_restore @long_running

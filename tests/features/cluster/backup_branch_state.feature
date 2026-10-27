@@ -299,10 +299,12 @@ Feature: Deduplicator and window state in backup archives
     Given the cluster is replaced by a fresh <cluster_size> node cluster whose nodes are named "restored"
     Then the current leader node is saved as placeholder "leader"
     Given the restore coordinator uses remote placement in a multi-node cluster
-    And restoring domain "{{domain}}" fails before installing its first deduplicator or window checkpoint
+    And deduplicator and window checkpoint stagings of restoring domain "{{domain}}" fail
     When the CLI restores "domain {{domain}} --resume" from "branch-state.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
-    When these Plexus commands fail with "restore state installation is incomplete"
+    And restoring domain "{{domain}}" has deduplicator and window checkpoint staging failure state delivered
+    When the deduplicator and window checkpoint staging failure of restoring domain "{{domain}}" is cleared
+    And these Plexus commands fail with "restore state installation is incomplete"
       """
       START;
       """
