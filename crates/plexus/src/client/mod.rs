@@ -675,7 +675,8 @@ mod tests {
             CREATE CLICKHOUSE CLIENT clickhouse_main
               CONFIG {
                 'addr' = 'http://127.0.0.1:8123',
-                'database' = 'default'
+                'database' = 'default',
+                'timeout_ms' = 5000
               };
         "#;
 
@@ -687,9 +688,11 @@ mod tests {
             .expect("parse should succeed");
 
         assert_eq!(parsed.name.as_str(), "clickhouse_main");
-        assert_eq!(parsed.config.len(), 2);
+        assert_eq!(parsed.config.len(), 3);
         assert_eq!(parsed.config[0].key, "addr");
         assert_eq!(parsed.config[0].value, "http://127.0.0.1:8123");
+        assert_eq!(parsed.config[2].key, "timeout_ms");
+        assert_eq!(parsed.config[2].value, "5000");
     }
 
     #[test]

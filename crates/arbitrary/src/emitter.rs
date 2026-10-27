@@ -225,7 +225,7 @@ impl Arbitrary<'_> {
                 EmitterEntity::ClickHouse(ClickHouseEmitter::Table(ClickHouseTableEmitter {
                     mode: self.clickhouse_table_publication(),
                     client: self.name(),
-                    table: self.emitter_table_name(),
+                    table: self.clickhouse_table_name(),
                     values: self.value_mappings(1),
                 }))
             }

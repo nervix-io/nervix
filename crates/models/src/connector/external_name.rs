@@ -45,8 +45,10 @@ pub enum ExternalNameError {
     Reserved { name: &'static str },
     #[error("holds nothing before its '{suffix}' suffix")]
     EmptyBeforeSuffix { suffix: &'static str },
-    #[error("holds an empty level between two '{separator}'")]
+    #[error("holds an empty level separated by '{separator}'")]
     EmptyLevel { separator: char },
+    #[error("names {actual} levels, but at most {max} are allowed")]
+    TooManyLevels { max: usize, actual: usize },
     #[error("holds the wildcard '{wildcard}' inside a level instead of as the whole level")]
     WildcardInsideLevel { wildcard: char },
     #[error("holds the wildcard '{wildcard}' before its last level")]
