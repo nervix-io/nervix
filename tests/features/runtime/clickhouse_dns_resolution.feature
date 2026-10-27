@@ -50,7 +50,8 @@ Feature: ClickHouse name resolution
       CREATE CLICKHOUSE CLIENT clickhouse_client MOUNT dev_tls VERSION 1 CONFIG {
         <client_config>,
         'user' = 'default',
-        'password' = 'nervix'
+        'password' = 'nervix',
+        'timeout_ms' = '5000'
       };
       CREATE CLICKHOUSE TABLE EMITTER to_clickhouse FROM notifications
         TO clickhouse_client TABLE 'clickhouse_dns_{{test_id}}'
@@ -127,7 +128,8 @@ Feature: ClickHouse name resolution
         'addr' = '{{clickhouse_tls_dns_addr}}',
         'tls_ca_file' = '{{dev_tls}}/ca.pem',
         'user' = 'default',
-        'password' = 'nervix'
+        'password' = 'nervix',
+        'timeout_ms' = '5000'
       };
       CREATE CLICKHOUSE TABLE EMITTER to_clickhouse FROM notifications
         TO clickhouse_client TABLE 'clickhouse_dns_{{test_id}}'
@@ -194,7 +196,8 @@ Feature: ClickHouse name resolution
       CREATE CLICKHOUSE CLIENT clickhouse_client CONFIG {
         'addr' = '{{clickhouse_forwarded_addr}}',
         'user' = 'default',
-        'password' = 'nervix'
+        'password' = 'nervix',
+        'timeout_ms' = '5000'
       };
       CREATE CLICKHOUSE TABLE EMITTER to_clickhouse FROM notifications
         TO clickhouse_client TABLE 'clickhouse_dns_{{test_id}}'

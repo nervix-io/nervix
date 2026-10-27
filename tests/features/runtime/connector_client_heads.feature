@@ -49,8 +49,8 @@ Feature: Connector names head client definitions
       | 3            | WEBSOCKETS   |                       | 'endpoint' = 'ws://127.0.0.1:19080/events'                  |
       | 1            | SYSLOG       |                       | 'addr' = '127.0.0.1:5514', 'protocol' = 'udp'               |
       | 3            | SYSLOG       |                       | 'addr' = '127.0.0.1:5514', 'protocol' = 'udp'               |
-      | 1            | CLICKHOUSE   |                       | 'addr' = 'http://127.0.0.1:8123'                            |
-      | 3            | CLICKHOUSE   |                       | 'addr' = 'http://127.0.0.1:8123'                            |
+      | 1            | CLICKHOUSE   |                       | 'addr' = 'http://127.0.0.1:8123', 'timeout_ms' = '5000'     |
+      | 3            | CLICKHOUSE   |                       | 'addr' = 'http://127.0.0.1:8123', 'timeout_ms' = '5000'     |
       | 1            | POSTGRES     | POOL SIZE MIN 0 MAX 1 | 'addr' = 'postgres://127.0.0.1:5432/events?sslmode=disable' |
       | 3            | POSTGRES     | POOL SIZE MIN 0 MAX 1 | 'addr' = 'postgres://127.0.0.1:5432/events?sslmode=disable' |
       | 1            | MYSQL        | POOL SIZE MIN 0 MAX 1 | 'addr' = 'mysql://127.0.0.1:3306/events'                    |

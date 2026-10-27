@@ -407,7 +407,7 @@ struct ScenarioWorld {
     /// How the last restore stream a scenario shaped itself ended.
     last_restore_end: Option<crate::common::raw_session::TestRestoreEnd>,
     /// A restore stream a scenario sent in the background.
-    background_restore: Option<AbortOnDropHandle<crate::common::raw_session::TestRestoreEnd>>,
+    background_restore: Option<crate::backup::restore::BackgroundRestore>,
     /// A leadership move a scenario armed underneath the next durably admitted command.
     leadership_move: Option<AbortOnDropHandle<std::io::Result<()>>>,
     /// The restore step pause a scenario armed and has not released.
