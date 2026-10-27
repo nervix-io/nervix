@@ -19,7 +19,7 @@ use std::num::NonZeroUsize;
 use arch_into::ArchInto as _;
 use error_stack::Report;
 use nervix_execution::{
-    BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
+    AdmissionError, BudgetedBuffer, ChargedBytes, CpuClass, Executor, MemoryClass, Reservation,
 };
 use nervix_models::{
     ClusterNodeName, NodePrerequisites, PrerequisiteMismatch, WireContractFingerprint,
@@ -119,6 +119,15 @@ pub(crate) struct RelayAdmissionRequest {
 pub(crate) struct RelayAdmissionResponse {
     pub(crate) receiver_epoch: u64,
     pub(crate) status: RelayAdmissionStatus,
+}
+
+/// The outcome of an operation charged only to room its memory class had free, which never waits
+/// in the class's line.
+pub(crate) enum FreeRoom<T> {
+    /// The class had room, and this holds what was charged to it.
+    Taken(T),
+    /// The class had no free room. Nothing was charged and nothing is held.
+    NoRoom,
 }
 
 /// A decoded value together with the charge that covers its retained allocations.
@@ -272,11 +281,54 @@ where
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
         + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
 {
-    let max_depth = validation_depth(executor)?;
     let decoded_charge = executor
         .reserve(class, bytes.len().arch_into())
         .await
         .map_err(|error| TransportError::with_cause(error, TransportError::Decode))?;
+    decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await
+}
+
+/// Validate and deserialize one bounded rkyv payload as [`decode_rkyv`] does, but charge the
+/// decoded value only to room `class` has free now. A class without room is reported rather than
+/// waited for, so a request whose answer is that the class is full never waits on that class.
+pub(crate) async fn decode_rkyv_in_free_room<T>(
+    executor: &Executor,
+    class: MemoryClass,
+    cpu: CpuClass,
+    bytes: ChargedBytes,
+) -> Result<FreeRoom<Decoded<T>>, Report<TransportError>>
+where
+    T: Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
+    let decoded_charge = match executor.try_reserve(class, bytes.len().arch_into()) {
+        Ok(charge) => charge,
+        Err(refusal) => {
+            if let AdmissionError::BudgetExhausted { .. } = refusal.current_context() {
+                return Ok(FreeRoom::NoRoom);
+            }
+            return Err(TransportError::with_cause(refusal, TransportError::Decode));
+        }
+    };
+    let decoded = decode_rkyv_charged(executor, cpu, bytes, decoded_charge).await?;
+    Ok(FreeRoom::Taken(decoded))
+}
+
+/// Validate and deserialize one bounded rkyv payload under `decoded_charge`, which covers the
+/// decoded value for as long as it is retained.
+async fn decode_rkyv_charged<T>(
+    executor: &Executor,
+    cpu: CpuClass,
+    bytes: ChargedBytes,
+    decoded_charge: Reservation,
+) -> Result<Decoded<T>, Report<TransportError>>
+where
+    T: Archive + Send + 'static,
+    T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, RkyvError>>
+        + rkyv::Deserialize<T, rkyv::api::high::HighDeserializer<RkyvError>>,
+{
+    let max_depth = validation_depth(executor)?;
     executor
         .run_cpu(cpu, decoded_charge, move |charge, cancellation| {
             cancellation.check().map_err(|error| {
