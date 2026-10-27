@@ -1801,7 +1801,7 @@ Feature: Web console Plexus REPL
         FLUSH EACH 1s MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
-      CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions FROM connected_sessions TO s3_lakehouse TABLE 'datalake_connected_sessions' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'tenant_id' = input.tenant_id, 'device_id' = input.device_id, 'event_type' = input.event_type, 'value' = input.value } FLUSH EACH 10s MAX BATCH SIZE 8MiB
+      CREATE DETACHED ICEBERG TABLE EMITTER iceberg_connected_sessions FROM connected_sessions TO s3_lakehouse TABLE 'datalake_connected_sessions' NAMESPACE '{{domain}}' LOCATION 's3://nervix-iceberg/tables/datalake_connected_sessions' CATALOG lakehouse_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { 'tenant_id' = input.tenant_id, 'device_id' = input.device_id, 'event_type' = input.event_type, 'value' = input.value } FLUSH EACH 10s MAX BATCH SIZE 8MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
       """

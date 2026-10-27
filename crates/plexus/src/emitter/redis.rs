@@ -40,3 +40,55 @@ pub(super) fn pubsub_body<'src>(
             }),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::{EmitterEntity, Model, RedisEmitter};
+    use rstest::rstest;
+
+    use crate::conformance_support::{assert_offers_exactly, created_model, refused};
+
+    #[rstest]
+    #[case("Orders:EU/*")]
+    #[case("通道:Événements")]
+    fn channel_literals_reach_the_emitter_model_unchanged(#[case] channel: &str) {
+        let statement = format!(
+            "CREATE REDIS PUBSUB EMITTER publishing FROM events TO redis_main CHANNEL '{channel}' \
+             MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING event_codec INHERIT ALL \
+             FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+        );
+        let Some(Model::Emitter(emitter)) = created_model(&statement) else {
+            panic!("a literal channel is accepted by the composed grammar: {statement}");
+        };
+        let EmitterEntity::Redis(RedisEmitter::PubSub(destination)) = *emitter.connector else {
+            panic!("the REDIS PUBSUB head constructs the Redis channel Model");
+        };
+        assert_eq!(destination.channel.as_str(), channel);
+    }
+
+    #[test]
+    fn channel_completion_and_modes_follow_the_pubsub_declaration() {
+        assert_offers_exactly(
+            "CREATE REDIS PUBSUB EMITTER publishing FROM events TO redis_main CHANNEL ",
+            &["redis_channel"],
+        );
+        assert_offers_exactly(
+            "CREATE REDIS PUBSUB EMITTER publishing FROM events TO redis_main CHANNEL \
+             'Orders:EU/*' MODE ",
+            &["NO ACK"],
+        );
+    }
+
+    #[test]
+    fn the_composed_grammar_applies_the_channel_byte_bound() {
+        for channel in [String::new(), "é".repeat(513)] {
+            let statement = format!(
+                "CREATE REDIS PUBSUB EMITTER publishing FROM events TO redis_main CHANNEL \
+                 '{channel}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING \
+                 event_codec INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR \
+                 LOG;"
+            );
+            assert!(refused(&statement), "channel is outside its declared bound");
+        }
+    }
+}

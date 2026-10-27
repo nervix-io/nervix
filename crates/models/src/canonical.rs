@@ -1902,7 +1902,7 @@ impl FlushPolicy {
     }
 }
 
-fn commit_policy_to_plexus(policy: &str, max_size: &str) -> String {
+fn commit_policy_to_plexus(policy: &str, max_size: &crate::PayloadSizeLimit) -> String {
     format!("COMMIT EACH {policy} MAX SIZE {max_size}")
 }
 
@@ -3720,6 +3720,7 @@ fn emitter_reference_to_plexus(
         EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
             client,
             table,
+            namespace,
             location,
             catalog,
             commit_each,
@@ -3730,9 +3731,10 @@ fn emitter_reference_to_plexus(
                 client: catalog_client,
             } = catalog;
             format!(
-                "{} TABLE {} LOCATION {} CATALOG {} {}",
+                "{} TABLE {} NAMESPACE {} LOCATION {} CATALOG {} {}",
                 client.as_str(),
                 string_literal(table.as_str()),
+                string_literal(namespace.as_str()),
                 string_literal(location),
                 catalog_client.as_str(),
                 commit_policy_to_plexus(commit_each, max_commit_size)

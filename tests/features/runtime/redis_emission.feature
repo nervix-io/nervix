@@ -9,7 +9,7 @@ Feature: Redis emission
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    And Redis channel "notifications_out_{{test_id}}" is observed
+    And Redis channel "<channel>_{{test_id}}" is observed
     When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
@@ -44,7 +44,7 @@ Feature: Redis emission
         CONFIG {
           'addr' = '{{redis_addr}}'
         };
-        CREATE REDIS PUBSUB EMITTER redis_notifications FROM notifications TO redis_main CHANNEL 'notifications_out_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        CREATE REDIS PUBSUB EMITTER redis_notifications FROM notifications TO redis_main CHANNEL '<channel>_{{test_id}}' MODE NO ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
         INHERIT ALL
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
@@ -71,7 +71,9 @@ Feature: Redis emission
       """
 
     Examples:
-      | cluster_size | replica_count |
-      | 1            | 0             |
-      | 3            | 0             |
-      | 3            | 1             |
+      | cluster_size | replica_count | channel           |
+      | 1            | 0             | notifications_out |
+      | 3            | 0             | notifications_out |
+      | 3            | 1             | notifications_out |
+      | 1            | 0             | Orders:EU/*       |
+      | 3            | 0             | Orders:EU/*       |

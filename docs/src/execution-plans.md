@@ -107,6 +107,11 @@ configuration. HTTP and WebSockets endpoint plans remain distinct entities while
 host's intake lifetime mechanism. Labels are derived from declarations and retained at plan/start
 time, without an allocation per published batch.
 
+An Iceberg plan carries the statement's validated catalog namespace with its table identity.
+Local opening uses exactly those namespace levels, independently of the Nervix domain name.
+Its commit-size value has already crossed the same positive whole-byte validation boundary as a
+batch-size value; plan construction reads its byte count without interpreting another string.
+
 Kafka source installation also binds the node-owned executor into the connector plan. Partition
 inspectors used by scheduling and the host's partition watch use that same node executor. The
 connector interprets the effective native client deadline and admits its synchronous driver calls;

@@ -1477,6 +1477,28 @@ impl DomainState {
                                 ),
                             }));
                         }
+                        if let nervix_models::EmitterEntity::Iceberg(
+                            nervix_models::IcebergEmitter::Table(table),
+                        ) = emitter.connector.as_ref()
+                        {
+                            let invalid_location = || RegistryError::EmitterLocation {
+                                domain: domain.clone(),
+                                identifier: identifier.clone(),
+                                kind: emitter.connector.kind(),
+                            };
+                            let backend =
+                                match nervix_models::IcebergStorageBackend::try_from(found) {
+                                    Ok(backend) => backend,
+                                    Err(source) => {
+                                        return Err(
+                                            Report::new(source).change_context(invalid_location())
+                                        );
+                                    }
+                                };
+                            backend
+                                .validate_location(&table.location)
+                                .change_context_lazy(invalid_location)?;
+                        }
                         if let (
                             nervix_models::EmitterEntity::Http(_),
                             Model::ClientHttp(http_client),

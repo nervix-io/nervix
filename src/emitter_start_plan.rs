@@ -78,8 +78,6 @@ pub(super) enum EmitterDurationSetting {
 pub(super) enum IcebergCommitSetting {
     #[strum(serialize = "commit_each")]
     CommitEach,
-    #[strum(serialize = "max_commit_size")]
-    MaxCommitSize,
 }
 
 impl EmitterDurationSetting {
@@ -248,7 +246,7 @@ fn otel_literal(expression: &Expression) -> Option<OtelLiteral> {
 fn iceberg_commit_policy(
     emitter: &CreateEmitter,
     commit_each: &str,
-    max_commit_size: &str,
+    max_commit_size: &nervix_models::PayloadSizeLimit,
 ) -> Result<IcebergCommitPolicy, Report<EmitterStartPlanError>> {
     let interval = parse_duration_text(commit_each).change_context_lazy(|| {
         EmitterStartPlanError::InvalidIcebergCommit {
@@ -257,17 +255,7 @@ fn iceberg_commit_policy(
             value: commit_each.to_string(),
         }
     })?;
-    let max_size = max_commit_size
-        .parse::<ubyte::ByteUnit>()
-        .map_err(|source| {
-            Report::new(EmitterStartPlanError::InvalidIcebergCommit {
-                emitter: emitter.name.clone(),
-                setting: IcebergCommitSetting::MaxCommitSize,
-                value: max_commit_size.to_string(),
-            })
-            .attach_printable(source)
-        })?
-        .as_u64();
+    let max_size = max_commit_size.bytes().get();
     Ok(IcebergCommitPolicy { interval, max_size })
 }
 
@@ -501,6 +489,7 @@ pub(super) struct IcebergTableEmitterPlan<Config = ResolvedClientConfig> {
     pub(super) storage: EmitterClientSpec<Config>,
     pub(super) catalog: EmitterClientSpec<Config>,
     pub(super) table: nervix_models::IcebergTableName,
+    pub(super) namespace: nervix_models::IcebergNamespace,
     pub(super) mapping: MappedValuesPlan,
     pub(super) location: String,
     pub(super) commit: IcebergCommitPolicy,
@@ -521,6 +510,7 @@ impl IcebergTableEmitterPlan<DeclaredClientConfig> {
             storage,
             catalog,
             table: self.table,
+            namespace: self.namespace,
             mapping: self.mapping,
             location: self.location,
             commit: self.commit,
@@ -1258,6 +1248,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
                     client: expected,
                     table,
+                    namespace,
                     values,
                     location,
                     catalog: IcebergCatalog::Rest { client: catalog },
@@ -1277,6 +1268,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                         storage,
                         catalog,
                         table: table.clone(),
+                        namespace: namespace.clone(),
                         mapping: MappedValuesPlan::decide(
                             &emitter.name,
                             "Iceberg",
@@ -1658,13 +1650,14 @@ mod tests {
             },
             client: named("upstream"),
             table: named("orders"),
+            namespace: named("Analytics.Events"),
             values: vec![value_mapping("id", "input.id")],
             location: "s3://warehouse/orders".to_string(),
             catalog: IcebergCatalog::Rest {
                 client: named("catalog"),
             },
             commit_each: "1s".to_string(),
-            max_commit_size: "1MiB".to_string(),
+            max_commit_size: "1MiB".parse().expect("valid commit size"),
         }))
     }
 
@@ -2276,25 +2269,14 @@ mod tests {
     }
 
     #[test]
-    fn iceberg_commit_limits_are_parsed_during_planning() {
-        let mut case = EmitterKind::IcebergS3.case();
-        let EmitterEntity::Iceberg(IcebergEmitter::Table(IcebergTableEmitter {
-            max_commit_size,
-            ..
-        })) = &mut case.connector
-        else {
-            panic!("the case must be Iceberg");
+    fn iceberg_plan_preserves_namespace_and_exact_commit_bytes() {
+        let case = EmitterKind::IcebergS3.case();
+        let plan = case.decide().expect("valid Iceberg plan");
+        let EmitterConnectorPlan::Iceberg(IcebergEmitterPlan::Table(table)) = plan.connector else {
+            panic!("the plan must be Iceberg");
         };
-        *max_commit_size = "invalid".to_string();
-        let error = case.decide().expect_err("the commit size must be valid");
-        assert_eq!(
-            *error.current_context(),
-            EmitterStartPlanError::InvalidIcebergCommit {
-                emitter: named("orders_out"),
-                setting: IcebergCommitSetting::MaxCommitSize,
-                value: "invalid".to_string(),
-            }
-        );
+        assert_eq!(table.namespace.as_str(), "Analytics.Events");
+        assert_eq!(table.commit.max_size, 1_048_576);
     }
 
     #[test]
