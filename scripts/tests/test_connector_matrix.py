@@ -41,7 +41,7 @@ def declarations():
                         "names_meaning": "a name matches only itself"},
             "batch": "optional", "batch_maximum": None,
             "body": "ENCODE USING <codec>", "batch_transformation": False,
-            "envelope": [], "properties": [],
+            "envelope": [], "properties": [], "value_contract": None,
             "bounds": {
                 "buffers": [],
                 "waits": [{"wait": "produce request", "bound": "`timeout_ms`; unbounded when omitted"}],
@@ -53,7 +53,7 @@ def declarations():
         "clients": [{"kind": "KAFKA", "pool": "unpooled", "config_owner": "driver", "options": [],
                      "keys": [{"name": "sasl.password", "presence": "optional", "type": "string",
                                "owner": "driver; best effort", "confidential": True, "file": "none"}],
-                     "namespaces": ["all driver property names"], "reserved": ["group.id"]}],
+                     "namespaces": ["all driver property names"], "reserved": ["group.id"], "constraints": []}],
     }
 
 
@@ -66,6 +66,24 @@ def reasons():
 
 
 class ConnectorMatrixTests(unittest.TestCase):
+    def test_value_and_client_constraints_follow_the_compiled_declaration(self):
+        surface = declarations()
+        surface["emit"][0]["value_contract"] = {
+            "fields": ["HISTOGRAM `count`: U64; required; the complete U64 range"],
+            "attributes": "nested typed arrays; BYTES refused",
+            "resource": "literal values only",
+            "unsupported": ["OTLP/JSON: protobuf transports only"],
+        }
+        surface["clients"][0]["constraints"] = ["TLS files require https", "headers preserve percent escapes"]
+        text = matrix.render_matrix(surface, reasons())
+        for value in ["HISTOGRAM `count`: U64; required; the complete U64 range",
+                      "nested typed arrays; BYTES refused", "literal values only",
+                      "OTLP/JSON: protobuf transports only", "TLS files require https",
+                      "headers preserve percent escapes"]:
+            self.assertIn(value, text)
+        surface["emit"][0]["value_contract"]["fields"] = ["HISTOGRAM `count`: U64; optional"]
+        self.assertNotEqual(text, matrix.render_matrix(surface, reasons()))
+
     def test_compiled_export_is_atomic_and_keeps_the_previous_complete_input_on_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "declarations.json"
