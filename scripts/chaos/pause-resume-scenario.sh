@@ -179,6 +179,9 @@ pause_one_node() {
     mkdir -p "${round_dir}/before" "${round_dir}/immediately-before" "${round_dir}/recovered"
     phase "${duration} pause of observed ${role} (${ordinal}/4)"
     failure_category=product
+    capture_cluster_parameters "${round_dir}/cluster-parameters" "${node_names[@]}" \
+        || pause_fail product 'the nodes did not publish one installed cluster policy before the pause'
+    local parameter_evidence="${round_dir}/cluster-parameters.json"
     wait_for 'cluster settled before pause role selection' 90 \
         select_pause_target "${role}" "${round_dir}/before"
     local selected_host="${target_host}"
@@ -212,7 +215,7 @@ pause_one_node() {
     container_id="$(owned_service_container "${selected_host}")" || return 1
     inspect_target "${container_id}" "${round_dir}/selected.json"
     "${script_dir}/verify-pause-evidence.sh" before "${run_id}" "${project_name}" \
-        "${selected_host}" "${image_id}" "${round_dir}/selected.json" "${round_dir}/selected.json"
+        "${selected_host}" "${image_id}" "${round_dir}/selected.json" "${round_dir}/selected.json" "${parameter_evidence}"
     container_name="$(jq -r '.[0].Name | ltrimstr("/")' "${round_dir}/selected.json")"
     run_bounded 20 docker run --rm \
         --label "io.nervix.chaos.run=${run_id}" \
@@ -232,7 +235,7 @@ pause_one_node() {
         "${round_dir}/immediately-before"
     inspect_target "${container_id}" "${round_dir}/before.json"
     "${script_dir}/verify-pause-evidence.sh" before "${run_id}" "${project_name}" \
-        "${selected_host}" "${image_id}" "${round_dir}/selected.json" "${round_dir}/before.json"
+        "${selected_host}" "${image_id}" "${round_dir}/selected.json" "${round_dir}/before.json" "${parameter_evidence}"
     [[ "$(owned_service_container "${selected_host}")" == "${container_id}" ]] \
         || pause_fail injection 'selected container changed before pause'
     local node_container_ids=()
@@ -275,7 +278,7 @@ pause_one_node() {
         || pause_fail injection 'Pumba never paused the selected node'
     inspect_target "${container_id}" "${round_dir}/paused.json"
     "${script_dir}/verify-pause-evidence.sh" paused "${run_id}" "${project_name}" \
-        "${selected_host}" "${image_id}" "${round_dir}/before.json" "${round_dir}/paused.json"
+        "${selected_host}" "${image_id}" "${round_dir}/before.json" "${round_dir}/paused.json" "${parameter_evidence}"
     local observer_id
     observer_id="$(owned_service_container observer)" || return 1
     local source_during=null output_during=null
@@ -353,7 +356,7 @@ pause_one_node() {
     fi
     "${script_dir}/verify-pause-evidence.sh" resumed "${run_id}" "${project_name}" \
         "${selected_host}" "${image_id}" "${round_dir}/before.json" \
-        "${round_dir}/resumed.json" "${round_dir}/pause-events.ndjson" \
+        "${round_dir}/resumed.json" "${parameter_evidence}" "${round_dir}/pause-events.ndjson" \
         "${min_ms}" "${max_ms}" "${round_dir}/duration.json" \
         || pause_fail injection 'actual Docker pause interval missed the declared fault window'
     pause_target_id=""
@@ -433,7 +436,7 @@ pause_one_node() {
         || pause_fail product 'a non-target node changed process incarnation'
     inspect_target "${container_id}" "${round_dir}/final.json"
     "${script_dir}/verify-pause-evidence.sh" before "${run_id}" "${project_name}" \
-        "${selected_host}" "${image_id}" "${round_dir}/before.json" "${round_dir}/final.json"
+        "${selected_host}" "${image_id}" "${round_dir}/before.json" "${round_dir}/final.json" "${parameter_evidence}"
     for host in "${node_hosts[@]}"; do
         capture_metrics "${host}"
         cp "${artifact_dir}/public/metrics-${host}.txt" "${round_dir}/metrics-${host}.txt"

@@ -943,6 +943,9 @@ cli_command() {
     run_cli "" "${command_text}"
 }
 
+# shellcheck source=cluster-parameters.sh
+source "${script_dir}/cluster-parameters.sh"
+
 domain_cli_command() {
     local command_text="$1"
     run_cli chaos_baseline "${command_text}"
@@ -2179,9 +2182,11 @@ compose config --quiet
 if [[ "${scenario}" == mixed-instability ]]; then
     # The node settings and load interval Compose renders are part of the experiment, so a replay
     # deploys them again and refuses to start when its rendering differs.
-    deployment="$(compose config --format json | jq -c '
+    deployment="$(compose config --format json | jq -c \
+        --argjson parameters "$(requested_cluster_parameters)" '
         {nodes: (.services["nervix-1"].environment
-                 | with_entries(select(.key | test("^NERVIX_(RAFT_|NODE_UNAVAILABILITY_TIMEOUT$|REPLICA_COUNT$|STATE_SNAPSHOT_INTERVAL$)")))),
+                 | with_entries(select(.key | startswith("NERVIX_RAFT_")))),
+         parameters: $parameters,
          load_interval_ms: (.services.load.environment.CHAOS_LOAD_INTERVAL_MS | tonumber)}')"
     if [[ -n "${replay_dir}" ]]; then
         jq -e --argjson rendered "${deployment}" '.mixed.deployment == $rendered' \
@@ -2245,10 +2250,9 @@ if [[ "${node_count}" == "3" ]]; then
 fi
 wait_for "public cluster status for ${node_count} node(s)" 120 cluster_status_ready
 phase "committed cluster parameter installation"
-# shellcheck source=cluster-parameters.sh
-source "${script_dir}/cluster-parameters.sh"
-configure_cluster_parameters >"${artifact_dir}/public/cluster-parameters.txt" 2>&1
-wait_for "public status after cluster policy installation" 120 cluster_status_ready
+configure_cluster_parameters >"${artifact_dir}/public/cluster-parameter-change.txt" 2>&1
+wait_for "committed parameters installed on every node" 120 capture_cluster_parameters \
+    "${artifact_dir}/public/cluster-parameters" "${node_names[@]}"
 phase "startup status publication"
 # shellcheck source=startup-status.sh
 source "${script_dir}/startup-status.sh"

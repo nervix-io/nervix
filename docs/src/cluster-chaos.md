@@ -2844,8 +2844,19 @@ staging volume's samples.
 The baseline and fresh-restore Compose projects launch every node with local prerequisites and
 capabilities. After the cluster is ready, the controller applies its requested replica count,
 snapshot interval, node-unavailability timeout and command retry validity through one Plexus
-`ALTER CLUSTER SET` command, then retains `DESCRIBE CLUSTER` beside the mutation result. Graph
-installation follows that command's runtime barrier. Restarts and later joins retain the committed
-record and pass no parameter seeds. Stateful checkpoint observations use the snapshot interval
-this startup command installed, rather than a per-node environment variable. [Node Settings](node-settings.md#committed-parameter-changes)
-owns the seed and parameter-change contract.
+`ALTER CLUSTER SET` command and retains its transcript. Before graph installation, the controller
+waits for a public `DESCRIBE CLUSTER` observation in which every expected node has installed the
+complete committed record at the same positive revision. It keeps the description and its checked
+projection as `public/cluster-parameters.txt` and `public/cluster-parameters.json`; the fresh cluster
+has its own capture. The projection preserves revision identities as decimal strings and retains
+every parameter value, including compound duration text. An incomplete, repeated or inconsistent
+publication fails the observation.
+
+Each pause round captures that policy before selecting its fault target. The pause verifier checks
+the selected node's installed unavailability timeout against the experiment and checks its local
+heartbeat in the Docker inspection. Domain-time and whole-cluster restart reports capture the
+installed policy after recovery. A mixed run records requested cluster parameters separately from
+node-local Raft prerequisites in its replay deployment. Restarts and later joins retain the
+committed record and pass no parameter seeds. Stateful checkpoint observations use the installed
+snapshot interval. [Node Settings](node-settings.md#committed-parameter-changes) owns the seed and
+parameter-change contract.

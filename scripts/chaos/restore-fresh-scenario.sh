@@ -124,7 +124,12 @@ fresh_start_cluster() {
         || fresh_fail product 'the fresh cluster never formed with its three node names'
     local original_cli_host="${cli_host}" policy_status=0
     cli_host="${fresh_hosts[0]}"
-    configure_cluster_parameters >"${case_dir}/fresh-cluster-parameters.txt" 2>&1 || policy_status=$?
+    configure_cluster_parameters >"${case_dir}/fresh-cluster-parameter-change.txt" 2>&1 || policy_status=$?
+    if ((policy_status == 0)); then
+        wait_for 'fresh cluster parameters installed on every node' "${fresh_startup_bound}" \
+            capture_cluster_parameters "${case_dir}/fresh-cluster-parameters" "${fresh_nodes[@]}" \
+            || policy_status=$?
+    fi
     cli_host="${original_cli_host}"
     ((policy_status == 0)) || fresh_fail product 'the fresh cluster refused its requested policy'
 }
