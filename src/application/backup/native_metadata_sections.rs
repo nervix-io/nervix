@@ -40,7 +40,7 @@ use thiserror::Error;
 
 use super::{
     CaptureSectionKey, CapturedSection,
-    interconnect::{CaptureDomainStateRequest, failed},
+    interconnect::{CaptureDomainStateRequest, failure_context},
     state_sections::archived_node,
 };
 use crate::{
@@ -107,8 +107,14 @@ impl NativeSection {
 }
 
 /// The failure a capture coordinator reads, rendering every context of `error`.
-fn refusal<C>(domain: &DomainName, error: &Report<C>) -> RemoteOperationFailure {
-    failed(domain, &format!("{error:#}"))
+fn refusal<C: Send + Sync + 'static>(
+    domain: &DomainName,
+    error: Report<C>,
+) -> Report<RemoteOperationFailure> {
+    error.change_context(failure_context(
+        domain,
+        "native state section operation failed",
+    ))
 }
 
 impl SessionServiceImpl {
@@ -119,7 +125,7 @@ impl SessionServiceImpl {
         captured: Vec<CapturedNativeMetadata>,
         schedule: Option<&DomainSchedule>,
         request: &CaptureDomainStateRequest,
-    ) -> Result<Vec<CapturedSection>, RemoteOperationFailure> {
+    ) -> Result<Vec<CapturedSection>, Report<RemoteOperationFailure>> {
         let local_node = self.inner.consensus.local_node_id();
         let mut staged = Vec::new();
         for captured in captured {
@@ -167,26 +173,26 @@ impl SessionServiceImpl {
         &self,
         section: NativeSection,
         domain: &DomainName,
-    ) -> Result<StagedArtifact, RemoteOperationFailure> {
+    ) -> Result<StagedArtifact, Report<RemoteOperationFailure>> {
         let executor = self.inner.runtime.executor().clone();
         let conversion_bytes = section
             .captured
             .conversion_bytes()
-            .map_err(|error| refusal(domain, &error))?;
+            .map_err(|error| refusal(domain, error))?;
         let conversion = executor
             .reserve(MemoryClass::RestoreMetadata, conversion_bytes)
             .await
-            .map_err(|error| refusal(domain, &error))?;
+            .map_err(|error| refusal(domain, error))?;
         let working = executor
             .reserve(MemoryClass::Bulk, SECTION_WRITER_BYTES)
             .await
-            .map_err(|error| refusal(domain, &error))?;
+            .map_err(|error| refusal(domain, error))?;
         let writer = self
             .inner
             .runtime
             .try_stage_artifact(MAX_RECORD_BYTES)
             .await
-            .map_err(|error| refusal(domain, &error))?;
+            .map_err(|error| refusal(domain, error))?;
         let interruption = self
             .inner
             .runtime
@@ -199,7 +205,7 @@ impl SessionServiceImpl {
                     .change_context(SnapshotStagingError::Encode)
             })
             .await
-            .map_err(|error| refusal(domain, &error))
+            .map_err(|error| refusal(domain, error))
     }
 }
 
@@ -247,6 +253,7 @@ impl NativeSection {
                         entity: entity(),
                         schema: *schema,
                         revision: offsets.revision,
+                        applied_start_generation: offsets.applied_start_generation(),
                         offsets: positions.map(KafkaPartitionOffset::from),
                     };
                     let scratch_bytes = record.scratch_bytes().change_context_lazy(|| {

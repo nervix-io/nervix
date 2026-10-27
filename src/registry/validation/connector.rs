@@ -23,10 +23,9 @@ use nervix_models::{
     CreateSignalingProtocol, DomainName, EmitterEntity, EndpointName, Expression, FieldName,
     HttpApplicationHeaders, HttpBodyMode, HttpEmitter, HttpHeaderName, HttpHeaderValue, HttpMethod,
     HttpOrigin, HttpRequestEmitter, IngestTimestampSource, IngestorInput, LiteralHeaderWrite,
-    Model, ModelIndex, ModelName, OtelAggregationTemporality, OtelEmitter, OtelMappings,
-    OtelMetricKind, OtelMetricsEmitter, ParseAsType, ProcessorOutput, RelayName, RouteConstruction,
-    SchemaField, SchemaName, SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsQueueEmitter,
-    VhostName, parse_duration_text,
+    Model, ModelIndex, ModelName, OtelEmitter, OtelMappings, OtelMetricKind, OtelMetricsEmitter,
+    ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName,
+    SignalingWireFormat, SqsEmitter, SqsFifoGroup, SqsQueueEmitter, VhostName, parse_duration_text,
 };
 use nervix_primitives::sync::StdArc;
 use nervix_vm::{
@@ -555,45 +554,13 @@ fn validate_otel_mapping_contract(
     identifier: &ModelName,
     connector: &OtelEmitter,
 ) -> error_stack::Result<(), RegistryError> {
-    /// The `VALUES` contract one OTEL signal imposes: what it may name, what it must name, and
-    /// whether delta temporality adds `start_time` to the required keys.
-    struct SignalContract {
-        signal: OtelMappingSignal,
-        required: &'static [&'static str],
-        delta: bool,
-    }
-
-    let SignalContract {
-        signal,
-        required,
-        delta,
-    } = match connector {
-        OtelEmitter::Logs(_) => SignalContract {
-            signal: OtelMappingSignal::Logs,
-            required: &["time", "body"],
-            delta: false,
-        },
-        OtelEmitter::Traces(_) => SignalContract {
-            signal: OtelMappingSignal::Traces,
-            required: &["trace_id", "span_id", "name", "start_time", "end_time"],
-            delta: false,
-        },
+    let signal = match connector {
+        OtelEmitter::Logs(_) => OtelMappingSignal::Logs,
+        OtelEmitter::Traces(_) => OtelMappingSignal::Traces,
         OtelEmitter::Metrics(OtelMetricsEmitter { metric, .. }) => match metric.kind {
-            OtelMetricKind::Gauge => SignalContract {
-                signal: OtelMappingSignal::MetricGauge,
-                required: &["time", "value"],
-                delta: false,
-            },
-            OtelMetricKind::Sum { temporality, .. } => SignalContract {
-                signal: OtelMappingSignal::MetricSum,
-                required: &["time", "value"],
-                delta: temporality == OtelAggregationTemporality::Delta,
-            },
-            OtelMetricKind::Histogram { temporality } => SignalContract {
-                signal: OtelMappingSignal::MetricHistogram,
-                required: &["time", "count", "bucket_counts", "explicit_bounds"],
-                delta: temporality == OtelAggregationTemporality::Delta,
-            },
+            OtelMetricKind::Gauge => OtelMappingSignal::MetricGauge,
+            OtelMetricKind::Sum { .. } => OtelMappingSignal::MetricSum,
+            OtelMetricKind::Histogram { .. } => OtelMappingSignal::MetricHistogram,
         },
     };
 
@@ -631,16 +598,22 @@ fn validate_otel_mapping_contract(
             }));
         }
     }
-    for key in required {
-        if !value_keys.contains(key) {
-            return Err(invalid(OtelMappingIssue::MissingValue { signal, key }));
+    for field in connector.value_fields() {
+        if !field.presence.is_required(connector.is_delta()) || value_keys.contains(field.key) {
+            continue;
         }
-    }
-    if delta && !value_keys.contains("start_time") {
-        return Err(invalid(OtelMappingIssue::MissingDeltaValue {
-            signal,
-            key: "start_time",
-        }));
+        let issue = match field.presence {
+            nervix_models::OtelValuePresence::Delta => OtelMappingIssue::MissingDeltaValue {
+                signal,
+                key: field.key,
+            },
+            nervix_models::OtelValuePresence::Required
+            | nervix_models::OtelValuePresence::Optional => OtelMappingIssue::MissingValue {
+                signal,
+                key: field.key,
+            },
+        };
+        return Err(invalid(issue));
     }
 
     for (section, mappings) in [
@@ -921,8 +894,13 @@ pub(in crate::registry) fn validate_http_emitter_client(
     };
 
     let endpoint = entry("endpoint").ok_or_else(|| invalid("HTTP client requires endpoint"))?;
-    let origin = HttpOrigin::parse(endpoint)
-        .map_err(|_| invalid("HTTP client endpoint must be an http or https origin"))?;
+    let origin = HttpOrigin::parse(endpoint).map_err(|cause| {
+        cause.change_context(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: "HTTP client endpoint must be an http or https origin".to_string(),
+        })
+    })?;
 
     let kind = <nervix_models::HttpRequestEmitter as nervix_models::EmitterEntityModel>::KIND;
     let timeout = entry("timeout_ms")
@@ -981,14 +959,23 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
                 ));
             }
         };
-        HttpMethod::parse(value, body)
-            .map_err(|error| invalid(format!("HTTP publish method {}", error.current_context())))?;
+        HttpMethod::parse(value, body).map_err(|cause| {
+            cause.change_context(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "HTTP publish method is invalid".to_string(),
+            })
+        })?;
     }
 
     if let Expression::Literal(nervix_models::Literal::String(value)) = path {
-        origin
-            .target(value)
-            .map_err(|_| invalid("HTTP publish path is invalid".to_string()))?;
+        origin.target(value).map_err(|cause| {
+            cause.change_context(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: "HTTP publish path is invalid".to_string(),
+            })
+        })?;
     }
 
     let mut known_headers = Vec::new();
@@ -1001,20 +988,26 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
             continue;
         };
         let name = if let Expression::Literal(nervix_models::Literal::String(name)) = name {
-            Some(HttpHeaderName::parse(name).map_err(|_| {
-                invalid(format!(
-                    "HTTP invoke #{invocation_index} header name is invalid or reserved"
-                ))
+            Some(HttpHeaderName::parse(name).map_err(|cause| {
+                cause.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "HTTP invoke #{invocation_index} header name is invalid or reserved"
+                    ),
+                })
             })?)
         } else {
             all_headers_known = false;
             None
         };
         let value = if let Expression::Literal(nervix_models::Literal::String(value)) = value {
-            Some(HttpHeaderValue::parse(value).map_err(|_| {
-                invalid(format!(
-                    "HTTP invoke #{invocation_index} header value is invalid"
-                ))
+            Some(HttpHeaderValue::parse(value).map_err(|cause| {
+                cause.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!("HTTP invoke #{invocation_index} header value is invalid"),
+                })
             })?)
         } else {
             all_headers_known = false;
@@ -1046,11 +1039,15 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
         let mut headers = HttpApplicationHeaders::default();
         let final_invocation = known_headers.last().map(|header| header.invocation);
         for known in known_headers {
-            headers.insert(known.name, known.value).map_err(|_| {
-                invalid(format!(
-                    "HTTP invoke #{} application headers exceed the count or 32 KiB limit",
-                    known.invocation
-                ))
+            headers.insert(known.name, known.value).map_err(|cause| {
+                cause.change_context(RegistryError::InvalidModel {
+                    domain: domain.as_str().to_string(),
+                    identifier: identifier.as_str().to_string(),
+                    reason: format!(
+                        "HTTP invoke #{} application headers exceed the count or 32 KiB limit",
+                        known.invocation
+                    ),
+                })
             })?;
         }
         if headers.validate_total().is_err() {

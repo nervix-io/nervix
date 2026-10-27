@@ -266,8 +266,8 @@ impl ParsedBlock {
     }
 
     fn read_content_length(value: &[u8], length: &mut Option<u64>) -> ResponseHeadResult<()> {
-        let text =
-            std::str::from_utf8(value).map_err(|_| Report::new(ResponseHeadError::Malformed))?;
+        let text = std::str::from_utf8(value)
+            .map_err(|cause| Report::new(cause).change_context(ResponseHeadError::Malformed))?;
         for item in text.split(',') {
             let item = item.trim_matches([' ', '\t']);
             if item.is_empty() || !item.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -275,7 +275,7 @@ impl ParsedBlock {
             }
             let parsed = item
                 .parse::<u64>()
-                .map_err(|_| Report::new(ResponseHeadError::Malformed))?;
+                .map_err(|cause| Report::new(cause).change_context(ResponseHeadError::Malformed))?;
             if let Some(existing) = length
                 && *existing != parsed
             {
@@ -290,8 +290,8 @@ impl ParsedBlock {
         value: &'a [u8],
         last: &mut Option<&'a str>,
     ) -> ResponseHeadResult<()> {
-        let text =
-            std::str::from_utf8(value).map_err(|_| Report::new(ResponseHeadError::Malformed))?;
+        let text = std::str::from_utf8(value)
+            .map_err(|cause| Report::new(cause).change_context(ResponseHeadError::Malformed))?;
         for coding in text.split(',') {
             let coding = coding.trim_matches([' ', '\t']);
             if coding.is_empty()

@@ -176,7 +176,7 @@ Feature: NATS ingestion
     When the controlled NATS endpoint goes down
     Then within "30s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
       """
-      transient error: failed to connect NATS client
+      transient error: expected INFO, got nothing
       """
     And within "60s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
       """
@@ -189,7 +189,7 @@ Feature: NATS ingestion
       """
     And within "30s" DESCRIBE INGESTOR "nats_notifications" on the leader node contains
       """
-      transient error: failed to connect NATS client
+      transient error: expected INFO, got nothing
       """
     When NATS message is published to subject "notifications_lost_{{test_id}}"
       """

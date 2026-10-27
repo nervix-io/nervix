@@ -148,8 +148,8 @@ impl WorkerPool {
         T: Send + 'static,
     {
         let RunningJob { handle, obligation } = self.start(admission, reservation, job).await?;
-        let value = handle.await.map_err(|_| {
-            Report::new(ExecutionError::JobPanicked {
+        let value = handle.await.map_err(|cause| {
+            Report::new(cause).change_context(ExecutionError::JobPanicked {
                 class: self.class.as_str(),
             })
         })?;

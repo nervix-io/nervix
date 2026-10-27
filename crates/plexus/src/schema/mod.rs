@@ -92,9 +92,10 @@ pub(crate) fn nervix_type<'src>()
         let array_len = select! { Token::NumberLiteral(raw) => raw }
             .labelled("array_length")
             .try_map(|raw, span| {
-                let len = raw.parse::<NonZeroU32>().map_err(|_| {
-                    Rich::custom(span, "array length must be a positive unsigned integer")
-                })?;
+                let len =
+                    crate::parser_support::integer_literal::<NonZeroU32>(&raw).map_err(|_| {
+                        Rich::custom(span, "array length must be a positive unsigned integer")
+                    })?;
                 // An array field becomes an Arrow fixed-size list, whose length is an i32.
                 if i32::try_from(len.get()).is_err() {
                     return Err(Rich::custom(

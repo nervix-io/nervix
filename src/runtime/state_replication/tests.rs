@@ -911,11 +911,14 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         .take()
         .expect("local Kafka state should grant authoritative access");
     let (_, kafka_payload) = kafka_originator
-        .replace_offsets(vec![KafkaOffsetPosition {
-            topic: "orders".to_string(),
-            partition: 3,
-            offset: 42,
-        }])
+        .apply_start(
+            1,
+            vec![KafkaOffsetPosition {
+                topic: "orders".to_string(),
+                partition: 3,
+                offset: 42,
+            }],
+        )
         .expect("Kafka offset should update");
     let deduplicator_placement = RuntimeStatePlacement {
         domain: domain.clone(),
@@ -1902,18 +1905,21 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
         .take()
         .expect("local Kafka state should grant authoritative access");
     let (offset_lsm, offset_payload) = originator
-        .replace_offsets(vec![
-            KafkaOffsetPosition {
-                topic: "notifications".to_string(),
-                partition: 0,
-                offset: 12,
-            },
-            KafkaOffsetPosition {
-                topic: "notifications".to_string(),
-                partition: 1,
-                offset: 18,
-            },
-        ])
+        .apply_start(
+            1,
+            vec![
+                KafkaOffsetPosition {
+                    topic: "notifications".to_string(),
+                    partition: 0,
+                    offset: 12,
+                },
+                KafkaOffsetPosition {
+                    topic: "notifications".to_string(),
+                    partition: 1,
+                    offset: 18,
+                },
+            ],
+        )
         .expect("offsets should update");
     store
         .persist_latest_snapshot(&placement, offset_lsm, &offset_payload)

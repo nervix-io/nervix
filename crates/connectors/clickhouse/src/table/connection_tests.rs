@@ -75,10 +75,16 @@ impl Fixture {
     }
 
     fn client(&self, addr: &str) -> ClickHouseClient {
-        let config = [ClientConfigEntry {
-            key: "addr".to_string(),
-            value: addr.to_string(),
-        }];
+        let config = [
+            ClientConfigEntry {
+                key: "addr".to_string(),
+                value: addr.to_string(),
+            },
+            ClientConfigEntry {
+                key: "timeout_ms".to_string(),
+                value: "5000".to_string(),
+            },
+        ];
         let (client, _) = ClickHouseTableEmitter::client_from_config(&config, self.dns())
             .expect("the client configuration is valid");
         client
@@ -116,9 +122,9 @@ fn stand_in(listener: TcpListener) -> JoinHandle<String> {
 async fn insert(client: &ClickHouseClient) -> error_stack::Result<(), ClickHouseWriteError> {
     ClickHouseTableEmitter::insert(
         client,
-        "events",
+        &ClickHouseTableName::parse("events").expect("valid table name"),
         Bytes::from_static(b"{\"id\":1}\n"),
-        Some(GENEROUS_TIMEOUT),
+        GENEROUS_TIMEOUT,
     )
     .await
 }
@@ -156,6 +162,37 @@ async fn inserts_reach_the_answer_that_accepts_and_keep_the_configured_authority
         "the request keeps the configured authority: {request}"
     );
     assert!(fixture.authority.questions_for(SERVER) > 0);
+}
+
+#[nervix_primitives::test]
+async fn insert_request_quotes_each_case_preserving_table_part() {
+    let fixture = Fixture::start().await;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("a loopback port is available");
+    let port = listener
+        .local_addr()
+        .expect("bound listener has an address")
+        .port();
+    let server = stand_in(listener);
+    let table =
+        ClickHouseTableName::parse("Sales.Order-Items").expect("qualified table name is valid");
+
+    ClickHouseTableEmitter::insert(
+        &fixture.client(&format!("http://127.0.0.1:{port}")),
+        &table,
+        Bytes::from_static(b"{\"id\":1}\n"),
+        GENEROUS_TIMEOUT,
+    )
+    .await
+    .expect("the insert succeeds");
+
+    let request = server.await.expect("the stand-in does not panic");
+    assert!(
+        request.contains("%60Sales%60.%60Order-Items%60")
+            || request.contains("`Sales`.`Order-Items`"),
+        "the insert SQL quotes and preserves both parts: {request}"
+    );
 }
 
 #[nervix_primitives::test]

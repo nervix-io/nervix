@@ -61,7 +61,8 @@ Feature: Emitter batching configuration
       CREATE CLICKHOUSE CLIENT clickhouse_main CONFIG {
         'addr' = 'http://127.0.0.1:8123',
         'user' = 'default',
-        'password' = 'nervix'
+        'password' = 'nervix',
+        'timeout_ms' = '5000'
       };
       CREATE POSTGRES CLIENT postgres_main POOL SIZE MIN 2 MAX 8 CONFIG {
         'addr' = 'postgresql://postgres:nervix@127.0.0.1:5432/postgres?sslmode=disable'
@@ -365,7 +366,8 @@ Feature: Emitter batching configuration
       CREATE RELAY outgoing SCHEMA event UNBRANCHED;
       CREATE OTEL CLIENT otel_main CONFIG {
         'endpoint' = 'http://127.0.0.1:4317',
-        'protocol' = 'grpc'
+        'protocol' = 'grpc',
+        'timeout_ms' = 5000
       };
       CREATE MONGODB CLIENT mongodb_main POOL SIZE MIN 1 MAX 2 CONFIG {
         'addr' = 'mongodb://127.0.0.1:27017',

@@ -456,6 +456,8 @@ scenarios = [
 capability = "MODE ACK"
 entity = "OTEL LOGS EMITTER"
 scenarios = [
+  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "Each OTEL signal requires its VALUES mappings on <nodes> nodes" },
+  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "OTEL refuses an unsupported publication mode on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL Export request that timed out is sent again byte for byte" },
 ]
 
@@ -463,6 +465,7 @@ scenarios = [
 capability = "RESOURCE"
 entity = "OTEL LOGS EMITTER"
 scenarios = [
+  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "OTEL refuses header writes and computed resources on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_export_retries.feature", scenario = "An OTEL Export request that timed out is sent again byte for byte" },
 ]
 
@@ -498,6 +501,7 @@ scenarios = [
 capability = "METRIC GAUGE"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
+  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "Each OTEL signal requires its VALUES mappings on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL gauge and histogram metric emitters export their points" },
 ]
 
@@ -505,6 +509,8 @@ scenarios = [
 capability = "METRIC HISTOGRAM"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
+  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "Each OTEL signal requires its VALUES mappings on <nodes> nodes" },
+  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "An OTEL histogram field requires its declared exact type on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL gauge and histogram metric emitters export their points" },
 ]
 
@@ -519,6 +525,7 @@ scenarios = [
 capability = "MODE ACK"
 entity = "OTEL METRICS EMITTER"
 scenarios = [
+  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "OTEL refuses an unsupported publication mode on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL metric emitters export over OTLP HTTP protobuf and gRPC" },
 ]
 
@@ -561,6 +568,8 @@ scenarios = [
 capability = "MODE ACK"
 entity = "OTEL TRACES EMITTER"
 scenarios = [
+  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "Each OTEL signal requires its VALUES mappings on <nodes> nodes" },
+  { feature = "tests/features/runtime/otel_declarations.feature", scenario = "OTEL refuses an unsupported publication mode on <nodes> nodes" },
   { feature = "tests/features/runtime/otel_emission.feature", scenario = "OTEL log and trace emitters export typed relay records over OTLP gRPC" },
 ]
 
@@ -977,6 +986,7 @@ capability = "MODE NO ACK"
 entity = "ZEROMQ PULL INGESTOR"
 scenarios = [
   { feature = "tests/features/runtime/zeromq_ingestion.feature", scenario = "ZeroMQ ingestor delivers JSON payloads to a subscribed relay" },
+  { feature = "tests/features/runtime/zeromq_client_declarations.feature", scenario = "Typed ZeroMQ bind and connect clients round-trip and deliver through PULL and PUSH" },
 ]
 
 [[capability]]
@@ -991,6 +1001,7 @@ capability = "MODE NO ACK"
 entity = "ZEROMQ PUSH EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/zeromq_emission.feature", scenario = "ZeroMQ emitter publishes JSON payloads from a relay" },
+  { feature = "tests/features/runtime/zeromq_client_declarations.feature", scenario = "Typed ZeroMQ bind and connect clients round-trip and deliver through PULL and PUSH" },
 ]
 
 [[capability]]

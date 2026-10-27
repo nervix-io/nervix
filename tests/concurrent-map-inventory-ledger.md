@@ -60,6 +60,11 @@ plan identifies those relays; channel-generation retirement and record delivery 
 handles, without another recurring map lookup. Publication or domain teardown keeps ownership of
 the registry entries. The read guard ends before waiting for dispatch quiescence.
 
+Kafka domain-offset resume clones its committed partition schedule from `RuntimeInner::executions`.
+A normal resume reads it once; accepting an explicit start adds a canonical reread, for at most two
+reads per resume attempt. Each guard ends before persistence, replica waits or native connector I/O.
+Consumer polling and offset commits retain their existing state handles.
+
 The frequency of a map is its hottest access:
 
 - **per record**: once per accepted record, row or delivered message
@@ -223,7 +228,7 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 | `RuntimeInner::replicated_branch_aggregated_states` | tasks and replication routes retain metric placement and progress; the registry handles registration and observation | retain: lifecycle registry |
 | `RuntimeInner::frozen_ownership_handoff_entities` | tasks bind one entity publication; watches register before reading it and handoff release publishes before waking | retain: lifecycle registry |
 | `RuntimeInner::domains` | task startup binds the lifecycle allocation; ingestion reads pause and clock from one publication, Kafka reads its generation, and generators use their retained clock | retain: lifecycle registry |
-| `RuntimeInner::executions` | schedule installation and observation bind clock, routing and state assignment publications; a forced-recovery request checks for its domain under the application sequence and waits on installation changes within its existing deadline; announcers retain their installed route and assignment slot | retain: lifecycle registry |
+| `RuntimeInner::executions` | schedule installation and observation bind clock, routing and state assignment publications; Kafka resume clones its committed partition schedule in at most two initialization phases; a forced-recovery request checks for its domain under the application sequence and waits on installation changes within its existing deadline; announcers retain their installed route and assignment slot | retain: lifecycle registry |
 | `DomainForceFlush::state` mutex | participant idle and claimed polls read their readiness hint; an available obligation acquires the coordinator for its authoritative generation claim | retain: bounded generation protocol |
 | Prometheus `MetricVec` children | client outcome children, quiesce payload counters/gauges, a source host's unfolding refusal, transport redelivery and oversized payload counters, and subscription drop counters resolve once with their owner | retain: lifecycle registry |
 | `RuntimeInner::endpoint_intake_routes` | one immutable publication; borrowed host/path resolution per HTTP request, retained route per WebSocket connection | completed publication: Typed Ratchet 12 |
@@ -269,7 +274,7 @@ the task in its next round, and `pending_state_replica_syncs` is deleted. See
 
 | Map | Readers and writers | Frequency | Handle, owner and generation | Guard and bound | Disposition |
 | --- | --- | --- | --- | --- | --- |
-| `RuntimeInner::executions` | schedule installation and observation; input retirement snapshots locally owned previous and replacement entrypoint plans before source stop; forced recovery waits for an absent execution under its operation deadline; tasks bind clock, routing and assignment handles | lifecycle, observer; one additional read per rebuild or entity swap | start version and published lifecycle generation; retirement keeps immutable typed plans | no record or batch guard for the repaired sites; the retirement snapshot releases its guard before network cleanup | retain: lifecycle registry |
+| `RuntimeInner::executions` | schedule installation and observation; Kafka resume clones its committed partition schedule; input retirement snapshots locally owned previous and replacement entrypoint plans before source stop; forced recovery waits for an absent execution under its operation deadline; tasks bind clock, routing and assignment handles | lifecycle, observer; at most two reads per Kafka resume attempt; one additional read per rebuild or entity swap | start version and published lifecycle generation; retirement keeps immutable typed plans | no record or batch guard for the repaired sites; Kafka schedule guards end before persistence or connector I/O; the retirement snapshot releases its guard before network cleanup | retain: lifecycle registry |
 | `RuntimeInner::domain_routings` (`ArcSwap` persistent table) | installed at successful publication, withdrawn at domain removal and cleared on shutdown; tasks retain the selected domain publisher; fresh intake and eviction read the immutable table | per fresh request or source intake group; one group per delivery for RabbitMQ ACK PARALLEL; per eviction | one stable routing publisher per installed domain | changed key copies a persistent path; reads acquire no discovery shard | retain: immutable publication |
 | `RuntimeInner::domains` | committed lifecycle installation by graph installation, authority-only fence installation by the domain clock owner on each committed domain change, and task binding | lifecycle, observer | pause, generation and start point publish with clock installation; each entry records the committed revision of its lifecycle so an older installation never replaces a newer one | no ingest-group, Kafka-poll or generator-record guard | retain: lifecycle registry |
 | `RuntimeInner::ingestors`, `ingestor_quiescence`, `client_ingestors` | start, stop and swap; intake-only and full alteration hold engagement/release; the first local intake close snapshots quiescence keys before shutdown ownership handoffs; drain polls and `DESCRIBE` | lifecycle, observer; one scan on the open-to-closed intake transition, repeated closes return before scanning | hosts and both overlapping holds retain the exact control; releasing one hold removes only its share | short; the intake-close scan copies keys before engaging their controls | retain: lifecycle registry |
@@ -372,6 +377,8 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::owner_relay_fanout_delays` | Armed by the slow busy relay scenario; a testing build's relay owner looks its domain up before every batch it fans out and waits the armed delay; absent from product builds | test-only relay delivery fault control |
 | `FaultInjectionState::wasm_reset_publication_authority_losses` | Armed for one scenario domain; looked up once before a generation publication and by explicit harness observations; its bounded remaining/delivered counts remain until that world's injector is dropped; absent from product builds | test-only WASM publication fault control |
 | `FaultInjectionState::failed_wasm_reset_publications` | Armed before ordinary graph publications; only reset generation publication reads it, and delivery is recorded after unpublished preparation is aborted; it stays enabled through uncertain outcome recording, then is explicitly cleared before exact replay; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped WASM publication failure in `fault_injection/wasm_reset_publication.rs` |
+| `FaultInjectionState::failed_restore_state_publications` | Armed before a restore for one restored domain; a testing build's state owner looks the domain up once after each durable publication of that domain's restored state and records the delivery there; it stays enabled through uncertain outcome recording and a resumed restore, then is explicitly cleared; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped restore publication failure in `fault_injection/restore_publication.rs` |
+| `FaultInjectionState::failed_restore_checkpoint_stagings` | Armed before a restore for one restored domain and one checkpoint kind; a testing build's state owner looks the domain and kind up once before it stages each WASM, materialized, deduplicator or window checkpoint of that domain's restored state, and records the delivery there; it stays enabled through uncertain outcome recording and a resumed restore, then is explicitly cleared; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped restore checkpoint staging failure in `fault_injection/restore_staging.rs` |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
 
 A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in
@@ -518,11 +525,14 @@ its prepared state. They do not claim an end-to-end ingestion throughput improve
 
 ## Restore generation installation
 
-The restore failure-control map is `failed_restore_state_installations`, keyed by domain and
-holding a typed guest-staging, materialized-staging or durable-publication failure. It is reached
-once at the corresponding guest or materialized staging boundary and once after durable generation publication, as test-only lifecycle control. It is not
-reached from record or acknowledgement execution. The receiver upload map retains its existing
-per-transfer lifetime and cadence; finalization moves the sealed file into the admitted storage job
+The restore failure-control maps are `failed_restore_checkpoint_stagings`, keyed by domain and
+checkpoint kind and holding a guest, materialized or branch-state staging failure, and
+`failed_restore_state_publications`, keyed by domain and holding a durable-publication failure.
+Each failure stays armed until cleared. The first is reached once before each guest,
+materialized, deduplicator or window checkpoint is staged and the second once after each durable
+generation publication, as test-only lifecycle control. Neither is reached from record or
+acknowledgement execution. The receiver upload map retains its
+existing per-transfer lifetime and cadence; finalization moves the sealed file into the admitted storage job
 and keeps its disk-quota owner there. Successful generation publication clears runtime state maps
 under the same applied authority guard after durable pointer publication and bounded storage
 cleanup. Checkpoint reads and writes add no concurrent map lookup.

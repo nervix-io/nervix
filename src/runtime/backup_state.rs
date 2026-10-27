@@ -249,6 +249,10 @@ pub(crate) struct NativeKafkaCheckpoint {
 }
 
 impl NativeKafkaCheckpoint {
+    pub(crate) fn applied_start_generation(&self) -> Option<u64> {
+        self.offsets.applied_start_generation()
+    }
+
     /// Validates the Kafka offset checkpoint of `entity` read into alignment, and orders its
     /// partitions.
     pub(in crate::runtime) fn validate(
@@ -527,22 +531,25 @@ impl Runtime {
     ) -> error_stack::Result<(), BackupStateCaptureError> {
         #[cfg(feature = "testing")]
         {
-            let faults = &self.inner.fault_injection;
-            let domain = &checkpoint.placement.domain;
-            let injected = match checkpoint.placement.state.kind() {
-                RuntimeStateKind::WasmProcessor => faults.restored_wasm_checkpoint_fails(domain),
-                RuntimeStateKind::MaterializedRelay => {
-                    faults.restored_materialized_checkpoint_fails(domain)
-                }
+            use crate::fault_injection::RestoreStagingKind;
+
+            let staging = match checkpoint.placement.state.kind() {
+                RuntimeStateKind::WasmProcessor => Some(RestoreStagingKind::Guest),
+                RuntimeStateKind::MaterializedRelay => Some(RestoreStagingKind::Materialized),
                 RuntimeStateKind::Deduplicator | RuntimeStateKind::WindowProcessor => {
-                    faults.restored_branch_state_checkpoint_fails(domain)
+                    Some(RestoreStagingKind::BranchState)
                 }
                 RuntimeStateKind::BranchAggregated
                 | RuntimeStateKind::Correlator
                 | RuntimeStateKind::KafkaOffset
-                | RuntimeStateKind::BranchLru => false,
+                | RuntimeStateKind::BranchLru => None,
             };
-            if injected {
+            if let Some(kind) = staging
+                && self
+                    .inner
+                    .fault_injection
+                    .restore_checkpoint_staging_fails(&checkpoint.placement.domain, kind)
+            {
                 return Err(Report::new(BackupStateCaptureError::Storage));
             }
         }
@@ -600,7 +607,7 @@ impl Runtime {
         if self
             .inner
             .fault_injection
-            .durable_restore_publication_fails(domain)
+            .restore_state_publication_fails(domain)
         {
             return Err(Report::new(BackupStateCaptureError::Storage));
         }
@@ -1082,11 +1089,12 @@ pub(crate) fn decode_backup_kafka_offsets(
 }
 
 pub(crate) fn write_restored_kafka_offsets(
+    applied_start_generation: Option<u64>,
     offsets: impl ExactSizeIterator<Item = (String, i32, i64)> + Clone,
     writer: &mut dyn Write,
     cancellation: &Cancellation,
 ) -> error_stack::Result<(), BackupStateCaptureError> {
-    write_offset_payload(offsets, writer, cancellation)
+    write_offset_payload(applied_start_generation, offsets, writer, cancellation)
         .change_context(BackupStateCaptureError::Storage)
 }
 

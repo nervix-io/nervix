@@ -243,6 +243,10 @@ fn bolero_streamed_kafka_preserves_every_partition_and_offset() {
                 .map(|((topic, partition), offset)| (topic, partition, offset))
                 .collect::<Vec<_>>();
             let input = offsets.clone();
+            let mut applied_start_generation = None;
+            if arbitrary.entropy().byte() % 2 == 0 {
+                applied_start_generation = Some(arbitrary.entropy().any_u64());
+            }
             let runtime = nervix_primitives::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -258,11 +262,23 @@ fn bolero_streamed_kafka_preserves_every_partition_and_offset() {
                     .run_cpu(CpuClass::Bulk, charge, move |_charge, cancellation| {
                         let mut encoded = Vec::new();
                         write_restored_kafka_offsets(
+                            applied_start_generation,
                             input.iter().cloned(),
                             &mut encoded,
                             cancellation,
                         )
                         .assured("the bounded current offset set streams");
+                        let entity = ModelName::parse("source").assured("literal name is valid");
+                        let checkpoint = NativeKafkaCheckpoint::validate(
+                            aligned(0, &encoded),
+                            &entity,
+                            cancellation,
+                        )
+                        .assured("the complete restored checkpoint validates");
+                        assert_eq!(
+                            checkpoint.applied_start_generation(),
+                            applied_start_generation
+                        );
                         encoded
                     })
                     .await
@@ -380,6 +396,10 @@ fn bolero_captured_kafka_offsets_stream_in_archive_order() {
                 });
             }
             let revision = arbitrary.entropy().any_u64();
+            let mut applied_start_generation = None;
+            if arbitrary.entropy().byte() % 2 == 0 {
+                applied_start_generation = Some(arbitrary.entropy().any_u64());
+            }
             let domain = DomainName::parse("orders").assured("literal name is valid");
             let entity = ModelName::parse("source").assured("literal name is valid");
             let schema = SchemaFingerprint::from_digest([7; 32]);
@@ -387,8 +407,13 @@ fn bolero_captured_kafka_offsets_stream_in_archive_order() {
             let record_entity = entity.clone();
             let captured = in_admitted_job(move |cancellation| {
                 let mut native = Vec::new();
-                write_restored_kafka_offsets(stored.into_iter(), &mut native, cancellation)
-                    .assured("the stored offsets stream natively");
+                write_restored_kafka_offsets(
+                    applied_start_generation,
+                    stored.into_iter(),
+                    &mut native,
+                    cancellation,
+                )
+                .assured("the stored offsets stream natively");
                 let decoded = decode_backup_kafka_offsets(&native)
                     .assured("the runtime decodes its own native offsets");
                 let offsets = NativeKafkaCheckpoint::validate(
@@ -403,6 +428,7 @@ fn bolero_captured_kafka_offsets_stream_in_archive_order() {
                         entity: record_entity,
                         schema,
                         revision: offsets.revision,
+                        applied_start_generation: offsets.applied_start_generation(),
                         offsets: positions.map(KafkaPartitionOffset::from),
                     };
                     let mut scratch = vec![
@@ -437,6 +463,7 @@ fn bolero_captured_kafka_offsets_stream_in_archive_order() {
                     entity: ModelName::parse("source").assured("literal name is valid"),
                     schema,
                     revision,
+                    applied_start_generation,
                     offsets: expected,
                 }
             );

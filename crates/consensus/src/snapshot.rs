@@ -26,6 +26,7 @@ use std::{
     io,
 };
 
+use error_stack::ResultExt as _;
 use meticulous::OptionExt as _;
 use nervix_primitives::sync::{Arc, blocking::Mutex};
 use rkyv::{Archive, Deserialize, Serialize};
@@ -96,7 +97,8 @@ impl TryFrom<SnapshotManifestRecord> for SnapshotManifest {
             last_applied_log_id: value.last_applied_log_id.map(LogIdRecord::into_log_id),
             last_membership: Arc::new(
                 StoredMembershipOf::try_from(value.last_membership)
-                    .map_err(|_| io::Error::other(StorageFailure::InvalidState))?,
+                    .change_context(StorageFailure::InvalidState)
+                    .map_err(crate::durable_batch::storage_report_io)?,
             ),
             section_count: value.section_count,
             total_bytes: value.total_bytes,

@@ -127,14 +127,15 @@ connects or sends to it.
 
 An emitter resolves the host in `addr` through the node's asynchronous resolver each time it
 opens a sender. Literal IPv4 and IPv6 addresses are used directly; hosts-file names and DNS
-answers follow the node's configured resolver and TTL policy. UDP tries answers in order, binding
-each socket to the answer's IP family, and sends to the first address whose setup succeeds. TCP
-and TLS try the answers in order, giving each an equal share of the time left in one connection
-budget, the client's `connect_timeout_ms`, 30 seconds when it is left out. DNS, address attempts and
-the TLS handshake all spend that same budget, and a connection that runs out of it is the emitter's
-transient status, naming the key and its bound. TLS verifies the original host from `addr`,
-whichever address accepted the connection. A new sender after a failure resolves again, so an
-expired answer can be replaced without restarting the node.
+answers follow the node's configured resolver and TTL policy. Opening a sender spends one budget,
+the client's `connect_timeout_ms`, 30 seconds when it is left out: name resolution first, then the
+answers in order, each with an equal share of the time left. UDP binds each socket to the answer's
+IP family and sends to the first address whose setup succeeds; TCP and TLS use the first address
+that accepts a connection, and TLS completes its handshake within that address's share. A name the
+resolver cannot answer is the emitter's transient status, with the lookup's failure, and address
+attempts that run out of the budget are its transient status naming the key and its bound. TLS
+verifies the original host from `addr`, whichever address accepted the connection. A new sender
+after a failure resolves again, so an expired answer can be replaced without restarting the node.
 
 | Config key | Required | Meaning |
 | --- | --- | --- |
@@ -142,7 +143,7 @@ expired answer can be replaced without restarting the node.
 | `addr` | Yes | `host:port`; bind address for ingestion and destination for emission |
 | `max_message_size` | No | Ingested-message byte cap; defaults to `131072` |
 | `framing` | No | TCP emitter framing: `octet-counting` by default or `non-transparent` |
-| `connect_timeout_ms` | No | For an emitter, positive whole milliseconds a new connection may take, name resolution, address attempts and TLS included; for a TLS listener, how long each accepted connection's TLS handshake may take. Defaults to 30 seconds |
+| `connect_timeout_ms` | No | For an emitter, positive whole milliseconds opening a new sender may take, name resolution, address attempts and TLS included; for a TLS listener, how long each accepted connection's TLS handshake may take. Defaults to 30 seconds |
 | `timeout_ms` | No | Emitter only: positive whole milliseconds writing and flushing one frame may take; unbounded when omitted |
 | `idle_timeout_ms` | No | TCP or TLS listener only: positive whole milliseconds an accepted connection may send nothing while the listener reads it before the listener closes it; unbounded when omitted |
 | `tls_cert_file` | Directional | TLS ingestor server certificate; optional emitter client certificate |
@@ -225,8 +226,10 @@ TO received_syslog
 ### UDP
 
 UDP follows RFC 5426. One datagram is one frame. A datagram larger than `max_message_size` is
-dropped and counted in `nervix_ingestor_oversized_payloads_total`, which `DESCRIBE INGESTOR`
-renders for the node that received it; the listener goes on reading the next datagram.
+dropped and counted in `nervix_ingestor_oversized_payloads_total` on the node that received it,
+which that node's `DESCRIBE INGESTOR` renders; the listener goes on reading the next datagram.
+Datagrams the listener has not read yet wait in the socket's kernel receive buffer, which drops
+what does not fit without anything counting it.
 
 ### TCP
 
@@ -237,15 +240,27 @@ framing for every frame:
 - any other frame is terminated by LF; a CR immediately before the LF is removed
 - both framing forms may be interleaved on one connection
 
-An octet count must be a positive decimal number with at most ten digits. A malformed or oversized
-octet-counted frame, or an oversized non-transparent frame, closes that connection because the
-stream cannot be resynchronized safely. Other connections and the listener continue unaffected.
-Per-connection frame memory is bounded by `max_message_size`, and completed frames enter a bounded
-intake queue.
+An octet count must be a positive decimal number with at most ten digits. Each connection holds at
+most `max_message_size` bytes, plus one octet count and its space, of what it has read but not yet
+queued, and hands every frame it completes to an intake queue of 64 frames that all of the
+listener's connections share. When the queue is full, a connection keeps its completed frame and
+reads nothing more until the queue has room, so TCP flow control holds its sender back and no
+frame is dropped.
 
 A frame may arrive split across any number of reads, including inside its octet count or between
 its CR and LF. The listener keeps the part it has and completes the frame from the following
 reads; the frame, and any framing failure, is the same as when one read carries it whole.
+
+Connections fail independently: whatever closes one leaves the listener and its other connections
+running. The frames a connection completed before it closed are still delivered, and the part of a
+frame it had sent is lost. A malformed or oversized octet-counted frame, or an
+oversized non-transparent frame, closes its connection because the stream cannot be
+resynchronized safely; nothing after it is read. Such a frame is not counted in
+`nervix_ingestor_oversized_payloads_total`, which for a Syslog listener counts UDP datagrams only.
+A read that fails, such as a reset, closes its connection, and so does a sender that closes its
+connection in the middle of a frame. A connection that fails is not the ingestor's transient error:
+the listener records the failure as a debug diagnostic that retains its cause without quoting the
+frame's payload.
 
 With `idle_timeout_ms`, a connection that sends nothing for that long while the listener waits to
 read from it is closed; the other connections and the listener continue. The wait restarts with
@@ -256,26 +271,67 @@ backpressure. Without the key, an idle connection stays open until its sender cl
 ### TLS
 
 TLS follows RFC 5425: the TCP listener behavior runs over a TLS session and frames use octet
-counting. A failed handshake closes only that connection, and so does a handshake that does not
+counting, so a frame that does not begin with an octet count is malformed and closes its
+connection. A failed handshake closes only that connection, and so does a handshake that does not
 complete within the client's `connect_timeout_ms`, 30 seconds when it is left out, so a client that
 opens a connection and never completes its handshake holds nothing past that bound. The
 client-authentication behavior is controlled by `tls_ca_file` as described above.
 
-### Quiesce and failures
+### Quiesce
 
-`SUSPEND` stops reading. UDP datagrams may accumulate in and overflow the kernel receive buffer;
-TCP and TLS apply transport backpressure and retain transport-buffered data for resume. `BUFFER`
-and `DROP` continue reading and apply the normal bounded local quiesce behavior.
+`SUSPEND` stops the listener taking frames, accepting connections and reading the connections it
+has. A UDP listener leaves arriving datagrams in the socket's kernel receive buffer, which drops
+what does not fit. A TCP or TLS listener keeps every frame it holds:
+
+- frames in the intake queue stay there;
+- a frame a connection has completed finishes its hand-off to the queue, or, when the queue is
+  full, waits in its connection until the queue has room after resume, rather than being dropped
+  when the suspension starts;
+- what a connection has read but not yet queued stays with it, and the connection reads nothing
+  more, so the kernel buffers fill and TCP flow control holds its sender back;
+- new connections wait in the operating system's accept queue.
+
+`idle_timeout_ms` does not run while the listener is not reading, so no connection is closed as
+idle because of a suspension. When the listener resumes, it delivers what it kept and goes on
+reading; each connection's frames arrive in the order the connection sent them.
+
+A suspended listener delivers what it kept only when it resumes itself, which it does when a hold
+ends without replacing it: a memory-pressure pause, or an alteration whose drain fails or whose
+hold expires.
+
+Whatever the mode, a change that commits under a hold starts a new listener in place of the old
+one: an alteration of the ingestor, or a `DOMAIN_PAUSE` change, which rebuilds the domain. The old
+listener then ends as it does on `STOP`, `DROP INGESTOR` or the node's shutdown: it closes its
+sockets and connections and discards what its queue and connections held and what the kernel
+buffered for them, so a sender whose connection closed has to connect again.
+
+`BUFFER` and `DROP` keep accepting and reading, and apply the normal bounded local quiesce behavior
+to what arrives. The frames `BUFFER` retained during an alteration's hold are held outside the
+listener, so they are delivered after the alteration commits; see
+[Quiesce Modes](ingestors.md#quiesce-modes).
+
+### Failures and recovery
 
 Syslog transport is at-most-once at intake. The listener sends no application acknowledgment, and
 datagrams dropped or stream data lost before intake are not recoverable.
 
-Bind and listener-level socket failures appear as that node's ingestor transient error and retry
-with the standard reconnect backoff. A failure on one node does not stop listeners on other nodes.
-Recovery clears the error and resets the backoff. A malformed message body is a codec decode
-failure and skips only that frame.
-For a malformed stream frame, the connection closes and its debug diagnostic retains the framing
-cause without quoting the frame's payload.
+A failure of the listener's own socket is that node's ingestor transient error, which
+`DESCRIBE INGESTOR` on that node shows with its reconnect backoff:
+
+- a bind that fails, when the listener starts or binds again, leaves it unbound until a later bind
+  succeeds;
+- a failed TCP or TLS accept closes only the listening socket. Established connections stay open:
+  their frames wait in the intake queue, and then in the connections, until the listener is bound
+  again, and are delivered then. New connections are refused in between;
+- a failed UDP receive closes the socket, losing the datagrams its kernel buffer held.
+
+The listener binds again on the host's reconnect cadence: 250 ms after the first failure, doubling
+after each further one up to 30 seconds. A successful bind alone neither clears the failure nor
+resets the delay; the next frame the listener delivers does. A failure on one node does not stop
+listeners on other nodes.
+
+A malformed message body is a codec decode failure and skips only that frame. A failed connection
+closes on its own, as [TCP](#tcp) describes.
 
 ## Emitter
 
@@ -312,10 +368,11 @@ The emitter uses octet-counted framing over one verified TLS connection. RFC 542
 non-transparent TLS framing. The same ten-digit count limit applies.
 
 For every transport, success means the local socket accepted and flushed the complete frame. No
-remote delivery acknowledgment exists. Connection establishment and write failures are
-infrastructure errors: the current batch is retained, the connection is rebuilt, and delivery is
-retried on the declared backoff. Records accepted before a later failure in the same batch may be
-delivered more than once.
+remote delivery acknowledgment exists. Because every frame is flushed before its publish returns,
+the sender holds nothing between publishes, so stopping the emitter leaves it nothing of its own to
+send. Connection establishment and write failures are infrastructure errors: the current batch is
+retained, the connection is rebuilt, and delivery is retried on the declared backoff. Records
+accepted before a later failure in the same batch may be delivered more than once.
 
 With `timeout_ms`, writing and flushing one frame that does not finish within that bound is a write
 failure: a server that stops reading fills the connection's buffers, and the write that waits on
@@ -330,10 +387,13 @@ connection work; the physical connection budget also bounds an attempt if no can
 ## Observability and limits
 
 Syslog ingestors and emitters use the standard `DESCRIBE INGESTOR` and `DESCRIBE EMITTER` runtime
-state, transient-error, reconnect-backoff, edge-metric, and emitter-metric surfaces. `SHOW CREATE`
-renders canonical codec, client, ingestor, and emitter declarations. Normal ALTER quiesce
-classification applies. Lifecycle transitions are info-level events; per-frame and per-connection
-details are debug or trace and do not include payload values.
+state, transient-error, reconnect-backoff, edge-metric, and emitter-metric surfaces. Every node
+runs its own listener, so `DESCRIBE INGESTOR` reports the listener of the node that answers it,
+with that node's transient error, reconnect backoff and `nervix_ingestor_oversized_payloads_total`.
+`SHOW CREATE` renders canonical codec, client, ingestor, and emitter declarations. Normal ALTER
+quiesce classification applies. Lifecycle transitions are info-level events; per-frame and
+per-connection details, including why a connection closed, are debug or trace and do not include
+payload values.
 
 | Limit | Value |
 | --- | --- |
@@ -341,7 +401,10 @@ details are debug or trace and do not include payload values.
 | UDP datagram intake | 65,535 bytes, further limited by `max_message_size`; a datagram above it is dropped and counted |
 | UDP payload emission | 65,507 bytes |
 | Octet-counting prefix | At most 10 digits |
-| Concurrent TCP/TLS connections | Unbounded count; bounded per-connection frame memory and bounded intake queue |
+| Concurrent TCP/TLS connections | Unbounded count; each holds at most `max_message_size` bytes, plus one octet count and its space, of what it has read but not yet queued |
+| TCP/TLS intake queue | 64 frames shared by a listener's connections; a full queue holds the connections back |
 | TLS handshake of an accepted connection | `connect_timeout_ms`, default 30 seconds |
 | Accepted connection sending nothing | `idle_timeout_ms`; unbounded when omitted |
+| Listener rebind after a socket failure | 250 ms after the first failure, doubling up to 30 seconds |
+| Opening an emitter's sender, name resolution and TLS included | `connect_timeout_ms`, default 30 seconds |
 | Emitter frame write | `timeout_ms`; unbounded when omitted |

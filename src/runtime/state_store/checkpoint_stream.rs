@@ -137,9 +137,9 @@ impl CheckpointStreamWriter {
                 key.extend_from_slice(&offset.to_be_bytes());
                 let mut batch = writer.db.batch();
                 batch.insert(&self.chunks, key, &buffer[..size]);
-                batch
-                    .commit()
-                    .map_err(|_| RuntimePersistenceError::WriteValue)?;
+                batch.commit().map_err(|cause| {
+                    Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+                })?;
                 offset = offset
                     .checked_add(u64::try_from(size).verified("bounded chunk fits"))
                     .ok_or(RuntimePersistenceError::InvalidCheckpointChunks)?;
@@ -168,9 +168,9 @@ impl CheckpointStreamWriter {
                 index_key(&placement_key, metadata.lsm),
                 placement_key,
             );
-            batch
-                .commit()
-                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+            batch.commit().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+            })?;
             writer.persist(PersistMode::SyncAll)
         })
     }

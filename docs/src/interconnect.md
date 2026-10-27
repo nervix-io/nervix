@@ -1579,6 +1579,8 @@ the owner's revision advanced. Its typed answer distinguishes an unchanged revis
 revision, and the shared remote-operation refusal classes. An unchanged checkpoint is neither
 encoded nor transferred. A newer checkpoint uses `sync_kafka_offsets` on Bulk with the Snapshot
 subquota and a thirty-second progress deadline, independently of the replica polling cadence.
+Its native checkpoint retains the optional applied-start generation beside every offset and topic
+schedule, so promotion does not reapply an explicit start.
 The owner retains the admitted offset topology and reads its conservative revision before the
 offset slots, encodes the current native checkpoint directly into a quota-owned staging file, and
 sends a forty-byte revision/digest header followed by chunks of at most 64 KiB. The declared
@@ -1992,6 +1994,11 @@ See [Shutdown And Recovery](./shutdown.md) for the complete phase contract, the 
 statuses, and what each ending preserves.
 
 ## Failure Ownership And Persistence
+
+Refreshing peer targets reports a failed installation at the recovery decision before continuing
+with the accepted targets. Backup capture and restore handlers retain local typed reports through
+section conversion and staging, then render their causes into the fixed `RemoteOperationFailure`
+reply. The wire class and its typed subject remain the caller's decision inputs.
 
 Transport failures identify name-resolution, setup, authentication, prerequisite-refusal,
 admission, encoding, decoding, flow-control, timeout, remote-response, and target-departure

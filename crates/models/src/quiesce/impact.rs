@@ -339,10 +339,16 @@ mod fingerprint_hex {
         let (pairs, _unpaired) = hex.as_bytes().as_chunks::<2>();
         let mut fingerprint = [0_u8; 32];
         for (byte, digits) in fingerprint.iter_mut().zip(pairs) {
-            let digits = std::str::from_utf8(digits.as_slice())
-                .map_err(|_| D::Error::custom("a fingerprint holds only hexadecimal digits"))?;
-            *byte = u8::from_str_radix(digits, 16)
-                .map_err(|_| D::Error::custom("a fingerprint holds only hexadecimal digits"))?;
+            let digits = std::str::from_utf8(digits.as_slice()).map_err(|cause| {
+                D::Error::custom(format!(
+                    "a fingerprint holds only hexadecimal digits: {cause}"
+                ))
+            })?;
+            *byte = u8::from_str_radix(digits, 16).map_err(|cause| {
+                D::Error::custom(format!(
+                    "a fingerprint holds only hexadecimal digits: {cause}"
+                ))
+            })?;
         }
         Ok(fingerprint)
     }

@@ -48,6 +48,14 @@ pub enum FailureKind {
 
 /// A failed call, as the host reads it through `nx_error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "the C ABI projects a failure into its fixed host-visible kind and message; \
+                  report conversions render their complete chain at this reporting boundary"
+    )
+)]
 pub struct Failure {
     kind: FailureKind,
     message: String,

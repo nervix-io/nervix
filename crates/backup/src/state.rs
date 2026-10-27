@@ -49,6 +49,8 @@ pub struct KafkaOffsetsRecord {
     pub entity: ModelName,
     pub schema: SchemaFingerprint,
     pub revision: u64,
+    /// The explicit domain start already applied by the source, if any.
+    pub applied_start_generation: Option<u64>,
     pub offsets: Vec<KafkaPartitionOffset>,
 }
 
@@ -116,7 +118,7 @@ impl ArchiveRecord for WasmStateDescriptor {
 
 impl ArchiveRecord for KafkaOffsetsRecord {
     const KIND: RecordKind = RecordKind::KafkaOffsets;
-    const VERSION: u16 = STATE_RECORD_VERSION;
+    const VERSION: u16 = 2;
 
     fn encode(&self) -> Result<Vec<u8>, Report<ArchiveWriteError>> {
         StreamedKafkaOffsets {
@@ -124,6 +126,7 @@ impl ArchiveRecord for KafkaOffsetsRecord {
             entity: self.entity.clone(),
             schema: self.schema,
             revision: self.revision,
+            applied_start_generation: self.applied_start_generation,
             offsets: self.offsets.iter().cloned(),
         }
         .encode()
@@ -147,6 +150,7 @@ impl ArchiveRecord for KafkaOffsetsRecord {
             entity: parse_entity(path, &wire.entity)?,
             schema: SchemaFingerprint::from_digest(wire.schema),
             revision: wire.revision,
+            applied_start_generation: wire.applied_start_generation,
             offsets: wire
                 .offsets
                 .into_iter()
@@ -207,11 +211,21 @@ impl ArchiveRecord for BranchLifecycleRecord {
 }
 
 fn parse_domain(path: &str, raw: &str) -> Result<DomainName, Report<ArchiveReadError>> {
-    DomainName::parse(raw).map_err(|_| invalid(path, "domain name"))
+    DomainName::parse(raw).map_err(|cause| {
+        cause.change_context(ArchiveReadError::InvalidValue {
+            path: path.to_string(),
+            field: "domain name",
+        })
+    })
 }
 
 fn parse_entity(path: &str, raw: &str) -> Result<ModelName, Report<ArchiveReadError>> {
-    ModelName::parse(raw).map_err(|_| invalid(path, "state entity name"))
+    ModelName::parse(raw).map_err(|cause| {
+        cause.change_context(ArchiveReadError::InvalidValue {
+            path: path.to_string(),
+            field: "state entity name",
+        })
+    })
 }
 
 pub(crate) fn validate_branch(
@@ -226,7 +240,12 @@ pub(crate) fn validate_branch(
     }
     let mut previous = None;
     for field in fields {
-        FieldName::parse(&field.name).map_err(|_| invalid(path, "branch field name"))?;
+        FieldName::parse(&field.name).map_err(|cause| {
+            cause.change_context(ArchiveReadError::InvalidValue {
+                path: path.to_string(),
+                field: "branch field name",
+            })
+        })?;
         if previous.is_some_and(|name: &str| name >= field.name.as_str()) {
             return Err(invalid(path, "branch field order"));
         }
@@ -400,6 +419,7 @@ mod tests {
             entity: entity(),
             schema: SchemaFingerprint::from_digest([3; 32]),
             revision: 19,
+            applied_start_generation: Some(0),
             offsets: vec![
                 KafkaPartitionOffset {
                     topic: "orders".to_string(),
@@ -446,6 +466,7 @@ mod tests {
             entity: entity(),
             schema: SchemaFingerprint::from_digest([3; 32]),
             revision: 1,
+            applied_start_generation: None,
             offsets: vec![
                 KafkaPartitionOffset {
                     topic: "orders".to_string(),

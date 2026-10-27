@@ -78,33 +78,38 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
         } else {
             None
         };
-        let start = match last_start {
-            nervix_models::DomainStartPoint::Resume => {
-                let state = self.state.current();
-                let missing_partition_timestamp = self
-                    .runtime
-                    .current_paced_domain_time(&self.domain)
-                    .map_err(|error| {
-                        Report::new(KafkaDomainOffsetError::Read)
-                            .attach_printable(error.to_string())
-                    })?;
-                let mut positions = Vec::new();
-                for partition in partitions {
-                    if let Some(offset) = state.read().next_offset(&self.topic, *partition) {
-                        positions.push(KafkaOffsetPosition {
-                            topic: self.topic.clone(),
-                            partition: *partition,
-                            offset,
-                        });
-                    }
-                }
-                KafkaDomainOffsetStart::Resume {
-                    positions,
-                    missing_partition_timestamp,
-                }
-            }
+        let state = self.state.current();
+        let missing_partition_timestamp = match last_start {
+            nervix_models::DomainStartPoint::Resume => self
+                .runtime
+                .current_paced_domain_time(&self.domain)
+                .map_err(|error| {
+                    Report::new(KafkaDomainOffsetError::Read).attach_printable(error.to_string())
+                })?,
             nervix_models::DomainStartPoint::At { timestamp, .. } => {
-                KafkaDomainOffsetStart::At(timestamp)
+                if state.read().applied_start_generation() != Some(generation) {
+                    return Ok(KafkaDomainOffsetInitialization {
+                        generation,
+                        start: KafkaDomainOffsetStart::At(timestamp),
+                        schedule,
+                    });
+                }
+                // A failed first initialization may have published the start in memory before
+                // its persistence or replica wait failed. Retry that durability boundary before
+                // any instance resumes, including when another instance applied the start.
+                let checkpoint = state
+                    .read()
+                    .latest_snapshot()
+                    .change_context(KafkaDomainOffsetError::Read)?;
+                self.runtime
+                    .persist_kafka_offset_snapshot(
+                        &state.persistence(),
+                        checkpoint.lsm,
+                        &checkpoint.payload,
+                    )
+                    .await
+                    .change_context(KafkaDomainOffsetError::Read)?;
+                Some(timestamp)
             }
             nervix_models::DomainStartPoint::Now { .. } => {
                 return Err(
@@ -115,17 +120,39 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
                 );
             }
         };
+        let mut positions = Vec::new();
+        for partition in partitions {
+            if let Some(offset) = state.read().next_offset(&self.topic, *partition) {
+                positions.push(KafkaOffsetPosition {
+                    topic: self.topic.clone(),
+                    partition: *partition,
+                    offset,
+                });
+            }
+        }
         Ok(KafkaDomainOffsetInitialization {
             generation,
-            start,
+            start: KafkaDomainOffsetStart::Resume {
+                positions,
+                missing_partition_timestamp,
+            },
             schedule,
         })
     }
 
-    async fn reset(&self, positions: Vec<KafkaOffsetPosition>) -> KafkaDomainOffsetResult<()> {
+    async fn reset(
+        &self,
+        generation: u64,
+        positions: Vec<KafkaOffsetPosition>,
+    ) -> KafkaDomainOffsetResult<()> {
+        if self.lifecycle.generation() != Some(generation) {
+            return Err(Report::new(KafkaDomainOffsetError::Reset).attach_printable(
+                "the domain start generation changed before Kafka initialization",
+            ));
+        }
         let state = self.state.current();
         self.runtime
-            .reset_domain_kafka_offsets(&state, positions)
+            .reset_domain_kafka_offsets(&state, generation, positions)
             .await
             .change_context(KafkaDomainOffsetError::Reset)
     }

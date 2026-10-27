@@ -707,10 +707,12 @@ Feature: Configuration backup into a public archive
     And the CLI output contains "branch_lifecycle=metric_source"
     And the CLI output contains "branch_lifecycle=filter_even_rows"
     Given the active domain is saved as placeholder "source_domain"
-    And restoring domain "{{domain}}_incomplete" fails before installing its first WASM checkpoint
+    And WASM checkpoint stagings of restoring domain "{{domain}}_incomplete" fail
     When the CLI restores "domain {{domain}} --as {{domain}}_incomplete" from "stateful.nvxb" on node "{{leader}}" reporting JSON
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
+    And restoring domain "{{domain}}_incomplete" has WASM checkpoint staging failure state delivered
     And abandoned restore storage is reclaimed across every node
+    When the WASM checkpoint staging failure of restoring domain "{{domain}}_incomplete" is cleared
     Given the active domain is "{{domain}}_incomplete"
     When these Plexus commands fail with "restore state installation is incomplete"
       """

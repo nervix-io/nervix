@@ -23,7 +23,7 @@ fn relay_capacity<'src>()
     choice((select! { Token::NumberLiteral(v) => v }, word_raw()))
         .labelled("relay_capacity")
         .try_map(|raw: String, span| {
-            raw.parse::<NonZeroUsize>().map_err(|_| {
+            crate::parser_support::integer_literal::<NonZeroUsize>(&raw).map_err(|_| {
                 Rich::custom(
                     span,
                     format!("invalid relay capacity '{raw}'; expected a positive integer"),

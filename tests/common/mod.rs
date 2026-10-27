@@ -1,3 +1,4 @@
+pub(crate) mod backup_phase;
 pub(crate) mod broker_observer;
 pub(crate) mod cli_terminal;
 pub(crate) mod client_conformance;
@@ -8,6 +9,7 @@ pub(crate) mod cluster_teardown;
 pub(crate) mod command_recovery;
 pub(crate) mod console_connections;
 pub(crate) mod dependencies;
+pub(crate) mod generator_cadence;
 pub(crate) mod grpc_receiver;
 pub(crate) mod http_receiver;
 pub(crate) mod iceberg_catalog_gate;

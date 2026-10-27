@@ -80,7 +80,7 @@ impl EndpointDraft {
 
     pub(super) fn build(&self) -> error_stack::Result<CreateEndpoint, EndpointDraftError> {
         let name = EndpointName::parse(self.name.trim())
-            .map_err(|_| Report::new(EndpointDraftError::Name))?;
+            .map_err(|cause| cause.change_context(EndpointDraftError::Name))?;
         let on_vhost = match &self.vhost {
             None => return Err(Report::new(EndpointDraftError::VhostRequired)),
             Some(selected) => selected

@@ -139,7 +139,7 @@ impl RelayDraft {
 
     pub(super) fn build(&self) -> error_stack::Result<CreateRelay, RelayDraftError> {
         let name = RelayName::parse(self.name.trim())
-            .map_err(|_| Report::new(RelayDraftError::RelayName))?;
+            .map_err(|cause| cause.change_context(RelayDraftError::RelayName))?;
         let Some(schema) = &self.schema else {
             return Err(Report::new(RelayDraftError::SchemaRequired));
         };
@@ -165,7 +165,7 @@ impl RelayDraft {
             .capacity
             .trim()
             .parse::<NonZeroUsize>()
-            .map_err(|_| Report::new(RelayDraftError::Capacity))?;
+            .map_err(|cause| Report::new(cause).change_context(RelayDraftError::Capacity))?;
         Ok(CreateRelay {
             name,
             schema: schema.clone(),
