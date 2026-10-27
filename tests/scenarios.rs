@@ -5321,6 +5321,12 @@ fn given_an_plexus_file_containing(world: &mut ScenarioWorld, name: String, #[st
     world.formatter_original_files.insert(name, contents);
 }
 
+#[given(regex = r#"^a Plexus file "([^"]+)" with invalid UTF-8$"#)]
+fn given_a_plexus_file_with_invalid_utf8(world: &mut ScenarioWorld, name: String) {
+    let root = formatter_root(world);
+    std::fs::write(root.join(name), [0xff]).expect("Plexus input bytes must be written");
+}
+
 /// Reads the `\r`, `\n`, `\t` and `\\` escapes a step spells where the characters themselves
 /// cannot be written in a feature file, such as a carriage return.
 fn unescaped_step_text(text: &str) -> String {
@@ -16262,6 +16268,38 @@ async fn when_incomplete_resource_upload_is_sent(
     world.last_command_output = Some(result.message);
 }
 
+#[when(expr = "a malformed archive upload of resource {string} is sent to the leader node")]
+async fn when_malformed_resource_upload_is_sent(world: &mut ScenarioWorld, resource: String) {
+    let resource = expand_placeholders(world, &resource);
+    let leader = current_leader_node(world).await;
+    // The declared byte count is correct; the archive itself has a truncated first tar block.
+    let upload = TestUpload {
+        domain: &world.domain,
+        resource: &resource,
+        identity: "malformed-archive",
+        parts: vec![
+            TestUploadPart::Start {
+                declared_bytes: NonZeroU64::MIN,
+            },
+            TestUploadPart::Chunk(vec![0]),
+        ],
+    };
+    let result = world
+        .cluster()
+        .send_shaped_resource_upload(&leader, upload)
+        .await
+        .expect("the server answers the malformed archive upload");
+    assert!(
+        matches!(
+            result.disposition,
+            nervix_client_wire::UploadDisposition::Failed { .. }
+        ),
+        "a malformed archive cannot be installed: {result:?}"
+    );
+    world.last_command_error = Some(result.message.clone());
+    world.last_command_output = Some(result.message);
+}
+
 #[when(
     expr = "client {string} upload of resource {string} from {string} with identity {string} \
             fails with {string}"
@@ -17893,6 +17931,22 @@ async fn when_selector_is_clicked_by_script(world: &mut ScenarioWorld, selector:
         .evaluate::<(), ()>("element => element.click()", None::<()>)
         .await
         .expect("selector must be script-clickable");
+}
+
+#[when(expr = "the browser refuses new upload forms with {string}")]
+async fn when_browser_refuses_upload_forms(world: &mut ScenarioWorld, reason: String) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selecting its form failure");
+    let reason = serde_json::to_string(&reason).assured("a string has a JSON representation");
+    let script = format!(
+        "() => {{ const reason = {reason}; window.FormData = new Proxy(window.FormData, {{ \
+         construct() {{ throw new Error(reason); }} }}); }}"
+    );
+    page.evaluate::<(), ()>(&script, None::<&()>)
+        .await
+        .expect("the browser must install the form-construction refusal");
 }
 
 #[when(expr = "selector {string} uploads resource directory {string}")]

@@ -55,7 +55,7 @@ fn publication(
 ) -> error_stack::Result<Option<RestorePublication>, RuntimePersistenceError> {
     let Some(raw) = view
         .get(publications, domain.as_str().as_bytes())
-        .map_err(|_| RuntimePersistenceError::ReadValue)?
+        .map_err(|cause| Report::new(cause).change_context(RuntimePersistenceError::ReadValue))?
     else {
         return Ok(None);
     };
@@ -145,14 +145,14 @@ impl RuntimeStateStore {
                 self.restore_staging_usage.forget();
             }
             // A failed retry cannot leave the receipt of a different byte stream marked complete.
-            self.restore_staging
-                .remove(&receipt_key)
-                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+            self.restore_staging.remove(&receipt_key).map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+            })?;
             let mut all_chunks = placement_key.clone();
             all_chunks.push(0);
-            self.latest
-                .remove(&placement_key)
-                .map_err(|_| RuntimePersistenceError::WriteValue)?;
+            self.latest.remove(&placement_key).map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+            })?;
             remove_bounded(
                 &self.db,
                 &self.lsm_index,
@@ -196,9 +196,9 @@ impl RuntimeStateStore {
                 key.extend_from_slice(&offset.to_be_bytes());
                 let mut batch = self.db.batch();
                 batch.insert(&self.checkpoint_chunks, key, &buffer[..size]);
-                batch
-                    .commit()
-                    .map_err(|_| RuntimePersistenceError::WriteValue)?;
+                batch.commit().map_err(|cause| {
+                    Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+                })?;
                 offset = offset
                     .checked_add(u64::try_from(size).verified("bounded chunk fits"))
                     .ok_or(RuntimePersistenceError::InvalidCheckpointChunks)?;
@@ -217,9 +217,9 @@ impl RuntimeStateStore {
                 placement_key,
             );
             batch.insert(&self.restore_staging, receipt_key, encoded.to_vec());
-            batch
-                .commit()
-                .map_err(|_| Report::new(RuntimePersistenceError::WriteValue))?;
+            batch.commit().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+            })?;
             // The admitted footprint is exactly the keys and values written above.
             self.restore_staging_usage.keep(staged);
             Ok(())
@@ -265,9 +265,9 @@ impl RuntimeStateStore {
         let namespace = StateNamespace::Restored(authority.generation);
         for item in view.prefix(&self.restore_staging, namespace.prefix(domain)) {
             check()?;
-            let (key, raw) = item
-                .into_inner()
-                .map_err(|_| RuntimePersistenceError::ReadValue)?;
+            let (key, raw) = item.into_inner().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+            })?;
             if raw.len() > RESTORE_STATE_CHUNK_BYTES {
                 return Err(Report::new(
                     RuntimePersistenceError::CheckpointPlacementTooLarge,
@@ -290,9 +290,9 @@ impl RuntimeStateStore {
                 ));
             }
             let placement_key = key;
-            let Some(raw) = view
-                .get(&self.latest, &placement_key)
-                .map_err(|_| RuntimePersistenceError::ReadValue)?
+            let Some(raw) = view.get(&self.latest, &placement_key).map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+            })?
             else {
                 return Err(Report::new(
                     RuntimePersistenceError::InvalidCheckpointChunks,
@@ -323,7 +323,9 @@ impl RuntimeStateStore {
         let mut headers = 0_u64;
         for item in view.prefix(&self.latest, namespace.prefix(domain)) {
             check()?;
-            item.key().map_err(|_| RuntimePersistenceError::ReadValue)?;
+            item.key().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+            })?;
             headers = headers
                 .checked_add(1)
                 .ok_or(RuntimePersistenceError::ReadValue)?;
@@ -364,9 +366,9 @@ impl RuntimeStateStore {
                 }
                 _ => {
                     self.validate_restore_inventory(domain, authority, expected, &mut check)?;
-                    self.db
-                        .persist(PersistMode::SyncAll)
-                        .map_err(|_| RuntimePersistenceError::Synchronize)?;
+                    self.db.persist(PersistMode::SyncAll).map_err(|cause| {
+                        Report::new(cause).change_context(RuntimePersistenceError::Synchronize)
+                    })?;
                     check()?;
                     let encoded = rkyv::to_bytes::<rkyv::rancor::Error>(&RestorePublication {
                         authority: authority.clone(),
@@ -379,16 +381,16 @@ impl RuntimeStateStore {
                         domain.as_str().as_bytes(),
                         encoded.to_vec(),
                     );
-                    batch
-                        .commit()
-                        .map_err(|_| RuntimePersistenceError::WriteValue)?;
+                    batch.commit().map_err(|cause| {
+                        Report::new(cause).change_context(RuntimePersistenceError::WriteValue)
+                    })?;
                 }
             }
             // A cancellation or failure after pointer commit leaves START closed. Retry makes
             // that same publication durable before any handle can attach to it.
-            self.db
-                .persist(PersistMode::SyncAll)
-                .map_err(|_| RuntimePersistenceError::Synchronize)?;
+            self.db.persist(PersistMode::SyncAll).map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::Synchronize)
+            })?;
             check()?;
             self.clean_published_restore(domain, authority.generation, &mut check)
         })
@@ -448,17 +450,17 @@ impl RuntimeStateStore {
             .prefix(&self.latest, &prefix)
             .zip(view.prefix(&self.latest, &prefix))
         {
-            let key = key_item
-                .key()
-                .map_err(|_| RuntimePersistenceError::ReadValue)?;
+            let key = key_item.key().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+            })?;
             let (_, stored) = physical_placement(&key)?;
             // The runtime supplies the fixed backup selection of at most six kinds.
             if !kinds.contains(&stored.state.kind()) {
                 continue;
             }
-            let raw_bytes = size_item
-                .size()
-                .map_err(|_| RuntimePersistenceError::ReadValue)?;
+            let raw_bytes = size_item.size().map_err(|cause| {
+                Report::new(cause).change_context(RuntimePersistenceError::ReadValue)
+            })?;
             checkpoints.push(checkpoint_reader::ListedCheckpoint::new(
                 stored,
                 view.clone(),

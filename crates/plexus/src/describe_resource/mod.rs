@@ -21,7 +21,8 @@ pub fn describe_resource_parser<'src>()
                     select! { Token::NumberLiteral(value) => value }.labelled("resource_version"),
                 )
                 .try_map(|version, span| {
-                    let Ok(version) = version.parse::<u64>() else {
+                    let Ok(version) = crate::parser_support::integer_literal::<u64>(&version)
+                    else {
                         return Err(Rich::custom(
                             span,
                             "resource_version must be an unsigned integer",

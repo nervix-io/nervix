@@ -129,13 +129,12 @@ impl NatsSubjectIngestorPlan {
             )
             .await
             .map_err(|source| {
-                Report::new(NatsSubjectIngestorError::Subscribe {
+                Report::new(source).change_context(NatsSubjectIngestorError::Subscribe {
                     subject: self.subject.as_str().to_string(),
                 })
-                .attach_printable(source.to_string())
             })?;
         client.flush().await.map_err(|source| {
-            Report::new(NatsSubjectIngestorError::Flush).attach_printable(source.to_string())
+            Report::new(source).change_context(NatsSubjectIngestorError::Flush)
         })?;
         Ok(NatsSubscription {
             _client: client,
@@ -185,9 +184,10 @@ impl NatsSubjectIngestorPlan {
         {
             options = options.require_tls(true);
         }
-        options.connect(addr).await.map_err(|source| {
-            Report::new(NatsSubjectIngestorError::Connect).attach_printable(source.to_string())
-        })
+        options
+            .connect(addr)
+            .await
+            .map_err(|source| Report::new(source).change_context(NatsSubjectIngestorError::Connect))
     }
 
     /// Tells the instance whose client lost its connection that its subscription ended.
@@ -519,6 +519,7 @@ mod tests {
             error.downcast_ref::<NatsSubjectIngestorError>(),
             Some(NatsSubjectIngestorError::Connect)
         ));
+        assert!(error.downcast_ref::<async_nats::ConnectError>().is_some());
     }
 
     /// The instance ends its subscription on the first loss, so a loss signalled while another is

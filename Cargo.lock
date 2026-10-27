@@ -6569,6 +6569,7 @@ dependencies = [
  "serde",
  "serde_json",
  "strum 0.26.3",
+ "sync_wrapper",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.21",
@@ -6981,6 +6982,7 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "nervix-primitives",
+ "nervix-recovery",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
@@ -7628,6 +7630,7 @@ version = "0.1.0-dev"
 name = "nervix-recovery"
 version = "0.1.0-dev"
 dependencies = [
+ "error-stack",
  "nervix-primitives",
  "tracing",
  "tracing-subscriber",
@@ -7905,6 +7908,7 @@ dependencies = [
  "nervix-models",
  "nervix-plexus",
  "nervix-primitives",
+ "nervix-recovery",
  "nervix-simd-kernels",
  "nonzero_ext",
  "regex",

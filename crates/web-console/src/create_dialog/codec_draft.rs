@@ -363,8 +363,8 @@ impl CodecDraft {
     pub(super) fn build(
         &self,
     ) -> error_stack::Result<CreateCodec<RequestedResourceVersion>, CodecDraftError> {
-        let name =
-            CodecName::parse(self.name.trim()).map_err(|_| Report::new(CodecDraftError::Name))?;
+        let name = CodecName::parse(self.name.trim())
+            .map_err(|cause| cause.change_context(CodecDraftError::Name))?;
         let schema = self
             .schema
             .as_ref()
@@ -383,8 +383,9 @@ impl CodecDraft {
         let mut fields = BTreeSet::new();
         let mut encoding_rules = Vec::new();
         for (index, rule) in self.encoding_rules.iter().enumerate() {
-            let field = FieldName::parse(rule.field.trim())
-                .map_err(|_| Report::new(CodecDraftError::EncodingField { entry: index + 1 }))?;
+            let field = FieldName::parse(rule.field.trim()).map_err(|cause| {
+                cause.change_context(CodecDraftError::EncodingField { entry: index + 1 })
+            })?;
             if !fields.insert(field.clone()) {
                 return Err(Report::new(CodecDraftError::DuplicateEncodingField {
                     field,

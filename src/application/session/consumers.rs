@@ -87,16 +87,16 @@ impl SessionConsumers {
         // A flush-only retuning keeps the endpoint; normalize that cadence before hashing the
         // construction, publishing and acknowledgement contract.
         model.flush_policy = FlushPolicy::Immediate;
-        let canonical = model.to_canonical_plexus().map_err(|_| {
+        let canonical = model.to_canonical_plexus().map_err(|error| {
             (
                 EmitterOpenRefusal::EndpointUnavailable,
-                "emitter contract could not be rendered".to_string(),
+                format!("emitter contract could not be rendered: {error:#}"),
             )
         })?;
-        let fields = serde_json::to_vec(expected_fields).map_err(|_| {
+        let fields = serde_json::to_vec(expected_fields).map_err(|error| {
             (
                 EmitterOpenRefusal::EndpointUnavailable,
-                "emitter output fields could not be fingerprinted".to_string(),
+                format!("emitter output fields could not be fingerprinted: {error}"),
             )
         })?;
         let mut hasher = blake3::Hasher::new();
@@ -212,12 +212,16 @@ impl SessionConsumers {
                 "domain is stopped",
             ));
         }
-        let Some((model, scheduled)) = service
+        let target = service
             .emitter_target_from_schedule(&open.domain, &open.emitter)
             .await
-            .ok()
-            .flatten()
-        else {
+            .map_err(|error| {
+                refuse(
+                    EmitterOpenRefusal::EndpointUnavailable,
+                    &format!("emitter target could not be inspected: {error:#}"),
+                )
+            })?;
+        let Some((model, scheduled)) = target else {
             return Err(refuse(
                 EmitterOpenRefusal::EmitterNotFound,
                 "emitter is not scheduled",

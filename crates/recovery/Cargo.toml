@@ -12,5 +12,6 @@ workspace = true
 tracing = { workspace = true }
 
 [dev-dependencies]
+error-stack = { workspace = true }
 nervix-primitives = { workspace = true, features = ["native"] }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
