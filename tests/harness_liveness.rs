@@ -51,10 +51,6 @@ mod http_receiver;
 mod iceberg_catalog_gate;
 #[path = "common/iceberg_catalog_gate_tests.rs"]
 mod iceberg_catalog_gate_tests;
-#[path = "common/injected_hold.rs"]
-mod injected_hold;
-#[path = "common/injected_hold_tests.rs"]
-mod injected_hold_tests;
 #[path = "common/materialized_state_diagnostics.rs"]
 mod materialized_state_diagnostics;
 #[path = "common/materialized_state_diagnostics_tests.rs"]

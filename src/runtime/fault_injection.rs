@@ -172,6 +172,14 @@ impl ConfiguredFaultInjection {
         false
     }
 
+    pub(in crate::runtime) fn misses_live_run(
+        &self,
+        _observer: &ClusterNodeName,
+        _missing: &ClusterNodeName,
+    ) -> bool {
+        false
+    }
+
     pub(in crate::runtime) fn fill_relay_memory_before_acknowledgement_watches_if_armed(
         &self,
         _node_id: &ClusterNodeName,
