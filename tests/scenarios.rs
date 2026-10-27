@@ -18012,6 +18012,23 @@ async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: St
     });
 }
 
+/// Leave room for transport on the selected node while refusing larger decoding reservations.
+#[when(expr = "bulk memory on node {string} keeps only {string} bytes free")]
+async fn when_bulk_memory_on_node_keeps_only_bytes_free(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    room: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let room = expand_placeholders(world, &room);
+    let room = room
+        .parse::<u64>()
+        .unwrap_or_else(|error| panic!("the free bulk memory '{room}' must be bytes: {error}"));
+    world
+        .fault_injection
+        .hold_bulk_memory_leaving_room_on(&crate::common::cluster::node_name(&node_id), room);
+}
+
 /// Hold every byte of bulk memory on every node but `room`, so a charge that needs more room than
 /// that is refused until the scenario releases the hold.
 #[when(expr = "bulk memory on every node keeps only {string} bytes free")]

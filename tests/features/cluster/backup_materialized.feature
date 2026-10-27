@@ -19,7 +19,7 @@ Feature: Materialized backup and archived lifecycle resumption
       """
       CREATE SUBSCRIPTION repeated_summaries TO summaries;
       """
-    Then node "node-2" reuses its remote materialized generation across five complete observations of round 1
+    Then node "node-2" reuses its remote materialized generation across five complete observations of round 1 with 64 KiB rows
     And within "30s" node "node-2" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually equals 0
       """
       class="relay"
@@ -35,7 +35,56 @@ Feature: Materialized backup and archived lifecycle resumption
       """
       CREATE SUBSCRIPTION replaced_summaries TO summaries;
       """
-    Then node "node-2" reuses its remote materialized generation across five complete observations of round 2
+    Then node "node-2" reuses its remote materialized generation across five complete observations of round 2 with 64 KiB rows
+
+  @materialized_read_admission @restore_installation @deloxide_stress_restore
+  Scenario: A relocated materialized generator releases refused snapshot reads and resumes after bulk contention
+    Given runtime replication is configured with replica count 0 and snapshot interval "10m"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When a materialized restore workload with 1 relays is created
+    And these Plexus statements are executed on the leader node
+      """
+      RELOCATE RELAY state_0 ONTO NODE node-1 IGNORE PREFERENCES;
+      RELOCATE GENERATOR produce_0 ONTO NODE node-2 IGNORE PREFERENCES;
+      """
+    And round 1 of 512 KiB materialized rows is submitted for 2 tenants
+    Then within "30s" the materialized generators report round 1, 512 KiB, 1 relays and 2 tenants
+    And node "node-2" reuses its remote materialized generation across five complete observations of round 1 with 512 KiB rows
+    And within "30s" node "node-3" observability metric "nervix_execution_memory_capacity_bytes" with labels eventually equals 33554432
+      """
+      class="bulk"
+      """
+    And within "30s" node "node-3" observability metric "nervix_execution_memory_rejections_total" with labels eventually equals 0
+      """
+      class="bulk"
+      """
+    When runtime installation on node "node-3" is paused
+    And this Plexus command request begins executing in the background on the leader node
+      """
+      RELOCATE GENERATOR produce_0 ONTO NODE node-3 IGNORE PREFERENCES;
+      """
+    Then node "node-3" reaches its runtime installation pause
+    When bulk memory on node "node-3" keeps only "2097152" bytes free
+    And runtime installation on node "node-3" is released
+    Then the background command request succeeds
+    Then within "60s" node "node-3" observability metric "nervix_interconnect_bulk_bytes_total" with labels eventually reaches at least 1048576
+      """
+      class="bulk",direction="received"
+      """
+    And within "60s" node "node-3" observability metric "nervix_execution_memory_rejections_total" with labels eventually reaches at least 1
+      """
+      class="bulk"
+      """
+    And within "60s" node "node-3" observability metric "nervix_execution_memory_reserved_bytes" with labels eventually equals 31457280
+      """
+      class="bulk"
+      """
+    When bulk memory on every node is released
+    Then within "180s" the materialized generators report round 1, 512 KiB, 1 relays and 2 tenants
+    When round 2 of 512 KiB materialized rows is submitted for 2 tenants
+    Then within "180s" the materialized generators report round 2, 512 KiB, 1 relays and 2 tenants
 
   Scenario Outline: RESUME reproduces an unpaced archived lifecycle in a fresh cluster
     Given a <cluster_size> node nervix cluster is started
