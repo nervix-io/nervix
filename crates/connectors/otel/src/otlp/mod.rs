@@ -25,7 +25,7 @@
 
 use std::{io::Write, ops::Range, str::FromStr, time::Duration};
 
-use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
+use ahash::{HashMap, HashMapExt as _};
 use arrow_array::{
     Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
     Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
@@ -231,7 +231,7 @@ struct OtelClientSettings {
     protocol: OtelProtocol,
     headers: Vec<(String, String)>,
     compression: OtelCompression,
-    timeout: Option<Duration>,
+    timeout: Duration,
 }
 
 enum OtelTransport {
@@ -521,22 +521,9 @@ fn misconfigured(reason: impl std::fmt::Display) -> Report<EmitterWriteError> {
 impl OtelClientSettings {
     fn parse(config: &[ClientConfigEntry]) -> EmitterStartResult<Self> {
         let schema = nervix_models::CreateClientOtel::<u64>::DECLARATION.config;
-        let mut seen = HashSet::new();
-        for entry in config {
-            let key = entry.key.as_str();
-            if schema.key(key).is_none() {
-                return Err(invalid_configuration(format!(
-                    "unsupported OTEL client config key '{}'",
-                    entry.key
-                )));
-            }
-            if !seen.insert(key) {
-                return Err(invalid_configuration(format!(
-                    "duplicate OTEL client config key '{}'",
-                    entry.key
-                )));
-            }
-        }
+        schema
+            .validate_rendered(config)
+            .change_context(EmitterOpenError::InvalidConfiguration { connector: OTEL })?;
 
         let endpoint =
             client_config_value(config, "endpoint", "OTEL").map_err(invalid_configuration)?;
@@ -575,7 +562,8 @@ impl OtelClientSettings {
         };
         let timeout = ConfiguredDeadline::timeout(config)
             .change_context(EmitterOpenError::InvalidConfiguration { connector: OTEL })?
-            .map(ConfiguredDeadline::bound);
+            .verified("the OTEL schema above requires a positive timeout_ms")
+            .bound();
         let headers = optional_client_config_value(config, "headers")
             .map(Self::parse_headers)
             .transpose()?
@@ -689,9 +677,9 @@ impl OtlpEncoder {
                     Endpoint::from_shared(settings.endpoint.to_string()).map_err(|error| {
                         invalid_configuration(format!("invalid OTEL endpoint: {error}"))
                     })?;
-                if let Some(timeout) = settings.timeout {
-                    endpoint = endpoint.timeout(timeout).connect_timeout(timeout);
-                }
+                endpoint = endpoint
+                    .timeout(settings.timeout)
+                    .connect_timeout(settings.timeout);
                 let tls = client_tls_paths(config);
                 if settings.endpoint.scheme() == "https" {
                     let host = settings.endpoint.host_str().verified(
@@ -2420,7 +2408,10 @@ mod tests {
             ("future", "value"),
         ]))
         .expect_err("unknown config keys must be rejected");
-        assert!(format!("{unknown:?}").contains("unsupported"));
+        assert!(matches!(
+            unknown.downcast_ref::<nervix_models::ClientConfigSchemaError>(),
+            Some(nervix_models::ClientConfigSchemaError::UnknownKey { key }) if key == "future"
+        ));
     }
 
     #[test]
@@ -2686,6 +2677,37 @@ mod tests {
             .await;
         assert!(matches!(outcome, OtelTransportOutcome::Failed(_)));
         assert!(authority.questions_for(name) > 0);
+    }
+
+    #[test]
+    fn client_settings_use_the_declared_required_deadline_and_literal_header_encoding() {
+        for protocol in ["grpc", "http/protobuf"] {
+            let missing = config(&[("endpoint", "http://127.0.0.1:1"), ("protocol", protocol)]);
+            let error = OtelClientSettings::parse(&missing)
+                .expect_err("a client without a deadline cannot open");
+            assert!(matches!(
+                error.downcast_ref::<nervix_models::ClientConfigSchemaError>(),
+                Some(nervix_models::ClientConfigSchemaError::MissingRequired { key: "timeout_ms" })
+            ));
+            let settings = OtelClientSettings::parse(&config(&[
+                ("endpoint", "http://127.0.0.1:1"),
+                ("protocol", protocol),
+                ("timeout_ms", "5000"),
+                (
+                    "headers",
+                    " X-Trace = a%2Cb , Authorization=Bearer token=1 ",
+                ),
+            ]))
+            .assured("both protocols use the same positive deadline and header decoder");
+            assert_eq!(settings.timeout, Duration::from_millis(5000));
+            assert_eq!(
+                settings.headers,
+                [
+                    ("x-trace".to_owned(), "a%2Cb".to_owned()),
+                    ("authorization".to_owned(), "Bearer token=1".to_owned())
+                ]
+            );
+        }
     }
 
     #[test]

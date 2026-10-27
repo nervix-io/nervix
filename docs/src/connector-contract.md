@@ -498,10 +498,8 @@ resolver. Constructing the emitter or channel asks no DNS question and opens no 
 export first needs a connection, Hyper resolves the configured endpoint's host, dials its answers
 under its dual-stack policy, and applies the endpoint port. Tonic keeps the original URI for HTTP/2
 authority and TLS server-name verification, and retains its configured roots, optional client
-identity, metadata, compression, and request timeout. A client that sets `timeout_ms` uses it as
+identity, metadata, compression, and request timeout. Every OTEL client requires `timeout_ms` and uses it as
 both the request timeout and the connection timeout, which encloses DNS, address attempts, and TLS.
-Without `timeout_ms` the channel has no connection deadline, and only the DNS hook's 30-second
-ceiling bounds the lookup.
 
 An unresolved name or failed connection remains an infrastructure export failure under the emitter
 host's existing retry and ACK policy; the export failure reports the gRPC outcome, not the lookup
@@ -1863,6 +1861,17 @@ before optional gzip or transport framing; a record whose request alone exceeds 
 refused while preparing, as a `validation` error of the `encode` operation. The connector converts
 each row once and samples the log records' `observed_time_unix_nano` from actual UTC once per
 preparation, then encodes each request once.
+
+The OTEL vocabulary declares each log, span and metric field once, including its exact type,
+requiredness and record constraints. That declaration projects the type table consumed by both
+registry validation and the connector's schema admission. The registry also reads required keys
+and DELTA's required `start_time` from it. Histogram counts use U64, bucket counts use U64 arrays
+or vectors, and histogram sum/min/max use F32 or F64. The generated capability reference renders
+these same tables, the recursive attribute and literal-resource contracts, unsupported OTLP
+features and their reasons, literal header-pair decoding, and the protocol-independent HTTPS/TLS
+pairing requirement. `timeout_ms` is required in the client schema and becomes one required
+duration when opening either transport; a schema refusal stays beneath the connector open context.
+The declaration adds no learned BATCH limit and changes no export, acknowledgement or retry owner.
 
 The retained boundary is that encoding: the exact protobuf bytes of the Export request and the
 positions of the rows it carries, kept in the emitter buffer beside the batch payloads and HTTP
