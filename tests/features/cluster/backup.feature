@@ -268,6 +268,78 @@ Feature: Configuration backup into a public archive
       | 1            |
       | 3            |
 
+  @backup_parked_wait @deloxide_stress_restore
+  Scenario Outline: A parked required wait whose state reads are slow does not hold the cut
+    Given Kafka is running
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And Kafka topic "backup_slow_wait_{{test_id}}" exists with 1 partitions
+    And junction "wait_for_state" takes "1s" to read its materialized state
+    When these Plexus commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA wait_event ( id I64, source STRING );
+      CREATE WIRE JSON SCHEMA wait_event_wire MODE STRICT ( id integer, source string );
+      CREATE CODEC wait_event_codec FROM WIRE JSON SCHEMA wait_event_wire TO SCHEMA wait_event;
+      CREATE RELAY wait_state SCHEMA wait_event UNBRANCHED
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY waiting_input SCHEMA wait_event UNBRANCHED;
+      CREATE RELAY waiting_output SCHEMA wait_event UNBRANCHED;
+      CREATE KAFKA CLIENT wait_kafka CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}',
+        'auto.offset.reset' = 'earliest'
+      };
+      CREATE KAFKA TOPIC INGESTOR wait_event_source
+        FROM wait_kafka TOPIC 'backup_slow_wait_{{test_id}}'
+          OFFSET BY DOMAIN MODE ACK SEQUENTIAL ACK TIMEOUT 5m
+            RETRY POLICY BACKOFF 200ms MAX 5s
+        ON QUIESCE SUSPEND DECODE USING wait_event_codec
+        TO waiting_input INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE VHOST edge backup-slow-wait-{{test_id}}.example.com;
+      CREATE ENDPOINT wait_state_ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE HTTP ENDPOINT INGESTOR wait_state_source
+        FROM wait_state_ingress MODE NO ACK
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING wait_event_codec
+        TO wait_state INHERIT ALL UNBRANCHED FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION wait_for_state FROM waiting_input UNBRANCHED
+        USING MATERIALIZED STATE wait_state REQUIRED WAIT
+        TO waiting_output INHERIT ALL
+          SET source = relay_state.wait_state.source
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION waiting_input_seen TO waiting_input;
+      CREATE SUBSCRIPTION waiting_output_seen TO waiting_output;
+      START;
+      """
+    When Kafka message is published to topic "backup_slow_wait_{{test_id}}"
+      """
+      {"id":7,"source":"input"}
+      """
+    Then within "30s" the relay subscription receives a payload
+      """
+      {"id":7,"source":"input"}
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI backs up "domain {{domain}} --timeout 10s" from node "{{leader}}" into "slow-parked.nvxb" reporting JSON
+    Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
+    And the relay subscription does not receive a payload within "2s"
+    When http payload is posted to node "{{leader}}" with host "backup-slow-wait-{{test_id}}.example.com" path "/state"
+      """
+      {"id":0,"source":"state"}
+      """
+    Then within "60s" the relay subscription receives a payload
+      """
+      {"id":7,"source":"state"}
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: An unavailable emitter times out a backup drain with outstanding work
     Given HTTP receiver "api" is running
     And HTTP receiver "api" answers with

@@ -768,6 +768,11 @@ owners:
   display, and every client runtime's conformance probe reading an attached clock. Single
   scenarios cover the CLI restoring a clock after a transport loss and a reconnected console
   restoring its attachment.
+- The paced branch-buffering outline checks both tenant keys and both sequence values under
+  one-second logical flush and collection at rate 20, retaining its 800 ms physical receive
+  budget. Its subscription reader runs independently of the scenario runner. Controlled harness
+  regressions distinguish timely rows learned about after a runner delay from a genuinely missing
+  row whose original receive budget expires; they do not change the runtime's clock contract.
 - Registered Bolero properties keep the complete values of clock periods, skews and rates, of the
   attach and detach statements, and of the clock requests, replies and frames. Mutations of a
   current clock frame decode deterministically or fail within the verification budgets.
