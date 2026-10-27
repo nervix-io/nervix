@@ -60,16 +60,19 @@ use super::{
 /// The `timeout-minutes` of the workflow job that runs the scenario suite. A policy input: keep it
 /// in step with the `scenarios` job in `.github/workflows/check.yaml`, which is the emergency guard
 /// outside this budget rather than the mechanism that ends a wedged run.
-pub(crate) const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(120 * 60);
+pub(crate) const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(155 * 60);
 /// The `scenarios` job's setup and instrumented server and CLI build before the suite starts.
-/// Run 39656928785 took 13m40s from job start to the binary. Thirty minutes funds twice that
-/// measurement, rounded up, including variation in cold builds and dependency setup.
-const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(30 * 60);
+/// Across the scenarios jobs of 22 Check runs of 21-27 October 2026 it took 5m42s to 16m54s,
+/// the slowest in run 40419254390, the first build after the build profile changed. Thirty-five
+/// minutes funds twice the slowest, rounded up, including variation in cold builds and
+/// dependency setup.
+const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(35 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
 /// watchdog drives, the dependency containers the suite then stops, and the artifact upload that
 /// follows. Cleanup, dependency stop and runtime shutdown can consume four minutes together.
 /// Retain eleven further minutes for coverage export, uploads and bounded cache publication on
-/// a slow runner; those steps share this reserve after a successful run too. A policy input.
+/// a slow runner; those steps share this reserve after a successful run too, where they took
+/// 0.7 to 1.9 minutes in the same 22 jobs. A policy input.
 const SUITE_CLEANUP_RESERVE: Duration = Duration::from_secs(15 * 60);
 /// The one budget a whole scenario run has: what the job limit leaves once the work before the
 /// suite and the reserve after it are both paid for.
@@ -81,12 +84,13 @@ pub(crate) const SUITE_BUDGET: Duration =
         },
         None => panic!("the workflow job limit must cover the work that precedes the suite"),
     };
-/// Run 39569675589 completed 3336 attempts in 34m28s. Round up to 35 minutes for the measured
-/// healthy ceiling. Run 39656928785 completed 2516 attempts in 41 minutes; its progress projects
-/// about 55 minutes for the full inventory, so the measuring runner's speed cannot be assumed.
-const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(35 * 60);
-/// A policy input funding a runner at half the measured throughput, including the broadly
-/// distributed 1.49-times slowdown seen in the independent Syslog run 39654966701.
+/// Run 40419254390 completed 3703 attempts in 49m31s, once the scenario build optimized the
+/// parser that had held the runner thread. Round up to 50 minutes for the measured healthy
+/// ceiling. One run measures one runner, so the measuring runner's speed cannot be assumed.
+const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(50 * 60);
+/// A policy input funding a runner at half the measured throughput. Across 17 runs of 21-26
+/// October on one inventory, the slowest runners ran every scenario 1.7 times as long as the
+/// fastest.
 const SUITE_HEADROOM_FACTOR: u32 = 2;
 /// Additional time beyond the scaled healthy ceiling for retries and the last active attempts.
 const SUITE_SLACK: Duration = Duration::from_secs(5 * 60);

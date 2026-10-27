@@ -717,9 +717,9 @@ jobs:
     needs: [test-selection]
     if: needs.test-selection.outputs.tests-required == 'true'
     runs-on: blacksmith-16vcpu-ubuntu-2404
-    # The harness derives 75 minutes of scenarios from this limit, with 30 for setup/builds and
+    # The harness derives 105 minutes of scenarios from this limit, with 35 for setup/builds and
     # 15 for cleanup/export/uploads. Keep tests/common/suite_watchdog.rs in step.
-    timeout-minutes: 120
+    timeout-minutes: 155
     permissions:
       contents: read
     env:

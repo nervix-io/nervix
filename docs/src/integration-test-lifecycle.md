@@ -478,8 +478,8 @@ scenarios that passed their first attempt, of an attempt's time against that sce
 across runs ranged from 0.74 to 1.25 from run to run, while inside one run half of the scenarios
 stayed within about a tenth of the run's own factor. The three slowest runs in that sample were
 the only Intel Xeon runners among the 17 whose runner diagnostics name the CPU, and they are the
-two passing runs that ended within 25 seconds of the 75-minute budget and the one that exhausted
-it.
+two passing runs that ended within 25 seconds of the 75-minute budget those runs had and the one
+that exhausted it.
 
 The suite waits, but not for the runner's CPUs. Once the long-running attempts that start
 together have ended, the runner's CPUs averaged 51 to 55 percent busy while every one of the 48
@@ -1077,7 +1077,7 @@ second module runs the operation, it is named after the owner.
 | Text the interactive CLI is expected to display, its startup banner included | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds, pressing Enter every 250 milliseconds so the REPL draws a prompt and prints the events it queued; a row expected from repeated HTTP posts gets 2 seconds after each post within the same 60 | The step fails quoting the newest 40 lines the terminal displayed, with control sequences removed and repeated lines collapsed |
 | The interactive CLI's exit after the scenario types `exit` | `cli_terminal.rs`, run by `tests/scenarios.rs` | 60 seconds | The step fails with the exit status or the elapsed wait, quoting the same transcript |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
-| The whole scenario run | `suite_watchdog.rs` | 75 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
+| The whole scenario run | `suite_watchdog.rs` | 105 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
 | Stopping the test dependencies after the run | `suite_watchdog.rs` | 2 minutes | The containers are left to the runner |
 | Dropping the runtime after the run | `suite_watchdog.rs`, run by `tests/scenarios.rs` | 60 seconds | Blocking tasks still running are abandoned |
 
@@ -1130,7 +1130,7 @@ ordering fails to build rather than producing a harness that outwaits itself.
 | Node startup, 84 seconds | Two budgeted attempts, each funding 36 seconds of readiness, 5 seconds of cleanup and a 1-second pause; cleanup and later attempts share the remaining total | Stays under a 90-second ceiling |
 | Cluster cleanup, 60 seconds | The slowest healthy cluster stop, rounded up to 15 seconds, times a headroom of 4 | 12.2 seconds at the slowest over 163 cleanups, with a 0.15-second median and 1.6 seconds at the 90th percentile |
 | Upload command, 10 minutes | The slowest healthy upload of a 48 MiB archive, rounded up to 120 seconds, times a headroom of 5, and shorter than the suite budget | With 48 such uploads on one shared, disk-backed host, those that completed did so inside the client's 120-second window and 35 others expired it; 72 on an idle host took at most 52 seconds |
-| Suite, 75 minutes | The 120-minute scenario job limit, less 30 minutes for pre-suite work and a 15-minute reserve after it | Run 39569675589 completed 3,336 attempts in 34m28s; twice the rounded 35-minute healthy ceiling plus five minutes of slack fits the budget. Run 39656928785's partial progress projects about 55 minutes |
+| Suite, 105 minutes | The 155-minute scenario job limit, less 35 minutes for pre-suite work and a 15-minute reserve after it | Run 40419254390 completed 3,703 attempts in 49m31s once the parser was optimized; twice the rounded 50-minute healthy ceiling plus five minutes of slack fits the budget. Across 17 runs of one inventory, the slowest runners ran every scenario 1.7 times as long as the fastest |
 | CLI backup or restore, 900 seconds | The slowest healthy three-node restore, rounded up to 300 seconds, times three installations: a leader change while a restore installs its state makes the next leader install it again once the CLI sends the archive again | The three-node restores that completed in the scenarios jobs of Check runs 39683355582 and 39683521277, both on slow runners, took 291 seconds at the slowest for a 42 MB archive and 260 seconds for the 84 MB keyspace and window archives; restores that took longer ended at the former 300-second budget. Six concurrent local copies of the keyspace and window scenario saw a restore start installing its state three times |
 
 The assertions keep these orderings, among others:
@@ -1149,7 +1149,8 @@ The assertions keep these orderings, among others:
 The suite funds a runner at half the measured healthy throughput, with five further minutes for
 retries and the final active attempts. Slow-run variation multiplies the whole workload, so the
 headroom scales the measured ceiling instead of adding one fixed allowance to an increasingly
-large inventory. Increasing a measured input eventually fails the compile-time assertion. Measure
+large inventory. The factor of two covers the spread that 17 runs of 21-26 October on one
+inventory measured between runners. Increasing a measured input eventually fails the compile-time assertion. Measure
 again whenever the suite, its concurrency, or the runner changes. A harness regression compares
 the workflow's actual job limit with the limit that derives the suite budget.
 
@@ -2310,7 +2311,7 @@ and keeps the same 5-minute reserve.
 
 ## The Suite Watchdog
 
-The scenario run has one budget, 75 minutes from the moment it starts, which `--suite-budget` or
+The scenario run has one budget, 105 minutes from the moment it starts, which `--suite-budget` or
 `NERVIX_TEST_SUITE_BUDGET` replaces with a duration such as `4m`, read by the same guarded duration
 parser as a node's options. The budget is a clock rather than
 a count of failures. Cucumber's fail-fast stops scheduling scenarios and leaves those already
@@ -2371,7 +2372,7 @@ held by a consensus commit delay that only its scenario's cleanup releases.
 
 The suite runs inside `just test-scenarios-coverage` in the CI `scenarios` job, after that job's
 instrumented server, CLI and paced simulation driver builds. The `tests` job runs at the same time
-on another runner. The `scenarios` job's `timeout-minutes` is 120, and the suite budget is derived
+on another runner. The `scenarios` job's `timeout-minutes` is 155, and the suite budget is derived
 from it so that the job ends on its own.
 
 For focused local coverage, `just coverage-scenarios <lcov-path> <scenario-options>` starts a
@@ -2401,9 +2402,9 @@ Deloxide selections reach its Rust and Python drivers on one-node and three-node
 
 | Part of the job | Budget | Basis |
 | --- | --- | --- |
-| Work before the scenario binary starts | 30 minutes | Run 39656928785 took 13m40s; twice that measurement, rounded up, funds cold builds and setup variation |
-| The scenario run | 75 minutes | What the limit leaves; twice the rounded 35-minute healthy ceiling plus five minutes |
-| After the budget expires | 15-minute reserve | At most 60 seconds of cleanup, 2 minutes of dependency stop and 60 seconds of runtime shutdown; eleven further minutes fund slow coverage export, uploads and cache publication after a successful run |
+| Work before the scenario binary starts | 35 minutes | 5m42s to 16m54s across the scenarios jobs of 22 Check runs of 21-27 October 2026; twice the slowest, rounded up, funds cold builds and setup variation |
+| The scenario run | 105 minutes | What the limit leaves; twice the rounded 50-minute healthy ceiling plus five minutes |
+| After the budget expires | 15-minute reserve | At most 60 seconds of cleanup, 2 minutes of dependency stop and 60 seconds of runtime shutdown; eleven further minutes fund slow coverage export, uploads and cache publication after a successful run, which took 0.7 to 1.9 minutes in those 22 jobs |
 
 A healthy suite finishes inside its budget and exits `0` or reports its failures. A wedged one exits
 `124` with its diagnostic and leaves the upload its reserve. Either way, a step that runs whatever
@@ -2415,14 +2416,14 @@ manifest took 5 to 14 seconds in the scenario jobs measured on 2026-10-14, and t
 already published every entry those jobs built. A suite that fails or runs out of its budget leaves
 publication `not-run`, so the reserve stays with the cleanup.
 
-Run 39569675589 completed 3,336 attempts in 2,068.2 seconds with 99.0% utilization and
-98,309.3 slot-seconds. Run 39656928785 exhausted its 2,460-second allowance with 2,516 attempts
-completed and 833 active, including 785 waiting for a run slot. Its 117,587.3 slot-seconds divided
-by completed attempts, extended to all 3,349 registered attempts and divided by 48 slots, projects
-about 55 minutes. This projection assumes the remaining attempts cost as much as the completed
-ones; it is a sizing estimate, not evidence that the remaining scenarios passed. Independent
-Syslog run 39654966701 also exhausted that allowance; matching first attempts cost 1.486 times the
-slot time of the green run. Those distributed slowdowns justify proportional headroom.
+Run 40419254390 completed 3,703 attempts in 2,971.1 seconds with 98.9% utilization and
+141,081.3 slot-seconds, the first run after the scenario build optimized the parser that had held
+the runner thread (see [Runner Stalls](#runner-stalls)). The 17 runs of 21-26 October that came
+before it on one inventory of about 3,620 attempts took 2,688.7 to 4,501.9 seconds of a 75-minute
+budget: every scenario of a run took the same multiple of its median, from 0.74 to
+1.25, so the slowest runners ran the suite 1.7 times as long as the fastest, and the slowest run
+exhausted the budget. Those distributed slowdowns justify proportional headroom, and twice the
+measured ceiling covers that spread.
 
 The job's limit remains the emergency guard outside the budget rather than the mechanism that ends a
 wedged run. A job the limit cancels is killed wherever its scenarios are: the logs it uploads end
@@ -2432,14 +2433,15 @@ harness's copy of it change together.
 ### CI Budget Review
 
 The review of 21 October 2026 compares execution allowances with retained progress rather than
-restarting an unchanged run after its watchdog expires. The new suite allowance is 75 minutes in a
-120-minute job. Other narrow bounds use at least 1.5 times the observed duration or current shard
+restarting an unchanged run after its watchdog expires. Its suite allowance of 75 minutes in a
+120-minute job became 105 minutes in a 155-minute job on 27 October 2026, when the measurement in
+[The CI Reserve](#the-ci-reserve) replaced the 34-minute ceiling it rested on. Other narrow bounds use at least 1.5 times the observed duration or current shard
 estimate, with time left for their surrounding work. The rows below cover the workflow job families
 and their nested execution guards; a missing completion is reported as incomplete evidence.
 
 | Guard | Evidence | Current allowance and decision |
 | --- | --- | --- |
-| Scenario suite and job | 34m28s complete; about 55 minutes projected from the exhausted run | 75-minute suite, 120-minute job, including 30 minutes before and 15 after the suite |
+| Scenario suite and job | 49m31s complete in 40419254390; 17 earlier runs of one inventory took 44m49s to 75m02s with a 1.7-times spread between runners | 105-minute suite, 155-minute job, including 35 minutes before and 15 after the suite |
 | Ordinary Bolero job | 47m10s in run 39649567371 | 90 minutes; 1.5 times the measurement is 70m45s |
 | Sanitizer shards | The current 205-target, three-shard plan estimates at most 114 minutes before discovery, qualification and uploads | 240 minutes; 1.5 times the estimate is 171 minutes, leaving 69 for surrounding work and cold-build variation |
 | Ordinary image builds | 65m01s for amd64 in Docker Build 39534273321; 56m43s in 39654966533 | 120 minutes; 1.5 times the slower complete build is about 98 minutes |
@@ -2525,14 +2527,19 @@ thread's system time fell from 18 to 8 percent of the run, and its user time, th
 work, rose from 2 to 7 percent.
 
 Purging in the background did not free the thread on CI: at 48 slots it still ran on a CPU for 89
-percent of Check run 40404803351, about 0.95 seconds per attempt. Much of that is parsing. The
-runner thread parses a command a scenario runs about eight times: the harness parses the command's
-document to decide how to send it and what to record from it, parses each statement again to size
-the client's wait, and the client library parses the statement it sends. The 36,276 statements of
-that run averaged 54 characters. Formatting a 140-character statement, which parses it, took about
-38 milliseconds unoptimized and about 7 with only `nervix-plexus` optimized. The dev profile
-therefore builds `nervix-plexus` at `opt-level = 2`, keeping its debug assertions and overflow
-checks.
+percent of Check run 40404803351, about 0.95 seconds per attempt. Much of that was parsing. The
+runner thread parsed a command a scenario runs about eight times: the harness parsed the command's
+document six times to decide how to send it and what to record from it, parsed each statement again
+to size the client's wait, and the client library parsed the statement it sends. The 36,276
+statements of that run averaged 54 characters, and the scenario build compiled the parser without
+optimization: formatting a 140-character statement, which parses it, took about 38 milliseconds
+unoptimized and about 7 with only `nervix-plexus` optimized. The dev profile therefore builds
+`nervix-plexus` at `opt-level = 2`, keeping its debug assertions and overflow checks. In Check run
+40419254390, the first after that change, the runner thread ran on a CPU for 74 percent of a
+2,971-second run, 0.60 seconds per attempt, and its ticks were 883 seconds late in total rather
+than 1,705. The harness now also reads each command document once, as a `CommandDocument` that
+answers every question the harness asks of it, so a statement is parsed three times rather than
+eight: with its document, to size the client's wait, and in the client library.
 
 ## Diagnostic Lane
 
