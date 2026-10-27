@@ -12715,6 +12715,39 @@ async fn given_next_remote_acknowledgement_is_lost(
     );
 }
 
+/// Opens a gap for `missing` in the live view `observer`'s acknowledgement watchers read, holds it
+/// until one of those watchers has read it, and closes it again: the run of `missing` was absent
+/// for exactly one look, as a failure detector that briefly suspects a slow node leaves it.
+#[when(expr = "node {string} briefly misses node {string} in its live view")]
+async fn when_node_briefly_misses_node_in_its_live_view(
+    world: &mut ScenarioWorld,
+    observer: String,
+    missing: String,
+) {
+    let observer = crate::common::cluster::node_name(&expand_placeholders(world, &observer));
+    let missing = crate::common::cluster::node_name(&expand_placeholders(world, &missing));
+    world
+        .fault_injection
+        .open_live_view_gap(observer.clone(), missing.clone());
+    let read = nervix_primitives::time::timeout(
+        Duration::from_secs(60),
+        world
+            .fault_injection
+            .wait_for_live_view_gap_read(&observer, &missing),
+    )
+    .await;
+    world
+        .fault_injection
+        .close_live_view_gap(&observer, &missing);
+    read.unwrap_or_else(|error| {
+        panic!(
+            "no acknowledgement watcher of node '{}' read the gap opened for node '{}': {error}",
+            observer.as_str(),
+            missing.as_str()
+        )
+    });
+}
+
 #[then(expr = "the record acknowledgement node {string} returned to node {string} was lost")]
 async fn then_remote_acknowledgement_was_lost(
     world: &mut ScenarioWorld,

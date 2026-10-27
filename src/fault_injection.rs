@@ -57,6 +57,9 @@ mod entity_drain;
 mod entity_drain_tests;
 mod execution;
 mod handoff_gate_link;
+mod live_view_gap;
+#[cfg(test)]
+mod live_view_gap_tests;
 mod model_publication;
 mod pause;
 mod relay_memory;
@@ -83,6 +86,7 @@ use entity_drain::ForcedEntityDrainTimeout;
 pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
+use live_view_gap::{LiveViewGap, LiveViewGapState};
 use model_publication::ModelPublicationRefusal;
 pub use model_publication::ModelPublicationRefusalKind;
 use pause::TestPause;
@@ -245,6 +249,9 @@ struct FaultInjectionState {
     /// assuming it.
     lost_remote_acknowledgements:
         DashMap<RemoteAcknowledgementLink, watch::Sender<RemoteAcknowledgementLoss>, RandomState>,
+    /// Gaps a scenario opens in the live view one node's acknowledgement watchers read. Each keeps
+    /// whether a watcher read it, so a scenario waits for the read instead of assuming it.
+    live_view_gaps: DashMap<LiveViewGap, watch::Sender<LiveViewGapState>, RandomState>,
     /// Nodes whose relay memory a scenario fills, at once or just before their relay work reaches
     /// an armed point, and the memory each fill holds.
     relay_memory_fills: DashMap<ClusterNodeName, RelayMemoryFill, RandomState>,
@@ -523,6 +530,7 @@ impl Default for FaultInjection {
                 remote_relay_admission_pauses: DashMap::default(),
                 remote_relay_dispatch_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
+                live_view_gaps: DashMap::default(),
                 relay_memory_fills: DashMap::default(),
                 relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
