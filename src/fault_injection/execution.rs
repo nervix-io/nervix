@@ -34,12 +34,10 @@ pub(super) struct NodeExecution {
 impl FaultInjection {
     /// The registered node executor, for a scenario that holds its real admission capacity.
     pub fn executor_on(&self, node_id: &ClusterNodeName) -> Executor {
-        self.inner
-            .executions
-            .get(node_id)
-            .unwrap_or_else(|| panic!("node '{node_id}' has not registered its executor"))
-            .executor
-            .clone()
+        let Some(node) = self.inner.executions.get(node_id) else {
+            panic!("node '{node_id}' has not registered its executor");
+        };
+        node.executor.clone()
     }
 
     /// Record the executor whose workers a scenario may fill.
