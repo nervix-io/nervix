@@ -93,27 +93,30 @@ impl<'a> WireValues<'a> {
 
     pub(super) fn redirect(&mut self) -> LeaderRedirect {
         let leader = if self.arbitrary.entropy().flag() {
-            Some(NodeEndpoints {
-                node: self.arbitrary.name(),
-                grpc_uri: self.arbitrary.entropy().pick([
-                    None,
-                    Some(
-                        url::Url::parse("https://node.example:7443/path?q=é")
-                            .assured("a literal URL"),
-                    ),
-                ]),
-                web_console_uri: self.arbitrary.entropy().pick([
-                    None,
-                    Some(
-                        url::Url::parse("https://node.example:7440/console/")
-                            .assured("a literal URL"),
-                    ),
-                ]),
-            })
+            Some(self.endpoints())
         } else {
             None
         };
         LeaderRedirect { leader }
+    }
+
+    /// A node, with or without each endpoint it may advertise.
+    pub(super) fn endpoints(&mut self) -> NodeEndpoints {
+        NodeEndpoints {
+            node: self.arbitrary.name(),
+            grpc_uri: self.arbitrary.entropy().pick([
+                None,
+                Some(
+                    url::Url::parse("https://node.example:7443/path?q=é").assured("a literal URL"),
+                ),
+            ]),
+            web_console_uri: self.arbitrary.entropy().pick([
+                None,
+                Some(
+                    url::Url::parse("https://node.example:7440/console/").assured("a literal URL"),
+                ),
+            ]),
+        }
     }
 
     pub(super) fn diagnostics(&mut self) -> Vec<Diagnostic> {

@@ -148,6 +148,15 @@ fn every_download_frame_round_trips() {
         };
         assert_eq!(decoded, redirect);
     }
+
+    let holder = leader();
+    let BackupDownloadMessage::Holder(decoded) = decode(
+        BackupDownloadMessage::encode_holder(&holder, &limits())
+            .assured("a holder answer fits the limits"),
+    ) else {
+        panic!("a holder answer decodes as one");
+    };
+    assert_eq!(decoded, holder);
 }
 
 #[test]

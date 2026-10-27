@@ -160,6 +160,7 @@ tags = [
   "@redis_idle_subscription",
   "@rabbitmq_consumer_modes",
   "@node_prerequisite_refusal",
+  "@backup_holder_download",
 ]
 target = "test:scenarios"
 
@@ -858,6 +859,16 @@ id = "scenario.local-report-triage"
 invariant = "Exported potential findings name their lock instances, modes and sites, do not qualify before review, and qualify with the complete cycle after an explicit non-overlap proof and retained regression."
 invocation = "scenarios"
 scenario = "Export potential findings and retain an explicit non-overlap review"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "The retained archive registry's release of an archive the recorded outcome does not name, a download sent to the node that assembled the archive after leadership moved, and that node's collection of it."
+examples = 1
+feature = "tests/features/cluster/backup.feature"
+id = "scenario.backup-holder-download"
+invariant = "A backup recovered after leadership moves downloads the archive from the node that assembled it, and that node refuses it once a download collected it."
+invocation = "scenarios"
+scenario = "A backup recovered after leadership moves streams its archive from the node that assembled it"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1724,6 +1735,16 @@ id = "stress.stale-restore-coordinator"
 invariant = "A delayed restore coordinator cannot republish after a new leader resumes the archived lifecycle."
 invocation = "stress-restore-scenarios"
 scenario = "A stale restore coordinator cannot republish after a new leader resumes the archived lifecycle"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: the retained archive registry's release of an archive the recorded outcome does not name, a download sent to the node that assembled the archive after leadership moved, and that node's collection of it."
+examples = 1
+feature = "tests/features/cluster/backup.feature"
+id = "stress.backup-holder-download"
+invariant = "A backup recovered after leadership moves downloads the archive from the node that assembled it, and that node refuses it once a download collected it."
+invocation = "stress-restore-scenarios"
+scenario = "A backup recovered after leadership moves streams its archive from the node that assembled it"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
@@ -2709,8 +2730,10 @@ path = "src/application/backup/retained.rs"
 workloads = [
   "scenario.wasm-kafka-restore",
   "scenario.restore-generation",
+  "scenario.backup-holder-download",
   "stress.wasm-kafka-restore",
   "stress.restore-generation",
+  "stress.backup-holder-download",
 ]
 
 [[owner]]
