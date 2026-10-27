@@ -898,7 +898,7 @@ leader without it.
 The node a session is on serves completion and choice lookups, listing and selecting domains,
 subscriptions, domain clock attachments, producers, and the reads its locally applied state can
 answer: `SHOW CLUSTER STATUS`, `DESCRIBE CLUSTER`, `SHOW TRANSACTIONS`, `SHOW CREATE`, `SHOW UDFS`,
-`SHOW INGESTORS`, `SHOW PLACEMENTS`,
+`SHOW INGESTORS`, `SHOW EMITTERS`, `SHOW PLACEMENTS`,
 `SHOW RELAY MATERIALIZED STATE`, `LOOKUP`, and the `DESCRIBE` statements of domains, resources,
 endpoints, lookups, placements, UDFs, relocations, relays, ingestors, junctions, deduplicators,
 reingestors, correlators, reorderers, window processors, WASM processors, and emitters. Every other

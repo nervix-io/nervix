@@ -46,12 +46,17 @@ Feature: HTTP REQUEST emitter
       """
     Then the last command output contains
       """
-      codec: event_codec
-      body: codec
-      to: HTTP REQUEST api METHOD input.request_method PATH input.request_path
+      to: HTTP REQUEST api
+      options: METHOD input.request_method PATH input.request_path
+      mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      quiesce: none
+      envelope: none
       batch: none
       flush: FLUSH IMMEDIATE
-      publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+      from: outgoing
+      codec: event_codec
+      body: codec
       """
     When these Plexus commands are executed on the leader node
       """
@@ -59,12 +64,17 @@ Feature: HTTP REQUEST emitter
       """
     Then the last command output contains
       """
-      codec: none
-      body: without body
-      to: HTTP REQUEST api METHOD 'DELETE' PATH input.request_path
+      to: HTTP REQUEST api
+      options: METHOD 'DELETE' PATH input.request_path
+      mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      quiesce: none
+      envelope: none
       batch: none
       flush: FLUSH IMMEDIATE
-      publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+      from: outgoing
+      codec: none
+      body: without body
       """
     When these Plexus commands fail with "HTTP METHOD and PATH require exact non-sensitive STRING values"
       """
@@ -89,12 +99,17 @@ Feature: HTTP REQUEST emitter
       """
     Then the last command output contains
       """
-      codec: event_codec
-      body: codec
-      to: HTTP REQUEST api METHOD input.request_method PATH input.request_path
+      to: HTTP REQUEST api
+      options: METHOD input.request_method PATH input.request_path
+      mode: ACK RETRY POLICY BACKOFF 500ms MAX 30s
+      quiesce: none
+      envelope: none
       batch: none
       flush: FLUSH IMMEDIATE
-      publishing mode: ACK RETRY POLICY BACKOFF 500ms MAX 30s
+      errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+      from: outgoing
+      codec: event_codec
+      body: codec
       """
     When these Plexus commands fail with "emitter body selection does not support the retained construction"
       """
@@ -126,12 +141,17 @@ Feature: HTTP REQUEST emitter
       """
     Then the last command output contains
       """
-      codec: none
-      body: without body
-      to: HTTP REQUEST api METHOD 'HEAD' PATH '/health'
+      to: HTTP REQUEST api
+      options: METHOD 'HEAD' PATH '/health'
+      mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      quiesce: none
+      envelope: none
       batch: none
       flush: FLUSH IMMEDIATE
-      publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+      errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+      from: outgoing
+      codec: none
+      body: without body
       """
 
     Examples:

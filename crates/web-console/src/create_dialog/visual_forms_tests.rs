@@ -855,8 +855,8 @@ fn ingestor_editor_shows_source_specific_fields_and_route_construction_sections(
             draft
                 .source
                 .choose_kind(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic));
-            draft.source.delivery = Some(super::ingestor_source_draft::DeliveryChoice::AckParallel);
-            draft.source.quiesce = Some(super::ingestor_source_draft::QuiesceChoice::Buffer);
+            draft.source.delivery = Some(nervix_models::IngestDeliveryKind::AckParallel);
+            draft.source.quiesce = Some(nervix_models::IngestQuiesceKind::Buffer);
             let route = draft.active_route_mut().assured("first route exists");
             route.branch.choose_branched();
             route.inherit.choose("fields");
@@ -921,7 +921,7 @@ fn client_vhost_and_endpoint_forms_render_every_transport_and_typed_reference_co
             "global-create-button",
         );
         let client = render();
-        for transport in ClientTransport::ALL {
+        for transport in ClientTransport::all() {
             assert!(client.contains(&format!("data-client-type=\"{}\"", transport.key())));
             assert!(client.contains(&transport.label()));
         }

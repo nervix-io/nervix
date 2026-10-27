@@ -1,5 +1,9 @@
 # Client Representation Coverage
 
+Names drawn from `nervix-arbitrary` include current Plexus keyword spellings where their name
+kind and domain admit them. The [property register](../docs/src/property-testing-and-fuzzing.md)
+records each generated domain's revision and input bounds.
+
 Every target below is registered in `tests/bolero-targets.toml`, runs its production path in ordinary
 tests and sanitizer-backed libFuzzer, and replays source-adjacent current-domain corpus seeds.
 Generators and Arrow dependencies remain in their owning test harnesses.

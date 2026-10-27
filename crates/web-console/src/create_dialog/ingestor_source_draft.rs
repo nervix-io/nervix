@@ -12,86 +12,31 @@
     nervix::layer(edge, reason = "owns the edges boundary declared above")
 )]
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU16, NonZeroU64};
 
 use error_stack::{Report, ResultExt as _};
 use nervix_models::{
-    ClientIngestorEntity, ClientName, DomainClockPeriod, EndpointIngestMode, EndpointName,
-    HttpEndpointIngestor, HttpIngestorEntity, HttpRequestIngestMode, HttpRequestIngestor,
-    IngestQuiesceMode, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
-    KafkaConsumerGroupName, KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode,
-    KafkaTopicIngestor, KafkaTopicName, ModelName, MqttIngestMode, MqttIngestorEntity, MqttQos,
-    MqttSession, MqttTopicFilter, MqttTopicIngestor, NatsIngestMode, NatsIngestorEntity,
-    NatsQueueGroupName, NatsSubjectIngestor, NatsSubjectName, NodeRef, PrometheusIngestMode,
-    PrometheusIngestorEntity, PrometheusQueryIngestor, PulsarIngestorEntity, PulsarSubscription,
-    PulsarSubscriptionName, PulsarSubscriptionOwnership, PulsarTopicIngestor, PulsarTopicName,
-    RabbitMqIngestMode, RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName,
-    RedisChannelName, RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy,
-    SqsIngestMode, SqsIngestorEntity, SqsQueueIngestor, SqsQueueName, SyslogIngestMode,
-    SyslogIngestorEntity, SyslogListenerIngestor, WebsocketsConnectionIngestor,
-    WebsocketsEndpointIngestor, WebsocketsIngestMode, WebsocketsIngestorEntity, ZeroMqIngestMode,
-    ZeroMqIngestorEntity, ZeroMqPullIngestor,
+    ChoiceRequirement, ClientIngestorEntity, ClientName, DomainClockPeriod, EndpointIngestMode,
+    EndpointName, HttpEndpointIngestor, HttpIngestorEntity, HttpRequestIngestMode,
+    HttpRequestIngestor, IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceMode,
+    IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind, KafkaConsumerGroupName,
+    KafkaIngestMode, KafkaIngestorEntity, KafkaOffsetMode, KafkaTopicIngestor, KafkaTopicName,
+    ModelName, MqttIngestMode, MqttIngestorEntity, MqttQos, MqttSession, MqttTopicFilter,
+    MqttTopicIngestor, NatsIngestMode, NatsIngestorEntity, NatsQueueGroupName, NatsSubjectIngestor,
+    NatsSubjectName, NodeRef, PayloadSizeLimit, PrometheusIngestMode, PrometheusIngestorEntity,
+    PrometheusQueryIngestor, PulsarIngestorEntity, PulsarSubscription, PulsarSubscriptionName,
+    PulsarSubscriptionOwnership, PulsarTopicIngestor, PulsarTopicName, RabbitMqIngestMode,
+    RabbitMqIngestorEntity, RabbitMqQueueIngestor, RabbitMqQueueName, RedisChannelName,
+    RedisIngestorEntity, RedisPubSubIngestMode, RedisPubSubIngestor, RetryPolicy, SqsIngestMode,
+    SqsIngestorEntity, SqsQueueIngestor, SqsQueueName, SyslogIngestMode, SyslogIngestorEntity,
+    SyslogListenerIngestor, WebsocketsConnectionIngestor, WebsocketsEndpointIngestor,
+    WebsocketsIngestMode, WebsocketsIngestorEntity, WebsocketsUpgradeHeader,
+    WebsocketsUpgradeHeaders, ZeroMqIngestMode, ZeroMqIngestorEntity, ZeroMqPullIngestor,
 };
+use strum::IntoEnumIterator as _;
 use thiserror::Error;
 
 use super::SelectedReference;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DeliveryChoice {
-    AckSequential,
-    AckParallel,
-    NoAck,
-}
-
-impl DeliveryChoice {
-    pub(super) const fn key(self) -> &'static str {
-        match self {
-            Self::AckSequential => "ack-sequential",
-            Self::AckParallel => "ack-parallel",
-            Self::NoAck => "no-ack",
-        }
-    }
-
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::AckSequential => "ACK SEQUENTIAL",
-            Self::AckParallel => "ACK PARALLEL",
-            Self::NoAck => "NO ACK",
-        }
-    }
-
-    pub(super) const fn acknowledged(self) -> bool {
-        matches!(self, Self::AckSequential | Self::AckParallel)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum QuiesceChoice {
-    Suspend,
-    Buffer,
-    Drop,
-    Reject,
-}
-
-impl QuiesceChoice {
-    pub(super) const fn key(self) -> &'static str {
-        match self {
-            Self::Suspend => "suspend",
-            Self::Buffer => "buffer",
-            Self::Drop => "drop",
-            Self::Reject => "reject",
-        }
-    }
-
-    pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::Suspend => "SUSPEND",
-            Self::Buffer => "BUFFER",
-            Self::Drop => "DROP",
-            Self::Reject => "REJECT",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OffsetChoice {
@@ -111,11 +56,13 @@ pub(super) struct IngestorEntityDraft {
     pub(super) subscription: String,
     pub(super) subscription_ownership: Option<PulsarSubscriptionOwnership>,
     pub(super) query: String,
+    pub(super) max_body_size: String,
+    pub(super) upgrade_headers: Vec<WebsocketsUpgradeHeader>,
     pub(super) every: String,
     pub(super) instances: String,
     pub(super) offset: Option<OffsetChoice>,
     pub(super) consumer_group: String,
-    pub(super) delivery: Option<DeliveryChoice>,
+    pub(super) delivery: Option<IngestDeliveryKind>,
     pub(super) ack_max: String,
     pub(super) batch_timeout: String,
     pub(super) ack_timeout: String,
@@ -123,7 +70,7 @@ pub(super) struct IngestorEntityDraft {
     pub(super) retry_max: String,
     pub(super) mqtt_session: Option<MqttSession>,
     pub(super) mqtt_qos: Option<MqttQos>,
-    pub(super) quiesce: Option<QuiesceChoice>,
+    pub(super) quiesce: Option<IngestQuiesceKind>,
     pub(super) buffer_size: String,
     pub(super) overflow: Option<IngestQuiesceOverflow>,
     pub(super) retry_after: String,
@@ -134,6 +81,11 @@ impl IngestorEntityDraft {
         if self.kind != Some(kind) {
             *self = Self {
                 kind: Some(kind),
+                delivery: kind
+                    .capabilities()
+                    .delivery
+                    .first()
+                    .map(|delivery| delivery.kind),
                 ..Self::default()
             };
         }
@@ -179,78 +131,107 @@ impl IngestorEntityDraft {
             .and_then(SelectedReference::current_name)
     }
 
-    pub(super) fn available_modes(&self) -> &'static [DeliveryChoice] {
-        match self.kind {
-            Some(
-                IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic)
-                | IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic),
-            ) => &[
-                DeliveryChoice::AckSequential,
-                DeliveryChoice::AckParallel,
-                DeliveryChoice::NoAck,
-            ],
-            Some(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)) => &[
-                DeliveryChoice::NoAck,
-                DeliveryChoice::AckSequential,
-                DeliveryChoice::AckParallel,
-            ],
-            Some(
-                IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue)
-                | IngestorEntityKind::Sqs(SqsIngestorEntity::Queue),
-            ) => &[DeliveryChoice::AckSequential],
-            Some(
-                IngestorEntityKind::Http(
-                    HttpIngestorEntity::Request | HttpIngestorEntity::Endpoint,
-                )
-                | IngestorEntityKind::Nats(NatsIngestorEntity::Subject)
-                | IngestorEntityKind::Redis(RedisIngestorEntity::PubSub)
-                | IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query)
-                | IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull)
-                | IngestorEntityKind::Websockets(
-                    WebsocketsIngestorEntity::Connection | WebsocketsIngestorEntity::Endpoint,
-                )
-                | IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener),
-            ) => &[DeliveryChoice::NoAck],
-            Some(IngestorEntityKind::Client(ClientIngestorEntity::Producer)) | None => &[],
+    pub(super) fn available_modes(&self) -> Vec<IngestDeliveryKind> {
+        let Some(kind) = self.kind else {
+            return Vec::new();
+        };
+        kind.capabilities()
+            .delivery
+            .iter()
+            .map(|delivery| delivery.kind)
+            .collect()
+    }
+
+    pub(super) fn available_quiesce(&self) -> Vec<IngestQuiesceKind> {
+        let Some(kind) = self.kind else {
+            return Vec::new();
+        };
+        kind.capabilities()
+            .quiesce
+            .iter()
+            .map(|quiesce| quiesce.kind)
+            .collect()
+    }
+
+    fn option_default(&self, keywords: &str) -> Option<&'static str> {
+        let option = self.kind?.capabilities().option(keywords)?;
+        match option.presence {
+            nervix_models::OptionPresence::Required => None,
+            nervix_models::OptionPresence::Optional { default } => default,
         }
     }
 
-    pub(super) fn available_quiesce(&self) -> &'static [QuiesceChoice] {
-        match self.kind {
-            Some(
-                IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic)
-                | IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic)
-                | IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue)
-                | IngestorEntityKind::Sqs(SqsIngestorEntity::Queue),
-            ) => &[QuiesceChoice::Suspend],
-            Some(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)) => &[
-                QuiesceChoice::Suspend,
-                QuiesceChoice::Buffer,
-                QuiesceChoice::Drop,
-            ],
-            Some(
-                IngestorEntityKind::Nats(NatsIngestorEntity::Subject)
-                | IngestorEntityKind::Redis(RedisIngestorEntity::PubSub)
-                | IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection),
-            ) => &[QuiesceChoice::Buffer, QuiesceChoice::Drop],
-            Some(
-                IngestorEntityKind::ZeroMq(ZeroMqIngestorEntity::Pull)
-                | IngestorEntityKind::Syslog(SyslogIngestorEntity::Listener),
-            ) => &[
-                QuiesceChoice::Suspend,
-                QuiesceChoice::Buffer,
-                QuiesceChoice::Drop,
-            ],
-            Some(
-                IngestorEntityKind::Http(HttpIngestorEntity::Request)
-                | IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query),
-            ) => &[QuiesceChoice::Suspend, QuiesceChoice::Buffer],
-            Some(
-                IngestorEntityKind::Http(HttpIngestorEntity::Endpoint)
-                | IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint),
-            ) => &[QuiesceChoice::Reject, QuiesceChoice::Buffer],
-            Some(IngestorEntityKind::Client(ClientIngestorEntity::Producer)) | None => &[],
+    pub(super) fn chosen_option(&self, keywords: &str) -> Option<&'static str> {
+        let selected = match keywords {
+            "SESSION" => self.mqtt_session.map(|session| session.keyword()),
+            "QOS" => self.mqtt_qos.map(|qos| qos.spelling()),
+            "SUBSCRIPTION" => self
+                .subscription_ownership
+                .map(|ownership| ownership.keywords()),
+            "OFFSET BY" => self.offset.map(|offset| match offset {
+                OffsetChoice::Domain => "DOMAIN",
+                OffsetChoice::ConsumerGroup => "CONSUMER GROUP",
+            }),
+            _ => None,
+        };
+        selected.or_else(|| self.option_default(keywords))
+    }
+
+    pub(super) fn choose_option(&mut self, keywords: &str, choice: &str) {
+        match keywords {
+            "SESSION" => {
+                self.mqtt_session = MqttSession::iter().find(|value| value.keyword() == choice)
+            }
+            "QOS" => self.mqtt_qos = MqttQos::iter().find(|value| value.spelling() == choice),
+            "SUBSCRIPTION" => {
+                self.subscription_ownership =
+                    PulsarSubscriptionOwnership::iter().find(|value| value.keywords() == choice)
+            }
+            "OFFSET BY" => {
+                self.offset = match choice {
+                    "DOMAIN" => Some(OffsetChoice::Domain),
+                    "CONSUMER GROUP" => Some(OffsetChoice::ConsumerGroup),
+                    _ => None,
+                }
+            }
+            _ => {}
         }
+    }
+
+    fn requirement_met(&self, requirement: &ChoiceRequirement) -> bool {
+        self.chosen_option(requirement.option) == Some(requirement.choice)
+    }
+
+    pub(super) fn mode_enabled(&self, mode: IngestDeliveryKind) -> bool {
+        let Some(kind) = self.kind else {
+            return false;
+        };
+        let Some(delivery) = kind.capabilities().declared_delivery(mode) else {
+            return false;
+        };
+        delivery
+            .requires
+            .iter()
+            .all(|requirement| self.requirement_met(requirement))
+    }
+
+    pub(super) fn quiesce_enabled(&self, choice: IngestQuiesceKind) -> bool {
+        let Some(kind) = self.kind else {
+            return false;
+        };
+        let Some(mode) = self.delivery else {
+            return false;
+        };
+        if !mode.allows_quiesce(choice) {
+            return false;
+        }
+        let Some(quiesce) = kind.capabilities().declared_quiesce(choice) else {
+            return false;
+        };
+        quiesce
+            .requires
+            .iter()
+            .all(|requirement| self.requirement_met(requirement))
     }
 
     pub(super) fn build(&self) -> error_stack::Result<IngestorEntity, IngestorEntityDraftError> {
@@ -268,6 +249,20 @@ impl IngestorEntityDraft {
                 IngestorEntityDraftError::Reference
             }));
         }
+        let mode = self
+            .delivery
+            .ok_or_else(|| Report::new(IngestorEntityDraftError::Mode))?;
+        let Some(delivery) = kind.capabilities().declared_delivery(mode) else {
+            return Err(Report::new(IngestorEntityDraftError::Mode));
+        };
+        for requirement in delivery.requires {
+            if !self.requirement_met(requirement) {
+                return Err(Report::new(IngestorEntityDraftError::OptionRequirement {
+                    option: requirement.option,
+                    choice: requirement.choice,
+                }));
+            }
+        }
         let quiesce = self.build_quiesce()?;
         let source: IngestorEntity = match kind {
             IngestorEntityKind::Client(ClientIngestorEntity::Producer) => {
@@ -282,7 +277,7 @@ impl IngestorEntityDraft {
             .into(),
             IngestorEntityKind::Http(HttpIngestorEntity::Endpoint) => HttpEndpointIngestor {
                 endpoint: self.endpoint()?,
-                mode: EndpointIngestMode::NoAck,
+                mode: self.endpoint_mode()?,
                 quiesce,
             }
             .into(),
@@ -331,10 +326,7 @@ impl IngestorEntityDraft {
                 queue: RabbitMqQueueName::parse(&self.queue)
                     .change_context(IngestorEntityDraftError::Queue)?,
                 instances: self.instances()?,
-                mode: RabbitMqIngestMode::AckSequential {
-                    timeout: self.ack_timeout()?,
-                    retry_policy: self.retry_policy()?,
-                },
+                mode: self.rabbitmq_mode()?,
                 quiesce,
             }
             .into(),
@@ -350,7 +342,7 @@ impl IngestorEntityDraft {
                 PrometheusQueryIngestor {
                     client: self.client()?,
                     query: self.required(&self.query, IngestorEntityDraftError::Query)?,
-                    max_body_size: None,
+                    max_body_size: self.max_body_size()?,
                     every: self.every()?,
                     mode: PrometheusIngestMode::NoAck,
                     quiesce,
@@ -378,7 +370,7 @@ impl IngestorEntityDraft {
             IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
                 WebsocketsConnectionIngestor {
                     client: self.client()?,
-                    headers: Vec::new(),
+                    headers: self.build_upgrade_headers()?,
                     mode: WebsocketsIngestMode::NoAck,
                     quiesce,
                 }
@@ -387,7 +379,7 @@ impl IngestorEntityDraft {
             IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => {
                 WebsocketsEndpointIngestor {
                     endpoint: self.endpoint()?,
-                    mode: EndpointIngestMode::NoAck,
+                    mode: self.endpoint_mode()?,
                     quiesce,
                 }
                 .into()
@@ -439,9 +431,13 @@ impl IngestorEntityDraft {
     }
 
     fn instances(&self) -> error_stack::Result<NonZeroU64, IngestorEntityDraftError> {
-        self.instances
-            .trim()
-            .parse()
+        let value = if self.instances.trim().is_empty() {
+            self.option_default("INSTANCES").unwrap_or("")
+        } else {
+            self.instances.trim()
+        };
+        value
+            .parse::<NonZeroU64>()
             .map_err(|cause| Report::new(cause).change_context(IngestorEntityDraftError::Instances))
     }
 
@@ -496,40 +492,106 @@ impl IngestorEntityDraft {
 
     fn kafka_mode(&self) -> error_stack::Result<KafkaIngestMode, IngestorEntityDraftError> {
         match self.delivery {
-            Some(DeliveryChoice::AckSequential) => Ok(KafkaIngestMode::AckSequential {
+            Some(IngestDeliveryKind::AckSequential) => Ok(KafkaIngestMode::AckSequential {
                 timeout: self.ack_timeout()?,
                 retry_policy: self.retry_policy()?,
             }),
-            Some(DeliveryChoice::AckParallel) => Ok(KafkaIngestMode::AckParallel {
+            Some(IngestDeliveryKind::AckParallel) => Ok(KafkaIngestMode::AckParallel {
                 max: self.ack_max()?,
                 batch_timeout: self
                     .required(&self.batch_timeout, IngestorEntityDraftError::BatchTimeout)?,
                 timeout: self.ack_timeout()?,
                 retry_policy: self.retry_policy()?,
             }),
-            Some(DeliveryChoice::NoAck) => Ok(KafkaIngestMode::NoAck),
-            None => Err(Report::new(IngestorEntityDraftError::Mode)),
+            Some(IngestDeliveryKind::NoAck) => Ok(KafkaIngestMode::NoAck),
+            Some(IngestDeliveryKind::AckRequest) | None => {
+                Err(Report::new(IngestorEntityDraftError::Mode))
+            }
+        }
+    }
+
+    fn endpoint_mode(&self) -> error_stack::Result<EndpointIngestMode, IngestorEntityDraftError> {
+        match self.delivery {
+            Some(IngestDeliveryKind::NoAck) => Ok(EndpointIngestMode::NoAck),
+            Some(IngestDeliveryKind::AckRequest) => {
+                let max = self
+                    .ack_max
+                    .trim()
+                    .parse::<NonZeroU16>()
+                    .change_context(IngestorEntityDraftError::AckMax)?;
+                Ok(EndpointIngestMode::Ack {
+                    max,
+                    timeout: self.ack_timeout()?,
+                })
+            }
+            Some(IngestDeliveryKind::AckSequential | IngestDeliveryKind::AckParallel) | None => {
+                Err(Report::new(IngestorEntityDraftError::Mode))
+            }
+        }
+    }
+
+    fn max_body_size(
+        &self,
+    ) -> error_stack::Result<Option<PayloadSizeLimit>, IngestorEntityDraftError> {
+        if self.max_body_size.trim().is_empty() {
+            return Ok(None);
+        }
+        let limit = self
+            .max_body_size
+            .trim()
+            .parse::<PayloadSizeLimit>()
+            .change_context(IngestorEntityDraftError::MaxBodySize)?;
+        Ok(Some(limit))
+    }
+
+    fn build_upgrade_headers(
+        &self,
+    ) -> error_stack::Result<Vec<WebsocketsUpgradeHeader>, IngestorEntityDraftError> {
+        WebsocketsUpgradeHeaders::parse(&self.upgrade_headers)
+            .change_context(IngestorEntityDraftError::UpgradeHeaders)?;
+        Ok(self.upgrade_headers.clone())
+    }
+
+    fn rabbitmq_mode(&self) -> error_stack::Result<RabbitMqIngestMode, IngestorEntityDraftError> {
+        match self.delivery {
+            Some(IngestDeliveryKind::NoAck) => Ok(RabbitMqIngestMode::NoAck),
+            Some(IngestDeliveryKind::AckSequential) => Ok(RabbitMqIngestMode::AckSequential {
+                timeout: self.ack_timeout()?,
+                retry_policy: self.retry_policy()?,
+            }),
+            Some(IngestDeliveryKind::AckParallel) => {
+                let max = self
+                    .ack_max
+                    .trim()
+                    .parse::<NonZeroU16>()
+                    .change_context(IngestorEntityDraftError::AckMax)?;
+                Ok(RabbitMqIngestMode::AckParallel {
+                    max,
+                    batch_timeout: self
+                        .required(&self.batch_timeout, IngestorEntityDraftError::BatchTimeout)?,
+                    timeout: self.ack_timeout()?,
+                    retry_policy: self.retry_policy()?,
+                })
+            }
+            Some(IngestDeliveryKind::AckRequest) | None => {
+                Err(Report::new(IngestorEntityDraftError::Mode))
+            }
         }
     }
 
     fn mqtt_mode(&self) -> error_stack::Result<MqttIngestMode, IngestorEntityDraftError> {
         match self.delivery {
-            Some(DeliveryChoice::NoAck) => {
-                let session = self
-                    .mqtt_session
+            Some(IngestDeliveryKind::NoAck) => {
+                let session = MqttSession::iter()
+                    .find(|value| Some(value.keyword()) == self.chosen_option("SESSION"))
                     .ok_or_else(|| Report::new(IngestorEntityDraftError::MqttSession))?;
-                let qos = self
-                    .mqtt_qos
+                let qos = MqttQos::iter()
+                    .find(|value| Some(value.spelling()) == self.chosen_option("QOS"))
                     .ok_or_else(|| Report::new(IngestorEntityDraftError::MqttQos))?;
                 Ok(MqttIngestMode::NoAck { session, qos })
             }
-            Some(DeliveryChoice::AckSequential | DeliveryChoice::AckParallel) => {
-                if self.mqtt_session != Some(MqttSession::Persistent)
-                    || self.mqtt_qos != Some(MqttQos::AtLeastOnce)
-                {
-                    return Err(Report::new(IngestorEntityDraftError::MqttAckContract));
-                }
-                if self.delivery == Some(DeliveryChoice::AckSequential) {
+            Some(IngestDeliveryKind::AckSequential | IngestDeliveryKind::AckParallel) => {
+                if self.delivery == Some(IngestDeliveryKind::AckSequential) {
                     Ok(MqttIngestMode::AckSequential {
                         timeout: self.ack_timeout()?,
                         retry_policy: self.retry_policy()?,
@@ -546,7 +608,9 @@ impl IngestorEntityDraft {
                     })
                 }
             }
-            None => Err(Report::new(IngestorEntityDraftError::Mode)),
+            Some(IngestDeliveryKind::AckRequest) | None => {
+                Err(Report::new(IngestorEntityDraftError::Mode))
+            }
         }
     }
 
@@ -554,30 +618,25 @@ impl IngestorEntityDraft {
         let choice = self
             .quiesce
             .ok_or_else(|| Report::new(IngestorEntityDraftError::Quiesce))?;
-        if !self.available_quiesce().contains(&choice) {
+        if !self.quiesce_enabled(choice) {
             return Err(Report::new(IngestorEntityDraftError::UnsupportedQuiesce));
         }
         match choice {
-            QuiesceChoice::Suspend => Ok(IngestQuiesceMode::Suspend),
-            QuiesceChoice::Drop => Ok(IngestQuiesceMode::Drop),
-            QuiesceChoice::Reject => Ok(IngestQuiesceMode::Reject {
+            IngestQuiesceKind::Suspend => Ok(IngestQuiesceMode::Suspend),
+            IngestQuiesceKind::Drop => Ok(IngestQuiesceMode::Drop),
+            IngestQuiesceKind::Reject => Ok(IngestQuiesceMode::Reject {
                 retry_after: self
                     .required(&self.retry_after, IngestorEntityDraftError::RetryAfter)?,
             }),
-            QuiesceChoice::Buffer => {
-                let max_size =
-                    self.required(&self.buffer_size, IngestorEntityDraftError::BufferSize)?;
-                // An endpoint holds what arrives in a bounded buffer and has no older message to
-                // drop, so its buffer names no overflow.
-                if self.reads_endpoint() {
-                    Ok(IngestQuiesceMode::EndpointBuffer { max_size })
-                } else {
-                    let overflow = self
-                        .overflow
-                        .ok_or_else(|| Report::new(IngestorEntityDraftError::Overflow))?;
-                    Ok(IngestQuiesceMode::Buffer { max_size, overflow })
-                }
-            }
+            IngestQuiesceKind::EndpointBuffer => Ok(IngestQuiesceMode::EndpointBuffer {
+                max_size: self.required(&self.buffer_size, IngestorEntityDraftError::BufferSize)?,
+            }),
+            IngestQuiesceKind::Buffer => Ok(IngestQuiesceMode::Buffer {
+                max_size: self.required(&self.buffer_size, IngestorEntityDraftError::BufferSize)?,
+                overflow: self
+                    .overflow
+                    .ok_or_else(|| Report::new(IngestorEntityDraftError::Overflow))?,
+            }),
         }
     }
 }
@@ -608,6 +667,10 @@ pub(super) enum IngestorEntityDraftError {
     SubscriptionOwnership,
     #[error("Enter a Prometheus query")]
     Query,
+    #[error("MAX BODY SIZE must be a positive supported byte size")]
+    MaxBodySize,
+    #[error("Enter valid literal upgrade headers")]
+    UpgradeHeaders,
     #[error("EVERY must be a positive domain-clock duration")]
     Every,
     #[error("INSTANCES must be a positive integer")]
@@ -618,7 +681,7 @@ pub(super) enum IngestorEntityDraftError {
     ConsumerGroup,
     #[error("Choose a supported source delivery mode")]
     Mode,
-    #[error("ACK PARALLEL MAX must be a positive integer")]
+    #[error("ACK MAX must be a positive integer")]
     AckMax,
     #[error("Enter BATCH TIMEOUT")]
     BatchTimeout,
@@ -632,8 +695,11 @@ pub(super) enum IngestorEntityDraftError {
     MqttSession,
     #[error("Choose MQTT QOS")]
     MqttQos,
-    #[error("MQTT ACK requires SESSION PERSISTENT QOS 1")]
-    MqttAckContract,
+    #[error("The selected mode requires {option} {choice}")]
+    OptionRequirement {
+        option: &'static str,
+        choice: &'static str,
+    },
     #[error("Choose an ON QUIESCE mode")]
     Quiesce,
     #[error("This source cannot use the selected ON QUIESCE mode")]
@@ -652,22 +718,202 @@ pub(super) enum IngestorEntityDraftError {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_models::{
-        CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, IngestQuiesceOverflow,
-        IngestorEntity, IngestorEntityKind, KafkaIngestorEntity, Model, ModelKind, ModelName,
-        MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity, NodeRef, PulsarIngestor,
-        PulsarIngestorEntity, PulsarSubscriptionOwnership, RedisIngestorEntity,
-        RequestedResourceVersion, Statement, WebsocketsIngestorEntity,
+        CodecName, CreateStatement, GeneralErrorPolicy, HttpIngestorEntity, IngestDeliveryKind,
+        IngestQuiesceKind, IngestQuiesceOverflow, IngestorEntity, IngestorEntityKind,
+        KafkaIngestorEntity, Model, ModelKind, ModelName, MqttIngestorEntity, MqttQos, MqttSession,
+        NatsIngestorEntity, NodeRef, PulsarIngestor, PulsarIngestorEntity,
+        PulsarSubscriptionOwnership, RedisIngestorEntity, RequestedResourceVersion, Statement,
+        WebsocketsIngestorEntity,
     };
     use nervix_plexus::statement::parse_statement;
 
-    use super::{DeliveryChoice, IngestorEntityDraft, OffsetChoice, QuiesceChoice};
+    use super::{IngestorEntityDraft, OffsetChoice};
     use crate::create_dialog::{
         SelectedReference,
         ingestor_draft::{IngestorDraft, TimestampDraft},
         ingestor_route_draft::{FlushDraft, InheritDraft, MessageErrorDraft},
     };
+
+    #[test]
+    fn offered_modes_follow_each_entity_declaration_in_declared_order() {
+        for kind in IngestorEntityKind::modeled() {
+            let mut draft = IngestorEntityDraft::default();
+            draft.choose_kind(kind);
+            let offered = draft
+                .available_modes()
+                .iter()
+                .map(|mode| mode.phrase())
+                .collect::<Vec<_>>();
+            let declared = kind
+                .capabilities()
+                .delivery
+                .iter()
+                .map(|delivery| delivery.kind.phrase())
+                .collect::<Vec<_>>();
+            assert_eq!(offered, declared, "{}", kind.phrase());
+        }
+    }
+
+    #[test]
+    fn declared_option_choices_bind_to_the_selected_semantic_value() {
+        for kind in IngestorEntityKind::modeled() {
+            let mut draft = IngestorEntityDraft::default();
+            draft.choose_kind(kind);
+            for option in kind.capabilities().options {
+                if let nervix_models::OptionForm::Choice(choices) = option.form {
+                    for choice in choices {
+                        draft.choose_option(option.keywords, choice.name);
+                        assert_eq!(
+                            draft.chosen_option(option.keywords),
+                            Some(choice.name),
+                            "{} {}",
+                            kind.phrase(),
+                            option.keywords
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn filled_from(source: &IngestorEntity) -> IngestorEntityDraft {
+        use nervix_models::*;
+        let kind = source.kind();
+        let mut draft = IngestorEntityDraft::default();
+        draft.choose_kind(kind);
+        draft.select_reference(&NodeRef::new(
+            kind.capabilities().reference.model_kind(),
+            source.reference().name().clone(),
+        ));
+        draft.delivery = Some(source.acknowledgement().kind());
+        match source.acknowledgement() {
+            IngestAcknowledgement::Unacknowledged => {}
+            IngestAcknowledgement::Request { max, timeout } => {
+                draft.ack_max = max.to_string();
+                draft.ack_timeout = timeout.to_owned();
+            }
+            IngestAcknowledgement::Sequential { timeout, retry } => {
+                draft.ack_timeout = timeout.to_owned();
+                draft.retry_backoff = retry.backoff.clone();
+                draft.retry_max = retry.max_backoff.clone();
+            }
+            IngestAcknowledgement::Parallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry,
+            } => {
+                draft.ack_max = max.to_string();
+                draft.batch_timeout = batch_timeout.to_owned();
+                draft.ack_timeout = timeout.to_owned();
+                draft.retry_backoff = retry.backoff.clone();
+                draft.retry_max = retry.max_backoff.clone();
+            }
+        }
+        draft.quiesce = Some(source.quiesce().kind());
+        match source.quiesce() {
+            IngestQuiesceMode::Suspend | IngestQuiesceMode::Drop => {}
+            IngestQuiesceMode::Reject { retry_after } => draft.retry_after = retry_after.clone(),
+            IngestQuiesceMode::EndpointBuffer { max_size } => draft.buffer_size = max_size.clone(),
+            IngestQuiesceMode::Buffer { max_size, overflow } => {
+                draft.buffer_size = max_size.clone();
+                draft.overflow = Some(*overflow);
+            }
+        }
+        match source {
+            IngestorEntity::Http(HttpIngestor::Request(entity)) => {
+                draft.every = entity.every.to_string()
+            }
+            IngestorEntity::Websockets(WebsocketsIngestor::Connection(entity)) => {
+                draft.upgrade_headers = entity.headers.clone();
+            }
+            IngestorEntity::Http(HttpIngestor::Endpoint(_))
+            | IngestorEntity::Websockets(WebsocketsIngestor::Endpoint(_))
+            | IngestorEntity::ZeroMq(_)
+            | IngestorEntity::Syslog(_) => {}
+            IngestorEntity::Kafka(KafkaIngestor::Topic(entity)) => {
+                draft.topic = entity.topic.to_string();
+                draft.instances = entity.instances.to_string();
+                match &entity.offset_mode {
+                    KafkaOffsetMode::Domain => draft.offset = Some(OffsetChoice::Domain),
+                    KafkaOffsetMode::ConsumerGroup(group) => {
+                        draft.offset = Some(OffsetChoice::ConsumerGroup);
+                        draft.consumer_group = group.to_string();
+                    }
+                }
+            }
+            IngestorEntity::Pulsar(PulsarIngestor::Topic(entity)) => {
+                draft.topic = entity.topic.to_string();
+                draft.instances = entity.instances.to_string();
+                draft.subscription = entity.subscription.name.to_string();
+                draft.subscription_ownership = Some(entity.subscription.ownership);
+            }
+            IngestorEntity::Mqtt(MqttIngestor::Topic(entity)) => {
+                draft.topic = entity.topic.to_string();
+                draft.instances = entity.instances.to_string();
+                draft.mqtt_session = Some(entity.mode.session());
+                draft.mqtt_qos = Some(entity.mode.qos());
+            }
+            IngestorEntity::Nats(NatsIngestor::Subject(entity)) => {
+                draft.subject = entity.subject.to_string();
+                draft.queue_group = entity.queue_group.to_string();
+                draft.instances = entity.instances.to_string();
+            }
+            IngestorEntity::RabbitMq(RabbitMqIngestor::Queue(entity)) => {
+                draft.queue = entity.queue.to_string();
+                draft.instances = entity.instances.to_string();
+            }
+            IngestorEntity::Redis(RedisIngestor::PubSub(entity)) => {
+                draft.channel = entity.channel.to_string()
+            }
+            IngestorEntity::Sqs(SqsIngestor::Queue(entity)) => {
+                draft.queue = entity.queue.to_string();
+                draft.instances = entity.instances.to_string();
+            }
+            IngestorEntity::Prometheus(PrometheusIngestor::Query(entity)) => {
+                draft.query = entity.query.clone();
+                draft.max_body_size = match entity.max_body_size {
+                    Some(limit) => limit.to_string(),
+                    None => String::new(),
+                };
+                draft.every = entity.every.to_string();
+            }
+        }
+        draft
+    }
+
+    #[test]
+    fn bolero_ingestor_source_drafts_preserve_every_declared_entity_configuration() {
+        use nervix_arbitrary::{Arbitrary, Domain};
+        bolero::check!()
+            .with_iterations(128)
+            .with_max_len(2048)
+            .for_each(|bytes: &[u8]| {
+                for kind in IngestorEntityKind::modeled() {
+                    let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
+                    let mut source = arbitrary
+                        .ingest_source_of(kind)
+                        .assured("a modeled source has a transport");
+                    // A completed form has required query text with no surrounding whitespace.
+                    // Its interior still spans arbitrary text, including quotes and Unicode.
+                    if let nervix_models::IngestorEntity::Prometheus(
+                        nervix_models::PrometheusIngestor::Query(entity),
+                    ) = &mut source
+                    {
+                        entity.query = format!("query({})", entity.query);
+                    }
+                    let draft = filled_from(&source);
+                    assert_eq!(
+                        draft
+                            .build()
+                            .assured("every generated declaration-valid source is editable"),
+                        source
+                    );
+                }
+            });
+    }
 
     fn complete(kind: IngestorEntityKind) -> IngestorEntityDraft {
         let mut draft = IngestorEntityDraft::default();
@@ -691,8 +937,8 @@ mod tests {
         draft.delivery = Some(match kind {
             IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic)
             | IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic)
-            | IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => DeliveryChoice::NoAck,
-            _ => DeliveryChoice::AckSequential,
+            | IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => IngestDeliveryKind::NoAck,
+            _ => kind.capabilities().delivery[0].kind,
         });
         draft.ack_max = "2".into();
         draft.batch_timeout = "1s".into();
@@ -704,15 +950,15 @@ mod tests {
         draft.quiesce = Some(match kind {
             IngestorEntityKind::Http(HttpIngestorEntity::Endpoint)
             | IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Endpoint) => {
-                QuiesceChoice::Reject
+                IngestQuiesceKind::Reject
             }
             IngestorEntityKind::Nats(NatsIngestorEntity::Subject)
             | IngestorEntityKind::Redis(RedisIngestorEntity::PubSub)
             | IngestorEntityKind::Websockets(WebsocketsIngestorEntity::Connection) => {
-                QuiesceChoice::Drop
+                IngestQuiesceKind::Drop
             }
-            IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => QuiesceChoice::Buffer,
-            _ => QuiesceChoice::Suspend,
+            IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) => IngestQuiesceKind::Buffer,
+            _ => IngestQuiesceKind::Suspend,
         });
         draft.buffer_size = "1MiB".into();
         draft.overflow = Some(IngestQuiesceOverflow::DropOldest);
@@ -767,13 +1013,13 @@ mod tests {
     #[test]
     fn acknowledged_mqtt_and_quiesce_require_matching_session_and_qos() {
         let mut draft = complete(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic));
-        draft.delivery = Some(DeliveryChoice::AckParallel);
-        draft.quiesce = Some(QuiesceChoice::Suspend);
+        draft.delivery = Some(IngestDeliveryKind::AckParallel);
+        draft.quiesce = Some(IngestQuiesceKind::Suspend);
         assert!(draft.build().is_err());
         draft.mqtt_session = Some(MqttSession::Persistent);
         draft.mqtt_qos = Some(MqttQos::AtLeastOnce);
         assert!(draft.build().is_ok());
-        draft.delivery = Some(DeliveryChoice::NoAck);
+        draft.delivery = Some(IngestDeliveryKind::NoAck);
         draft.mqtt_session = Some(MqttSession::Clean);
         assert!(draft.build().is_err());
     }
@@ -782,11 +1028,11 @@ mod tests {
     fn every_source_quiesce_choice_builds_only_when_its_contract_is_met() {
         for kind in IngestorEntityKind::modeled() {
             let draft = complete(kind);
-            for choice in draft.available_quiesce() {
+            for choice in draft.available_quiesce().iter() {
                 let mut candidate = draft.clone();
                 candidate.quiesce = Some(*choice);
                 if kind == IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)
-                    && *choice == QuiesceChoice::Suspend
+                    && *choice == IngestQuiesceKind::Suspend
                 {
                     candidate.mqtt_session = Some(MqttSession::Persistent);
                     candidate.mqtt_qos = Some(MqttQos::AtLeastOnce);
@@ -795,15 +1041,15 @@ mod tests {
                     candidate.build().is_ok(),
                     "{} {}",
                     kind.form_label(),
-                    choice.label()
+                    choice.keyword()
                 );
             }
         }
         let mut kafka = complete(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic));
-        kafka.quiesce = Some(QuiesceChoice::Buffer);
+        kafka.quiesce = Some(IngestQuiesceKind::Buffer);
         assert!(kafka.build().is_err());
         let mut endpoint = complete(IngestorEntityKind::Http(HttpIngestorEntity::Endpoint));
-        endpoint.quiesce = Some(QuiesceChoice::Drop);
+        endpoint.quiesce = Some(IngestQuiesceKind::Drop);
         assert!(endpoint.build().is_err());
     }
 
