@@ -150,7 +150,10 @@ fn an_unrepresentable_emitter_contract_is_refused() {
             consumers.endpoint_contract(model.clone(), &fields),
             Err((
                 EmitterOpenRefusal::EndpointUnavailable,
-                "emitter contract could not be rendered".to_string()
+                format!(
+                    "emitter contract could not be rendered: cannot represent non-finite float in \
+                     Plexus: {value}"
+                )
             ))
         );
     }
