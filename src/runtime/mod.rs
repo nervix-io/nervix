@@ -309,6 +309,7 @@ mod relay_send_attempts;
 mod relay_subscription;
 mod relay_transit;
 mod remote_ack_owner;
+mod remote_ack_registrar;
 mod remote_ack_watch_charge;
 mod remote_dispatch;
 mod reorderer;

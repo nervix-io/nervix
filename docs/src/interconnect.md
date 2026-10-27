@@ -860,6 +860,18 @@ outcome once. Each report and the outcome is one bounded event that the receiver
 five seconds and then gives up. Once the outcome is given up, or the receiver's run ends, nothing
 reports that acknowledgement again.
 
+The receiver reports to the registering node's run as its own live view shows that run. When
+another run of the node has replaced it, the receiver stops at once, because nothing in the new run
+holds the acknowledgement. A run that has not yet appeared in the live view, such as one that has
+only just joined, is reported to for five seconds of discovery. A run the receiver has already seen
+live and that then drops out of its live view, as a run that a failure detector briefly suspects
+under load does, is neither reported to nor given up while it is missing. The receiver keeps the
+acknowledgement, including a terminal outcome reached meanwhile, and reports it as soon as the run
+is back. It stops only when the run has stayed missing for the registering node's fifteen-second
+silence bound and one more sweep, because by then a registering node whose run goes on has failed
+the acknowledgement itself. A shorter gap in the live view therefore costs the source neither the
+acknowledgement nor a resend.
+
 The registering node therefore waits for an acknowledgement only while the receiver keeps reporting
 it. From the moment the delivery that carries the acknowledgement is admitted, a sweep once a second
 counts the passes in which the receiver reported nothing about it, and fails the acknowledgement
@@ -927,11 +939,12 @@ refusal. The hold ends as soon as the sender cancels the delivery, its peer ends
 stops. Only watches larger than the whole budget, or a hold still without room when the
 five-minute bound has passed, are refused, with the typed admission cause beneath the runtime's
 `RemoteAckAdmission`. Each watch returns its row's share as soon as it reports the row's terminal
-outcome, gives that outcome up, or ends because the registrar run left or changed, so room
-returns at the rate rows are reported rather than a whole batch at a time; the task's share
-returns when the batch's last watch ends or the runtime shuts down. The membership writer
-publishes immutable process identities; a watcher gives initial discovery five seconds and stops
-once a previously observed registrar is absent. Terminal delivery retains the five-second event
+outcome, gives that outcome up, or ends because the registrar run changed or stayed missing from
+the live view past its silence bound, so room returns at the rate rows are reported rather than a
+whole batch at a time; the task's share returns when the batch's last watch ends or the runtime
+shuts down. The membership writer publishes immutable process identities; a watcher gives initial
+discovery five seconds, holds its reports while a previously observed registrar is missing, and
+stops once that registrar has stayed missing for its fifteen-second silence bound and one sweep. Terminal delivery retains the five-second event
 deadline described above; this does not promise suppression of replay duplicates after lost outcomes.
 
 An authenticated connection retains its peer's protocol owner. That owner alone mutates ordinary
@@ -1905,9 +1918,12 @@ The public gossip-completion qualification holds the two followers' revision rep
 sampling and a peer's health reply. One client connects before those faults, then creates a user,
 creates a relay and reads cluster status in order within one twenty-second harness budget. That
 budget includes margin over the measured multi-stage gossip propagation under parallel bulk load;
-it is not a product deadline. The retained status must still report the connected follower as
-connected and name the new relay's owner before releasing any reply. The adjacent health-only
-qualification keeps its nine-second sequential probe.
+it is not a product deadline. The retained client status must name the new relay's owner before
+releasing any reply. A separate direct status request to node-1 checks that node-3 is connected
+while the replies remain held, so a client redirect cannot substitute another node's peer table.
+A controlled leader-transfer case checks that a probe redirected to node-3 identifies node-3 and
+reports its connected node-1 peer. The adjacent health-only qualification keeps its nine-second
+sequential probe.
 
 `SHOW CLUSTER STATUS` exposes the interconnect address, endpoint generation, observation age,
 observation outcome, and derived availability. Its `connected` status means the latest application
