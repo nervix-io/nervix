@@ -279,6 +279,7 @@ async fn process_command_preserves_detached_deduplicator_and_emitter_modes() {
     ];
 
     for command in commands {
+        nervix_primitives::task::consume_budget().await;
         let result = service
             .test_command(test_command_request(command, "default"), &mut subscriptions)
             .await;
@@ -339,6 +340,7 @@ async fn process_command_creates_junction_model() {
         "CREATE JUNCTION join_streams FROM notifications_a, notifications_b UNBRANCHED TO \
          notifications_all INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG;",
     ] {
+        nervix_primitives::task::consume_budget().await;
         let result = service
             .test_command(test_command_request(command, "default"), &mut subscriptions)
             .await;
@@ -396,6 +398,7 @@ async fn process_command_creates_deduplicator_model() {
          10m UNBRANCHED TO deduped INHERIT ALL FLUSH EACH 100ms MAX BATCH SIZE 1MiB ON MESSAGE \
          ERROR LOG;",
     ] {
+        nervix_primitives::task::consume_budget().await;
         let result = service
             .test_command(test_command_request(command, "default"), &mut subscriptions)
             .await;

@@ -12,6 +12,7 @@
 
 use std::task::Poll;
 
+use meticulous::ResultExt as _;
 use nervix_execution::{AdmissionError, ExecutionError, Executor, QueueAdmission};
 use nervix_models::ClientName;
 use nervix_primitives::{
@@ -33,8 +34,9 @@ impl InspectionFixture {
     async fn new(executor: Executor) -> Self {
         Self {
             service: build_test_service_with_executor(false, executor).await,
-            domain: DomainName::parse("inspection").expect("valid domain"),
-            name: ClientName::parse("api").expect("valid client"),
+            domain: DomainName::parse("inspection")
+                .assured("inspection is a nonempty ASCII domain-name literal"),
+            name: ClientName::parse("api").assured("api is a nonempty ASCII client-name literal"),
             config: [
                 ClientConfigEntry {
                     key: "endpoint".into(),
@@ -71,10 +73,11 @@ impl InspectionFixture {
             .await
     }
 
-    fn close(self) {
+    fn close(self) -> anyhow::Result<()> {
         let path = self.service.path.clone();
         drop(self);
-        std::fs::remove_dir_all(path).expect("the test database is removed");
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 }
 
@@ -92,29 +95,31 @@ impl FullFilesystem {
         let running_job = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
             let charge = holder
                 .try_reserve(MemoryClass::Commands, 0)
-                .expect("zero charge");
+                .assured("zero bytes fit the live command-memory budget");
             holder
                 .run_storage(
                     StorageClass::Filesystem,
                     charge,
                     move |_charge, _cancellation| {
-                        started
-                            .send(())
-                            .expect("the test is waiting for its worker");
+                        started.send(()).assured(
+                            "fill retains the worker-start receiver until this signal arrives",
+                        );
                         match held.recv() {
                             Ok(()) | Err(mpsc::RecvError) => {}
                         }
                     },
                 )
                 .await
-                .expect("the held filesystem job runs");
+                .assured("the live executor runs a closure that handles both channel outcomes");
         }));
-        running.await.expect("the holding worker starts");
+        running
+            .await
+            .assured("the retained holding task signals before waiting for its release");
         let waiter = executor.clone();
         let waiting_job = AbortOnDropHandle::new(nervix_primitives::task::spawn(async move {
             let charge = waiter
                 .try_reserve(MemoryClass::Commands, 0)
-                .expect("zero charge");
+                .assured("zero bytes fit the live command-memory budget");
             waiter
                 .run_storage(
                     StorageClass::Filesystem,
@@ -122,9 +127,10 @@ impl FullFilesystem {
                     |_charge, _cancellation| (),
                 )
                 .await
-                .expect("the queued job runs after release");
+                .assured("the live executor runs the queued infallible closure after release");
         }));
         while executor.snapshot().filesystem_storage.pending != 1 {
+            nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
         Self {
@@ -136,20 +142,25 @@ impl FullFilesystem {
 
     async fn release(self) {
         drop(self.release);
-        self.running.await.expect("the occupied job finishes");
-        self.waiting.await.expect("the queued job finishes");
+        self.running
+            .await
+            .assured("dropping the release sender ends the held closure without panic");
+        self.waiting
+            .await
+            .assured("the queued closure returns unit and has no failure operation");
     }
 }
 
 #[nervix_primitives::test]
-async fn accepted_inspection_waits_for_memory_and_cancellation_returns_its_place() {
+async fn accepted_inspection_waits_for_memory_and_cancellation_returns_its_place()
+-> anyhow::Result<()> {
     let executor = crate::runtime::single_worker_executor();
     let fixture = InspectionFixture::new(executor.clone()).await;
     let memory = executor.memory(MemoryClass::Commands);
     assert_eq!(memory.reserved_bytes, 0);
     let held = executor
         .try_reserve(MemoryClass::Commands, memory.capacity_bytes)
-        .expect("the test fills command memory");
+        .verified("the empty budget was asserted above and this reserves its exact capacity");
     let refused = fixture
         .inspect(QueueAdmission::RefuseWhenFull)
         .await
@@ -179,14 +190,15 @@ async fn accepted_inspection_waits_for_memory_and_cancellation_returns_its_place
     drop(held);
     accepted
         .await
-        .expect("the accepted inspection continues after memory is released");
+        .assured("the fixture config has no external inputs and its memory was released");
     assert_eq!(executor.memory(MemoryClass::Commands).reserved_bytes, 0);
-    fixture.close();
+    fixture.close()?;
+    Ok(())
 }
 
 #[nervix_primitives::test]
 async fn accepted_inspection_waits_for_a_full_filesystem_queue_and_cancellation_returns_its_charge()
-{
+-> anyhow::Result<()> {
     let executor = crate::runtime::single_worker_executor();
     let fixture = InspectionFixture::new(executor.clone()).await;
     let full = FullFilesystem::fill(&executor).await;
@@ -215,7 +227,8 @@ async fn accepted_inspection_waits_for_a_full_filesystem_queue_and_cancellation_
     full.release().await;
     accepted
         .await
-        .expect("the accepted inspection continues after a queue place is released");
+        .assured("the fixture config has no external inputs and both held jobs finished");
     assert_eq!(executor.memory(MemoryClass::Commands).reserved_bytes, 0);
-    fixture.close();
+    fixture.close()?;
+    Ok(())
 }

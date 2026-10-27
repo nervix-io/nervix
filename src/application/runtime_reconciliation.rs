@@ -97,6 +97,7 @@ mod tests {
     use std::time::Duration;
 
     use error_stack::Report;
+    use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_primitives::{
         sync::{mpsc, oneshot},
         time::{Instant, advance},
@@ -116,14 +117,19 @@ mod tests {
         let task_shutdown = shutdown.clone();
         let (attempts, mut observed) = mpsc::channel(4);
         let task = nervix_primitives::task::spawn(async move {
-            let mut count = 0;
+            let mut count = 0_u8;
             RuntimeReconciliation::new(schedule_rx, domain_rx, task_shutdown)
                 .run(move || {
-                    count += 1;
+                    count = count.checked_add(1).assured(
+                        "the four-slot observer and bounded test reads keep the counter below \
+                         u8::MAX",
+                    );
                     let count = count;
                     let attempts = attempts.clone();
                     async move {
-                        attempts.send(count).await.unwrap();
+                        attempts.send(count).await.assured(
+                            "the test retains the observation receiver until the supervisor joins",
+                        );
                         if count == 1 { refused() } else { Ok(()) }
                     }
                 })
@@ -131,7 +137,10 @@ mod tests {
         });
 
         assert_eq!(observed.recv().await, Some(1));
-        advance(RUNTIME_STATE_RETRY_INTERVAL - Duration::from_millis(1)).await;
+        let before_retry = RUNTIME_STATE_RETRY_INTERVAL
+            .checked_sub(Duration::from_millis(1))
+            .assured("the 500 ms retry cadence exceeds the 1 ms test boundary");
+        advance(before_retry).await;
         nervix_primitives::task::yield_now().await;
         assert!(observed.try_recv().is_err());
         advance(Duration::from_millis(1)).await;
@@ -140,7 +149,8 @@ mod tests {
         nervix_primitives::task::yield_now().await;
         assert!(observed.try_recv().is_err());
         shutdown.cancel();
-        task.await.unwrap();
+        task.await
+            .assured("the controlled callbacks only use channel endpoints retained by this test");
     }
 
     #[nervix_primitives::test(start_paused = true)]
@@ -159,7 +169,9 @@ mod tests {
                     let inputs = (*current_schedule.borrow(), *current_domain.borrow());
                     let attempts = attempts.clone();
                     async move {
-                        attempts.send(inputs).await.unwrap();
+                        attempts.send(inputs).await.assured(
+                            "the test retains the observation receiver until the supervisor joins",
+                        );
                         refused()
                     }
                 })
@@ -167,13 +179,18 @@ mod tests {
         });
 
         assert_eq!(observed.recv().await, Some((0, 0)));
-        schedules.send(1).unwrap();
+        schedules
+            .send(1)
+            .assured("the supervisor and callback retain schedule receivers until shutdown");
         assert_eq!(observed.recv().await, Some((1, 0)));
-        domains.send(2).unwrap();
+        domains
+            .send(2)
+            .assured("the supervisor and callback retain domain receivers until shutdown");
         assert_eq!(observed.recv().await, Some((1, 2)));
         assert_eq!(started.elapsed(), Duration::ZERO);
         shutdown.cancel();
-        task.await.unwrap();
+        task.await
+            .assured("the controlled callbacks only use channel endpoints retained by this test");
     }
 
     #[nervix_primitives::test(start_paused = true)]
@@ -195,9 +212,13 @@ mod tests {
                     let attempts = attempts.clone();
                     let released = released.take();
                     async move {
-                        attempts.send(inputs).await.unwrap();
+                        attempts.send(inputs).await.assured(
+                            "the test retains the observation receiver until the supervisor joins",
+                        );
                         if let Some(released) = released {
-                            released.await.unwrap();
+                            released
+                                .await
+                                .assured("the test sends the release before dropping its sender");
                         }
                         Ok(())
                     }
@@ -206,15 +227,22 @@ mod tests {
         });
 
         assert_eq!(observed.recv().await, Some((0, 0)));
-        schedules.send(1).unwrap();
-        domains.send(2).unwrap();
-        release.send(()).unwrap();
+        schedules
+            .send(1)
+            .assured("the supervisor and callback retain schedule receivers until shutdown");
+        domains
+            .send(2)
+            .assured("the supervisor and callback retain domain receivers until shutdown");
+        release
+            .send(())
+            .assured("the first installation retains its release receiver until this send");
         assert_eq!(observed.recv().await, Some((1, 2)));
         assert_eq!(started.elapsed(), Duration::ZERO);
         nervix_primitives::task::yield_now().await;
         assert!(observed.try_recv().is_err());
         shutdown.cancel();
-        task.await.unwrap();
+        task.await
+            .assured("the controlled callbacks only use channel endpoints retained by this test");
     }
 
     #[nervix_primitives::test(start_paused = true)]
@@ -230,7 +258,9 @@ mod tests {
                 .run(move || {
                     let attempts = attempts.clone();
                     async move {
-                        attempts.send(()).await.unwrap();
+                        attempts.send(()).await.assured(
+                            "the test retains the observation receiver until the supervisor joins",
+                        );
                         refused()
                     }
                 })
@@ -239,7 +269,8 @@ mod tests {
 
         assert_eq!(observed.recv().await, Some(()));
         shutdown.cancel();
-        task.await.unwrap();
+        task.await
+            .assured("the controlled callbacks only use channel endpoints retained by this test");
         assert_eq!(observed.recv().await, None);
         assert_eq!(started.elapsed(), Duration::ZERO);
     }
@@ -247,6 +278,7 @@ mod tests {
     #[nervix_primitives::test(start_paused = true)]
     async fn closed_committed_inputs_end_the_supervisor() {
         for close_schedule in [true, false] {
+            nervix_primitives::task::consume_budget().await;
             let (schedules, schedule_rx) = watch::channel(0);
             let (domains, domain_rx) = watch::channel(0);
             let shutdown = CancellationToken::new();
@@ -260,7 +292,9 @@ mod tests {
             } else {
                 drop(domains);
             }
-            task.await.unwrap();
+            task.await.assured(
+                "the controlled callbacks only use channel endpoints retained by this test",
+            );
         }
     }
 }

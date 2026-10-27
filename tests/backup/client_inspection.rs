@@ -36,6 +36,7 @@ impl FilesystemHold {
             tasks: Vec::new(),
         };
         for _ in 0..shape.workers {
+            nervix_primitives::task::consume_budget().await;
             let (release, parked) = mpsc::channel();
             let (started, running) = oneshot::channel();
             let worker = executor.clone();
@@ -67,6 +68,7 @@ impl FilesystemHold {
             running.await.assured("the holding worker starts");
         }
         for _ in 0..shape.queue_capacity {
+            nervix_primitives::task::consume_budget().await;
             let waiter = executor.clone();
             held.tasks
                 .push(AbortOnDropHandle::new(nervix_primitives::task::spawn(
@@ -87,6 +89,7 @@ impl FilesystemHold {
                 )));
         }
         while executor.snapshot().filesystem_storage.pending < shape.queue_capacity {
+            nervix_primitives::task::consume_budget().await;
             nervix_primitives::task::yield_now().await;
         }
         held
