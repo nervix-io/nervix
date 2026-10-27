@@ -122,6 +122,32 @@ pub enum ClientPooling {
     Unpooled,
 }
 
+impl ClientPooling {
+    /// Alternative configuration spellings that would compete with the declared POOL SIZE.
+    pub const fn reserved_config_keys(self) -> &'static [&'static str] {
+        match self {
+            Self::Pooled => &[
+                "maxpoolsize",
+                "max_pool_size",
+                "minpoolsize",
+                "min_pool_size",
+                "pool_max",
+                "pool_min",
+                "pool_size",
+            ],
+            Self::Unpooled => &[],
+        }
+    }
+
+    /// Pool-capacity keys are reserved without regard to ASCII case, including URL parameters.
+    pub fn reserves_config_key(self, key: &str) -> bool {
+        // Seven fixed declaration entries bound this scan independently of configuration size.
+        self.reserved_config_keys()
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(key))
+    }
+}
+
 /// What every client of one connector declares, whatever its statement says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClientDeclaration {

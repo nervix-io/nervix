@@ -387,6 +387,7 @@ capability = "ON CONFLICT DO NOTHING"
 entity = "MYSQL TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/mysql_emission.feature", scenario = "MySQL emitter handles insert conflicts with <conflict_action>" },
+  { feature = "tests/features/runtime/mysql_declarations.feature", scenario = "MySQL declarations preserve qualified names and conflict choices on <nodes> nodes" },
 ]
 
 [[capability]]
@@ -394,6 +395,7 @@ capability = "ON CONFLICT DO UPDATE"
 entity = "MYSQL TABLE EMITTER"
 scenarios = [
   { feature = "tests/features/runtime/mysql_emission.feature", scenario = "MySQL emitter handles insert conflicts with <conflict_action>" },
+  { feature = "tests/features/runtime/mysql_declarations.feature", scenario = "MySQL declarations preserve qualified names and conflict choices on <nodes> nodes" },
 ]
 
 [[capability]]

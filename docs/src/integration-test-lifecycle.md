@@ -175,6 +175,7 @@ resubmitting an outcome that might already have produced output.
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
 | Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
+| Syslog TLS publication and split-frame writes | One abort-on-drop task on the binary's runtime, owning TCP connection establishment, the TLS handshake and the complete prepared write. Publication closes the connection there; a split-frame write returns its sender for the later remainder | `tests/common/syslog_tls.rs`, using `tests/common/runner_observation.rs` |
 | Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
@@ -191,6 +192,16 @@ keeps its one-second `idle_timeout_ms`, observes both messages beside the silent
 measures the silent connection's close from before connecting. The runtime task removes runner
 polling gaps; it does not remove scheduling delays on the worker itself or change the listener's
 deadline.
+
+The Syslog TLS steps prepare their identity, trust and framed bytes before starting the sender.
+The sender performs its connection, handshake and write together on a runtime worker, independently
+of subsequent runner polls. Dropping the step aborts that task and releases its connection; a
+sender panic still fails the awaiting step with its original cause. The handshake-stall scenario
+retains the listener's one-second `connect_timeout_ms`, observes the silent client's actual close
+at least one second after connection began, and verifies authenticated publication both beside
+the stalled handshake and after it closes. The split-frame scenarios retain their connection and
+exact remainder across steps. This removes runner polling gaps without changing the listener's
+deadline or claiming that runtime workers cannot themselves be delayed.
 
 The controlled NATS endpoint publishes a positive observation when it holds a complete publish
 and stops reading behind it. A connection-loss scenario waits for that observation, ends the
@@ -949,6 +960,20 @@ The harness keeps these boundaries explicit.
   materialized checkpoint staging failure, holds the first coordinator's failed outcome before it
   is recorded, moves leadership, and requires recovery under the same execution reference to end
   failed and stay failed once the condition is cleared.
+- **Forced entity drain timeouts.** A forced entity drain timeout armed for a domain refuses the
+  next drain observed there, after one complete status round. When a durable execution owns the
+  domain's mutation at that drain, the timeout keeps refusing the same drain, the same purpose,
+  relays and entities, whenever that execution observes it again on whichever node coordinates it,
+  until another execution or none owns the domain. A drain that no execution owns meets the timeout
+  once. A timeout that only the first run met would let a leader that runs the command again under
+  the same execution reference, because the refused outcome was never recorded, drain and apply
+  the alteration, and the scenario would observe that success. The execution's other drains, such
+  as a source-intake drain before the full hold or the other units one node drain moves, are left
+  alone, and an alteration a scenario runs later owns the domain under its own reference and
+  drains normally. The three-node Syslog regression moves leadership while the alteration waits at
+  its entity gate pause, holds the new leader's run of the same transaction until the first run
+  has refused and released its hold, and requires the alteration to end refused with every frame
+  delivered once.
 - **Console backup download pauses.** The console reload scenarios hold the archive's first
   download before it streams, so the reload interrupts a download in progress. The archive is
   assembled and served by the leader that completes the backup. A leadership move while the backup
@@ -1066,8 +1091,9 @@ The harness keeps these boundaries explicit.
   The restarted-voter observation fixture stops every in-process node before arming its fault.
   It blocks direct gossip between the first leader and one voter, then holds that voter's first
   relayed heartbeat while allowing the other voters' heartbeats to advance. The leader's
-  reconciliation starts after that sample arrives, so slow harness startup cannot consume the
-  product's observation grace. A one-shot barrier captures a scheduling pass inside that grace
+  reconciliation starts after that sample arrives and the fixture establishes its leadership, so
+  slow harness startup or a leadership transfer cannot consume the product's observation grace.
+  A one-shot barrier captures a scheduling pass inside that grace
   with the voter marked unavailable; its elapsed-time decision is captured before the barrier
   waits. The scenario checks the failure-detector verdict and final ownership through public
   cluster status. Releasing the barrier waits for that pass to finish before restoring heartbeats
@@ -1565,8 +1591,9 @@ ready, it waits for each to catch up with the leader and then for the same conve
 Starting the nodes one after another would hold the last voter back by every earlier node's startup.
 On a loaded host that can outlast the ten-second grace a newly started leader gives voters it has
 not yet observed before it fails their work over, as [Control Plane](./control-plane.md) describes.
-Only the restarted-voter observation fixture keeps the bootstrap node first, because its scenario
-observes scheduling while that node leads. Adding a node, or starting one a
+The restarted-voter observation fixture also starts all nodes together, then transfers leadership
+to the bootstrap node if needed. It waits for the held voter's catch-up after releasing its
+scheduling barrier. Adding a node, or starting one a
 scenario stopped, spends one 84-second node startup and the catch-up that follows it; adding a node
 also repeats the convergence checks. A node started while its consensus connectivity is blocked
 spends the node startup without the catch-up. A scenario whose subject is a node that cannot apply
@@ -3170,6 +3197,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | A server process report names the listener another socket held only when its outermost context is a lost bind, read without its emphasis | `a_report_names_its_outermost_context_without_its_emphasis`, `the_last_report_a_launch_wrote_is_the_one_read`, `a_log_without_a_report_names_no_context`, `control_sequences_are_removed_and_the_text_between_them_is_kept`, `a_report_of_a_lost_bind_names_the_listener_the_next_launch_moves`, `a_report_of_any_other_failure_names_no_listener` |
 | A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
+| The actual Syslog TLS sender completes its handshake and full write while its runner stops polling it, under the unchanged one-second peer deadline | `a_syslog_tls_publication_finishes_while_the_runner_is_unpolled`, `a_syslog_tls_split_write_finishes_while_the_runner_is_unpolled` |
 | Every tick's lateness adds up beside the stalls, and the summary reports the runner thread's CPU and run-queue time and the runtime workers' busy time | `the_lateness_of_every_tick_adds_up_beside_the_stalls`, `a_tick_below_the_bound_counts_as_lateness_and_not_as_a_stall`, `a_thread_schedstat_reads_its_cpu_time_and_run_queue_wait`, `the_runner_thread_reads_the_cpu_time_it_spent_since_it_was_named`, `the_suite_summary_adds_up_every_runner_tick_beside_its_stalls` |
 | A stall lists only the scenarios that hold run slots, and a suite timeout counts only the scenarios still queued or running | `the_running_scenarios_are_those_that_hold_their_run_slots`, `a_suite_timeout_does_not_count_a_finished_attempt_as_active` |
 | jemalloc purges freed memory on its background threads once the scenario process asks, so the runner thread does not wait for a purge | `freed_memory_is_purged_on_jemalloc_background_threads` |

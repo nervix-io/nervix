@@ -3,8 +3,8 @@
 //!
 //! Layer: test harness, outside the product layer order.
 //!
-//! - **Owns.** A receiver-scoped heartbeat freeze, a one-shot scheduling observation barrier, and
-//!   the end of a restarted leader's startup voter observation.
+//! - **Owns.** A receiver-scoped heartbeat freeze, the fixture's reconciliation start gate, a
+//!   one-shot scheduling observation barrier, and the end of a restarted leader's observation.
 //! - **Depends on.** Typed node identities and the fault harness's existing pause primitive.
 //! - **Must not know.** Schedules, runtime state, or the gossip failure detector's decisions.
 
@@ -20,6 +20,7 @@ use super::{FaultInjection, TestPause};
 pub(super) struct StartupVoterGossip {
     voter: ClusterNodeName,
     first_heartbeat: watch::Sender<Option<CapturedHeartbeat>>,
+    reconciliation: Arc<TestPause>,
     observation: Arc<TestPause>,
 }
 
@@ -54,6 +55,7 @@ impl FaultInjection {
             StartupVoterGossip {
                 voter,
                 first_heartbeat: watch::channel(None).0,
+                reconciliation: Arc::new(TestPause::default()),
                 observation: Arc::new(TestPause::default()),
             },
         );
@@ -109,16 +111,31 @@ impl FaultInjection {
         &self,
         observer: &ClusterNodeName,
     ) {
-        let mut heartbeat = {
+        let (mut heartbeat, reconciliation) = {
             let Some(fault) = self.inner.startup_voter_gossip.get(observer) else {
                 return;
             };
-            fault.first_heartbeat.subscribe()
+            (
+                fault.first_heartbeat.subscribe(),
+                fault.reconciliation.clone(),
+            )
         };
+        reconciliation.wait_until_released().await;
         heartbeat
             .wait_for(Option::is_some)
             .await
             .assured("the armed restart fixture retains its heartbeat sender through observation");
+    }
+
+    /// Starts the observer's reconciliation grace only after the fixture has established its
+    /// leadership, while the other voters' startup and policy discovery remain free to progress.
+    pub fn begin_startup_voter_observation(&self, observer: &ClusterNodeName) {
+        self.inner
+            .startup_voter_gossip
+            .get(observer)
+            .verified("the restart fixture armed this observer before starting its nodes")
+            .reconciliation
+            .release();
     }
 
     pub(crate) async fn pause_startup_voter_observation_if_armed(

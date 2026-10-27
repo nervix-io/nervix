@@ -181,6 +181,11 @@ provides.
 | WASM runtime | The saved-state verdict of the guest-call failure, an invalid emission, or an exhausted execution limit | The stage the failure is reported under, whether rejected-state recovery starts, and whether the instance is discarded |
 | Restore conversion | An execution admission or staging refusal among the report's contexts | Release what the conversion holds and convert again within its wait for room |
 
+Snapshot metadata and Arrow decoders refuse additional bulk scratch without queueing while they
+retain encoded input from that pool. The report preserves `AdmissionError` beneath the snapshot
+context, and refusal releases the input. A generator reports the failed read and tries a complete
+read again on its next occurrence; memory pressure never becomes absent or corrupt state.
+
 ### Outcomes That Are Not Reports
 
 An ordinary outcome is a typed value, never an error report. Waiting for or skipping a message
@@ -1048,6 +1053,13 @@ inverted retry range are distinct issues. A mapped-value type failure reports th
 and the expression's inferred Arrow type, such as `VALUES key 'severity_number' requires I32,
 found Int64`. These are command refusals before publication, including during `ALTER`, rather
 than retried source or sink initialization failures. They never include a record's values.
+
+MySQL table-name construction refuses empty path parts and more than two parts with typed
+`ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through
+`OfflineClientConfigError::PoolSizing`, whose public message names the setting key and `POOL SIZE`
+without the address, credentials or parameter value. Driver URL syntax failures keep the driver
+cause under the existing key-bearing offline context; public projection still renders only that
+reviewed context.
 
 Registry validation and planning refuse invalid models before graph activation. Validation names the
 owning node, the route when the rule is route-local, the operation, and relevant fields or

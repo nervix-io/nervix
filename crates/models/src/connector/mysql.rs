@@ -28,7 +28,7 @@ use crate::{
     ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
     EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
     EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, LocatorDeclaration,
-    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
+    LocatorName, OptionChoice, OptionDeclaration, OptionForm, OptionPresence, ParseAsType,
 };
 
 configured_client!(MySql: pooled, config CLIENT_CONFIG, CreateClientMySql => MySqlConfigEntry);
@@ -61,9 +61,67 @@ pub struct MySqlTableEmitter {
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum MySqlConflictAction {
+    /// An ordinary insert, with the server's duplicate-key outcome.
     None,
+    /// A duplicate-key update assigning the first mapped column to itself, including triggers.
     DoNothing,
+    /// A duplicate-key update of every mapped column, including mapped primary/unique keys.
     DoUpdate,
+}
+
+/// The two-byte prepared-statement parameter count bounds every MySQL insert.
+#[cfg_attr(
+    nervix_lint,
+    nervix::constant(
+        fixed,
+        reason = "MySQL COM_STMT_PREPARE_OK encodes num_params in two bytes"
+    )
+)]
+pub const MYSQL_MAX_PLACEHOLDERS: usize = 65_535;
+
+/// The binary-protocol representation of a declared direct-value type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum MySqlValueEncoding {
+    #[strum(serialize = "integer 0 or 1")]
+    BooleanInteger,
+    #[strum(serialize = "signed 64-bit integer")]
+    SignedInteger,
+    #[strum(serialize = "signed integer through i64::MAX, unsigned integer above it")]
+    UnsignedInteger,
+    #[strum(serialize = "double, including non-finite values")]
+    Double,
+    #[strum(serialize = "UTF-8 bytes")]
+    Utf8Bytes,
+    #[strum(serialize = "original octets")]
+    Bytes,
+    #[strum(serialize = "RFC 3339 timestamp bytes")]
+    TimestampBytes,
+    #[strum(
+        serialize = "recursive JSON text; bytes use padded base64 and non-finite floats use null"
+    )]
+    JsonText,
+}
+
+impl MySqlValueEncoding {
+    /// Every current Plexus scalar or collection has an explicit binding; nullability is separate.
+    pub fn for_type(ty: &ParseAsType) -> Self {
+        match ty {
+            ParseAsType::Bool => Self::BooleanInteger,
+            ParseAsType::U8
+            | ParseAsType::I8
+            | ParseAsType::U16
+            | ParseAsType::I16
+            | ParseAsType::U32
+            | ParseAsType::I32
+            | ParseAsType::I64 => Self::SignedInteger,
+            ParseAsType::U64 => Self::UnsignedInteger,
+            ParseAsType::F32 | ParseAsType::F64 => Self::Double,
+            ParseAsType::String => Self::Utf8Bytes,
+            ParseAsType::Bytes => Self::Bytes,
+            ParseAsType::Datetime => Self::TimestampBytes,
+            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => Self::JsonText,
+        }
+    }
 }
 
 /// What the connector of a MYSQL TABLE holds and how long it waits.
@@ -79,7 +137,11 @@ const MYSQL_BOUNDS: DeclaredBounds = DeclaredBounds {
         wait: "connection, its handshake and an insert",
         bound: WaitBound::Unbounded,
     }],
-    driver_limits: &["The driver has no connect, read or write timeout."],
+    driver_limits: &[
+        "The driver has no connect, read or write timeout.",
+        "A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row \
+         limit.",
+    ],
 };
 
 impl EmitterDeclaration for MySqlTableEmitter {
@@ -157,6 +219,39 @@ super::publishing::emitter_modes! {
 
 super::external_name::external_names! {
     /// The case-preserving external table identifier this connector publishes to.
-    pub struct MySqlTableName => super::external_name::external_identifier,
+    pub struct MySqlTableName => table_path,
         label "mysql_table", example "Orders";
+}
+
+impl MySqlTableName {
+    /// The validated database/table parts, with their exact spelling, for separate SQL quoting.
+    pub fn parts(&self) -> impl Iterator<Item = &str> {
+        self.as_str().split('.')
+    }
+}
+
+fn table_path(text: &str) -> Result<(), super::external_name::ExternalNameError> {
+    use super::external_name::{ExternalNameError, external_identifier};
+
+    external_identifier(text)?;
+    #[cfg_attr(
+        nervix_lint,
+        nervix::constant(
+            fixed,
+            reason = "the Plexus MYSQL TABLE locator has at most database and table parts"
+        )
+    )]
+    const MAX_PARTS: usize = 2;
+    // The shared lexical rule bounds the complete path to 128 bytes.
+    if text.split('.').any(str::is_empty) {
+        return Err(ExternalNameError::EmptyLevel { separator: '.' });
+    }
+    let levels = text.split('.').count();
+    if levels > MAX_PARTS {
+        return Err(ExternalNameError::TooManyLevels {
+            max: MAX_PARTS,
+            actual: levels,
+        });
+    }
+    Ok(())
 }

@@ -1836,7 +1836,10 @@ impl Cluster {
             if leader != bootstrap {
                 self.transfer_leadership(&leader, &bootstrap);
             }
-            return self.wait_for_leader(&bootstrap, Some(&bootstrap)).await;
+            self.wait_for_leader(&bootstrap, Some(&bootstrap)).await?;
+            self.fault_injection
+                .begin_startup_voter_observation(&node_name(&bootstrap));
+            return Ok(());
         }
         self.start_restarted_nodes_together(
             construction,

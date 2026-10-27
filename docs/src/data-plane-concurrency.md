@@ -1006,6 +1006,14 @@ An incoming materialized snapshot releases its response stream at EOF, before lo
 or Arrow decoding. Those local operations retain their own staging and memory admission; they do
 not keep Snapshot request or connection-stream permits while waiting for executor work.
 
+Metadata and Arrow decoding retain encoded input charged to the bulk pool. Additional scratch
+admission cannot wait behind those inputs: it refuses without queueing and releases the input,
+so concurrent reads can free room for one another. Framing input is released before the next read
+to avoid retaining a stored reader's working charge across another admission. A generator reports
+the typed refusal and retries a complete read on its next occurrence. The bounded memory owner
+tests and the public relocated-generator contention scenario exercise this progress contract;
+these async admission waits remain outside Deloxide's tracked locks.
+
 A generator task retains at most one decoded remote source generation, including its metadata and
 column admission charges. Optional retention first reserves the complete charge from the
 independent `state_read_cache` pool, whose capacity equals the relay pool's, then returns the
@@ -1530,6 +1538,11 @@ application calls require a callable/trait contract or `nervix::dispatch(reason 
 owning callable; a cold module default is insufficient. A dispatch contract states the external
 driver or callback boundary; it does not exempt compiler-visible local callback bodies or acquisitions.
 
+The MySQL insert builder carries a dispatch contract for the vocabulary's opaque iterator over
+at most two immutable table-name parts, with at most 128 bytes across them. The boundary is
+borrowed string traversal; local SQL quoting callbacks retain their recurring-execution checks.
+Statement construction reaches no internal runtime acquisition.
+
 Local iteration and polling implementations remain call edges. Generated `await` polling is the
 Rust scheduling protocol, rather than a separate application callback diagnostic. Synchronization
 inside external libraries, opaque external future implementations and unsupported whole-program
@@ -1996,7 +2009,7 @@ resume barriers use the existing async pause owner, whose ordering remains outsi
 observation; the public outcome and dependent mutation assert recovery under the original
 execution reference.
 
-The registered `@restarted_voter_observation` workload reaches whole-cluster restart and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only watch channels and concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
+The registered `@restarted_voter_observation` workload reaches whole-cluster restart, concurrent live-policy discovery and automatic scheduling when the leader first hears a voter through a relayed heartbeat. Its test-only reconciliation gate releases after leadership is established; that gate, the watch channels and the concurrent fault map are untracked. The registered native metadata restore workload exercises distributed Kafka checkpoint replication, acknowledgement, restart and exact restoration above the resident replication message budget; its stream waits and assignment atomics retain their complementary checks.
 
 The lane builds all selected executables and diagnostic drivers before starting its workload clock.
 For each prepared invocation it lists what the build holds or reads
