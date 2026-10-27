@@ -39,14 +39,18 @@ pub enum MappedValueType {
     String,
     #[strum(serialize = "I32")]
     I32,
+    #[strum(serialize = "U64")]
+    U64,
+    #[strum(serialize = "F32 or F64")]
+    Float,
     #[strum(serialize = "DATETIME")]
     Datetime,
     #[strum(serialize = "an integer-family value")]
     Integer,
     #[strum(serialize = "an integer-family, F32, or F64 value")]
     Number,
-    #[strum(serialize = "an integer ARRAY or VEC")]
-    IntegerSequence,
+    #[strum(serialize = "a U64 ARRAY or VEC")]
+    U64Sequence,
     #[strum(serialize = "an F32 or F64 ARRAY or VEC")]
     FloatSequence,
     #[strum(serialize = "a string, boolean, number, datetime or an ARRAY or VEC of those")]
@@ -64,6 +68,8 @@ impl MappedValueType {
         match self {
             Self::String => *actual == DataType::Utf8,
             Self::I32 => *actual == DataType::Int32,
+            Self::U64 => *actual == DataType::UInt64,
+            Self::Float => matches!(actual, DataType::Float32 | DataType::Float64),
             Self::Datetime => matches!(actual, DataType::Timestamp(TimeUnit::Nanosecond, _)),
             Self::Integer => matches!(
                 actual,
@@ -80,9 +86,9 @@ impl MappedValueType {
                 Self::Integer.admits(actual)
                     || matches!(actual, DataType::Float32 | DataType::Float64)
             }
-            Self::IntegerSequence => {
+            Self::U64Sequence => {
                 if let Some(element) = Self::sequence_element(actual) {
-                    Self::Integer.admits(element)
+                    Self::U64.admits(element)
                 } else {
                     false
                 }
@@ -217,13 +223,9 @@ mod tests {
             (MappedValueType::Number, DataType::UInt64, true),
             (MappedValueType::Number, DataType::Float32, true),
             (MappedValueType::Number, DataType::Boolean, false),
+            (MappedValueType::U64Sequence, list(DataType::UInt64), true),
             (
-                MappedValueType::IntegerSequence,
-                list(DataType::Int64),
-                true,
-            ),
-            (
-                MappedValueType::IntegerSequence,
+                MappedValueType::U64Sequence,
                 vector(DataType::Float64),
                 false,
             ),

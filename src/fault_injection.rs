@@ -63,6 +63,9 @@ mod restarted_voter;
 mod restore_publication;
 #[cfg(test)]
 mod restore_publication_tests;
+mod restore_staging;
+#[cfg(test)]
+mod restore_staging_tests;
 mod shutdown_handoff;
 mod standalone_transaction;
 #[cfg(test)]
@@ -84,6 +87,8 @@ use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 use restore_publication::RestorePublicationFailure;
+pub use restore_staging::RestoreStagingKind;
+use restore_staging::{RestoreStagingFailure, RestoreStagingTarget};
 pub use standalone_transaction::StandaloneTransactionBoundary;
 use wasm_reset_publication::{WasmResetPublicationAuthorityLoss, WasmResetPublicationFailure};
 
@@ -184,8 +189,10 @@ struct FaultInjectionState {
     delayed_stopped_branch_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
-    /// One-shot failures after earlier restore checkpoints have reached the receiving node.
-    failed_restore_state_installations: DashMap<DomainName, RestoreStagingFailure, RandomState>,
+    /// Failures of every staging of one kind of a restored domain's checkpoints until cleared,
+    /// each keeping whether a staging met it.
+    failed_restore_checkpoint_stagings:
+        DashMap<RestoreStagingTarget, RestoreStagingFailure, RandomState>,
     /// Failures of every durable publication of a restored domain's state until cleared, each
     /// keeping whether a publication met it.
     failed_restore_state_publications: DashMap<DomainName, RestorePublicationFailure, RandomState>,
@@ -492,7 +499,7 @@ impl Default for FaultInjection {
                 delayed_source_confirmations: DashMap::default(),
                 delayed_stopped_branch_state_writes: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
-                failed_restore_state_installations: DashMap::default(),
+                failed_restore_checkpoint_stagings: DashMap::default(),
                 failed_restore_state_publications: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
                 guest_save_interruptions: DashMap::default(),
@@ -543,32 +550,7 @@ impl Default for FaultInjection {
     }
 }
 
-/// One precise checkpoint staging boundary of a stopped-domain restore installation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RestoreStagingFailure {
-    Guest,
-    Materialized,
-    BranchState,
-}
-
 impl FaultInjection {
-    pub fn fail_restored_materialized_checkpoint(&self, domain: DomainName) {
-        self.inner
-            .failed_restore_state_installations
-            .insert(domain, RestoreStagingFailure::Materialized);
-    }
-    pub fn fail_restored_wasm_checkpoint(&self, domain: DomainName) {
-        self.inner
-            .failed_restore_state_installations
-            .insert(domain, RestoreStagingFailure::Guest);
-    }
-
-    pub fn fail_restored_branch_state_checkpoint(&self, domain: DomainName) {
-        self.inner
-            .failed_restore_state_installations
-            .insert(domain, RestoreStagingFailure::BranchState);
-    }
-
     /// Interrupt the next branch lifecycle or Kafka offset section of `entity` that a backup of
     /// `domain` streams, once, after it has asked for `entries` of its entries.
     pub fn interrupt_native_metadata_capture(
@@ -735,31 +717,6 @@ impl FaultInjection {
         };
         let (_, chunks) = self.inner.guest_save_interruptions.remove(&owner)?;
         Some(chunks)
-    }
-
-    pub(crate) fn restored_wasm_checkpoint_fails(&self, domain: &DomainName) -> bool {
-        self.inner
-            .failed_restore_state_installations
-            .remove_if(domain, |_, fault| *fault == RestoreStagingFailure::Guest)
-            .is_some()
-    }
-
-    pub(crate) fn restored_materialized_checkpoint_fails(&self, domain: &DomainName) -> bool {
-        self.inner
-            .failed_restore_state_installations
-            .remove_if(domain, |_, fault| {
-                *fault == RestoreStagingFailure::Materialized
-            })
-            .is_some()
-    }
-
-    pub(crate) fn restored_branch_state_checkpoint_fails(&self, domain: &DomainName) -> bool {
-        self.inner
-            .failed_restore_state_installations
-            .remove_if(domain, |_, fault| {
-                *fault == RestoreStagingFailure::BranchState
-            })
-            .is_some()
     }
 
     pub(crate) fn register_wasm_state_reset_coordinator(

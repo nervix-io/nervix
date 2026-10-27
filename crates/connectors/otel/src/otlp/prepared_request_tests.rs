@@ -838,6 +838,7 @@ async fn entity_constructors_keep_their_kind_through_the_lifecycle_contract() {
         config: config(&[
             ("endpoint", "http://127.0.0.1:9"),
             ("protocol", "http/protobuf"),
+            ("timeout_ms", "5000"),
         ]),
         dns: dns.clone(),
         batch: None,

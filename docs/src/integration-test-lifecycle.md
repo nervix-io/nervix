@@ -863,18 +863,24 @@ The harness keeps these boundaries explicit.
   scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
   released observations. The scenario asserts the original execution reference's outcome and a
   dependent command through the public session protocol; it adds no setup delay or request retry.
-- **Restore publication failures.** A durable state publication failure armed for a restored
-  domain fails every publication of that domain's restored state, on whichever node publishes and
-  after the store has made the publication durable, until the scenario clears it. A failure that
-  the first publication consumed would let a leader that resumes the restore, because the failed
-  outcome was never recorded, publish again and complete the restore. The control keeps whether a
-  publication met it, so a scenario asserts the failure as pending before the restore and as
-  delivered once the restore failed, instead of inferring delivery from a successful publication.
-  Clearing it ends the condition without changing a recorded outcome, and the scenarios clear it
-  before asserting that the incomplete-state gate, not the injected failure, refuses `START`. The
-  three-node regression holds the first coordinator's failed outcome before it is recorded, moves
-  leadership, and requires recovery under the same execution reference to end failed and stay
-  failed once the condition is cleared.
+- **Restore publication and staging failures.** A durable state publication failure armed for a
+  restored domain fails every publication of that domain's restored state, on whichever node
+  publishes and after the store has made the publication durable, until the scenario clears it. A
+  checkpoint staging failure is armed for a restored domain and one checkpoint kind: WASM guest
+  state, materialized relay state, or deduplicator and window state. It fails every staging of
+  that domain's checkpoints of that kind, on whichever node stages and before the store stages
+  the checkpoint, until the scenario clears it. Each kind of one domain is armed, delivered and
+  cleared on its own. A failure that the first publication or staging consumed would let a leader
+  that resumes the restore, because the failed outcome was never recorded, publish or stage again
+  and complete the restore. Each control keeps whether a publication or staging met it, so a
+  scenario asserts the failure as pending before the restore and as delivered once the restore
+  failed, instead of inferring delivery from a later success. Clearing it ends the condition
+  without changing a recorded outcome, and the scenarios clear it before asserting that the
+  incomplete-state gate, not the injected failure, refuses `START`, and before a later restore of
+  the same domain. The three-node regression, an outline over a durable publication failure and a
+  materialized checkpoint staging failure, holds the first coordinator's failed outcome before it
+  is recorded, moves leadership, and requires recovery under the same execution reference to end
+  failed and stay failed once the condition is cleared.
 - **Forced entity drain timeouts.** A forced entity drain timeout armed for a domain refuses the
   next drain observed there, after one complete status round. When a durable execution owns the
   domain's mutation at that drain, the timeout keeps refusing the same drain, the same purpose,
@@ -2827,10 +2833,27 @@ artifact carries `tests/logs`.
 Server processes write their logs into their own temporary directories, and a failure quotes the
 tail it needs.
 
+The materialized input round and the delayed-coordinator publication observation each own a
+`BackupPhase`. It captures the existing 120-second deadline before dispatching the operation through
+`observe_off_the_runner`; a runner delayed while polling other scenarios does not stop the input
+round from submitting its next row or the observer from recording a reached barrier. Reading the
+result later does not restart that deadline. Dropping the result future aborts its operation, and a
+real expiry still fails the step with its identity, budget and elapsed time. Producer close remains
+outside the input round's budget, as before.
+
+Input diagnostics retain domain, initial route, producer, attachment, generation, round, tenant,
+attempt and submission identity. A submission is logged separately from its ACK wait and terminal
+outcome. While an ACK is pending, a five-second progress observation records connection, admission,
+producer ending, pending submissions and remaining round budget. It does not resubmit unresolved
+work. Only a reported processing failure takes the fixture's existing replay path, preserving every
+row's event timestamp and complete value; the intentional successful replay also remains.
+
 The delayed-coordinator materialized restore fixture arms the existing publication hook on every
-candidate node, then captures the first coordinator that actually reaches it within the existing
-120-second bound. A terminal background outcome before that barrier is reported immediately. The
-fixture releases the unused hooks before transferring leadership, keeping only the captured
+candidate node, then captures the first coordinator that actually reaches it within that phase's
+deadline. The background task retains its immutable execution reference with its handle. Sending,
+reply and barrier observations retain that reference, route, archive size, candidate nodes and the
+coordinator that reached publication. A terminal background outcome before that barrier is reported
+immediately. The fixture releases the unused hooks before transferring leadership, keeping only the captured
 coordinator held while its successor completes the same immutable restore and produces new rows.
 Releasing that captured hook must be refused and must leave the complete materialized generations
 identical. The controlled first-route scenario moves leadership before submission as well; a saved
@@ -3035,6 +3058,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
 | A step takes the messages a NATS observer's client already holds without a poll of the runner task for each one, in the order the server delivered them | `a_step_takes_buffered_deliveries_without_a_poll_per_message` |
+| A bounded backup phase keeps progressing while its caller is unpolled, retains the original deadline and identifies a genuine expiry | `a_backup_phase_progresses_while_its_runner_is_unpolled`, `a_stalled_backup_phase_fails_at_its_original_deadline`, `an_expired_backup_phase_does_not_start_another_budget` |
 | NATS driver diagnostics distinguish a deliberately overflowing subscription from a disconnected TCP peer, and a disconnect preserves all 32,768 deliveries already buffered | `an_observer_records_the_drivers_slow_consumer_notifications`, `a_disconnected_observer_keeps_its_buffered_burst_and_reports_the_connection_end` |
 | The actual sequence/header assertion drains all 32,768 messages while its caller is unpolled past its deadline, preserves each oracle and still fails a stalled delivery at the original deadline | `a_buffered_sequence_meets_its_deadline_while_the_runner_is_stalled`, `a_sequence_keeps_every_message_and_header_oracle`, `a_stalled_delivery_still_fails_at_the_captured_sequence_deadline` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
