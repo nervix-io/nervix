@@ -649,6 +649,17 @@ statement's `MAX BODY SIZE`: a response that exceeds it fails the poll, which th
 as its transient error, and the next poll reads again. An `HTTP REQUEST` poll's response body has
 no such bound yet and is declared unbounded.
 
+A per-connection bound does not bound the total when the listener accepts an unlimited number of
+connections. The Syslog listener declares frame assembly and completed frames waiting for its
+intake queue as separate unbounded totals, with their per-connection limits in each description.
+Its assembly buffer holds at most `max_message_size + 11` bytes per connection, and each connection
+may also hold one completed frame of at most `max_message_size` bytes while its queue send waits.
+An oversized stream frame closes only its connection; it neither fails the listener's source read
+nor makes the host reconnect. UDP admission separately drops and counts a datagram above
+`max_message_size`, after receiving it into a fixed 65,535-byte scratch buffer. The shared stream
+intake queue holds at most 64 frames and applies backpressure; that queue does not limit the
+connection count or total connection-local retention.
+
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
 sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
 deadline keys mean the same thing for every connector:
