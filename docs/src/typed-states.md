@@ -359,6 +359,13 @@ the candidate graph. It also establishes required batching and schedulable trans
 durations there. Planning consumes those guarantees, including the presence of a required batch,
 and an invalid alteration leaves the accepted configuration intact.
 
+MySQL table names validate their one- or two-part path at construction and decoding, keeping the
+original case. Their parts are borrowed from that validated name when the connector quotes the
+SQL destination; it does not reinterpret the whole path as one identifier. Pooled-client
+configuration has one reserved-key declaration, shared by offline MySQL URL inspection and the
+host's resolved-configuration refusal. Pool capacity remains the client's typed `POOL SIZE`
+bounds, with no competing URL setting.
+
 RabbitMQ's consumer enum distinguishes automatic acknowledgement, sequential acknowledgement
 and parallel acknowledgement. The parallel variant owns a `NonZeroU16` prefetch count and batch
 timeout; both acknowledged variants own an ACK timeout and retry policy. Zero cannot accidentally

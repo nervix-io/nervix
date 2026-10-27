@@ -50,6 +50,9 @@ mod backup_cut;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
+mod entity_drain;
+#[cfg(test)]
+mod entity_drain_tests;
 mod execution;
 mod handoff_gate_link;
 mod model_publication;
@@ -73,6 +76,8 @@ mod wasm_reset_publication;
 pub use backup_cut::BackupCutBoundary;
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
+use entity_drain::ForcedEntityDrainTimeout;
+pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
 use model_publication::ModelPublicationRefusal;
@@ -161,8 +166,9 @@ struct FaultInjectionState {
     /// One-shot, domain-scoped leader refusals of the next transaction model step publication and
     /// of the pause release after it, each keeping how far it was delivered.
     refused_model_publications: DashMap<DomainName, ModelPublicationRefusal, RandomState>,
-    /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
-    forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
+    /// Domain-scoped failures met at the entity drain observation boundary, each refusing the drain
+    /// that met it first whenever the execution owning it observes that drain again.
+    forced_entity_drain_timeouts: DashMap<DomainName, ForcedEntityDrainTimeout, RandomState>,
     /// A stale drain observation on one node omits already buffered relay-owner batches.
     stale_owner_buffer_drain_reports: DashMap<(DomainName, ClusterNodeName), (), RandomState>,
     /// One-shot, domain-scoped timeouts consumed after the durable domain pause engages.
@@ -1103,13 +1109,6 @@ impl FaultInjection {
             return false;
         };
         *failure == HandoffEngagementTransportFailure::Delivered
-    }
-
-    /// Forces the next entity drain in `domain` to report its normal timeout outcome after one
-    /// complete status observation. The one-shot seam lets timeout recovery tests exercise that
-    /// outcome without making successful cluster work race a short duration.
-    pub fn force_next_entity_drain_timeout(&self, domain: DomainName) {
-        self.inner.forced_entity_drain_timeouts.insert(domain, ());
     }
 
     /// Simulates an incomplete drain observation so a scenario can exercise the local schedule
@@ -2142,14 +2141,6 @@ impl FaultInjection {
         }
         *failure = HandoffEngagementTransportFailure::Delivered;
         true
-    }
-
-    /// Consumes the domain-scoped timeout only at the coordinator's drain-observation seam.
-    pub(crate) fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
-        self.inner
-            .forced_entity_drain_timeouts
-            .remove(domain)
-            .is_some()
     }
 
     pub(crate) fn report_no_owner_buffered_batches(

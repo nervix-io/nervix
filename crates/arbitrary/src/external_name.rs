@@ -10,8 +10,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClickHouseTableName, ExternalName, KafkaConsumerGroupName, KafkaTopicName,
     MONGODB_NAMESPACE_MAX_BYTES, MongoDbCollectionName, MqttTopicFilter, MqttTopicName,
-    NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName, PulsarSubscriptionName,
-    PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
+    MySqlTableName, NatsPublishSubjectName, NatsQueueGroupName, NatsSubjectName,
+    PulsarSubscriptionName, PulsarTopicName, RabbitMqQueueName, RedisChannelName, SqsQueueName,
 };
 
 use crate::Arbitrary;
@@ -262,6 +262,24 @@ impl Arbitrary<'_> {
         let text = self.pieces_text(["a", "Z", "0", "9", ".", "_", "-", "~"], 128);
         N::parse(&text)
             .assured("the generator uses the identifier alphabet within the declared bound")
+    }
+
+    /// A MySQL table or database/table path, reaching the complete 128-byte lexical bound.
+    pub fn mysql_table_name(&mut self) -> MySqlTableName {
+        const PIECES: [&str; 7] = ["a", "Z", "0", "9", "_", "-", "~"];
+        let text = if self.entropy.flag() {
+            // At most 126 bytes leave a dot and one nonempty table part inside 128 bytes.
+            let database = self.pieces_text(PIECES, 126);
+            let remaining = 127_usize
+                .checked_sub(database.len())
+                .assured("a database part is at most 126 bytes, leaving a nonempty table part");
+            let table = self.pieces_text(PIECES, remaining);
+            format!("{database}.{table}")
+        } else {
+            self.pieces_text(PIECES, 128)
+        };
+        MySqlTableName::parse(&text)
+            .assured("one or two nonempty identifier parts fit the table path's lexical bound")
     }
 
     /// A publication topic reaches the MQTT byte bound without subscription wildcards or NUL.

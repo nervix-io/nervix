@@ -45,7 +45,9 @@ use nervix_connector::{
     MappedEmitterMember, MappedEmitterRows, MeasuredRequest, PerRecordOutcome,
     RejectedEmitterMember, RowEmitter, RowRequest, RowRequestLimits, optional_client_config_value,
 };
-use nervix_models::{ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, MySqlTableName};
+use nervix_models::{
+    ClientConfigEntry, ClientPoolBounds, EmitterBatchPolicy, MYSQL_MAX_PLACEHOLDERS, MySqlTableName,
+};
 use nervix_primitives::{sync::atomic::Ordering, time::Instant};
 use nervix_recovery::Reported as _;
 use tracing::{debug, trace};
@@ -54,11 +56,6 @@ const MYSQL: &str = "mysql";
 
 /// What `MAX SIZE` measures on a MySQL write, which an oversized row's rejection names.
 const MEASURED_REQUEST: &str = "MySQL insert";
-
-/// The most placeholders one prepared statement binds, which the protocol counts in 16 bits. A
-/// statement with more is refused before it runs, so every insert carries at most as many rows as
-/// fit this many placeholders.
-const MAX_PLACEHOLDERS: usize = 65_535;
 
 /// What separates one row's placeholders from the next in a multi-row insert.
 const ROW_SEPARATOR: &str = ", ";
@@ -350,7 +347,19 @@ impl MySqlTableEmitter {
     }
 
     /// The statement every insert of a write executes, around the placeholders of its rows.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "visits the vocabulary's opaque iterator over at most two \
+                                   immutable table parts bounded to 128 bytes total; local \
+                                   quoting callbacks remain analyzed")
+    )]
     fn insert_statement(&self, columns: &[String]) -> EmitterWriteResult<MultiRowInsert> {
+        let quoted_table = self
+            .table
+            .parts()
+            .map(Self::quote_ident)
+            .collect::<Vec<_>>()
+            .join(".");
         let quoted_columns = columns
             .iter()
             .map(|column| Self::quote_ident(column))
@@ -365,10 +374,7 @@ impl MySqlTableEmitter {
         let suffix = Self::conflict_clause(&quoted_columns, self.conflict_action)
             .map_err(MySqlWriteError::into_report)?;
         Ok(MultiRowInsert {
-            prefix: format!(
-                "INSERT INTO {} ({columns_sql}) VALUES ",
-                Self::quote_ident(self.table.as_str())
-            ),
+            prefix: format!("INSERT INTO {} ({columns_sql}) VALUES ", quoted_table),
             row,
             suffix,
         })
@@ -464,7 +470,7 @@ impl RowEmitter for MySqlTableEmitter {
                 Report::new(EmitterWriteError::Misconfigured { connector: MYSQL })
                     .attach_printable(format!(
                         "a MySQL insert of {column_count} columns binds more than the \
-                         {MAX_PLACEHOLDERS} placeholders one statement accepts"
+                         {MYSQL_MAX_PLACEHOLDERS} placeholders one statement accepts"
                     )),
             );
             return outcome;
@@ -584,7 +590,7 @@ impl MultiRowInsert {
     /// How many rows of `column_count` placeholders each fit one statement, or nothing when not
     /// even one row does.
     fn rows_per_statement(column_count: usize) -> Option<NonZeroUsize> {
-        let rows = MAX_PLACEHOLDERS.checked_div(column_count)?;
+        let rows = MYSQL_MAX_PLACEHOLDERS.checked_div(column_count)?;
         NonZeroUsize::new(rows)
     }
 
@@ -1107,6 +1113,135 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn declared_scalar_encodings_match_the_driver_parameters() {
+        use nervix_models::{MySqlValueEncoding, ParseAsType};
+
+        struct BindingCase {
+            ty: ParseAsType,
+            array: ArrayRef,
+            expected: Value,
+            encoding: MySqlValueEncoding,
+        }
+        macro_rules! binding {
+            ($ty:ident, $array:ident, $value:expr, $expected:expr, $encoding:ident) => {
+                BindingCase {
+                    ty: ParseAsType::$ty,
+                    array: StdArc::new($array::from(vec![$value])),
+                    expected: $expected,
+                    encoding: MySqlValueEncoding::$encoding,
+                }
+            };
+        }
+        let cases = [
+            binding!(Bool, BooleanArray, true, Value::Int(1), BooleanInteger),
+            binding!(U8, UInt8Array, u8::MAX, Value::Int(255), SignedInteger),
+            binding!(I8, Int8Array, i8::MIN, Value::Int(-128), SignedInteger),
+            binding!(
+                U16,
+                UInt16Array,
+                u16::MAX,
+                Value::Int(65_535),
+                SignedInteger
+            ),
+            binding!(
+                I16,
+                Int16Array,
+                i16::MIN,
+                Value::Int(-32_768),
+                SignedInteger
+            ),
+            binding!(
+                U32,
+                UInt32Array,
+                u32::MAX,
+                Value::Int(4_294_967_295),
+                SignedInteger
+            ),
+            binding!(
+                I32,
+                Int32Array,
+                i32::MIN,
+                Value::Int(-2_147_483_648),
+                SignedInteger
+            ),
+            binding!(
+                I64,
+                Int64Array,
+                i64::MIN,
+                Value::Int(i64::MIN),
+                SignedInteger
+            ),
+            binding!(U64, UInt64Array, 7_u64, Value::Int(7), UnsignedInteger),
+            binding!(
+                U64,
+                UInt64Array,
+                u64::MAX,
+                Value::UInt(u64::MAX),
+                UnsignedInteger
+            ),
+            binding!(
+                F32,
+                Float32Array,
+                f32::MAX,
+                Value::Double(f64::from(f32::MAX)),
+                Double
+            ),
+            binding!(F64, Float64Array, f64::NAN, Value::Double(f64::NAN), Double),
+            binding!(
+                String,
+                StringArray,
+                "é",
+                Value::Bytes("é".as_bytes().to_vec()),
+                Utf8Bytes
+            ),
+            binding!(
+                Bytes,
+                BinaryArray,
+                b"\x00\xff".as_slice(),
+                Value::Bytes(vec![0, 255]),
+                Bytes
+            ),
+            binding!(
+                Datetime,
+                TimestampNanosecondArray,
+                0_i64,
+                Value::Bytes(b"1970-01-01T00:00:00+00:00".to_vec()),
+                TimestampBytes
+            ),
+            binding!(I64, Int64Array, None::<i64>, Value::NULL, SignedInteger),
+        ];
+        for case in cases {
+            assert_eq!(
+                MySqlValueEncoding::for_type(&case.ty),
+                case.encoding,
+                "{}",
+                case.ty
+            );
+            let column = MappedMySqlColumn::new(&case.array).expect("the declared scalar binds");
+            match (column.value(0), case.expected) {
+                (Value::Double(actual), Value::Double(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits(), "{}", case.ty);
+                }
+                (actual, expected) => assert_eq!(actual, expected, "{}", case.ty),
+            }
+        }
+        for ty in [
+            ParseAsType::Array {
+                element: Box::new(ParseAsType::I64),
+                len: std::num::NonZeroU32::new(2).expect("two is positive"),
+            },
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Bytes),
+            },
+        ] {
+            assert_eq!(
+                MySqlValueEncoding::for_type(&ty),
+                MySqlValueEncoding::JsonText
+            );
+        }
+    }
     /// Stands in for the pool where a test never opens a connection.
     struct NoConnections;
 
@@ -1132,6 +1267,122 @@ mod tests {
                 max_size: "1KiB".parse().expect("1KiB is a valid size"),
             }),
         }
+    }
+
+    #[test]
+    fn a_qualified_table_quotes_each_case_preserving_part() {
+        let mut emitter = test_emitter(MySqlConflictAction::None);
+        emitter.table = MySqlTableName::parse("Shop.Orders").expect("two table path parts");
+        let statement = emitter
+            .insert_statement(&["key.with.dot".to_string(), "tick`column".to_string()])
+            .expect("the quoted columns form an insert");
+        assert_eq!(
+            statement.sql(1),
+            "INSERT INTO `Shop`.`Orders` (`key.with.dot`, `tick``column`) VALUES (?, ?)"
+        );
+    }
+
+    #[test]
+    fn bolero_mysql_insert_measure_matches_binary_parameters() {
+        use mysql_common::proto::MySerialize as _;
+        use nervix_arbitrary::{Arbitrary, Domain};
+
+        bolero::check!()
+            .with_iterations(256)
+            .with_max_len(1024)
+            .for_each(|bytes: &[u8]| {
+                let mut arbitrary = Arbitrary::new(bytes, Domain::Vocabulary);
+                let mut emitter = test_emitter(arbitrary.entropy().pick([
+                    MySqlConflictAction::None,
+                    MySqlConflictAction::DoNothing,
+                    MySqlConflictAction::DoUpdate,
+                ]));
+                emitter.table = arbitrary.mysql_table_name();
+                let rows = usize::try_from(arbitrary.entropy().boundary_biased(1..=8))
+                    .assured("the generated row count is between one and eight");
+                let mut numbers = Vec::with_capacity(rows);
+                let mut strings = Vec::with_capacity(rows);
+                let mut octets = Vec::with_capacity(rows);
+                for _ in 0..rows {
+                    let length = usize::try_from(arbitrary.entropy().boundary_biased(0..=300))
+                        .assured("a generated payload has at most 300 bytes");
+                    let number = arbitrary.entropy().any_u64();
+                    let text = arbitrary.entropy().pick(["a", "é", "'", "`", "\0"]);
+                    let octet = arbitrary.entropy().byte();
+                    if arbitrary.entropy().flag() {
+                        numbers.push(None);
+                        strings.push(None);
+                        octets.push(None);
+                    } else {
+                        numbers.push(Some(number));
+                        strings.push(Some(text.repeat(length)));
+                        octets.push(Some(vec![octet; length]));
+                    }
+                }
+                let names = [
+                    "key.with.dot".to_string(),
+                    "tick`column".to_string(),
+                    "octets".to_string(),
+                ];
+                let schema = StdArc::new(Schema::new(vec![
+                    Field::new("id", DataType::UInt64, true),
+                    Field::new("text", DataType::Utf8, true),
+                    Field::new("data", DataType::Binary, true),
+                ]));
+                let batch = RecordBatch::try_new(
+                    schema,
+                    vec![
+                        StdArc::new(UInt64Array::from(numbers)),
+                        StdArc::new(StringArray::from(strings)),
+                        StdArc::new(BinaryArray::from_iter(octets)),
+                    ],
+                )
+                .assured("the generated columns have the same bounded row count");
+                let columns = MappedMySqlColumns::new(&batch, &names)
+                    .assured("the declared integer, string and byte columns are supported");
+                let mut members = (0..rows)
+                    .map(|row| MappedEmitterMember { carrier: 0, row })
+                    .collect::<Vec<_>>();
+                let rotation = arbitrary.entropy().count(
+                    rows.checked_sub(1)
+                        .assured("the generated row count is positive"),
+                );
+                members.rotate_left(rotation);
+                let statement = emitter
+                    .insert_statement(&names)
+                    .assured("a declared table and three columns form an insert");
+                let values = BoundValues::bind(&[columns], &members, names.len());
+                for start in 0..rows {
+                    let first_end = start
+                        .checked_add(1)
+                        .assured("at most eight rows are generated");
+                    for end in first_end..=rows {
+                        let begin = start
+                            .checked_mul(names.len())
+                            .assured("eight rows of three parameters fit usize");
+                        let finish = end
+                            .checked_mul(names.len())
+                            .assured("eight rows of three parameters fit usize");
+                        let mut encoded = Vec::new();
+                        for value in &values.values[begin..finish] {
+                            value.serialize(&mut encoded);
+                        }
+                        let sql = statement.sql(
+                            end.checked_sub(start)
+                                .assured("the selected row range is nonempty"),
+                        );
+                        let actual = sql
+                            .len()
+                            .checked_add(encoded.len())
+                            .assured("a bounded insert's text and parameters fit usize");
+                        assert_eq!(
+                            statement.measure(&values, start..end),
+                            u64::try_from(actual).assured("a bounded encoded insert fits u64"),
+                            "rows {start}..{end}, SQL {sql}"
+                        );
+                    }
+                }
+            });
     }
 
     #[nervix_primitives::test]
@@ -1254,10 +1505,10 @@ mod tests {
         );
         assert_eq!(
             MultiRowInsert::rows_per_statement(1).map(NonZeroUsize::get),
-            Some(MAX_PLACEHOLDERS)
+            Some(MYSQL_MAX_PLACEHOLDERS)
         );
         assert_eq!(
-            MultiRowInsert::rows_per_statement(MAX_PLACEHOLDERS + 1),
+            MultiRowInsert::rows_per_statement(MYSQL_MAX_PLACEHOLDERS + 1),
             None
         );
         assert_eq!(MultiRowInsert::rows_per_statement(0), None);

@@ -64,7 +64,9 @@ impl MongoDbClientConfiguration {
             ("minPoolSize", connection.min_pool_size),
         ] {
             if value.is_some() {
-                return Err(Report::new(OfflineClientConfigError::PoolSizing { key }));
+                return Err(Report::new(OfflineClientConfigError::PoolSizing {
+                    key: key.to_owned(),
+                }));
             }
         }
         // The driver's explicit-seed parse performs pure validation and returns immediately.
@@ -174,7 +176,7 @@ mod tests {
             )))
             .expect_err("a pool is sized only by POOL SIZE");
             assert!(
-                matches!(report.current_context(), OfflineClientConfigError::PoolSizing { key: actual } if *actual == key)
+                matches!(report.current_context(), OfflineClientConfigError::PoolSizing { key: actual } if actual.as_str() == key)
             );
         }
     }
