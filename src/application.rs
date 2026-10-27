@@ -193,6 +193,7 @@ mod session_service;
 mod shutdown;
 mod startup;
 mod state_replication_requests;
+mod statement_routing;
 mod subscription;
 mod termination_signals;
 #[cfg(test)]

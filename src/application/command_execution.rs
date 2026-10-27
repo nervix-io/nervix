@@ -49,8 +49,9 @@ use super::{
     authentication::{user_credentials, verify_password_hash},
     command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::current_timestamp,
-    model_mutation::{command_error, is_persistent_statement},
+    model_mutation::command_error,
     session_service::{SessionServiceImpl, conflicting_reference, expired_reference},
+    statement_routing::is_persistent_statement,
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
     transaction::is_queueable_transaction_statement,
 };
