@@ -279,7 +279,7 @@ impl Arbitrary<'_> {
                 EmitterEntity::MongoDb(MongoDbEmitter::Collection(MongoDbCollectionEmitter {
                     mode: self.mongodb_collection_publication(),
                     client: self.name(),
-                    collection: self.emitter_table_name(),
+                    collection: self.mongodb_collection_name(),
                     values,
                     conflict_action,
                 }))

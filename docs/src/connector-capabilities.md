@@ -720,7 +720,7 @@ Client CONFIG keys below come from the same declaration used by validation, comp
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |  |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |  |
 | Network waits | connection: name resolution, TCP and TLS: driver default, connectTimeoutMS, 10 s<br>server selection: driver default, 30 s<br>the handshake, a pool wait and a write: unbounded |  |
-| Driver limits | A document above 16 MiB is rejected. |  |
+| Driver limits | A document above the declared BSON document limit is rejected. |  |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |  |
 
 ### ICEBERG TABLE emit
@@ -1114,12 +1114,12 @@ Delegated property namespaces: none; only declared keys are accepted. Reserved k
 | --- | --- |
 | Kind | MONGODB |
 | Connection pooling | pooled; explicit POOL SIZE MIN &lt;minimum&gt; MAX &lt;maximum&gt; |
-| CONFIG owner class | Nervix |
+| CONFIG owner class | Nervix; address query delegated to driver |
 | Statement options | No entity-specific options. |
 
 | CONFIG key | Presence | Value | Owner | Confidential | File role |
 | --- | --- | --- | --- | --- | --- |
-| `addr` | required | URL (mongodb or mongodb+srv) | Nervix; strict | no | none |
+| `addr` | required | driver address, including its delegated query options | Nervix; strict | no | none |
 | `database` | optional | string | Nervix; strict | no | none |
 | `tls_ca_file` | optional | file path, with resource mount templates resolved before use | Nervix; strict | no | TLS trust; follows the connector's documented root policy |
 

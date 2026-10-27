@@ -14,6 +14,14 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+MongoDB's explicit-seed URL and delegated options are checked by its native parser without
+network I/O. Pool query options produce the typed `PoolSizing` outcome naming `POOL SIZE`;
+other native refusals retain the driver's error beneath the value-free key context. Its resolved
+database is required, and the collection checks the complete namespace budget before opening.
+Client initialization also preserves the driver cause of option installation and the validation
+ping. Public command refusal projection renders the reviewed key/pool context rather than driver
+input.
+
 The ClickHouse declaration checks a required positive `timeout_ms` and the address/TLS pairing
 before inspecting mounted files or opening a client. Missing timeout or HTTPS trust is a
 `ClientConfigSchemaError::MissingRequired` or `RequiresKey`; a TLS key with an HTTP address is

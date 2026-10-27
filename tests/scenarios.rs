@@ -30830,6 +30830,40 @@ fn mongodb_document_user_id(document: &MongoDbDocument) -> serde_json::Value {
     }
 }
 
+#[then("the MongoDB collection eventually matches this BSON filter")]
+async fn then_mongodb_collection_matches_bson_filter(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let filter: MongoDbDocument =
+        serde_json::from_str(&expand_placeholders(world, docstring(step)))
+            .assured("the scenario supplies a BSON query document");
+    let prepared = world
+        .mongodb_collection
+        .clone()
+        .assured("the Given step provisioned a collection");
+    let client = prepared.client(world.dependencies.endpoints()).await;
+    let collection = client
+        .database("nervix")
+        .collection::<MongoDbDocument>(&prepared.name);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        nervix_primitives::task::consume_budget().await;
+        let document = collection
+            .find_one(filter.clone())
+            .await
+            .assured("the test server accepts a BSON query");
+        if document.is_some() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no document matched BSON filter {filter:?}"
+        );
+        nervix_primitives::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 #[then("the MongoDB collection eventually contains a document")]
 async fn then_mongodb_collection_eventually_contains_document(
     world: &mut ScenarioWorld,
@@ -32599,6 +32633,36 @@ fn then_last_cluster_status_reports_interconnect_status(
         observed.as_deref(),
         Some(expected_status.as_str()),
         "expected peer '{peer_node_id}' to remain '{expected_status}' in the probe's status: \
+         {output}"
+    );
+}
+
+#[then(expr = "node {string} reports interconnect to {string} as {string}")]
+async fn then_node_reports_interconnect_status(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    peer_node_id: String,
+    expected_status: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let peer_node_id = expand_placeholders(world, &peer_node_id);
+    let expected_status = expand_placeholders(world, &expected_status);
+    let output = world
+        .cluster()
+        .status_text(&node_id, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+        .await
+        .unwrap_or_else(|error| panic!("cluster status on '{node_id}' failed: {error:#}"));
+    assert!(
+        output
+            .lines()
+            .any(|line| line == format!("raft.id: {node_id}")),
+        "cluster status request to '{node_id}' was answered by another node: {output}"
+    );
+    let observed = crate::common::cluster::interconnect_status_from_text(&output, &peer_node_id);
+    assert_eq!(
+        observed.as_deref(),
+        Some(expected_status.as_str()),
+        "expected node '{node_id}' to report peer '{peer_node_id}' as '{expected_status}': \
          {output}"
     );
 }
