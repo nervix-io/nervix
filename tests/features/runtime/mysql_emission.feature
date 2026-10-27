@@ -9,7 +9,7 @@ Feature: MySQL emission
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
       """
-    And MySQL table "notifications_mysql_out_{{test_id}}" exists
+    And MySQL table "Notifications_mysql_out_{{test_id}}" exists
     When these Plexus commands are executed
       """
       CREATE SCHEMA notification (
@@ -47,7 +47,7 @@ Feature: MySQL emission
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
-        CREATE MYSQL TABLE EMITTER to_mysql FROM notifications TO mysql_client TABLE 'notifications_mysql_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
+        CREATE MYSQL TABLE EMITTER to_mysql FROM notifications TO mysql_client TABLE 'nervix.Notifications_mysql_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
