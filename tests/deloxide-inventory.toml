@@ -989,7 +989,7 @@ scenario = "A restore publication pause follows the admitted coordinator after t
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "A remote generator repeatedly describes and reads a stable materialized generation, then reads its replacement through authenticated snapshot transfer. Sealing exercises the existing tracked assignment and sealed-cache locks; transport waits and task-local reuse are outside the detector."
+coverage = "A remote generator repeatedly describes and reads a stable materialized generation, holds no relay memory beside its retained view while its source owner refuses relay grants, then reads its replacement through authenticated snapshot transfer. Sealing exercises the existing tracked assignment and sealed-cache locks; transport waits, async memory admission and task-local reuse are outside the detector."
 examples = 1
 feature = "tests/features/cluster/backup_materialized.feature"
 id = "scenario.materialized-read-reuse"
@@ -1346,6 +1346,26 @@ id = "scenario.backup-multi-domain-wait"
 invariant = "One- and three-node cluster backups wait across independent domain cut budgets and retain both quiesced cuts."
 invocation = "scenarios"
 scenario = "A Plexus cluster backup waits across independent domain cut budgets"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic cluster lifetimes, leader routing and command recovery around an ordinary CLI subprocess whose backup runs again under its reference after leadership moves while its expired outcome waits to be recorded."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-rerun-expiry"
+invariant = "A backup that runs again under its reference holds its second cut again and returns the second-domain quiesce expiry, and both domains resume."
+invocation = "scenarios"
+scenario = "A backup that runs again under its reference returns the second-domain quiesce expiry again"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Diagnostic cluster lifetimes, leader routing and command recovery around an ordinary CLI subprocess whose cluster backup runs again under its reference after leadership moves while its outcome waits to be recorded."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "scenario.backup-rerun-holds"
+invariant = "A cluster backup that runs again under its reference holds each delayed cut again, and the archive the client receives records both holds."
+invocation = "scenarios"
+scenario = "A cluster backup that runs again under its reference holds each delayed cut again"
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
@@ -1839,7 +1859,7 @@ scenario = "A restore publication pause follows the admitted coordinator after t
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
-coverage = "Under scheduling stress: a remote generator reads and reuses a stable complete generation, then reads its replacement; existing assignment and sealed-cache locks are tracked. Async transport waits and task-local reuse remain outside Deloxide."
+coverage = "Under scheduling stress: a remote generator reads and reuses a stable complete generation, holds no relay memory beside its retained view while its source owner refuses relay grants, then reads its replacement; existing assignment and sealed-cache locks are tracked. Async transport waits, memory admission and task-local reuse remain outside Deloxide."
 examples = 1
 feature = "tests/features/cluster/backup_materialized.feature"
 id = "stress.materialized-read-reuse"
@@ -1986,6 +2006,26 @@ id = "stress.backup-multi-domain-wait"
 invariant = "One- and three-node cluster backups wait across independent domain cut budgets and retain both quiesced cuts."
 invocation = "stress-restore-scenarios"
 scenario = "A Plexus cluster backup waits across independent domain cut budgets"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic cluster lifetimes, leader routing and command recovery around an ordinary CLI subprocess whose backup runs again under its reference after leadership moves while its expired outcome waits to be recorded."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-rerun-expiry"
+invariant = "A backup that runs again under its reference holds its second cut again and returns the second-domain quiesce expiry, and both domains resume."
+invocation = "stress-restore-scenarios"
+scenario = "A backup that runs again under its reference returns the second-domain quiesce expiry again"
+selections = ["deloxide-stress-restore"]
+
+[[workload]]
+coverage = "Under scheduling stress: diagnostic cluster lifetimes, leader routing and command recovery around an ordinary CLI subprocess whose cluster backup runs again under its reference after leadership moves while its outcome waits to be recorded."
+examples = 1
+feature = "tests/features/cluster/backup_wait.feature"
+id = "stress.backup-rerun-holds"
+invariant = "A cluster backup that runs again under its reference holds each delayed cut again, and the archive the client receives records both holds."
+invocation = "stress-restore-scenarios"
+scenario = "A cluster backup that runs again under its reference holds each delayed cut again"
 selections = ["deloxide-stress-restore"]
 
 [[workload]]

@@ -184,6 +184,9 @@ async fn when_cli_backs_up(world: &mut ScenarioWorld, scope: String, node: Strin
     run_cli(world, &node, arguments).await;
 }
 
+/// Every cut of the domain that reaches its capture waits there, a cut of a backup that runs again
+/// under its execution reference included, until the scenario releases the gate or times its
+/// holds.
 #[given(expr = "the backup cut for domain {string} will pause before its capture")]
 fn given_backup_cut_pauses(world: &mut ScenarioWorld, raw_domain: String) {
     let domain = scenario_domain(world, &raw_domain);
@@ -252,6 +255,7 @@ async fn then_backup_cut_paused(world: &mut ScenarioWorld, raw_domain: String) {
     .expect("the backup reaches the pause before its capture");
 }
 
+/// Every cut waiting at the domain's capture continues, and every later one passes it.
 #[when(expr = "the backup cut pause for domain {string} is released")]
 fn when_backup_cut_pause_released(world: &mut ScenarioWorld, raw_domain: String) {
     let domain = scenario_domain(world, &raw_domain);
@@ -260,6 +264,8 @@ fn when_backup_cut_pause_released(world: &mut ScenarioWorld, raw_domain: String)
         .release_backup_cut_pause(&domain, BackupCutBoundary::Capture);
 }
 
+/// Every cut of the domain that holds its lease waits there, a cut of a backup that runs again
+/// under its execution reference included, until the scenario releases the gate.
 #[given(expr = "the backup cut for domain {string} will pause once it holds its lease")]
 fn given_backup_lease_pauses(world: &mut ScenarioWorld, raw_domain: String) {
     let domain = scenario_domain(world, &raw_domain);
@@ -283,6 +289,7 @@ async fn then_backup_lease_paused(world: &mut ScenarioWorld, raw_domain: String)
     .expect("the backup holds its lease and reaches the pause before its reach check");
 }
 
+/// Every cut waiting once it holds the domain's lease continues, and every later one passes.
 #[when(expr = "the backup lease pause for domain {string} is released")]
 fn when_backup_lease_pause_released(world: &mut ScenarioWorld, raw_domain: String) {
     let domain = scenario_domain(world, &raw_domain);

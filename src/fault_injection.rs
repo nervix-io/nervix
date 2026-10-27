@@ -47,6 +47,8 @@ use nervix_recovery::NoReceiver as _;
 use crate::registry::SchedulerMode;
 
 mod backup_cut;
+#[cfg(test)]
+mod backup_cut_tests;
 mod client_inspection;
 mod consensus;
 mod domain_clock;
@@ -76,6 +78,7 @@ mod transaction_cleanup;
 mod wasm_reset_publication;
 
 pub use backup_cut::BackupCutBoundary;
+use backup_cut::{BackupCutGate, BackupCutGateKey};
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use entity_drain::ForcedEntityDrainTimeout;
@@ -231,6 +234,9 @@ struct FaultInjectionState {
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     command_pauses: DashMap<CommandPausePoint, Arc<TestPause>, RandomState>,
+    /// The gates every backup cut of a domain waits at, by domain and boundary. Runtime and
+    /// harness waiters clone a gate so it remains alive after its map guard drops.
+    backup_cut_gates: DashMap<BackupCutGateKey, Arc<BackupCutGate>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     entity_gate_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// A remote node pauses after engaging its gate but before replying to the coordinator.
@@ -425,10 +431,6 @@ enum CommandPausePoint {
         node_id: ClusterNodeName,
         step: RestoreStep,
     },
-    BackupCut {
-        domain: DomainName,
-        boundary: BackupCutBoundary,
-    },
     BackupDownload(ClusterNodeName),
     RestoreStatePublication {
         domain: DomainName,
@@ -524,6 +526,7 @@ impl Default for FaultInjection {
                 startup_observation_end,
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
+                backup_cut_gates: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
                 entity_gate_response_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),

@@ -15664,6 +15664,15 @@ async fn wait_for_mqtt_ingestors_ready(world: &mut ScenarioWorld) {
 }
 
 async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(), String> {
+    open_recorded_web_console_page(world, url, web_console_connections::InitialSession::Deliver)
+        .await
+}
+
+async fn open_recorded_web_console_page(
+    world: &mut ScenarioWorld,
+    url: &str,
+    initial_session: web_console_connections::InitialSession,
+) -> Result<(), String> {
     let playwright = Playwright::launch()
         .await
         .map_err(|error| error.to_string())?;
@@ -15681,7 +15690,7 @@ async fn open_web_console_page(world: &mut ScenarioWorld, url: &str) -> Result<(
         .await
         .map_err(|error| error.to_string())?;
     page.set_default_timeout(10_000.0).await;
-    web_console_connections::record_console_connections(&page)
+    web_console_connections::record_console_connections(&page, initial_session)
         .await
         .map_err(|error| error.to_string())?;
     page.goto(url, None)
@@ -19531,7 +19540,16 @@ async fn then_selector_exists(world: &mut ScenarioWorld, selector: String) {
         .expect("a browser page must be opened before selector assertions");
     let selector = expand_placeholders(world, &selector);
     let script = format!(
-        r#"() => document.querySelector({selector}) ? 'OK' : 'selector is absent'"#,
+        r#"() => {{
+            if (document.querySelector({selector})) return 'OK';
+            const text = (selector) => document.querySelector(selector)?.textContent?.trim();
+            return 'selector is absent; ' + JSON.stringify({{
+                domain: text('.domain-select'),
+                scope: text('.create-scope'),
+                choices: Array.from(document.querySelectorAll('.create-choice-state'))
+                    .map((state) => state.textContent.trim()),
+            }});
+        }}"#,
         selector = serde_json::to_string(&selector)
             .assured("the test selector serializes as JavaScript string text")
     );
@@ -32659,6 +32677,36 @@ fn then_last_cluster_status_reports_interconnect_status(
         observed.as_deref(),
         Some(expected_status.as_str()),
         "expected peer '{peer_node_id}' to remain '{expected_status}' in the probe's status: \
+         {output}"
+    );
+}
+
+#[then(expr = "node {string} reports interconnect to {string} as {string}")]
+async fn then_node_reports_interconnect_status(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    peer_node_id: String,
+    expected_status: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let peer_node_id = expand_placeholders(world, &peer_node_id);
+    let expected_status = expand_placeholders(world, &expected_status);
+    let output = world
+        .cluster()
+        .status_text(&node_id, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+        .await
+        .unwrap_or_else(|error| panic!("cluster status on '{node_id}' failed: {error:#}"));
+    assert!(
+        output
+            .lines()
+            .any(|line| line == format!("raft.id: {node_id}")),
+        "cluster status request to '{node_id}' was answered by another node: {output}"
+    );
+    let observed = crate::common::cluster::interconnect_status_from_text(&output, &peer_node_id);
+    assert_eq!(
+        observed.as_deref(),
+        Some(expected_status.as_str()),
+        "expected node '{node_id}' to report peer '{peer_node_id}' as '{expected_status}': \
          {output}"
     );
 }
