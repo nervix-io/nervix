@@ -32637,6 +32637,36 @@ fn then_last_cluster_status_reports_interconnect_status(
     );
 }
 
+#[then(expr = "node {string} reports interconnect to {string} as {string}")]
+async fn then_node_reports_interconnect_status(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    peer_node_id: String,
+    expected_status: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let peer_node_id = expand_placeholders(world, &peer_node_id);
+    let expected_status = expand_placeholders(world, &expected_status);
+    let output = world
+        .cluster()
+        .status_text(&node_id, PhaseDeadline::after(STATUS_REQUEST_TIMEOUT))
+        .await
+        .unwrap_or_else(|error| panic!("cluster status on '{node_id}' failed: {error:#}"));
+    assert!(
+        output
+            .lines()
+            .any(|line| line == format!("raft.id: {node_id}")),
+        "cluster status request to '{node_id}' was answered by another node: {output}"
+    );
+    let observed = crate::common::cluster::interconnect_status_from_text(&output, &peer_node_id);
+    assert_eq!(
+        observed.as_deref(),
+        Some(expected_status.as_str()),
+        "expected node '{node_id}' to report peer '{peer_node_id}' as '{expected_status}': \
+         {output}"
+    );
+}
+
 #[then(expr = "node {string} eventually reports interconnect to {string} as {string}")]
 async fn then_node_eventually_reports_interconnect_status(
     world: &mut ScenarioWorld,
