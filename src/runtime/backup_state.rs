@@ -531,22 +531,25 @@ impl Runtime {
     ) -> error_stack::Result<(), BackupStateCaptureError> {
         #[cfg(feature = "testing")]
         {
-            let faults = &self.inner.fault_injection;
-            let domain = &checkpoint.placement.domain;
-            let injected = match checkpoint.placement.state.kind() {
-                RuntimeStateKind::WasmProcessor => faults.restored_wasm_checkpoint_fails(domain),
-                RuntimeStateKind::MaterializedRelay => {
-                    faults.restored_materialized_checkpoint_fails(domain)
-                }
+            use crate::fault_injection::RestoreStagingKind;
+
+            let staging = match checkpoint.placement.state.kind() {
+                RuntimeStateKind::WasmProcessor => Some(RestoreStagingKind::Guest),
+                RuntimeStateKind::MaterializedRelay => Some(RestoreStagingKind::Materialized),
                 RuntimeStateKind::Deduplicator | RuntimeStateKind::WindowProcessor => {
-                    faults.restored_branch_state_checkpoint_fails(domain)
+                    Some(RestoreStagingKind::BranchState)
                 }
                 RuntimeStateKind::BranchAggregated
                 | RuntimeStateKind::Correlator
                 | RuntimeStateKind::KafkaOffset
-                | RuntimeStateKind::BranchLru => false,
+                | RuntimeStateKind::BranchLru => None,
             };
-            if injected {
+            if let Some(kind) = staging
+                && self
+                    .inner
+                    .fault_injection
+                    .restore_checkpoint_staging_fails(&checkpoint.placement.domain, kind)
+            {
                 return Err(Report::new(BackupStateCaptureError::Storage));
             }
         }

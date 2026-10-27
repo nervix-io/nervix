@@ -17,7 +17,8 @@ Publication" section of docs/src/integration-test-lifecycle.md owns the contract
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+import contextlib
 from dataclasses import asdict, dataclass, field
 import enum
 import json
@@ -434,6 +435,59 @@ class Clock:
         time.sleep(seconds)
 
 
+class Termination:
+    """The SIGINT or SIGTERM that ends the publication step, and where publication raises it.
+
+    Python runs a signal handler between any two bytecodes, so a handler that raised at once could
+    land inside library cleanup. Python 3.12.3's `shutil.rmtree`, interrupted just after it closed a
+    temporary directory's descriptor, closed it again, and that failure replaced the cancellation
+    before it was recorded; later versions leave the directory behind instead. So the handler only
+    records the first signal, and raises it only inside a wait for a kache command or for the next
+    poll. There it raises at once and only once, so the wait's own cleanup, such as reaping the
+    command it killed, runs to its end. A signal received outside a wait is raised when the next wait
+    begins or the current phase ends, so the record names the phase in which the step received it.
+    """
+
+    def __init__(self) -> None:
+        self.signal_number: int | None = None
+        self.interrupts_wait = False
+
+    def install(self) -> None:
+        """Make this the step's handler of both termination signals."""
+        signal.signal(signal.SIGINT, self.handle)
+        signal.signal(signal.SIGTERM, self.handle)
+
+    def ignore(self) -> None:
+        """Ignore both termination signals once the record is written. Python's exit restores the
+        default handlers, so a later signal would otherwise end the step with its own status."""
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+    def handle(self, signal_number: int, _frame: FrameType | None) -> None:
+        """Record the step's first termination signal, and raise it if a wait is running."""
+        if self.signal_number is None:
+            self.signal_number = signal_number
+        if self.interrupts_wait:
+            self.interrupts_wait = False
+            raise Cancelled(self.signal_number)
+
+    def check(self) -> None:
+        """Raise the termination the step received, if it received one."""
+        if self.signal_number is not None:
+            raise Cancelled(self.signal_number)
+
+    @contextlib.contextmanager
+    def interruptible(self) -> Iterator[None]:
+        """A wait that the step's termination ends at once, including one received before it."""
+        # The wait becomes interruptible before it checks, so a signal between the two is raised.
+        self.interrupts_wait = True
+        try:
+            self.check()
+            yield
+        finally:
+            self.interrupts_wait = False
+
+
 @dataclass
 class Publication:
     """The record of one job's publication, written whatever its outcome."""
@@ -487,9 +541,17 @@ class Publisher:
     """Publishes one job's cache within its budget: saves the build manifest, then waits until the
     job's daemon reports no upload queued or in flight."""
 
-    def __init__(self, environment: Mapping[str, str], clock: Clock, budget_seconds: float, poll_seconds: float) -> None:
+    def __init__(
+        self,
+        environment: Mapping[str, str],
+        clock: Clock,
+        termination: Termination,
+        budget_seconds: float,
+        poll_seconds: float,
+    ) -> None:
         self.environment = kache_environment(environment)
         self.clock = clock
+        self.termination = termination
         self.budget_seconds = budget_seconds
         self.poll_seconds = poll_seconds
         self.started = clock.now()
@@ -519,9 +581,9 @@ class Publisher:
 
         # Without its daemon, kache reports counters from the store alone, where nothing is ever
         # pending, so every count below is confirmed only while the daemon answers.
-        publication.phase = "asking the daemon"
+        self.begin(publication, "asking the daemon")
         try:
-            daemon = DaemonState.read(self.environment, self.command_timeout())
+            daemon = self.daemon()
         except KacheError as error:
             publication.finish(Outcome.UNAVAILABLE, [f"The job's kache daemon could not be asked: {error}."])
             return
@@ -540,13 +602,13 @@ class Publisher:
             publication.finish(Outcome.UNAVAILABLE, [f"The daemon's uploads could not be read: {error}."])
             return
 
-        publication.phase = "saving the manifest"
+        self.begin(publication, "saving the manifest")
         namespace = self.environment.get("KACHE_NAMESPACE") or publication.manifest_key
         publication.manifest = self.command(
             ["save-manifest", "--manifest-key", publication.manifest_key, "--namespace", namespace]
         )
 
-        publication.phase = "waiting for uploads"
+        self.begin(publication, "waiting for uploads")
         waiting_since = self.clock.now()
         reasons = []
         uploads = publication.uploads_at_start
@@ -561,11 +623,12 @@ class Publisher:
             remaining = self.remaining()
             if remaining <= 0:
                 break
-            self.clock.sleep(min(self.poll_seconds, remaining))
+            with self.termination.interruptible():
+                self.clock.sleep(min(self.poll_seconds, remaining))
         publication.upload_wait_seconds = self.clock.now() - waiting_since
         publication.uploads_at_end = uploads
         try:
-            still_running = DaemonState.read(self.environment, self.command_timeout()).running
+            still_running = self.daemon().running
         except KacheError:
             still_running = False
         if not still_running:
@@ -588,6 +651,17 @@ class Publisher:
         else:
             publication.finish(Outcome.PUBLISHED, [])
 
+    def begin(self, publication: Publication, phase: str) -> None:
+        """Move publication to its next phase. A termination received since the last wait is raised
+        first, so the record names the phase in which the step received it."""
+        self.termination.check()
+        publication.phase = phase
+
+    def daemon(self) -> DaemonState:
+        """What the job's daemon reports, asked in a wait the step's termination interrupts."""
+        with self.termination.interruptible():
+            return DaemonState.read(self.environment, self.command_timeout())
+
     def command(self, arguments: Sequence[str]) -> CommandResult:
         began = self.clock.now()
         rendered = " ".join(["kache", *arguments])
@@ -595,7 +669,8 @@ class Publisher:
         if remaining <= 0:
             return CommandResult(rendered, None, 0.0, [])
         try:
-            completed = run_kache(arguments, self.environment, remaining)
+            with self.termination.interruptible():
+                completed = run_kache(arguments, self.environment, remaining)
         except subprocess.TimeoutExpired as expired:
             output = captured_text(expired.stdout) + captured_text(expired.stderr)
             return CommandResult(rendered, None, self.clock.now() - began, output.splitlines()[-OUTPUT_TAIL_LINES:])
@@ -604,9 +679,11 @@ class Publisher:
 
     def uploads(self) -> Uploads:
         timeout = self.command_timeout()
+        # Only the command is a wait: a termination never interrupts the directory's removal.
         with tempfile.TemporaryDirectory(prefix="kache-telemetry-") as directory:
             try:
-                written = run_kache(["telemetry", "write", directory], self.environment, timeout)
+                with self.termination.interruptible():
+                    written = run_kache(["telemetry", "write", directory], self.environment, timeout)
             except subprocess.TimeoutExpired as error:
                 raise KacheError(f"`kache telemetry write` did not answer within {timeout:.0f} s") from error
             if written.returncode != 0:
@@ -622,21 +699,18 @@ class Publisher:
         return self.clock.now() - self.started
 
 
-def raise_cancelled(signal_number: int, _frame: FrameType | None) -> None:
-    raise Cancelled(signal_number)
-
-
 def publish(
     report_directory: Path,
     job_status: str,
     environment: Mapping[str, str],
+    termination: Termination,
     clock: Clock | None = None,
     budget_seconds: float = PUBLICATION_BUDGET_SECONDS,
     poll_seconds: float = UPLOAD_POLL_SECONDS,
 ) -> Publication:
     """Publish the job's cache and write its record. A step termination is recorded too, then
     raised again so the step ends as the runner asked."""
-    publisher = Publisher(environment, clock or Clock(), budget_seconds, poll_seconds)
+    publisher = Publisher(environment, clock or Clock(), termination, budget_seconds, poll_seconds)
     publication = Publication(
         # An image build has no GitHub job; its manifest key names it.
         job=environment.get("GITHUB_JOB") or environment.get("KACHE_MANIFEST_KEY") or "local build",
@@ -644,16 +718,16 @@ def publish(
         manifest_key=environment.get("KACHE_MANIFEST_KEY") or None,
         budget_seconds=budget_seconds,
     )
-    cancelled = None
     try:
         publisher.publish(publication)
+        # A termination received after the last wait cancels publication too.
+        termination.check()
     except Cancelled as error:
-        cancelled = error
         publication.finish(Outcome.CANCELLED, [f"The step received {error} while {publication.phase}."])
     publication.elapsed_seconds = publisher.elapsed()
     record(publication, report_directory, environment)
-    if cancelled is not None:
-        raise cancelled
+    # Raised again, as is a termination received while the record was written.
+    termination.check()
     return publication
 
 
@@ -690,9 +764,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "start":
             start(environment)
         else:
-            signal.signal(signal.SIGINT, raise_cancelled)
-            signal.signal(signal.SIGTERM, raise_cancelled)
-            publish(arguments.report_directory, arguments.job_status, environment)
+            termination = Termination()
+            termination.install()
+            try:
+                publish(arguments.report_directory, arguments.job_status, environment, termination)
+            finally:
+                termination.ignore()
+            # A termination received after publication's last check still ends the step with its
+            # status, and from here on none can replace it.
+            termination.check()
     except ConfigurationError as error:
         print(f"{parser.prog} {arguments.command}: {error}", file=sys.stderr)
         return 2
