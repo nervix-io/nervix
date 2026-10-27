@@ -343,6 +343,12 @@ impl MySqlTableEmitter {
     }
 
     /// The statement every insert of a write executes, around the placeholders of its rows.
+    #[cfg_attr(
+        nervix_lint,
+        nervix::dispatch(reason = "visits the vocabulary's opaque iterator over at most two \
+                                   immutable table parts bounded to 128 bytes total; local \
+                                   quoting callbacks remain analyzed")
+    )]
     fn insert_statement(&self, columns: &[String]) -> EmitterWriteResult<MultiRowInsert> {
         let quoted_table = self
             .table
