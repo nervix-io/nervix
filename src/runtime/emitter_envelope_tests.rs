@@ -128,6 +128,7 @@ fn rows(
             envelopes
                 .envelope(row)
                 .expect("the envelopes describe every row of the batch")
+                .map(|envelope| &**envelope)
         })
         .collect()
 }
@@ -167,7 +168,10 @@ async fn an_envelope_that_computes_nothing_is_carried_by_every_row_alike() {
     let envelopes = evaluate(&envelope, &mut published, EnvelopeInput::Published).await;
 
     assert_eq!(envelopes.row_count(), None);
-    assert_eq!(envelopes.envelope(7), Some(Ok(&persistent_with_delay())));
+    assert_eq!(
+        envelopes.envelope(7),
+        Some(Ok(&Arc::new(persistent_with_delay())))
+    );
     assert_eq!(envelopes.estimated_bytes(), 0);
     assert_eq!(
         published.acks.len(),
@@ -411,7 +415,7 @@ async fn values_read_their_own_source_record_and_the_output_the_route_constructe
 }
 
 #[test]
-fn a_publish_batch_without_envelopes_publishes_every_row_with_the_empty_one() {
+fn a_publish_batch_without_envelopes_gives_no_row_one_and_rows_share_a_fixed_envelope() {
     let input = test_schema(&[("id", ParseAsType::String)]);
     let published = batch(
         input,
@@ -425,17 +429,23 @@ fn a_publish_batch_without_envelopes_publishes_every_row_with_the_empty_one() {
         publish_batch
             .envelope(1)
             .expect("a batch without envelopes answers for every row"),
-        Ok(RecordEnvelope::default())
+        Ok(None)
     );
     assert!(
         publish_batch.envelope(2).is_ok(),
         "a batch without envelopes answers alike for any row"
     );
 
-    let fixed = publish_batch.with_envelopes(RowEnvelopes::Fixed(persistent_with_delay()));
-    assert_eq!(
-        fixed.envelope(1).expect("the row exists"),
-        Ok(persistent_with_delay())
+    let fixed =
+        publish_batch.with_envelopes(RowEnvelopes::Fixed(Arc::new(persistent_with_delay())));
+    let carried = |row: usize| match fixed.envelope(row).expect("the row exists") {
+        Ok(Some(envelope)) => envelope,
+        other => panic!("row {row} carries the fixed envelope, found {other:?}"),
+    };
+    assert_eq!(*carried(1), persistent_with_delay());
+    assert!(
+        Arc::ptr_eq(&carried(0), &carried(1)),
+        "every row shares the one fixed envelope rather than a copy of it"
     );
 }
 
@@ -474,7 +484,8 @@ async fn evaluated_envelopes_stay_with_the_publish_batch_they_were_evaluated_ove
 
     let message_ids = [0, 1].map(
         |row| match enveloped.envelope(row).expect("the row exists") {
-            Ok(envelope) => envelope.message_id,
+            Ok(Some(envelope)) => envelope.message_id.clone(),
+            Ok(None) => panic!("row {row} has an envelope"),
             Err(failure) => panic!("row {row} has an envelope: {failure}"),
         },
     );

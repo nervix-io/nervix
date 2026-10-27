@@ -42,8 +42,9 @@ pub(super) struct BatchEnvelope {
     pub(super) key: Option<String>,
     pub(super) headers: EmitterHeaders,
     pub(super) message_group: Option<String>,
-    /// What the emitter's envelope clauses and properties set on the record.
-    pub(super) clauses: RecordEnvelope,
+    /// What the emitter's envelope clauses and properties set on the record, absent where the
+    /// emitter writes none. The batch the member came from holds it, and the payload shares it.
+    pub(super) clauses: Option<Arc<RecordEnvelope>>,
 }
 
 /// One row of a carrier, or a rejected row that seals the current payload.
@@ -417,7 +418,7 @@ mod tests {
                     key: None,
                     headers: Vec::new(),
                     message_group: Some(group.to_string()),
-                    clauses: RecordEnvelope::default(),
+                    clauses: None,
                 },
             }],
         }
@@ -518,15 +519,18 @@ mod tests {
 
     #[test]
     fn a_differing_envelope_value_seals_the_payload_and_each_payload_keeps_its_own() {
+        let clauses = |message_id: &str| {
+            Some(Arc::new(RecordEnvelope {
+                persistent: true,
+                message_id: Some(message_id.to_string()),
+                ..RecordEnvelope::default()
+            }))
+        };
         let with_message_id = |value: i64, batch_index: usize, message_id: &str| {
             let mut carrier = carrier(value, batch_index, "source_a", "one");
             for row in &mut carrier.rows {
                 if let PackingRow::Ready { envelope, .. } = row {
-                    envelope.clauses = RecordEnvelope {
-                        persistent: true,
-                        message_id: Some(message_id.to_string()),
-                        ..RecordEnvelope::default()
-                    };
+                    envelope.clauses = clauses(message_id);
                 }
             }
             carrier
@@ -545,7 +549,7 @@ mod tests {
             .map(|outcome| match outcome {
                 PackedOutcome::Payload(payload) => (
                     payload.rows.len(),
-                    payload.envelope.clauses.message_id,
+                    payload.envelope.clauses,
                     payload.payload,
                 ),
                 other => panic!("every test row should encode into a payload, found {other:?}"),
@@ -556,11 +560,11 @@ mod tests {
             vec![
                 (
                     2,
-                    Some("first".to_string()),
+                    clauses("first"),
                     br#"[{"value":1},{"value":2}]"#.to_vec()
                 ),
-                (1, Some("second".to_string()), br#"[{"value":3}]"#.to_vec()),
-                (1, Some("first".to_string()), br#"[{"value":4}]"#.to_vec()),
+                (1, clauses("second"), br#"[{"value":3}]"#.to_vec()),
+                (1, clauses("first"), br#"[{"value":4}]"#.to_vec()),
             ],
             "a member whose envelope differs never shares its neighbours' payload"
         );
@@ -1066,19 +1070,19 @@ mod tests {
                 key: None,
                 headers: Vec::new(),
                 message_group: None,
-                clauses: RecordEnvelope::default(),
+                clauses: None,
             },
             BatchEnvelope {
                 key: Some("key".to_string()),
                 headers: vec![("trace".to_string(), "1".to_string())],
                 message_group: None,
-                clauses: RecordEnvelope::default(),
+                clauses: None,
             },
             BatchEnvelope {
                 key: None,
                 headers: Vec::new(),
                 message_group: Some("group".to_string()),
-                clauses: RecordEnvelope::default(),
+                clauses: None,
             },
         ]
     }

@@ -24,7 +24,8 @@ use std::collections::BTreeMap;
 
 use nervix_connector::{
     EmitterHttpRequest, EmitterRecord, EmitterRecordId, EmitterRecordPosition, EmitterRowRequest,
-    PerRecordOutcome, PreparedRowRequest, RejectedEmitterMember, RowRequestPreparation,
+    PerRecordOutcome, PreparedRowRequest, RecordEnvelope, RejectedEmitterMember,
+    RowRequestPreparation,
 };
 
 use super::{emitter_batch_packing::BatchEnvelope, *};
@@ -216,7 +217,10 @@ impl PreparedContent for EncodedPayload {
             self.envelope.headers.clone(),
             occurred_at,
         );
-        let emitter_record = emitter_record.with_envelope(self.envelope.clauses.clone());
+        let emitter_record = match &self.envelope.clauses {
+            Some(clauses) => emitter_record.with_envelope(RecordEnvelope::clone(clauses)),
+            None => emitter_record,
+        };
         match &self.envelope.message_group {
             Some(message_group) => emitter_record.with_message_group(message_group.clone()),
             None => emitter_record,
@@ -618,7 +622,7 @@ mod shuttle_tests;
 mod tests {
     use std::collections::BTreeSet;
 
-    use nervix_connector::{EmitterWriteError, RecordEnvelope};
+    use nervix_connector::EmitterWriteError;
 
     use super::*;
     use crate::runtime::test_fixtures::{emitter_context, input_schema};
@@ -661,7 +665,7 @@ mod tests {
                     key: Some("key".to_string()),
                     headers: vec![("source".to_string(), "a".to_string())],
                     message_group: Some("group".to_string()),
-                    clauses: RecordEnvelope::default(),
+                    clauses: None,
                 },
                 payload: bytes.as_bytes().to_vec(),
             },
@@ -1514,19 +1518,19 @@ mod tests {
                 key: None,
                 headers: Vec::new(),
                 message_group: None,
-                clauses: RecordEnvelope::default(),
+                clauses: None,
             },
             1 => BatchEnvelope {
                 key: Some(format!("key-{variant}")),
                 headers: vec![("trace".to_string(), variant.to_string())],
                 message_group: None,
-                clauses: RecordEnvelope::default(),
+                clauses: None,
             },
             _ => BatchEnvelope {
                 key: None,
                 headers: Vec::new(),
                 message_group: Some(format!("group-{variant}")),
-                clauses: RecordEnvelope::default(),
+                clauses: None,
             },
         }
     }

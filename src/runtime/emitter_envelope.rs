@@ -4,8 +4,8 @@
 //! - **Owns.** Compiling the values an emitter's envelope computes once, as one program over each
 //!   published record, its source record and the batch's materialized state; evaluating that
 //!   program over each batch the emitter admits, after its route kept and finalized the rows;
-//!   carrying each row's envelope, or the reason it has none, beside the batch; and the bytes they
-//!   hold.
+//!   carrying each row's envelope, or the reason it has none, beside the batch, held once for the
+//!   payloads that publish the row to share; and the bytes they hold.
 //! - **Depends on.** The emitter's envelope plan, the VM's compile and execute API, the connector
 //!   contract's record envelope, and the relay batches the program runs over.
 //! - **Must not know.** Which connector reads an envelope, what its transport does with it, or
@@ -110,8 +110,9 @@ pub(in crate::runtime) enum EnvelopeInput<'a> {
 
 /// One emitter's envelope, compiled once for its task.
 pub(in crate::runtime) struct CompiledEnvelope {
-    /// What every record carries whatever it holds: the flag and duration clauses.
-    fixed: RecordEnvelope,
+    /// What every record carries whatever it holds: the flag and duration clauses. Every row of
+    /// every batch shares it where the envelope computes no value.
+    fixed: Arc<RecordEnvelope>,
     /// The values each record computes, absent where the envelope computes none.
     computed: Option<CompiledEnvelopeValues>,
 }
@@ -166,7 +167,7 @@ impl CompiledEnvelope {
     ) -> error_stack::Result<Self, EmitterEnvelopeError> {
         let Some(computed) = &plan.computed else {
             return Ok(Self {
-                fixed: plan.fixed.clone(),
+                fixed: Arc::new(plan.fixed.clone()),
                 computed: None,
             });
         };
@@ -245,7 +246,7 @@ impl CompiledEnvelope {
             emitter: emitter.clone(),
         })?;
         Ok(Self {
-            fixed: plan.fixed.clone(),
+            fixed: Arc::new(plan.fixed.clone()),
             computed: Some(CompiledEnvelopeValues {
                 program: CompiledProgramWithMaterializedInterest {
                     compiled: Arc::new(compiled),
@@ -275,7 +276,7 @@ impl CompiledEnvelope {
         execution_now: Timestamp,
     ) -> Result<RowEnvelopes, PlannedGeneralFailure> {
         let Some(computed) = &self.computed else {
-            return Ok(RowEnvelopes::Fixed(self.fixed.clone()));
+            return Ok(RowEnvelopes::Fixed(Arc::clone(&self.fixed)));
         };
         let acks = std::mem::take(&mut published.acks);
         let source = match input {
@@ -356,7 +357,8 @@ impl CompiledEnvelopeValues {
         evaluated: &VmTypedBatch,
         selected_rows: &nervix_vm::RowSelection,
         row_count: usize,
-    ) -> error_stack::Result<Vec<Result<RecordEnvelope, EnvelopeError>>, EmitterEnvelopeError> {
+    ) -> error_stack::Result<Vec<Result<Arc<RecordEnvelope>, EnvelopeError>>, EmitterEnvelopeError>
+    {
         let mut output_rows = vec![None; row_count];
         for (output_row, input_row) in selected_rows.iter().enumerate() {
             if let Some(slot) = output_rows.get_mut(input_row) {
@@ -386,7 +388,7 @@ impl CompiledEnvelopeValues {
             }
             match missing {
                 Some(failure) => rows.push(Err(failure)),
-                None => rows.push(Ok(envelope)),
+                None => rows.push(Ok(Arc::new(envelope))),
             }
         }
         Ok(rows)
@@ -503,13 +505,14 @@ impl EnvelopeTarget {
     }
 }
 
-/// The envelope of every row of one emitter batch, as the host evaluated it.
+/// The envelope of every row of one emitter batch, as the host evaluated it. Each envelope is held
+/// once: the payloads that publish a row share its envelope rather than copying it.
 #[derive(Debug, Clone)]
 pub(in crate::runtime) enum RowEnvelopes {
     /// Every row carries this one envelope, which computes no value.
-    Fixed(RecordEnvelope),
+    Fixed(Arc<RecordEnvelope>),
     /// Each row's own envelope, or why it has none.
-    Evaluated(Vec<Result<RecordEnvelope, EnvelopeError>>),
+    Evaluated(Vec<Result<Arc<RecordEnvelope>, EnvelopeError>>),
 }
 
 impl RowEnvelopes {
@@ -527,7 +530,7 @@ impl RowEnvelopes {
     pub(in crate::runtime) fn envelope(
         &self,
         row: usize,
-    ) -> Option<Result<&RecordEnvelope, &EnvelopeError>> {
+    ) -> Option<Result<&Arc<RecordEnvelope>, &EnvelopeError>> {
         match self {
             Self::Fixed(envelope) => Some(Ok(envelope)),
             Self::Evaluated(rows) => match rows.get(row)? {

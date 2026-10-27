@@ -93,7 +93,7 @@ fn payload(rows: &[usize], bytes: &[u8]) -> PreparedPayload<EncodedPayload> {
                 key: None,
                 headers: Vec::new(),
                 message_group: None,
-                clauses: modeled_envelope(),
+                clauses: Some(Arc::new(modeled_envelope())),
             },
             payload: bytes.to_vec(),
         },

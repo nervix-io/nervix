@@ -318,17 +318,17 @@ impl EmitterPublishBatch {
         }
     }
 
-    /// The envelope row `row` is published with, empty when the emitter writes none, or why the
-    /// row has none.
+    /// The envelope row `row` is published with, absent when the emitter writes none, or why the
+    /// row has none. The row shares it with this batch rather than copying it.
     pub(super) fn envelope(
         &self,
         row: usize,
-    ) -> EmitterRuntimeResult<Result<RecordEnvelope, EnvelopeError>> {
+    ) -> EmitterRuntimeResult<Result<Option<Arc<RecordEnvelope>>, EnvelopeError>> {
         let Some(envelopes) = &self.envelopes else {
-            return Ok(Ok(RecordEnvelope::default()));
+            return Ok(Ok(None));
         };
         match envelopes.envelope(row) {
-            Some(Ok(envelope)) => Ok(Ok(envelope.clone())),
+            Some(Ok(envelope)) => Ok(Ok(Some(Arc::clone(envelope)))),
             Some(Err(failure)) => Ok(Err(failure.clone())),
             None => Err(Report::new(EmitterRuntimeError::EncodeBatch)
                 .attach_printable(format!("emitter batch row {row} has no envelope entry"))),

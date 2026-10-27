@@ -1557,10 +1557,13 @@ type. The host compiles that program once for the task, over the source record a
 published record as `message` and, where the route constructs the published record, that output
 as `output`, with the materialized state and lookups the emitter reaches. It evaluates the program
 once per admitted batch, after the route, and carries each row's `RecordEnvelope` beside the batch:
-the fixed clauses with the row's own values, or the reason the row has none. A record without an
-envelope is rejected by the host under the emitter's message error policy, as an `evaluation` error
-of the `publish` operation, and never reaches the connector. Packing seals a batch payload where
-two members' envelopes differ, and a retained payload keeps its envelope with its bytes.
+the fixed clauses with the row's own values, or the reason the row has none. Where the envelope
+computes no value, every row of every batch shares the one envelope its fixed clauses form. A record
+without an envelope is rejected by the host under the emitter's message error policy, as an
+`evaluation` error of the `publish` operation, and never reaches the connector. Packing seals a
+batch payload where two members' envelopes differ. A payload shares its members' envelope with the
+batch they came from rather than copying it, and a retained payload keeps it with its bytes. An
+emitter that writes no envelope carries nothing beside its batches or in its payloads.
 
 A record emitter reads its record's envelope from `EmitterRecord::envelope`: the three flags, the
 timestamp, the two durations, the reply target, the message and deduplication identities, and the

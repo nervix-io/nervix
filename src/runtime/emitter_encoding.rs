@@ -863,8 +863,8 @@ mod tests {
             Timestamp::from_unix_nanos(100),
         )
         .with_envelopes(RowEnvelopes::Evaluated(vec![
-            Ok(message_id("first")),
-            Ok(message_id("second")),
+            Ok(Arc::new(message_id("first"))),
+            Ok(Arc::new(message_id("second"))),
             Err(EnvelopeError::OmittedInputRow),
         ]))
     }
