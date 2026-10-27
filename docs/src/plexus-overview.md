@@ -684,8 +684,10 @@ CREATE [IF NOT EXISTS] <CONNECTOR> CLIENT <name>
 
 `POSTGRES`, `MYSQL`, `MONGODB`, and `REDIS` clients require `POOL SIZE MIN <n> MAX <n>` after the
 name and before the optional mount. See [Database Client Connection Pools](database-client-pools.md).
-`DROP CLIENT` and `SHOW CREATE CLIENT` address the client's name without a
-connector in their head.
+`DROP CLIENT`, `SHOW CREATE CLIENT`, and `DESCRIBE CLIENT` address the client's name without a
+connector in their head. `DESCRIBE CLIENT <name>` reports the connector and effective CONFIG,
+marking declared defaults supplied for omitted keys. `SHOW CREATE CLIENT <name>` preserves
+authored configuration. Both inspection commands redact confidential values.
 
 WebSocket clients and endpoints may also reference a signaling protocol:
 

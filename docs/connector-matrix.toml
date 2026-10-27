@@ -143,7 +143,7 @@ properties = "This entity declares no typed PROPERTIES block; any encoded record
 [entity."CLICKHOUSE TABLE"]
 emit_headers = "The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity."
 envelope = "This implementation maps payloads; it declares no additional per-record envelope clauses for this entity."
-mirror = "The ClickHouse connector inserts mapped rows into an existing table; it declares no change-data-capture or query ingestor."
+mirror = "The ClickHouse connector inserts mapped rows into an existing table; its client declares TCP keep-alive and HTTP pool idle-reuse intervals. It declares no change-data-capture or query ingestor."
 properties = "This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping."
 
 [entity."POSTGRES TABLE"]

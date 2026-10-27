@@ -167,6 +167,7 @@ use crate::common::{
 };
 
 mod backup;
+mod clickhouse_connections;
 mod client_consumers;
 mod client_producers;
 mod common;

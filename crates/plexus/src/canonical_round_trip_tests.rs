@@ -382,6 +382,21 @@ fn statement_corpus_reaches_resumed_restore() {
 }
 
 #[test]
+fn statement_corpus_reaches_client_inspection() {
+    let bytes = include_bytes!(
+        "__fuzz__/canonical_round_trip_tests__bolero_statement_roundtrip_canonical_plexus/corpus/\
+         describe-client"
+    );
+    let mut arbitrary = Arbitrary::new(bytes, Domain::Plexus);
+    let statement = client_statement(&mut arbitrary);
+    assert!(matches!(
+        statement,
+        ClientStatement::Server(Statement::DescribeClient(_))
+    ));
+    assert_statement_round_trips(&statement);
+}
+
+#[test]
 fn bolero_statement_roundtrip_canonical_plexus() {
     bolero::check!()
         .with_iterations(256)

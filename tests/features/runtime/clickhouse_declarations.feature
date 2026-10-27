@@ -1,6 +1,114 @@
 Feature: ClickHouse declarations
   ClickHouse clients and table emitters reject declarations that their transport cannot use.
 
+  Scenario Outline: ClickHouse client inspection reports its default connection settings
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE CLICKHOUSE CLIENT checked CONFIG {
+        'addr' = 'http://127.0.0.1:8123', 'timeout_ms' = '5000',
+        'password' = 'secret-client-password'
+      };
+      """
+    When these Plexus commands are executed
+      """
+      DESCRIBE CLIENT checked;
+      """
+    Then the last command output contains
+      """
+      pool_idle_timeout_ms: 2000 (default)
+      tcp_keepalive_ms: 60000 (default)
+      """
+    And the last command output contains
+      """
+      password: ********
+      """
+    And the last command output does not contain
+      """
+      secret-client-password
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Client inspection reports a missing client
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail with "client 'missing' not found"
+      """
+      DESCRIBE CLIENT missing;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: ClickHouse client inspection reports declared connection settings
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE CLICKHOUSE CLIENT checked CONFIG {
+        'addr' = 'http://127.0.0.1:8123', 'timeout_ms' = '5000',
+        'tcp_keepalive_ms' = '<keepalive>', 'pool_idle_timeout_ms' = '250'
+      };
+      DESCRIBE CLIENT checked;
+      """
+    Then the last command output contains
+      """
+      pool_idle_timeout_ms: 250
+      tcp_keepalive_ms: <keepalive>
+      """
+    And the last command output does not contain
+      """
+      (default)
+      """
+
+    Examples:
+      | cluster_size | keepalive |
+      | 1            | 30000     |
+      | 3            | 30000     |
+      | 1            | 60000     |
+      | 3            | 60000     |
+
+  Scenario Outline: ClickHouse clients refuse invalid connection settings at CREATE
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands fail with "<diagnostic>"
+      """
+      CREATE CLICKHOUSE CLIENT checked CONFIG {
+        'addr' = 'http://127.0.0.1:8123', 'timeout_ms' = '5000', <entry>
+      };
+      """
+
+    Examples:
+      | cluster_size | entry                           | diagnostic                                       |
+      | 1            | 'pool_idle_timeout_ms' = '0'    | invalid client config key 'pool_idle_timeout_ms' |
+      | 3            | 'pool_idle_timeout_ms' = '0'    | invalid client config key 'pool_idle_timeout_ms' |
+      | 1            | 'tcp_keepalive_ms' = 'invalid'  | invalid client config key 'tcp_keepalive_ms'     |
+      | 3            | 'tcp_keepalive_ms' = 'invalid'  | invalid client config key 'tcp_keepalive_ms'     |
+      | 1            | 'tcp_keepalive_ms' = '1'        | invalid client config key 'tcp_keepalive_ms'     |
+      | 3            | 'tcp_keepalive_ms' = '1'        | invalid client config key 'tcp_keepalive_ms'     |
+      | 1            | 'tcp_keepalive_ms' = '1001'     | invalid client config key 'tcp_keepalive_ms'     |
+      | 3            | 'tcp_keepalive_ms' = '1001'     | invalid client config key 'tcp_keepalive_ms'     |
+      | 1            | 'tcp_keepalive_ms' = '32768000' | invalid client config key 'tcp_keepalive_ms'     |
+      | 3            | 'tcp_keepalive_ms' = '32768000' | invalid client config key 'tcp_keepalive_ms'     |
+      | 1            | 'pool_idle_timout_ms' = '250'   | unknown client config key 'pool_idle_timout_ms'  |
+      | 3            | 'pool_idle_timout_ms' = '250'   | unknown client config key 'pool_idle_timout_ms'  |
+
   Scenario Outline: ClickHouse table declaration keeps a valid one- or two-part locator
     Given a 1 node nervix cluster is started
     And the leader node is configured with these Plexus commands
