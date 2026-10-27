@@ -522,9 +522,12 @@ impl SessionServiceImpl {
             .registry
             .get::<CreatePlacement>(domain, &describe.name)
         {
-            Ok(Some(placement)) => placement.to_canonical_plexus().ok(),
+            Ok(Some(placement)) => match placement.to_canonical_plexus() {
+                Ok(form) => Some(form),
+                Err(error) => return command_error(format!("{error:#}")),
+            },
             Ok(None) => None,
-            Err(error) => return command_error(error.to_string()),
+            Err(error) => return command_error(format!("{error:#}")),
         };
         let mut lines = vec![format!("placement: {}", rule.name.as_str())];
         if let Some(form) = form {

@@ -33,6 +33,7 @@ use nervix_primitives::{
     sync::{Arc, CancellationToken},
     task::{AbortOnDropHandle, JoinHandle},
 };
+use nervix_recovery::Reported as _;
 use thiserror::Error;
 
 use super::{
@@ -134,7 +135,11 @@ async fn completion_peers(
         .await
     {
         Ok(Some(response)) => response,
-        Ok(None) | Err(_) => return None,
+        Ok(None) => return None,
+        Err(error) => {
+            Err::<(), _>(error).reported("observe completion peers");
+            return None;
+        }
     };
     if consensus.current_leader_tenure().as_ref() != Some(&tenure) {
         return None;
@@ -217,7 +222,10 @@ async fn probe_application_revisions(
                 .await
             {
                 Ok(response) => response,
-                Err(_) => return None,
+                Err(error) => {
+                    Err::<(), _>(error).reported("observe application revision");
+                    return None;
+                }
             };
             if response.identity != expected_identity || !phase.is_complete(&response, revision) {
                 return None;
@@ -274,7 +282,11 @@ async fn probe_https_listeners(
                 .await;
             let installation = match response {
                 Ok(response) if response.identity == expected_identity => response.installation,
-                Ok(_) | Err(_) => HttpsListenerInstallation::Pending,
+                Ok(_) => HttpsListenerInstallation::Pending,
+                Err(error) => {
+                    Err::<(), _>(error).reported("observe HTTPS listener installation");
+                    HttpsListenerInstallation::Pending
+                }
             };
             ProbedHttpsListener {
                 identity: expected_identity,

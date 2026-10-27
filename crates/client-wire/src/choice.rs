@@ -623,6 +623,14 @@ impl Choice {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::error_boundary(
+        outcome,
+        reason = "configured-choice replies project lookup and context state into this fixed \
+                  session-protocol disposition"
+    )
+)]
 pub enum ChoiceStatus {
     Ready,
     MissingContext,

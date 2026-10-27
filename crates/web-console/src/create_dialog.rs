@@ -605,7 +605,7 @@ impl Default for DomainDraft {
 impl DomainDraft {
     fn submission(&self) -> error_stack::Result<CreateSubmission, CreateDraftError> {
         let name = DomainName::parse(self.name.trim())
-            .map_err(|_| Report::new(CreateDraftError::DomainName))?;
+            .map_err(|cause| cause.change_context(CreateDraftError::DomainName))?;
         let pace = match self.pace {
             DomainPaceChoice::Unpaced => DomainPace::Unpaced,
             DomainPaceChoice::Paced => DomainPace::Paced {
@@ -659,7 +659,7 @@ impl UserDraft {
     /// never reaches the preview or the terminal.
     fn submission(&self) -> error_stack::Result<CreateSubmission, CreateDraftError> {
         let name = UserName::parse(self.name.trim())
-            .map_err(|_| Report::new(CreateDraftError::UserName))?;
+            .map_err(|cause| cause.change_context(CreateDraftError::UserName))?;
         if self.password.is_empty() {
             return Err(Report::new(CreateDraftError::PasswordRequired));
         }
@@ -708,7 +708,7 @@ impl ResourceDraft {
         let scope =
             captured_domain.ok_or_else(|| Report::new(CreateDraftError::ResourceDomainRequired))?;
         let name = ResourceName::parse(self.name.trim())
-            .map_err(|_| Report::new(CreateDraftError::ResourceName))?;
+            .map_err(|cause| cause.change_context(CreateDraftError::ResourceName))?;
         let statement = Statement::CreateResource(CreateStatement::new(
             CreateResource {
                 identifier: name.clone(),

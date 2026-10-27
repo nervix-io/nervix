@@ -1203,8 +1203,8 @@ impl EmitterDelivery {
         use arrow_ipc::reader::StreamReader;
         let expected = SchemaField::arrow_schema(fields);
         let mut reader =
-            StreamReader::try_new(std::io::Cursor::new(batch), None).map_err(|_| {
-                Report::new(ClientError::UnexpectedReply {
+            StreamReader::try_new(std::io::Cursor::new(batch), None).map_err(|cause| {
+                Report::new(cause).change_context(ClientError::UnexpectedReply {
                     request: RequestKind::ReadEmitterBatch,
                 })
             })?;
@@ -1218,8 +1218,8 @@ impl EmitterDelivery {
                 request: RequestKind::ReadEmitterBatch,
             }));
         };
-        let rows = rows.map_err(|_| {
-            Report::new(ClientError::UnexpectedReply {
+        let rows = rows.map_err(|cause| {
+            Report::new(cause).change_context(ClientError::UnexpectedReply {
                 request: RequestKind::ReadEmitterBatch,
             })
         })?;

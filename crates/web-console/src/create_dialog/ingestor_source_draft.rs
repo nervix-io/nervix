@@ -438,7 +438,7 @@ impl IngestorEntityDraft {
         };
         value
             .parse::<NonZeroU64>()
-            .change_context(IngestorEntityDraftError::Instances)
+            .map_err(|cause| Report::new(cause).change_context(IngestorEntityDraftError::Instances))
     }
 
     fn every(&self) -> error_stack::Result<DomainClockPeriod, IngestorEntityDraftError> {
@@ -487,7 +487,7 @@ impl IngestorEntityDraft {
         self.ack_max
             .trim()
             .parse()
-            .map_err(|_| Report::new(IngestorEntityDraftError::AckMax))
+            .map_err(|cause| Report::new(cause).change_context(IngestorEntityDraftError::AckMax))
     }
 
     fn kafka_mode(&self) -> error_stack::Result<KafkaIngestMode, IngestorEntityDraftError> {

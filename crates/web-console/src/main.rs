@@ -4742,7 +4742,7 @@ async fn upload_resource_files(
     }
     let form = match web_sys::FormData::new() {
         Ok(form) => form,
-        Err(_) => return "failed to create upload form".to_string(),
+        Err(cause) => return format!("failed to create upload form: {cause:?}"),
     };
     for index in 0..files.length() {
         let Some(file) = files.item(index) else {

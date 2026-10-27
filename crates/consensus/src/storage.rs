@@ -19,7 +19,7 @@ use std::{
     ops::{Bound, RangeBounds},
 };
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, Readable as _, Snapshot as FjallSnapshot};
 use futures_util::{FutureExt as _, Stream, StreamExt as _, stream};
 use meticulous::{OptionExt as _, ResultExt as _};
@@ -171,10 +171,9 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
             encoding: value.encoding,
             last_applied_log_id: value.last_applied_log_id.map(Into::into),
             last_membership: Arc::new(
-                value
-                    .last_membership
-                    .try_into()
-                    .map_err(|_| io::Error::other(StorageFailure::InvalidState))?,
+                StoredMembershipOf::try_from(value.last_membership)
+                    .change_context(StorageFailure::InvalidState)
+                    .map_err(crate::durable_batch::storage_report_io)?,
             ),
             runtime_revision: value.runtime_revision,
             command_retry_fence: value.command_retry_fence,
@@ -1112,7 +1111,8 @@ impl StoreInner {
         let record: EntryRecord = storage_decode(value)?;
         let entry = record
             .into_entry()
-            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+            .change_context(StorageFailure::InvalidState)
+            .map_err(crate::durable_batch::storage_report_io)?;
         if entry.log_id.index != index {
             return Err(io::Error::other(StorageFailure::InvalidState));
         }
@@ -1122,9 +1122,9 @@ impl StoreInner {
     /// The log index a stored log key names. A log key is exactly the index's eight big-endian
     /// bytes, so any other length is a key no append wrote.
     fn log_index(key: &[u8]) -> io::Result<u64> {
-        let index: [u8; 8] = key
-            .try_into()
-            .map_err(|_| io::Error::other(StorageFailure::InvalidState))?;
+        let index = <[u8; 8]>::try_from(key)
+            .change_context(StorageFailure::InvalidState)
+            .map_err(crate::durable_batch::storage_report_io)?;
         Ok(u64::from_be_bytes(index))
     }
 
@@ -1584,7 +1584,7 @@ enum LogEntryStreamError {
 
 impl LogEntryStreamError {
     fn report_into_io(report: Report<Self>) -> io::Error {
-        io::Error::other(report.into_error())
+        crate::durable_batch::storage_report_io(report)
     }
 
     fn report_into_leader_bounded(report: Report<Self>) -> LeaderBoundedStreamError<TypeConfig> {
@@ -1594,7 +1594,9 @@ impl LogEntryStreamError {
         };
         match changed {
             Some(error) => LeaderBoundedStreamError::LeaderChanged(error),
-            None => LeaderBoundedStreamError::IoError(io::Error::other(report.into_error())),
+            None => {
+                LeaderBoundedStreamError::IoError(crate::durable_batch::storage_report_io(report))
+            }
         }
     }
 }

@@ -644,6 +644,11 @@ current representation, qualification policy and coverage limits.
 
 ## Validation And Failure Boundaries
 
+Configuration-backup round-trip validation names an unpinned resource binding with its own typed
+refusal, rather than using a resource name itself as the error. Its exact outcome classification
+applies to that validity check. Generic resource-version mapping still forwards the callback's
+actual error type and does not classify every callback failure as a refusal.
+
 Native connection options validate every timeout at setup: one millisecond through 24 hours.
 The backup command wait has its own required duration, distinct from an optional per-domain
 quiesce override and the ordinary request and retry bounds. Backup execution identity projects

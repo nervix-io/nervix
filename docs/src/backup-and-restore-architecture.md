@@ -786,6 +786,13 @@ routing could not reach. A section path names a branch by the BLAKE3 fingerprint
 
 ## Failure Semantics At Every Boundary
 
+Section conversion, executor admission, checkpoint reads and staging keep their typed causes in
+local reports. Capture and restore handlers project those reports into the fixed interconnect
+failure only when returning their reply; its reason renders the context chain. A staging refusal
+that the restore stream projects into its fixed intake outcome is also reported at its recovery
+decision, so a failed write or seal retains an operator-visible cause.
+A retained archive's read failure is reported before its download sends the fixed read refusal.
+
 | Boundary | Failure | What remains | Recovery |
 | --- | --- | --- | --- |
 | Backup admission | The statement is batched, queued in a transaction, or sent to a follower | Nothing admitted | Send it alone, to the leader the redirect names. |
@@ -882,6 +889,12 @@ attempted, each domain's status and start generation, a dry run's impact reports
 for every skipped state section. `DESCRIBE BACKUP` inventories an archive without contacting a node.
 [Backup And Restore](./backup-and-restore.md) shows each report.
 
+Backup command diagnostics and restore step reasons render the owning context and its complete
+cause chain. A coordinator's direct checkpoint calls retain the same runtime-state and staging
+causes as an installation through the interconnect; interrupted guest and native-metadata captures
+retain their cause in the backup failure. These diagnostics name operations and entities without
+including archive contents.
+
 The leader logs at `info` when it assembled an archive, when a download collected one and when a
 restore completed, with the execution reference and the domains; skipped state is logged at `warn`
 on the leader. Maintenance failures are logged at `warn` on the node. There are no backup-specific
@@ -899,7 +912,7 @@ keyspaces' disk allocation; until the first sweep completes they read zero.
 | Capture fence | The Loom models `server.backup.cut-includes-publication` and `server.backup.cut-generation`, each qualified by weakenings that must fail, and the Shuttle checks of the fence, of forced deduplicator and window publication at the cut, and of materialized capture against eviction. |
 | Downloads and retention | `backup.feature` and `backup_delivery.feature`, and the Shuttle checks that a download stays bounded, a lost client releases its hold once, and concurrent downloads collect an archive once. |
 | Restore progress | `restore.feature` on one and three nodes: verification refusals, a failed step, an interrupted upload, joined retries and a leader change while applying; the Shuttle checks that a resumed restore never repeats a recorded effect, an abandoned upload releases its quota once, and concurrent retries join one execution. |
-| Complete-set publication and the gate | `backup_generation.feature`, `backup_materialized.feature`, `backup_branch_state.feature` and `backup_branch_state_large.feature`: interrupted installation, durable-publication failure, including one whose coordinator loses leadership before recording it and whose recovery under the same execution reference fails again, restart and delayed coordinators; the consensus Shuttle checks that publication and handle clearing precede resume and fence delayed publishers. |
+| Complete-set publication and the gate | `backup.feature`, `backup_generation.feature`, `backup_materialized.feature`, `backup_branch_state.feature` and `backup_branch_state_large.feature`: interrupted installation through a checkpoint staging failure, durable-publication failure, each including one whose coordinator loses leadership before recording it and whose recovery under the same execution reference fails again, restart and delayed coordinators; the consensus Shuttle checks that publication and handle clearing precede resume and fence delayed publishers. |
 | Staging quota and maintenance | `backup_staging.feature`, the state store's storage regressions, the kept-measurement property, and the consensus Shuttle check that reclamation holds its revision through queued installation. |
 | Interconnect operations | The Turmoil scenarios for a fenced section fetch across a partition, window sections above the bulk budget, a bounded inventory under a held link, and a restart during transfer, with their committed seeds; [Deterministic Interconnect Simulation](./interconnect-simulation.md) lists them. |
 | Tracked locks | The restore storage owner tests and the `@restore_installation` and `@backup_wait` scenarios in the Deloxide selections, with their `stress.` twins in the stress selections; [Data-Plane Concurrency](./data-plane-concurrency.md) records what the detector does and does not see. |

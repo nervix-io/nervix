@@ -1283,9 +1283,9 @@ impl Runtime {
             )
             .await;
         });
-        release
-            .await
-            .map_err(|_| Report::new(EntityGateOperationError::ReleaseTaskTerminated))?;
+        release.await.map_err(|cause| {
+            Report::new(cause).change_context(EntityGateOperationError::ReleaseTaskTerminated)
+        })?;
         Ok(())
     }
 

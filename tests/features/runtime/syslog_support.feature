@@ -54,7 +54,7 @@ Feature: Syslog support
       CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
       START;
       """
-    When these Plexus commands are executed
+    When these Plexus commands are executed on the active session
       """
       SHOW CREATE CODEC syslog_codec;
       """
@@ -115,6 +115,65 @@ Feature: Syslog support
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
+
+  Scenario: A Syslog subscription survives a leader change before inspecting its codec
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these Plexus commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these Plexus commands are executed
+      """
+      CREATE SCHEMA syslog_event (facility U8, severity U8, message STRING);
+      CREATE CODEC syslog_codec FROM SYSLOG TO SCHEMA syslog_event;
+      CREATE RELAY syslog_events SCHEMA syslog_event UNBRANCHED;
+      CREATE SYSLOG CLIENT syslog_listener CONFIG {
+        'protocol' = 'udp',
+        'addr' = '{{syslog_ingest_addr}}'
+      };
+      CREATE SYSLOG LISTENER INGESTOR syslog_intake
+        FROM syslog_listener MODE NO ACK
+        ON QUIESCE SUSPEND
+        DECODE USING syslog_codec
+        TO syslog_events
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION syslog_events_subscription TO syslog_events;
+      START;
+      """
+    Then the current leader node is saved as placeholder "subscribed_leader"
+    And a node other than placeholder "subscribed_leader" is saved as placeholder "successor"
+    When leadership is transferred from node "{{subscribed_leader}}" to node "{{successor}}"
+    Then node "{{subscribed_leader}}" eventually reports leader "{{successor}}"
+    When these Plexus commands are executed on the active session
+      """
+      SHOW CREATE CODEC syslog_codec;
+      """
+    Then the last command output contains
+      """
+      CREATE CODEC syslog_codec
+      """
+    Then within "5s" DESCRIBE INGESTOR "syslog_intake" on the leader node contains
+      """
+      ready: true
+      """
+    When Syslog UDP message is published to "{{syslog_ingest_addr}}"
+      """
+      <34>1 2003-10-11T22:14:15.003Z edge-1 orders 123 ID47 - after leadership change
+      """
+    Then the relay subscription receives a payload
+      """
+      "facility":4
+      """
+    And the last relay subscription payload contains
+      """
+      "severity":2
+      "message":"after leadership change"
+      """
 
   Scenario: Syslog UDP listeners follow node lifecycle, leadership, and membership
     Given runtime replication is configured with replica count 1 and snapshot interval "100ms"

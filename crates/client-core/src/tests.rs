@@ -2765,6 +2765,11 @@ async fn event_streams_end_with_a_session_that_no_known_server_can_reopen() {
         subscription_error.current_context(),
         ClientError::SessionClosed
     ));
+    assert_eq!(
+        subscription_error.downcast_ref::<EventQueueError>(),
+        Some(&EventQueueError::Closed)
+    );
+    assert!(format!("{subscription_error:#}").contains("the session of the event queue ended"));
 
     let server_error = client
         .next_server_event()
@@ -2826,6 +2831,10 @@ async fn an_acknowledged_subscription_that_no_known_server_can_restore_ends_afte
     assert!(
         matches!(error.current_context(), ClientError::SessionClosed),
         "{error:?}"
+    );
+    assert_eq!(
+        error.downcast_ref::<EventQueueError>(),
+        Some(&EventQueueError::Closed)
     );
 }
 

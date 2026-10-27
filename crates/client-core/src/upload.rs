@@ -21,6 +21,7 @@ use nervix_client_wire::{
 };
 use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
 use nervix_primitives::{stream::wrappers::ReceiverStream, sync::mpsc};
+use nervix_recovery::Reported as _;
 use tempfile::TempPath;
 use tokio::{
     fs::File,
@@ -366,7 +367,10 @@ impl UploadAttempt {
                     Ok(read) => read,
                     // Ending the stream early leaves the archive short of its declared size,
                     // which the server answers as a failed upload.
-                    Err(_) => return,
+                    Err(error) => {
+                        Err::<(), _>(error).reported("read resource upload archive");
+                        return;
+                    }
                 };
                 if read == 0 {
                     break;

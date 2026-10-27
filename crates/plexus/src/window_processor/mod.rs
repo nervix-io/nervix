@@ -23,7 +23,7 @@ fn message_count<'src>()
 -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
     select! { Token::NumberLiteral(value) => value }
         .try_map(|raw, span| {
-            raw.parse::<u64>()
+            crate::parser_support::integer_literal::<u64>(&raw)
                 .map_err(|_| Rich::custom(span, format!("invalid integer '{raw}'")))
         })
         .labelled("message_count")

@@ -202,7 +202,7 @@ impl IngestorDraft {
 
     pub(super) fn build(&self) -> error_stack::Result<CreateIngestor, IngestorDraftError> {
         let name = IngestorName::parse(self.name.trim())
-            .map_err(|_| Report::new(IngestorDraftError::Name))?;
+            .map_err(|cause| cause.change_context(IngestorDraftError::Name))?;
         let source = {
             let mapping_input = self.source.build();
             match mapping_input {
