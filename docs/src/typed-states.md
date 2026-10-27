@@ -9,6 +9,10 @@ key presence, duplicates, type checks and TLS pairing; rendered mount values cro
 boundary again before storage. Driver-specific validation stays in connector engines called by
 the composition root. Confidential inspection is an explicit projection of complete entries;
 stored configuration and archive serialization do not consume that projection.
+ClickHouse's rendered CONFIG validation requires a positive request deadline and HTTPS trust or
+refuses TLS file keys on HTTP. The case-preserving `ClickHouseTableName` is constructed only from
+one or two nonempty locator parts; the connector receives that validated name and quotes its parts
+for SQL without reparsing a Plexus statement.
 
 Nervix represents absence and distinct semantic states in its types. A zero, empty string,
 empty collection, maximum integer, or all-zero digest is a value in its own right; it does not
@@ -174,6 +178,13 @@ The following read starts its optional keep-alive deadline after the host acknow
 ordinary prefix; that original deadline then survives cancellation. The connection retains at
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
+
+The Core NATS emitter's buffer is either empty or pending with a nonzero record count and its
+connection expectation. A pending write that began connected requires that same successful
+connection; one queued while disconnected requires the next connection. The state is consumed
+only once the driver drains its buffer, and a mismatched connection becomes a typed failure
+instead of certifying discarded bytes. A deadline leaves the pending state intact. This is
+volatile connector state, never a stored shape or a separate representation of the host's rows.
 
 **MQTT input retirement.** A retiring input keeps the previous typed plan and an optional
 replacement plan. Absence means the declaration is removed; stopping an execution whose input
@@ -383,6 +394,15 @@ required identity is an error, not a default digest.
 The runtime Kafka offset key remains schema-independent. A backup archive also records the
 ingestor's scheduled fingerprint with those offsets, so restore applies them only to the same
 ingestor contract after publishing its target schedule.
+
+The Kafka checkpoint also carries an optional applied-start generation. Absence means no explicit
+start has been applied; generation zero is an ordinary present value. The marker and reset positions
+publish together under assignment authority. Repeated or delayed starts cannot replace offsets
+already acknowledged in the same or a later generation. Native checkpoint loading, replication,
+archive encoding and restore preserve the marker exactly; restore never infers it from the domain's
+latest start record.
+The native root has a required, verified format signature, so arbitrary bytes cannot supply an
+apparent absent generation when a checkpoint uses a different representation.
 
 Kafka replica catch-up describes revision state as `Current` or `Advanced(revision)`, with typed
 remote-operation failures for refusal. An advanced revision selects a bulk native checkpoint;

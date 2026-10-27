@@ -183,113 +183,20 @@ impl EmitterConnector for PreparedRequestEmitter {
     nervix::layer(harness, reason = "test module remains outside product execution")
 )]
 mod tests {
-    use std::collections::VecDeque;
-
-    use nervix_connector::{
-        EmitterFinish, EmitterFinishResult, EmitterHttpRequest, EmitterRecordId, EmitterWriteError,
-        PerRecordOutcome,
+    use nervix_connector_fake::{
+        FakeEmitter, HttpContent as SentRequest, HttpRequests, PublishAnswer as Answer,
     };
     use nervix_models::{
         CodecWireFormat, CreateCodec, CreateWireSchema, HttpApplicationHeaders, HttpBodyMode,
         HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin, JsonType, ResolvedCodecWireFormat,
         WireSchemaField,
     };
-    use nervix_primitives::sync::blocking::Mutex;
 
     use super::*;
     use crate::{
         runtime::test_fixtures::{emitter_context, input_schema, named},
         runtime_schema::compile_codec,
     };
-
-    /// How the scripted emitter answers one write.
-    enum Answer {
-        /// The emitter fails before it answers for any request, as an endpoint that lost the
-        /// response does.
-        Lose,
-        /// The emitter delivers every request of the write.
-        DeliverAll,
-        /// The emitter rejects the first request and delivers the rest.
-        RejectFirst,
-    }
-
-    /// One request the scripted emitter was handed, with everything it would send.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct SentRequest {
-        method: String,
-        target: String,
-        headers: Vec<(String, String)>,
-        body: Option<Vec<u8>>,
-    }
-
-    /// An HTTP emitter that keeps every request it was handed and answers each write from a script.
-    struct ScriptedHttpEmitter {
-        writes: Arc<Mutex<Vec<Vec<SentRequest>>>>,
-        answers: VecDeque<Answer>,
-    }
-
-    #[async_trait]
-    impl EmitterLifecycle for ScriptedHttpEmitter {
-        fn kind(&self) -> nervix_models::EmitterEntityKind {
-            nervix_models::EmitterEntityKind::Kafka(nervix_models::KafkaEmitterEntity::Topic)
-        }
-
-        async fn finish(&mut self, _deadline: Instant) -> EmitterFinishResult {
-            Ok(EmitterFinish::NothingHeld)
-        }
-    }
-
-    #[async_trait]
-    impl HttpRequestEmitter for ScriptedHttpEmitter {
-        async fn publish(
-            &mut self,
-            requests: Vec<EmitterHttpRequest>,
-        ) -> PerRecordOutcome<EmitterRecordId> {
-            let mut sent = Vec::with_capacity(requests.len());
-            for request in &requests {
-                sent.push(SentRequest {
-                    method: request.method.as_str().to_string(),
-                    target: request.target.as_str().to_string(),
-                    headers: request
-                        .headers
-                        .iter()
-                        .map(|(name, value)| {
-                            (name.as_str().to_string(), value.as_str().to_string())
-                        })
-                        .collect(),
-                    body: request.body.clone(),
-                });
-            }
-            self.writes.lock().push(sent);
-            let mut outcome = PerRecordOutcome::with_capacity(requests.len());
-            let answer = self
-                .answers
-                .pop_front()
-                .expect("the test scripts an answer for every write it makes");
-            match answer {
-                Answer::Lose => {
-                    outcome.fail(Report::new(EmitterWriteError::Publish {
-                        connector: "scripted",
-                    }));
-                }
-                Answer::DeliverAll => {
-                    for request in &requests {
-                        outcome.deliver(request.id);
-                    }
-                }
-                Answer::RejectFirst => {
-                    for (index, request) in requests.iter().enumerate() {
-                        if index == 0 {
-                            outcome.reject(request.rejected("refused".to_string()));
-                        } else {
-                            outcome.deliver(request.id);
-                        }
-                    }
-                }
-            }
-            outcome
-        }
-    }
 
     fn json_codec() -> Arc<CompiledCodec> {
         let wire = CreateWireSchema {
@@ -392,12 +299,10 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_retry_resends_the_prepared_requests_unchanged_before_preparing_new_rows() {
         let context = emitter_context();
-        let writes = Arc::new(Mutex::new(Vec::new()));
+        let publisher = FakeEmitter::<HttpRequests>::new([Answer::Fail, Answer::ConfirmAll]);
+        let writes = publisher.observations();
         let mut connector = PreparedRequestEmitter::new(
-            Box::new(ScriptedHttpEmitter {
-                writes: writes.clone(),
-                answers: VecDeque::from([Answer::Lose, Answer::DeliverAll]),
-            }),
+            Box::new(publisher),
             HttpRequestBody::Encoded(json_codec()),
         );
         let (first, first_completions) = batch(&[1, 2]);
@@ -445,7 +350,7 @@ mod tests {
             body: Some(format!(r#"{{"value":{value}}}"#).into_bytes()),
         };
         assert_eq!(
-            *writes.lock(),
+            writes.lock().contents(),
             vec![vec![sent(1), sent(2)], vec![sent(1), sent(2), sent(3)]]
         );
         assert!(requests.is_empty());
@@ -461,14 +366,10 @@ mod tests {
     #[nervix_primitives::test]
     async fn a_bodyless_request_carries_no_content_and_a_rejection_resolves_only_its_row() {
         let context = emitter_context();
-        let writes = Arc::new(Mutex::new(Vec::new()));
-        let mut connector = PreparedRequestEmitter::new(
-            Box::new(ScriptedHttpEmitter {
-                writes: writes.clone(),
-                answers: VecDeque::from([Answer::RejectFirst]),
-            }),
-            HttpRequestBody::Absent,
-        );
+        let publisher = FakeEmitter::<HttpRequests>::new([Answer::RejectFirst]);
+        let writes = publisher.observations();
+        let mut connector =
+            PreparedRequestEmitter::new(Box::new(publisher), HttpRequestBody::Absent);
         let (only, completions) = batch(&[7, 8]);
         let mut batches = vec![only];
         let mut requests = PreparedPayloads::default();
@@ -488,7 +389,7 @@ mod tests {
             .await
             .expect("a rejection resolves its row and the other row is delivered");
 
-        let written = writes.lock().clone();
+        let written = writes.lock().contents();
         let [write] = written.as_slice() else {
             panic!("one write carries both requests");
         };
@@ -519,10 +420,7 @@ mod tests {
             backoff: &mut backoff,
         };
         let mut connector = EmitterConnectorState::opened(Box::new(PreparedRequestEmitter::new(
-            Box::new(ScriptedHttpEmitter {
-                writes: Arc::new(Mutex::new(Vec::new())),
-                answers: VecDeque::from([Answer::RejectFirst]),
-            }),
+            Box::new(FakeEmitter::<HttpRequests>::new([Answer::RejectFirst])),
             body,
         )));
         let mut buffer = EmitterBatchBuffer::default();

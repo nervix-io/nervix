@@ -73,9 +73,11 @@ Feature: Bounded complete restore generations
     Then the CLI backup succeeded with a JSON report naming domain "{{domain}}"
     And backup archive "stateful.nvxb" is larger than 32 MiB
     Given the active domain is saved as placeholder "source_domain"
-    And restoring domain "{{domain}}_durable_failure" fails after durable state publication
+    And durable state publications of restoring domain "{{domain}}_durable_failure" fail
     When the CLI restores "domain {{domain}} --as {{domain}}_durable_failure" from "stateful.nvxb" on node "{{leader}}" reporting JSON with memory measurements
     Then the CLI restore failed with JSON error code "RESTORE_INCOMPLETE" and a message containing "runtime state"
+    And restoring domain "{{domain}}_durable_failure" has durable state publication failure state delivered
+    When the durable state publication failure of restoring domain "{{domain}}_durable_failure" is cleared
     Given the active domain is "{{source_domain}}_durable_failure"
     When these Plexus commands fail with "restore state installation is incomplete"
       """

@@ -577,7 +577,7 @@ CREATE [IF NOT EXISTS] <kind> CLIENT <name>
 
 Transport-specific schemes and keys:
 
-- `KAFKA`: pass-through to librdkafka, except `allow.auto.create.topics`, which `CREATE KAFKA CLIENT` refuses. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
+- `KAFKA`: librdkafka properties with the [reserved keys and consumer settings](#kafka) described below. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file` and `tls_key_file`, and the client requires `timeout_ms`; see [Prometheus](#prometheus) for every key it declares.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -1000,23 +1000,35 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 See the [KAFKA TOPIC capability and mirror reference](connector-capabilities.md#kafka-topic-ingest).
 <!-- connector-matrix:ingest-kafka-topic:end -->
 
-Kafka is the richest ingestion surface today.
-
 Offset modes:
 
 - `CONSUMER GROUP '<group>'`: Kafka manages offsets
 - `DOMAIN`: Nervix stores the next offset in replicated runtime state and commits partition-to-instance assignment in the Raft-backed domain schedule
 
-Kafka client configuration is passed through to librdkafka. Nervix does not override
+`CREATE KAFKA CLIENT` refuses the Nervix-owned keys `group.id`, `enable.auto.commit`,
+`enable.partition.eof`, `allow.auto.create.topics` and `delivery.report.only.error`. Other property
+names and values are checked offline by librdkafka before commitment and passed through to it.
+
+The statement's offset mode supplies the consumer's `group.id`. Only `OFFSET BY CONSUMER GROUP`
+with `MODE NO ACK` enables `enable.auto.commit`. Every consumer disables `enable.partition.eof`
+and `allow.auto.create.topics`. Nervix does not override
 `auto.offset.reset`; set it explicitly, for example to `earliest`, when a new consumer group must
 read records that may already exist. Under `OFFSET BY DOMAIN` in an unpaced domain the same
-setting places a partition that has no domain offset yet.
+setting places a partition that has no domain offset yet. These overrides also take precedence
+over the configurable driver defaults in the table above.
 
 A Kafka ingestor never creates the topic it reads. Every consumer Nervix runs for it sets
 `allow.auto.create.topics` to `false`, whatever the broker allows, and `CREATE KAFKA CLIENT` refuses a
 Kafka client whose `CONFIG` sets that key. Provision the topic before the ingestor starts. Until it
-exists, `DESCRIBE INGESTOR` reports `transient error: Kafka topic '<topic>' does not exist`, and the
+exists, `DESCRIBE INGESTOR` reports `transient error: KAFKA topic '<topic>' does not exist`, and the
 ingestor starts reading once the topic is created.
+
+Only `OFFSET BY CONSUMER GROUP '<group>'` joins a broker-managed group and commits offsets to it.
+That group belongs to the operator: dropping the ingestor leaves its committed offsets on Kafka
+for later consumers. `OFFSET BY DOMAIN` uses direct partition assignments, and the partition
+inspectors only fetch metadata. Their internal `nervix_domain_...` and watch group identifiers
+never become groups on the broker, so running or dropping those consumers creates or deletes no
+broker group.
 
 In an ACK mode, Nervix commits a Kafka position only after its downstream acknowledgement
 completes. If downstream work rejects a record, the ingestor seeks back to it. If Kafka cannot
@@ -1068,7 +1080,13 @@ read reconnects on the host's reconnect cadence: it waits 250 ms after its first
 doubles the wait after each further one, up to 30 seconds, until a batch is read again.
 `DESCRIBE INGESTOR` shows the current wait as its reconnect backoff.
 
-`OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix persists the offsets on the runtime state snapshot interval and whenever a node stops executing the domain, and when the ingestor has state replicas, a commit completes only after every replica has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset snapshot. The leader watches Kafka partition topology and commits any rebalance through the strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path. Executing ingestors consume only the committed partition assignment.
+`OFFSET BY DOMAIN` is at-least-once. A commit records the partition's next offset in memory. Nervix
+persists the offsets on the runtime state snapshot interval and whenever a node stops executing
+the domain, and when the ingestor has state replicas, a commit completes only after every replica
+has acknowledged it. Crash recovery may therefore restart from a slightly stale persisted offset
+snapshot. The leader watches Kafka partition topology and commits any rebalance through the
+strongly consistent domain schedule, which is persisted through the control-plane Raft/Fjall path.
+Executing ingestors consume only the committed partition assignment.
 
 A commit or start-point reset waits for its replica acknowledgements within the native checkpoint
 bulk operation's thirty-second budget. A missing acknowledgement fails the commit at that deadline;
@@ -1077,17 +1095,20 @@ disk staging and transfer chunks, so checkpoint length is independent of the Bul
 
 Offset recovery details:
 
+- `START AT <timestamp>` and `START AT NOW` apply once per domain start generation across all instances. The first initialization persists the resolved partition positions and the applied generation together before reading. Quiescence, reconnects, rebalances, ownership changes and restarts in that generation resume acknowledged positions; they do not apply the timestamp again. A new partition without a recorded position starts at that generation's original timestamp. A later explicit `START AT` begins a new generation and replaces the positions again.
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
-- a partition without a stored domain offset, such as one added to the topic or any partition on a domain's first `START`, starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
+- in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
 - the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
 
-Quiescing leaves a consumer group, or unassigns domain-owned partitions, and resume continues from
-committed offsets. Topic time and size retention continue during the pause. For consumer-group
+Quiescing leaves a consumer group, or unassigns domain-owned partitions. Domain-owned partitions
+resume from their recorded offsets, and consumer-group
+partitions resume from the group's committed offsets or an outstanding rejection floor as described
+above. Topic time and size retention continue during the pause. For consumer-group
 offsets that age out, the client's pass-through `auto.offset.reset` setting decides whether resume
 uses the earliest retained record, skips to new records, or raises a general source error. Domain
-offsets clamp to the live watermark range and resume at the earliest retained record, exposing a
-gap. Other members of a user-named group may consume and commit while Nervix is absent. Quiescing
-does not change the auto-commit loss windows of `MODE NO ACK`.
+offsets clamp to the partition's current low and high watermarks; records retention has removed
+cannot be recovered. Other members of a user-named group may consume and commit while Nervix is
+absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
 
 ### Pulsar
 
@@ -1578,7 +1599,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Options in statement order | No entity-specific options. |
 | Headers | Not offered: The PULL listener receives payload frames and the PUSH socket sends them; neither has a broker acknowledgement or header map. |
 | Quiesce (complete bodies after ON QUIESCE) | SUSPEND<br>BUFFER MAX SIZE 64MiB ON OVERFLOW DROP OLDEST<br>DROP |
-| Metadata | Not offered: Payload frames have no broker position or typed transport metadata namespace. |
+| Metadata | Not offered: The driver exposes no peer identity on receive. Only frame 0 is ingested, with no broker position or typed transport metadata namespace. |
 | Every live node | no; scheduled owner |
 | Position class | none |
 | Acknowledgement confirmation | none |
@@ -1592,11 +1613,17 @@ See the [ZEROMQ PULL capability and mirror reference](connector-capabilities.md#
 
 The source is a PULL socket on the client's `addr`, a `tcp://<host>:<port>` or `ipc://<path>`
 endpoint. With `'bind' = 'true'` the socket binds that address and pushing peers connect to it;
-otherwise it connects to a peer bound there. Every value of the client's `CONFIG` is rendered the
-way an emitter renders it, so it can name the client's `MOUNT`, and the ingestor keeps the mount
-for as long as it runs; see [Client Config Mounts](resources.md#client-config-mounts). A value that
-does not render, or a mount the node cannot provide, keeps the ingestor from starting, and
-`DESCRIBE INGESTOR` shows that failure as its transient error, naming the entry or the resource.
+with `'bind' = 'false'`, or when `bind` is omitted, it connects to a peer bound there. `bind`
+accepts only `true` or `false`, ignoring letter case; any other value is refused at `CREATE CLIENT`.
+`CREATE CLIENT` also checks `addr` with the socket driver's TCP/IPC endpoint parser before storing
+the configuration. Rendered address templates pass that same check before commit; it opens no
+socket and performs no name lookup.
+Every value of the client's `CONFIG` can name its pinned `MOUNT`. The ingestor's plan resolves
+those values and keeps the mount for as long as the ingestor runs; see
+[Client Config Mounts](resources.md#client-config-mounts). A node that cannot provide the mount or
+render its values cannot start the ingestor, and `DESCRIBE INGESTOR` shows that failure as its
+transient error, naming the entry or the resource. A refusal during pre-commit validation is
+returned by `CREATE CLIENT` instead.
 
 The ingestor reads no deadline key: a `ZEROMQ` client's `timeout_ms` and `connect_timeout_ms` bound
 only an emitter's waits. A connecting socket connects when the ingestor starts. The driver retries a
@@ -2083,11 +2110,13 @@ configuration templates keep their shared client contract; rendered values are c
 commitment and again when opening the source. A ping write has a one-second physical budget and a
 failure triggers recovery.
 
-An explicit idle timeout overrides the ping-derived value. Every received frame, including a
-ping or pong, refreshes activity. Sending a client ping or cancelling a read leaves the inactivity
-deadline in place. The idle deadline is physical time and a silent connection is closed and retried
-on the reconnect policy. Choose a bound that permits the peer's expected idle periods or keepalive
-cadence. Three ping intervals must fit the shared schedulable bound when they supply the deadline.
+After signaling succeeds, the idle timer starts. An explicit idle timeout overrides the
+ping-derived value. Every received frame, including a ping or pong, refreshes activity. Sending a
+client ping or cancelling a read leaves the inactivity deadline in place. The idle deadline is
+physical time and a silent connection is closed and retried on the host's reconnect cadence.
+Choose a bound that permits the peer's expected idle periods or keepalive cadence. Three ping
+intervals must fit the shared schedulable bound when they supply the deadline; the signaling
+handshake has its own `TIMEOUT`.
 
 Accepted signaling data stays in one bounded handoff until the handshake completes. The source
 then delivers those messages in order before reading new socket frames. In addition to the queue,
@@ -2102,19 +2131,23 @@ asynchronous resolver. It tries the returned addresses in order within the confi
 `connect_timeout_ms` budget for DNS, TCP, TLS and the opening upgrade. The upgrade still uses the configured URL for the HTTP Host
 header, TLS server name, path and query; custom TLS roots and client identity remain in effect.
 An expired DNS answer is refreshed on a new attempt, while a healthy connection stays open.
-Resolution, connection and read failures are transient source failures. A peer Close records its
-code and reason in `DESCRIBE INGESTOR`; EOF also triggers recovery. Reconnects wait 250 ms initially,
-doubling to at most 30 seconds while attempts keep failing. A successful upgrade alone does not
-reset the delay or clear the last failure: a delivered batch does. Cancelling or stopping the
-source drops a pending connection attempt.
+Resolution, connection and read failures are transient source failures. Nervix answers a peer's
+Close before releasing the connection and reports any supplied code and reason in `DESCRIBE INGESTOR`;
+EOF also triggers recovery. This `MODE NO ACK` source reconnects on the host's cadence: 250 ms,
+500 ms, 1 second, and continuing to double up to 30 seconds. The current wait is visible as the
+reconnect backoff in `DESCRIBE INGESTOR`. A successful upgrade alone does not reset the delay or
+clear the last failure: a delivered batch does. A peer that repeatedly connects and closes without
+delivering a batch therefore receives the growing delay too. Cancelling or stopping the source
+drops a pending connection attempt.
 Both quiesce modes continue polling the connection so keepalives and reconnect behavior remain live.
 A stop-reading mode is unavailable because it would starve protocol maintenance and become a
 disconnect.
 
-Suspension and terminal close send a Close frame and wait up to one second for the peer's reply,
-including the time needed to send the frame, before releasing the connection. A peer that does
-not answer cannot hold shutdown indefinitely. Terminal close also clears queued signaling
-payloads; suspension retains them.
+When the host suspends or closes the source, it sends a Close frame and waits up to one second for
+the peer's reply, including the time needed to send the frame, before releasing the connection.
+A peer that does not answer cannot hold shutdown indefinitely. Suspension retains queued payloads
+from successful signaling and delivers them before opening a replacement connection. Terminal
+close clears that queue even if the Close exchange fails or times out.
 
 A `WEBSOCKETS CONNECTION` ingestor is a single-owner ingestor. It keeps its existing primary and
 replica assignment through schedule recomputation while every assigned cluster node remains live,
@@ -2176,23 +2209,26 @@ diagnostic. A failed handshake delivers no frame to the relay.
 ### Data Arriving During The Handshake
 
 Peers commonly start streaming before they finish acknowledging. `ACCEPT DATA`
-says where payload starts flowing to the relay:
+marks when incoming data becomes payload to retain during signaling:
 
 ```plexus,ignore
 ON CONNECT ACCEPT DATA                                  -- from the first frame
 WAIT JAQ '<matcher>' [FAIL JAQ '<matcher>'] [CAPTURE '<program>'] ACCEPT DATA
 ```
 
-On `ON CONNECT` the relay is open before anything is negotiated. On a `WAIT`
-step it opens when that step completes, which is the usual case: completing the
-step is what proves the peer is streaming. Because a step may list several
-matchers, a client can subscribe to two streams at once and open the relay when
-the first subscription is confirmed while the second is still outstanding.
+On `ON CONNECT`, acceptance starts with the first frame. On a `WAIT` step, it starts after every
+matcher in that step has succeeded. To retain data after one subscription is confirmed while
+another is still outstanding, use separate `WAIT` steps: mark the first with `ACCEPT DATA` and
+wait for the second afterward, as in the captured-state example below.
 
-Frames that arrive before the relay opens are not payload the graph asked for,
-so they are dropped rather than held. Nothing accumulates in memory, and nothing
-reaches a relay from a connection that was never established. Without
-`ACCEPT DATA` anywhere, payload starts flowing once the handshake finishes.
+Before acceptance starts, unmatched data frames are discarded. After acceptance starts, an
+outbound `WEBSOCKETS CONNECTION` ingestor holds payloads in its bounded handshake queue, whose
+`handshake_buffer_capacity` defaults to 16 messages. A full queue holds back further accepted
+data within the whole handshake's `TIMEOUT`. The ingestor reports readiness only after all
+signaling steps succeed, then delivers the retained messages in order before reading new socket
+frames. A failed or cancelled handshake discards that attempt's queue. Without `ACCEPT DATA`,
+unmatched frames are discarded throughout signaling and ordinary payload reads begin after the
+handshake succeeds.
 
 ### Sequencing And Captured State
 
