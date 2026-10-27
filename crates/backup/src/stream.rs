@@ -49,6 +49,7 @@ pub struct StreamedKafkaOffsets<I> {
     pub entity: ModelName,
     pub schema: SchemaFingerprint,
     pub revision: u64,
+    pub applied_start_generation: Option<u64>,
     /// Every partition in topic and partition order. It is walked once for each serializer pass.
     pub offsets: I,
 }
@@ -89,6 +90,7 @@ where
             entity: self.entity.as_str().to_string(),
             schema: *self.schema.as_digest(),
             revision: self.revision,
+            applied_start_generation: self.applied_start_generation,
             offsets: CheckedEntries {
                 entries: self.offsets.clone().map(KafkaPartitionWire::from),
                 stop: &stop,
@@ -198,6 +200,7 @@ struct KafkaOffsetsStream<'a, I: ExactSizeIterator<Item = KafkaPartitionWire> + 
     entity: String,
     schema: [u8; 32],
     revision: u64,
+    applied_start_generation: Option<u64>,
     #[rkyv(with = IteratorAsVec<CheckedEntry<'a, KafkaPartitionWire>>, omit_bounds)]
     offsets: CheckedEntries<'a, I>,
 }
@@ -494,6 +497,7 @@ mod tests {
             entity: record.entity.as_str().to_string(),
             schema: *record.schema.as_digest(),
             revision: record.revision,
+            applied_start_generation: record.applied_start_generation,
             offsets: record
                 .offsets
                 .iter()
@@ -536,6 +540,7 @@ mod tests {
             entity: record.entity.clone(),
             schema: record.schema,
             revision: record.revision,
+            applied_start_generation: record.applied_start_generation,
             offsets: record.offsets.clone().into_iter(),
         }
     }
@@ -785,6 +790,7 @@ mod tests {
             entity: ModelName::parse("source").assured("the entity is an accepted literal"),
             schema: SchemaFingerprint::from_digest([5; 32]),
             revision: 3,
+            applied_start_generation: Some(u64::MAX),
             offsets: (0..310_000).map(move |partition| KafkaPartitionOffset {
                 topic: topic.clone(),
                 partition,

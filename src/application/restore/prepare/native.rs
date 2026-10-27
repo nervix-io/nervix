@@ -101,6 +101,7 @@ impl VerifiedArchive {
                     }
                     DescribedRuntimeState::KafkaOffsets { offsets, .. } => {
                         write_restored_kafka_offsets(
+                            offsets.applied_start_generation,
                             offsets.offsets.iter().map(|entry| {
                                 (entry.topic.clone(), entry.partition, entry.next_offset)
                             }),
