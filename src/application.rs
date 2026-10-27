@@ -935,6 +935,7 @@ impl Application {
                     }
                     nervix_primitives::select! {
                         _ = shutdown.cancelled() => break None,
+                        _ = shutdown_coordinator.requested() => break None,
                         _ = sleep(settings.membership.gossip_interval()) => {}
                     }
                 }
@@ -948,7 +949,10 @@ impl Application {
                     Err(error) => Err(error.change_context(AppError::Preflight)),
                 }
             }
-            _ => Err(Report::new(AppError::ClusterParametersUnavailable)),
+            _ => match join_refusal.borrow().clone() {
+                Some(refusal) => Err(Report::new(refusal).change_context(AppError::JoinRefused)),
+                None => Err(Report::new(AppError::ClusterParametersUnavailable)),
+            },
         };
         let record = match initial_parameters {
             Ok(record) => record,

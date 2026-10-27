@@ -1827,16 +1827,15 @@ impl Cluster {
             }
         }
         if arrangement.relayed_voter().is_some() {
-            // The relayed voter's scenario observes scheduling while the bootstrap node leads, so
-            // that node starts first. The held heartbeat can keep replication from catching the
-            // voter up, so the others start without waiting for catch-up: the scenario reaches and
-            // releases the observation barrier before it waits for that.
-            self.start_node_within(&bootstrap, construction).await?;
-            for node_id in node_ids.iter().filter(|node_id| **node_id != bootstrap) {
-                self.start_node_without_waiting_for_raft_catch_up_within(node_id, construction)
-                    .await?;
+            // Returning nodes discover live policy from another process before reporting ready,
+            // so every voter starts together. The held heartbeat can prevent catch-up; the
+            // scenario releases it after observing scheduling with the bootstrap node leading.
+            self.start_restarted_nodes_together(construction, None)
+                .await?;
+            let leader = self.wait_for_leader_among_running().await?;
+            if leader != bootstrap {
+                self.transfer_leadership(&leader, &bootstrap);
             }
-            self.wait_for_any_leader(&bootstrap).await?;
             return self.wait_for_leader(&bootstrap, Some(&bootstrap)).await;
         }
         self.start_restarted_nodes_together(

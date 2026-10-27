@@ -1341,8 +1341,10 @@ A node that is refused as it joins stops with `AppError::JoinRefused` above a `J
 `Prerequisite` holds the `JoinRefusal` that names the peer and the `PrerequisiteMismatch` from this
 node's side, and `ClockSkew` names the peer whose clock was judged, the skew one probe proved and
 this node's tolerance. The refusal is logged at `error` as
-`this node was refused at join and stops` when the node requests its own stop, and returned once
-its shutdown phases have run, so the exit renders the whole chain.
+`this node was refused at join and stops` when the node requests its own stop. Before live policy
+discovery completes, startup cleans up the subsystems it started and returns that typed refusal.
+After startup, it returns the refusal once the shutdown phases have run. The exit renders the
+whole chain in either case.
 
 Memory-pressure watermarks are validated the same way. A watermark set without its pair, a low
 watermark that is not below the high one, or a zero check interval while the watermarks are set is

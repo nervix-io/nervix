@@ -361,8 +361,11 @@ that has not applied the current record remains visibly behind. Sessions receive
 notice when their node installs a parameter revision. A joining or returning node obtains the
 live cluster's published record before activating services that consume it and verifies that
 record against consensus as it catches up.
-Live-policy discovery has a fixed 60-second budget and also ends when shutdown begins. If its
-budget expires, startup refuses to activate graph state.
+Live-policy discovery has a fixed 60-second budget and also ends at the first stop request. A
+prerequisite refusal retains its typed join error through startup cleanup, even before a policy
+publication is available. If the discovery budget expires, startup refuses to activate graph state.
+During a whole-cluster restart, peers must start without waiting for another node to report ready:
+each returning node needs another process's live publication before it can finish startup.
 
 Only the first bootstrapping node supplies parameter seed flags; another node given them
 refuses startup. Changes validate the transition at commit: existing Models must fit a lowered

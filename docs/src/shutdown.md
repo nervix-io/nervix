@@ -1169,7 +1169,9 @@ stores as the previous run left them: the preflight creates a directory only whe
 removes the probe file it writes. A returning node that starts with peers to reach is then held to
 the cluster's prerequisites as it rejoins. When a connection it dials is refused before any has
 completed, or the clock of a peer it completed a handshake with is beyond its tolerance, it stops
-through the ordinary phases and exits with status `1`, while the incumbents keep running.
+and exits with status `1`, while the incumbents keep running. A refusal during live-policy
+discovery ends that wait at the stop request and cleans up the started subsystems before returning
+the typed join error. After startup, the ordinary shutdown phases handle the refusal.
 
 ### Whole-Cluster Restart Keeps Ownership
 
