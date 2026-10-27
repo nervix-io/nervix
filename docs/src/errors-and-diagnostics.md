@@ -189,6 +189,11 @@ provides.
 | WASM runtime | The saved-state verdict of the guest-call failure, an invalid emission, or an exhausted execution limit | The stage the failure is reported under, whether rejected-state recovery starts, and whether the instance is discarded |
 | Restore conversion | An execution admission or staging refusal among the report's contexts | Release what the conversion holds and convert again within its wait for room |
 
+Snapshot metadata and Arrow decoders refuse additional bulk scratch without queueing while they
+retain encoded input from that pool. The report preserves `AdmissionError` beneath the snapshot
+context, and refusal releases the input. A generator reports the failed read and tries a complete
+read again on its next occurrence; memory pressure never becomes absent or corrupt state.
+
 ### Outcomes That Are Not Reports
 
 An ordinary outcome is a typed value, never an error report. Waiting for or skipping a message
@@ -295,6 +300,11 @@ sequenceDiagram
     Registry-->>Session: Report with owning node and route context
     Session-->>Client: Failed command with diagnostic and source span
 ```
+
+Connector inspection renders configured error-policy expressions through the same canonical owner
+as Plexus output. A canonical-rendering failure remains `CanonicalPlexusError` until the command
+response boundary; `DESCRIBE INGESTOR` and `DESCRIBE EMITTER` return that failure instead of a
+partially rendered description.
 
 ## Ownership And Propagation
 

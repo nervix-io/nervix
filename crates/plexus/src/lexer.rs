@@ -384,6 +384,7 @@ pub enum Identifier {
     Skip,
     Default,
     Emitter,
+    Emitters,
     Encode,
     Emit,
     To,

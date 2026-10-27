@@ -75,7 +75,11 @@ refer to those exact external names. Nervix references such as clients, schemas 
 bare identifiers. The [capability reference](connector-capabilities.md) gives each locator's rule.
 
 `DESCRIBE EMITTER` exposes the kind and reference on its `to:` line. Dataflow transport labels use
-the same connector/entity phrase. `SHOW CREATE EMITTER` renders the complete current statement.
+the same connector/entity phrase. `SHOW EMITTERS;` lists the domain's emitters with that phrase
+as `to=<CONNECTOR> <ENTITY>`, the codec or `none`, and attachment mode. `SHOW CREATE EMITTER` renders
+the complete current statement. The shared [inspection block](connector-contract.md#shared-entity-presentation)
+shows options, mode, quiesce, envelope, batch, flush and error policies in that order. Emitter
+quiesce and envelope are `none` for the current Models.
 
 ## Branch Semantics
 
@@ -540,12 +544,17 @@ appears as its `leak_sensitive(...)` call and never as a value. `DESCRIBE EMITTE
 reports the request contract of the `deliver_event` example above in these lines:
 
 ```text
-codec: event_body_codec
-body: codec
-to: HTTP REQUEST api METHOD input.request_method PATH input.request_path
+to: HTTP REQUEST api
+options: METHOD input.request_method PATH input.request_path
+mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+quiesce: none
+envelope: none
 batch: none
 flush: FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+from: outgoing
+codec: event_body_codec
+body: codec
 ```
 
 `body` reads `codec` for `ENCODE USING`, and `without body`, with `codec: none`, for `WITHOUT BODY`.
@@ -632,8 +641,8 @@ The codec forms are described in [Schemas and codecs](schemas-and-codecs.md#batc
 These checks cover the whole candidate graph, so replacing a codec that a batching emitter uses
 is validated against that emitter too.
 
-`SHOW CREATE EMITTER` renders the clause between the emitter clause and `FLUSH`, with the size in the
-unit it was written in. `DESCRIBE EMITTER` reports it on the line after `to:`, as
+`SHOW CREATE EMITTER` renders the clause between the entity clause and `FLUSH`, with the size in the
+unit it was written in. `DESCRIBE EMITTER` reports it on its `batch:` line, as
 `batch: MAX MESSAGES 500 MAX SIZE 1MiB` or `batch: none`.
 
 The complete contract for batch payloads — packing, containers per wire format, exact size

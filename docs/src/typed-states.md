@@ -175,6 +175,10 @@ Reset acceptance, reset refusal, an unusable snapshot envelope and rejected appl
 distinct typed ABI verdicts. Protocol decoding checks the complete size-prefixed header before
 identifier access and verifies offsets and counts before constructing owned values.
 
+Entity presentation distinguishes a written option from its declared effective default. Inspection
+shows both, while canonical Plexus emits only written options, preserving optional Model fields
+through a complete round trip. This is a display projection, never a stored shape or runtime plan.
+
 ## Absence And Distinct States
 
 **MQTT size admission.** A source packet is either an admitted publish with independently owned

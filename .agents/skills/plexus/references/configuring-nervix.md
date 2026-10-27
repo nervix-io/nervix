@@ -479,6 +479,8 @@ Choose checks relevant to the configured graph:
   client ingestor's admission, producers, outstanding batches and bytes, and admitted batches. A
   client emitter's description also counts active consumers, forwarded credit and retained output,
   incomplete application batches, retries, ACKs and rejections.
+- Read `Ingestors` and `Emitters` for the `SHOW INGESTORS`, `SHOW EMITTERS` and `DESCRIBE`
+  inspection contracts, including effective options versus canonical `SHOW CREATE` configuration.
 - The observability server's `/metrics` endpoint reports raw graph-edge counters and histograms,
   including batch-size resolution for tuning collection and flush boundaries. Read `Metrics And
   Observability` for the current histogram buckets. The endpoint also reports

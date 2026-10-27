@@ -922,6 +922,24 @@ positions. A name an expression computes is the emitter's to settle at run time 
 [ingestor](./ingestors.md) and [emitter](./emitters.md) manuals and of
 [Connector Capabilities](./connector-capabilities.md) state it.
 
+### Shared entity presentation
+
+The vocabulary's `EntityPresentation` projects each configured source or sink once from its
+current Model. Its declaration supplies the connector/entity phrase, locator keywords, option
+order and effective defaults. Canonical Plexus and `DESCRIBE` consume that projection; canonical
+text preserves omitted optional Model fields, while inspection includes their effective defaults.
+`DESCRIBE INGESTOR` and `DESCRIBE EMITTER` begin their configuration block with `from:` or `to:`,
+then `options:`, `mode:`, `quiesce:`, `envelope:`, `batch:`, `flush:` and `errors:`. Empty options,
+unavailable quiesce/envelope and absent batching print `none`. An ingestor's flush and message
+error policies name their output relays; its general error policy belongs to the node. Runtime
+health and counters follow configuration, including Kafka's observed partition assignments.
+
+`SHOW INGESTORS`, `SHOW EMITTERS` and graph transport labels use the same declared entity phrase.
+The console's ingestor choices read the declared entities, locator, options, option choices,
+delivery modes and quiesce modes. Required option choices govern whether delivery and quiesce
+buttons are enabled, and the draft enforces those same requirements before constructing a Model.
+Typed field adapters bind declarations to draft storage; they do not define another allowed list.
+
 ## Ingestor boundary
 
 Endpoint and Syslog sources are assigned to all live voters when a schedule is prepared, including

@@ -30,11 +30,9 @@ use nervix_models::{
     CreateReorderer, CreateWindowProcessor, EmitterBody, FieldPath, HeaderModel,
     IngestTimestampSource, IngestorEntity, IngestorInput, KafkaIngestor, KafkaOffsetMode,
     KafkaTopicIngestor, Model, ModelKind, ModelName, NodeRef, PlacementName, PlacementPolicy,
-    ProcessorInputs, ProcessorOutputs, PrometheusIngestor, PulsarIngestor, PulsarTopicIngestor,
-    RelayName, RequestedResourceVersion, ResourceDescription, ResourceEntryContent,
-    ResourceManifestEntry, ResourceUsage, ResourceVersionEntries, ScheduledNode,
-    WasmStateInspection, expression_to_plexus, ingest_quiesce_to_plexus,
-    ingestor_input_body_to_plexus,
+    ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ResourceDescription,
+    ResourceEntryContent, ResourceManifestEntry, ResourceUsage, ResourceVersionEntries,
+    ScheduledNode, WasmStateInspection, expression_to_plexus,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use sorted_vec::SortedSet;
@@ -262,53 +260,62 @@ pub(in crate::application) fn format_endpoint_describe_output(
     .join("\n")
 }
 
-fn format_kafka_offset_mode(offset_mode: &KafkaOffsetMode) -> String {
-    match offset_mode {
-        KafkaOffsetMode::ConsumerGroup(group) => {
-            format!("CONSUMER GROUP {}", group.as_str())
-        }
-        KafkaOffsetMode::Domain => "DOMAIN".to_string(),
-    }
-}
-
 pub(in crate::application) fn format_ingestor_describe_output(
     name: impl Into<ModelName>,
     ingestor: &CreateIngestor,
     ingestor_node: &ScheduledNode,
     summary: &RuntimeIngestorDescribe,
-) -> String {
+) -> error_stack::Result<String, CanonicalPlexusError> {
     let name = name.into();
     let mut lines = vec![
         format!("ingestor: {}", name.as_str()),
         "kind: INGESTOR".to_string(),
-        format!(
-            "from: {} {}",
-            ingestor.input.source_phrase(),
-            ingestor_input_body_to_plexus(&ingestor.input)
-        ),
-        format!(
-            "streams: {}",
-            ingestor
-                .output_routes
-                .relays()
-                .map(|name| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
     ];
+    lines.extend(ingestor.input.entity_presentation().describe_lines());
+    lines.push("batch: none".to_owned());
+    let mut flush = Vec::new();
+    let mut errors = vec![
+        ingestor
+            .general_error_policy
+            .to_canonical_plexus()
+            .to_owned(),
+    ];
+    for output in ingestor.output_routes.outputs() {
+        let policy = match &output.flush_policy {
+            Some(policy) => policy.to_canonical_plexus(),
+            None => "none".to_owned(),
+        };
+        flush.push(format!("{}={policy}", output.relay));
+        errors.push(format!(
+            "{}={}",
+            output.relay,
+            output.message_error_policy.to_canonical_plexus()?
+        ));
+    }
+    lines.push(format!(
+        "flush: {}",
+        if flush.is_empty() {
+            "none".to_owned()
+        } else {
+            flush.join("; ")
+        }
+    ));
+    lines.push(format!("errors: {}", errors.join("; ")));
+    lines.push(format!(
+        "streams: {}",
+        ingestor
+            .output_routes
+            .relays()
+            .map(|name| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
     match &ingestor.input {
         IngestorInput::Transport(transport) => {
             lines.push(format!("codec: {}", transport.codec.as_str()));
-            if let nervix_models::IngestorEntity::RabbitMq(
-                nervix_models::RabbitMqIngestor::Queue(source),
-            ) = &transport.source
-            {
-                lines.push(format!("mode: {}", source.mode.to_canonical_plexus()));
-            }
         }
         IngestorInput::Client(client) => {
             lines.push(format!("schema: {}", client.schema.as_str()));
-            lines.push(format!("mode: {}", client.mode.to_canonical_plexus()));
         }
     }
     lines.extend([
@@ -334,10 +341,6 @@ pub(in crate::application) fn format_ingestor_describe_output(
             }
         ),
         format!("ready: {}", if summary.ready { "true" } else { "false" }),
-        format!(
-            "quiesce: {}",
-            ingest_quiesce_to_plexus(ingestor.input.quiesce())
-        ),
         format!(
             "quiesce state: {}",
             summary.quiesce_state.as_deref().unwrap_or("none")
@@ -401,18 +404,11 @@ pub(in crate::application) fn format_ingestor_describe_output(
     lines.push(format!("reconnect wait: {reconnect_wait}"));
 
     if let Some(IngestorEntity::Kafka(KafkaIngestor::Topic(KafkaTopicIngestor {
-        topic,
         offset_mode,
         instances,
         ..
     }))) = ingestor.input.transport_entity()
     {
-        lines.push(format!("kafka topic: {}", topic.as_str()));
-        lines.push(format!(
-            "kafka offset mode: {}",
-            format_kafka_offset_mode(offset_mode)
-        ));
-        lines.push(format!("kafka instances: {instances}"));
         if let Some(kafka) = summary.kafka_domain_offsets.as_ref() {
             lines.push(format!(
                 "kafka observed partitions: {}",
@@ -445,37 +441,13 @@ pub(in crate::application) fn format_ingestor_describe_output(
                 lines.push(format!("kafka instance {instance_idx} partitions: -"));
             }
         }
-    } else if let Some(IngestorEntity::Pulsar(PulsarIngestor::Topic(PulsarTopicIngestor {
-        topic,
-        subscription,
-        instances,
-        ..
-    }))) = ingestor.input.transport_entity()
-    {
-        lines.push(format!("pulsar topic: {}", topic.as_str()));
-        lines.push(format!(
-            "pulsar subscription: {}",
-            subscription.name.as_str()
-        ));
-        lines.push(format!(
-            "pulsar subscription ownership: {}",
-            subscription.ownership.keywords()
-        ));
-        lines.push(format!("pulsar instances: {instances}"));
-    } else if let Some(IngestorEntity::Prometheus(PrometheusIngestor::Query(source))) =
-        ingestor.input.transport_entity()
-    {
-        lines.push(format!(
-            "prometheus max body size: {}",
-            source.max_body_size_in_effect()
-        ));
     }
     lines.push(format!(
         "headers: {}",
         format_header_model(ingestor.input.entity_kind().capabilities().headers)
     ));
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 /// How `DESCRIBE` shows the header model of one side: the model, or `none` where that side's
@@ -937,30 +909,19 @@ pub(in crate::application) fn format_emitter_describe_output(
         format!("emitter: {}", name.as_str()),
         "kind: EMITTER".to_string(),
     ];
-    lines.extend(format_schedule_placement_lines(scheduled_node));
-    if let Some(status) = status {
-        lines.extend([
-            format!("status: {}", status.status),
-            // What the node is doing when it is neither working nor broken, such as waiting for a
-            // connection from a shared client's pool.
-            format!("detail: {}", status.detail.as_deref().unwrap_or("-")),
-            format!(
-                "transient error: {}",
-                status.transient_error.as_deref().unwrap_or("-")
-            ),
-            format!(
-                "reconnect backoff: {}",
-                status.reconnect_backoff.as_deref().unwrap_or("-")
-            ),
-            format!(
-                "reconnect wait: {}",
-                match status.reconnect_wait_millis {
-                    Some(millis) => format!("{millis}ms"),
-                    None => "-".to_string(),
-                }
-            ),
-        ]);
-    }
+    lines.extend(emitter.connector.entity_presentation()?.describe_lines());
+    lines.push(match &emitter.batch {
+        Some(batch) => format!("batch: {batch}"),
+        None => "batch: none".to_owned(),
+    });
+    lines.push(format!(
+        "flush: {}",
+        emitter.flush_policy.to_canonical_plexus()
+    ));
+    lines.push(format!(
+        "errors: {}",
+        emitter.error_policies.to_canonical_plexus()?
+    ));
     lines.extend([
         format!(
             "from: {}",
@@ -988,16 +949,6 @@ pub(in crate::application) fn format_emitter_describe_output(
                 EmitterBody::Client => "native Arrow",
             }
         ),
-        format!("to: {}", emitter.connector.destination_to_plexus()?),
-        match &emitter.batch {
-            Some(batch) => format!("batch: {batch}"),
-            None => "batch: none".to_string(),
-        },
-        format!("flush: {}", emitter.flush_policy.to_canonical_plexus()),
-        format!(
-            "publishing mode: {}",
-            emitter.connector.publishing().to_canonical_plexus()
-        ),
         format!(
             "filter-map: {}",
             if !emitter.construction.is_empty() {
@@ -1011,6 +962,30 @@ pub(in crate::application) fn format_emitter_describe_output(
             format_header_model(emitter.connector.capabilities().headers)
         ),
     ]);
+    lines.extend(format_schedule_placement_lines(scheduled_node));
+    if let Some(status) = status {
+        lines.extend([
+            format!("status: {}", status.status),
+            // What the node is doing when it is neither working nor broken, such as waiting for a
+            // connection from a shared client's pool.
+            format!("detail: {}", status.detail.as_deref().unwrap_or("-")),
+            format!(
+                "transient error: {}",
+                status.transient_error.as_deref().unwrap_or("-")
+            ),
+            format!(
+                "reconnect backoff: {}",
+                status.reconnect_backoff.as_deref().unwrap_or("-")
+            ),
+            format!(
+                "reconnect wait: {}",
+                match status.reconnect_wait_millis {
+                    Some(millis) => format!("{millis}ms"),
+                    None => "-".to_string(),
+                }
+            ),
+        ]);
+    }
     Ok(lines.join("\n"))
 }
 
@@ -1743,8 +1718,11 @@ mod tests {
             .parse()
             .assured("the fixture size is a whole number of kibibytes");
         for (max_body_size, line) in [
-            (None, "prometheus max body size: 16MiB"),
-            (Some(written), "prometheus max body size: 1KiB"),
+            (None, "options: QUERY 'up' MAX BODY SIZE 16MiB EVERY 15s"),
+            (
+                Some(written),
+                "options: QUERY 'up' MAX BODY SIZE 1KiB EVERY 15s",
+            ),
         ] {
             let mut scheduled = scheduled_node("samples", ModelKind::Ingestor);
             let Model::Ingestor(ingestor) = scheduled.config.as_mut() else {
@@ -1769,7 +1747,8 @@ mod tests {
             };
 
             let described =
-                format_ingestor_describe_output(&ingestor.name, ingestor, &scheduled, &summary);
+                format_ingestor_describe_output(&ingestor.name, ingestor, &scheduled, &summary)
+                    .assured("the current ingestor configuration renders");
 
             assert!(
                 described.lines().any(|candidate| candidate == line),

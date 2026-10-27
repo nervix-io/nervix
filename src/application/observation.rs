@@ -42,9 +42,9 @@ use nervix_models::{
     DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
     DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainName, DomainStatus, FieldName, IngestorName, InspectionFormat,
-    LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName,
-    ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
+    DescribeWindowProcessor, DomainName, DomainStatus, EmitterName, FieldName, IngestorName,
+    InspectionFormat, LookupName, LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType,
+    RelayName, ResourceDescription, ResourceId, ResourceName, ResourceUsage, ResourceVersion,
     ResourceVersionDescription, ResourceVersionEntries, ScheduledNode, SchemaName,
     ShowRelayMaterializedState, UniquelyKindedModel, WasmStateInspection,
 };
@@ -788,6 +788,47 @@ impl SessionServiceImpl {
         command_ok(lines.join("\n"))
     }
 
+    /// Lists committed emitter configurations through their declared entity phrases.
+    pub(in crate::application) async fn show_emitters(&self, domain: &DomainName) -> CommandResult {
+        let names = match self
+            .inner
+            .registry
+            .list_identifiers(domain, ModelKind::Emitter, "")
+        {
+            Ok(names) => names,
+            Err(error) => return command_error(format!("failed to list emitters: {error:#}")),
+        };
+        if names.is_empty() {
+            return command_ok("no emitters".to_owned());
+        }
+        let mut lines = Vec::with_capacity(names.len());
+        for name in names {
+            nervix_primitives::task::consume_budget().await;
+            let name = EmitterName::from(&name);
+            let emitter = match self.inner.registry.get::<CreateEmitter>(domain, &name) {
+                Ok(Some(emitter)) => emitter,
+                Ok(None) => continue,
+                Err(error) => {
+                    return command_error(format!(
+                        "failed to read emitter '{}': {error:#}",
+                        name.as_str()
+                    ));
+                }
+            };
+            let codec = match emitter.body.codec() {
+                Some(codec) => codec.as_str(),
+                None => "none",
+            };
+            lines.push(format!(
+                "{} to={} codec={codec} attachment={}",
+                name.as_str(),
+                emitter.connector.kind().phrase(),
+                emitter.mode.as_ref()
+            ));
+        }
+        command_ok(lines.join("\n"))
+    }
+
     pub(in crate::application) async fn describe_ingestor(
         &self,
         domain: &DomainName,
@@ -813,15 +854,15 @@ impl SessionServiceImpl {
             .await;
 
         match summary {
-            Ok((summary, metrics)) => command_ok(append_metrics_lines(
-                format_ingestor_describe_output(
-                    &describe.ingestor,
-                    &ingestor,
-                    &ingestor_node,
-                    &summary,
-                ),
-                metrics,
-            )),
+            Ok((summary, metrics)) => match format_ingestor_describe_output(
+                &describe.ingestor,
+                &ingestor,
+                &ingestor_node,
+                &summary,
+            ) {
+                Ok(output) => command_ok(append_metrics_lines(output, metrics)),
+                Err(error) => command_error(format!("{error:#}")),
+            },
             Err(message) => command_error(format!("{message:#}")),
         }
     }
