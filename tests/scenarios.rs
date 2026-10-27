@@ -12359,6 +12359,34 @@ async fn given_resource_installation_failure(world: &mut ScenarioWorld, node_id:
         .fail_next_resource_installation_on(crate::common::cluster::node_name(&node_id));
 }
 
+#[given(
+    expr = "node {string} refuses its next uploaded resource version publication as a lost \
+            leadership"
+)]
+async fn given_resource_publication_refusal(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .fault_injection
+        .refuse_next_resource_publication_on(crate::common::cluster::node_name(&node_id));
+}
+
+#[then(expr = "node {string} refused the publication until its reconciliation took the upload up")]
+async fn then_refused_resource_publication_was_taken_up(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let taken_up = world
+        .fault_injection
+        .refused_resource_publication_taken_up(&crate::common::cluster::node_name(&node_id));
+    assert_eq!(
+        taken_up,
+        Some(true),
+        "node '{node_id}' must refuse an uploaded version's publication and its reconciliation \
+         must take that upload up"
+    );
+}
+
 #[given(expr = "the next HTTPS listener installation on node {string} fails")]
 async fn given_https_listener_installation_failure(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);
