@@ -8,11 +8,11 @@ Feature: Iceberg storage deadlines and retry ownership
       user_id I64
       """
     And a stallable endpoint "iceberg_objects" stands in front of "rustfs_addr"
-    And the leader node is configured with these Plexus statements
+    And the leader node is configured with these Plexus commands
       """
       CREATE UNPACED DOMAIN {{domain}};
       """
-    When these Plexus statements are executed on the leader node
+    When these Plexus commands are executed on the leader node
       """
       CREATE SCHEMA notification (user_id I64);
       CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (user_id integer);
@@ -38,7 +38,7 @@ Feature: Iceberg storage deadlines and retry ownership
         'warehouse' = 's3://nervix-iceberg/warehouse'
       };
       CREATE ICEBERG TABLE EMITTER iceberg_output FROM notifications
-        TO s3_main TABLE 'storage_timeout_{{test_id}}'
+        TO s3_main TABLE 'storage_timeout_{{test_id}}' NAMESPACE '{{domain}}'
         LOCATION 's3://nervix-iceberg/tables/storage_timeout_{{test_id}}'
         CATALOG iceberg_catalog COMMIT EACH 100ms MAX SIZE 1MiB MODE ACK RETRY POLICY BACKOFF 2s MAX 2s VALUES { 'user_id' = input.user_id } FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       START;

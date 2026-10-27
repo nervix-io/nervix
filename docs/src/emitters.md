@@ -60,7 +60,7 @@ The declared pairs are `CLIENT CONSUMER`, `HTTP REQUEST`, `KAFKA TOPIC`, `PULSAR
 `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION` and `ICEBERG TABLE`.
 A client consumer uses `TO SCHEMA <schema> MODE ACK ...`, with native output in place of a codec.
 All other destinations name a configured client. An Iceberg destination names its storage client;
-Nervix resolves S3, GCS or Azure Blob from that client's kind. Its `LOCATION`, `CATALOG` and
+Nervix resolves S3, GCS or Azure Blob from that client's kind. Its `NAMESPACE`, `LOCATION`, `CATALOG` and
 `COMMIT EACH` options precede `MODE`. OTEL metrics retain `METRIC '<name>' UNIT ...` before
 `MODE`; `VALUES`, `ATTRIBUTES`, `RESOURCE` and `SCOPE` form their payload section after it.
 Database conflict clauses follow `VALUES`.
@@ -2529,6 +2529,7 @@ For TLS connections, include `tls=true`, mount a TLS resource, and set `'tls_ca_
 CREATE ICEBERG TABLE EMITTER <name>
   FROM <relay>
   TO <storage_client> TABLE 'Orders'
+  (NAMESPACE 'Analytics.Events')
   (LOCATION 's3://warehouse/orders')
   (CATALOG catalog)
   (COMMIT EACH 10s MAX SIZE 64MiB)
@@ -2548,7 +2549,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | S3 \| GCS \| AZURE_BLOB store and catalog clients |
 | Locator and validation rule | TABLE 'Orders' (iceberg_table) |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |
+| Options in statement order | `NAMESPACE 'Analytics.Events'` (string literal); required<br>`LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | optional |
@@ -2583,6 +2584,7 @@ CREATE ICEBERG_REST CLIENT iceberg_catalog
 CREATE ICEBERG TABLE EMITTER iceberg_notifications
   FROM notifications
   TO s3_main TABLE 'notifications'
+  NAMESPACE 'analytics'
   LOCATION 's3://nervix-iceberg/tables/notifications'
   CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
     'user_id' = input.user_id,
@@ -2592,7 +2594,44 @@ CREATE ICEBERG TABLE EMITTER iceberg_notifications
   ON GENERAL ERROR LOG;
 ```
 
-Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The referenced storage client selects the S3, GCS or Azure Blob implementation and supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `ICEBERG_REST CLIENT` that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
+Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The referenced storage client selects the S3, GCS or Azure Blob implementation and supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `ICEBERG_REST CLIENT` that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, catalog namespace, mapped output columns, table location, catalog client reference, and flush policy.
+
+`NAMESPACE '<namespace>'` is required immediately after the table name. Its dot-separated levels
+preserve case: `NAMESPACE 'Analytics.Events'` selects the two catalog levels `Analytics` and
+`Events`. The namespace is independent of the Nervix domain. Its literal follows the same
+1–128-byte identifier alphabet as the table, with no empty level. `SHOW CREATE EMITTER` retains
+the declared namespace.
+
+`LOCATION` must be an absolute object-store URL whose scheme matches the storage client: `s3`
+for `S3`, `gs` for `GCS`, and `wasb`, `wasbs`, `abfs` or `abfss` for `AZURE_BLOB`. Nervix refuses
+a mismatched scheme at `CREATE` or `ALTER`, naming `LOCATION`, before opening either client.
+`COMMIT EACH ... MAX SIZE` uses the same positive whole-byte size syntax as `BATCH MAX SIZE`.
+
+The four Iceberg client schemas distinguish Nervix-owned options from driver properties.
+Nervix validates declared addresses, booleans and deadlines at `CREATE CLIENT`; for example,
+`'path_style_access' = 'yes'` and `'no_auth' = 'yes'` are refused. Unknown unprefixed keys are
+refused rather than treated as driver settings. The generated
+[client key tables](./connector-capabilities.md#s3-client) list the current keys and file roles.
+S3 delegates `s3.*` and `client.*`, GCS delegates `gcs.*`, and Azure delegates `adls.*`.
+The REST catalog delegates `header.*` and those storage-property namespaces. Delegated names
+and values keep the driver's interpretation; a declaration is not a connectivity or credential
+check, and a property the offline check cannot inspect is checked when its driver opens.
+The offline storage reader refuses an unsupported encryption selection and Azure connection
+strings without opening an operator. The Azure table's `LOCATION` selects its endpoint; its client
+supplies account and authentication options. GCS inline credentials use the driver's
+Base64-encoded JSON form in `credentials_json`.
+
+HTTPS currently uses the catalog client's built-in web PKI roots. The declared catalog TLS-file
+keys participate in admission and mounting; the Iceberg HTTP transports do not yet apply those
+files.
+
+
+When building the REST catalog's file I/O properties, Nervix first supplies the storage client's
+properties and then the catalog client's properties. Within a storage client, the last entry
+for a normalized property takes precedence. A catalog entry for the same Iceberg
+property key takes precedence in the effective properties used by the table's file I/O,
+including its object-store operations. Keep the two clients' settings consistent when configuring
+both namespaces.
 
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
@@ -2617,6 +2656,7 @@ CREATE ICEBERG_REST CLIENT iceberg_catalog
 CREATE ICEBERG TABLE EMITTER iceberg_notifications
   FROM notifications
   TO gcs_main TABLE 'notifications'
+  NAMESPACE 'analytics'
   LOCATION 'gs://nervix-iceberg/tables/notifications'
   CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
     'user_id' = input.user_id,
@@ -2644,6 +2684,7 @@ CREATE ICEBERG_REST CLIENT iceberg_catalog
 CREATE ICEBERG TABLE EMITTER iceberg_notifications
   FROM notifications
   TO azure_main TABLE 'notifications'
+  NAMESPACE 'analytics'
   LOCATION 'wasbs://nervix-iceberg@myaccount.blob.core.windows.net/tables/notifications'
   CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
     'user_id' = input.user_id,

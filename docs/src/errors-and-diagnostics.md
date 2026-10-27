@@ -1076,6 +1076,16 @@ TLS keys on `ws`, and unpaired identity files are typed refusals naming their ke
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
+An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
+vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
+cause; a storage-scheme mismatch names the found scheme and the schemes its declared client
+accepts. Namespace literals are validated external identities, and commit-size literals use the
+same positive whole-byte refusal as batch-size literals before a plan is installed.
+Its client schema names invalid Nervix-owned keys before commit. Offline storage inspection
+projects the offending driver property key through `OfflineClientConfigError`, retaining the
+Iceberg storage reader's typed error beneath it. The public refusal does not print the property's
+value. Properties requiring a table or an initialized OpenDAL operator remain initialization
+checks.
 An emitter whose connector keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
 emitter, the emitter's connector and entity, the header as the emitter's

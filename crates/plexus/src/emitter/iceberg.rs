@@ -18,11 +18,12 @@ pub(super) fn mode<'src>()
     request_mode!(IcebergTablePublishingMode)
 }
 pub(super) fn commit_each<'src>()
--> impl Parser<'src, &'src [Token], (String, String), extra::Err<ParseError<'src>>> + Clone {
+-> impl Parser<'src, &'src [Token], (String, PayloadSizeLimit), extra::Err<ParseError<'src>>> + Clone
+{
     kw_phrase2(Identifier::Commit, Identifier::Each)
         .ignore_then(duration_lit())
         .then_ignore(kw_phrase2(Identifier::Max, Identifier::Size))
-        .then(byte_size_lit())
+        .then(payload_size_lit("COMMIT MAX SIZE"))
 }
 pub(super) fn table_body<'src>()
 -> impl Parser<'src, &'src [Token], ParsedDestination<IcebergTableEmitter>, extra::Err<ParseError<'src>>>
@@ -31,6 +32,8 @@ pub(super) fn table_body<'src>()
         client_ref()
             .then_ignore(kw(Identifier::Table))
             .then(external_name::<IcebergTableName>())
+            .then_ignore(kw(Identifier::Namespace))
+            .then(external_name::<IcebergNamespace>())
             .then_ignore(kw(Identifier::Location))
             .then(string_lit().labelled("iceberg_location"))
             .then_ignore(kw(Identifier::Catalog))
@@ -43,13 +46,17 @@ pub(super) fn table_body<'src>()
             .map(
                 |(
                     (
-                        ((((client, table), location), catalog), (commit_each, max_commit_size)),
+                        (
+                            ((((client, table), namespace), location), catalog),
+                            (commit_each, max_commit_size),
+                        ),
                         mode,
                     ),
                     values,
                 )| IcebergTableEmitter {
                     client,
                     table,
+                    namespace,
                     location,
                     catalog: IcebergCatalog::Rest { client: catalog },
                     commit_each,
@@ -60,3 +67,7 @@ pub(super) fn table_body<'src>()
             ),
     )
 }
+
+#[cfg(test)]
+#[path = "iceberg_tests.rs"]
+mod tests;

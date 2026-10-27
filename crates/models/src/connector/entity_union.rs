@@ -433,7 +433,7 @@ macro_rules! connector_emitters {
                 }
             }
 
-            fn commit_policy(&self) -> Option<(&str, &str)> {
+            fn commit_policy(&self) -> Option<(&str, $crate::PayloadSizeLimit)> {
                 match self {
                     $(Self::$Variant(connector) => $crate::EmitterEntityBody::commit_policy(connector),)+
                 }

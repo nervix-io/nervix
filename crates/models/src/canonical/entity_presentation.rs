@@ -629,6 +629,7 @@ impl EmitterEntity {
             }
             Self::Iceberg(IcebergEmitter::Table(entity)) => {
                 presentation.external_locator(entity.table.as_str());
+                presentation.written_option("NAMESPACE", string_literal(entity.namespace.as_str()));
                 presentation.written_option("LOCATION", string_literal(&entity.location));
                 let IcebergCatalog::Rest { client } = &entity.catalog;
                 presentation.written_option("CATALOG", client.as_str().to_owned());

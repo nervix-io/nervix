@@ -1121,7 +1121,7 @@ impl Arbitrary<'_> {
             },
             EmitterOperationForm::SetCommit => AlterEmitterOperation::SetCommit {
                 commit_each: self.duration(),
-                max_commit_size: self.byte_size(),
+                max_commit_size: self.payload_size_limit(),
             },
         }
     }

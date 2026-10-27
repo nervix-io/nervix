@@ -140,11 +140,7 @@ fn batch_clause<'src>()
                 .map_err(|error| Rich::custom(span, error.to_string()))
         }))
         .then_ignore(kw_phrase2(Identifier::Max, Identifier::Size))
-        .then(byte_size_lit().try_map(|literal, span| {
-            literal
-                .parse::<PayloadSizeLimit>()
-                .map_err(|issue| Rich::custom(span, format!("BATCH MAX SIZE {issue}")))
-        }))
+        .then(payload_size_lit("BATCH MAX SIZE"))
         .map(|(max_messages, max_size)| EmitterBatchPolicy {
             max_messages,
             max_size,

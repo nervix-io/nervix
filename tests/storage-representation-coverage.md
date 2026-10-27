@@ -97,3 +97,12 @@ allocation checks.
 
 The public scenario **Persisted models reload from the on-disk tables a node flushed them into**
 covers the registry's on-disk read path on one- and three-node clusters.
+
+## Iceberg Model Coverage
+
+The Model generators include Iceberg declarations with the required case-preserving,
+dot-separated namespace, the storage backend and location, catalog reference and typed positive
+commit-size limit. Registry and Model archive properties compare those fields with the complete
+Model. The vocabulary owner separately checks namespace JSON/archive equality and backend
+conversions in `models-iceberg-declarations`; `client-config-schema` covers ordered owned and
+delegated configuration values through JSON/archive equality and public inspection.

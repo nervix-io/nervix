@@ -1886,7 +1886,7 @@ impl FlushPolicy {
     }
 }
 
-fn commit_policy_to_plexus(policy: &str, max_size: &str) -> String {
+fn commit_policy_to_plexus(policy: &str, max_size: &crate::PayloadSizeLimit) -> String {
     format!("COMMIT EACH {policy} MAX SIZE {max_size}")
 }
 

@@ -1013,7 +1013,7 @@ scenario = "Materialized generations larger than the bulk budget resume on every
 selections = ["deloxide", "deloxide-order"]
 
 [[workload]]
-coverage = "Materialized branch retention after restore and restart with past event watermarks and a fast physical expiration scan."
+coverage = "Materialized branch retention after restore and restart with past event watermarks and a fast physical expiration scan; on three nodes leadership moves before the restore's outcome is recorded, and the outcome is learned under its reference."
 examples = 2
 feature = "tests/features/cluster/backup_materialized.feature"
 id = "scenario.materialized-retention-activation"
@@ -1847,7 +1847,7 @@ scenario = "Materialized generations larger than the bulk budget resume on every
 selections = ["deloxide-stress-restore"]
 
 [[workload]]
-coverage = "Under scheduling stress: materialized branch retention after restore and restart with past event watermarks and a fast physical expiration scan."
+coverage = "Under scheduling stress: materialized branch retention after restore and restart with past event watermarks and a fast physical expiration scan; on three nodes leadership moves before the restore's outcome is recorded, and the outcome is learned under its reference."
 examples = 2
 feature = "tests/features/cluster/backup_materialized.feature"
 id = "stress.materialized-retention-activation"

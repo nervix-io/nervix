@@ -302,7 +302,12 @@ fn emitter_surface(kind: EmitterEntityKind) -> EmitterSurface {
                 ConnectorKind::AzureBlob,
             ]),
             locator: Some(("TABLE", "iceberg_table")),
-            options: &[("LOCATION", true), ("CATALOG", true), ("COMMIT EACH", true)],
+            options: &[
+                ("NAMESPACE", true),
+                ("LOCATION", true),
+                ("CATALOG", true),
+                ("COMMIT EACH", true),
+            ],
         },
     }
 }

@@ -183,6 +183,12 @@ ordinary prefix; that original deadline then survives cancellation. The connecti
 most one discard and clears it only when it returns the size outcome after confirmation. See
 [MQTT source connections](./connector-contract.md#mqtt-source-connections).
 
+**Iceberg catalog identity.** The namespace is required configuration, represented by one shared
+validated name type from parsing through connector opening. Dot-separated levels are nonempty and
+retain case. No absent namespace is filled from the Nervix domain, and no layer invents another
+namespace key. A commit-size limit is the same positive whole-byte value that bounds a batch;
+decoding validates that value rather than storing text for the runtime to parse.
+
 The Core NATS emitter's buffer is either empty or pending with a nonzero record count and its
 connection expectation. A pending write that began connected requires that same successful
 connection; one queued while disconnected requires the next connection. The state is consumed
