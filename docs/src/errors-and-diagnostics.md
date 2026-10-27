@@ -14,6 +14,12 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+ZeroMQ endpoint validation keeps the socket driver's endpoint error beneath
+`OfflineClientConfigError` for `addr`. Its socket owners keep the shared Boolean parser's
+`ClientConfigError` beneath their configuration context for `bind`; a malformed value does not
+select a socket operation. Public CREATE refusals retain the key and client identity while the
+driver's diagnostic remains internal.
+
 Transaction model preflight adds its operation identity with `change_context` above the registry
 report. It does not nest that report in a context field: the ordinary typed report chain remains
 inspectable, so command projection can retain the schema's invalid-key diagnosis.
@@ -123,6 +129,13 @@ emitter shows the first printable attachment of a failure as its transient error
 one the outermost context. A typed attachment carries a value for one consumer, as an emitter attaches
 the retry delay its receiver stated for the emitter host to read. Neither replaces a context: a
 caller decides from contexts and typed fields.
+
+A Core NATS flush keeps its driver's typed failure beneath `CoreFlushError::ClientFlush`.
+A connection change is the separate `CoreFlushError::ConnectionChanged` failure, carrying the
+nonzero count whose delivery can no longer be certified. Publication and finish add their own
+`EmitterWriteError` or `EmitterFinishError::Flush` context and render the complete report for the
+emitter's transient description. An elapsed write still names its configured `timeout_ms`; an
+elapsed finish reports the pending count through `EmitterFinishError::Unsent`.
 
 Two failures of one operation stay one report. When a model alteration fails after its domain
 paused and resuming the domain fails too, the resume's report is added beside the alteration's and
@@ -478,6 +491,12 @@ source composition with the protocol encoder's typed cause retained beneath the 
 
 ### Stored Shapes And Archives
 
+The native Kafka checkpoint decoder checks its required format signature before exposing offsets
+or the optional applied-start generation. A mismatched signature retains the typed
+`KafkaOffsetCheckpointError::FormatSignature` cause beneath `RuntimePersistenceError::DecodeState`.
+Loading, replica conversion and backup capture all use that owning decoder; no missing marker is
+filled from domain metadata.
+
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
 transport failure. Registry Model records validate their current frame signature and report
@@ -807,6 +826,11 @@ acknowledgement, rather than failures to decode a record. A control call that ex
 `socket.timeout.ms` budget reports `KafkaTopicIngestorError::ControlTimeout` with that bound. Metadata,
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
+
+After an explicit domain start is accepted, another explicit start in the canonical-position read
+ends that resume attempt with `KafkaTopicIngestorError::UnresolvedDomainStart` beneath
+`IngestorError::Resume`. Its typed fields retain the accepted and observed generations. The host
+retries on its existing cadence; the connector polls only after it has canonical resume positions.
 
 A domain-offset Kafka ingestor that must start a partition without a domain offset while its
 client's `auto.offset.reset` is `error` fails its resume with

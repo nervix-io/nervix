@@ -80,6 +80,14 @@ same oracle runs on one and three nodes. The broker's native round-trip control 
 in the scenario and again during teardown before diagnostics or node drain, including after a
 failed assertion. It does not change a product deadline or use a readiness sleep.
 
+The Kafka explicit-start scenarios use a provisioned real topic and an independent broker observer.
+Their exact payload sets distinguish new work from acknowledged records replayed after a codec
+quiescence, full-cluster restart or partition growth. A later explicit start must replay its selected
+history. The restore outline captures the running domain, replaces the cluster with fresh stores,
+and requires only new records after `RESUME`. Both topologies use the production sticky scheduler
+for recovery from persisted state. Their diagnostic inventory includes active/order execution and
+the corresponding lifecycle or restore stress selection. No phase or suite budget changes.
+
 The Kafka consumer-retirement scenario holds the same broker's replies before it drops an ingestor
 whose eight instances joined their group, so destroying each consumer waits for its LeaveGroup
 answer. It waits for a running connector-storage job before sending a record through an HTTP
@@ -166,6 +174,7 @@ resubmitting an outcome that might already have produced output.
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
+| Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
 | Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
@@ -174,6 +183,23 @@ resubmitting an outcome that might already have produced output.
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, the delivery owner, `tests/common/broker_observer.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
 | Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards | The stallable TCP proxy in the cluster fixture, `tests/common/cluster.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
+
+The Syslog mixed-framing sender assembles its octet-counted and non-transparent frames before
+connecting and writes them together on its runtime task. A stalled scenario runner cannot leave
+that sender idle between its count, delimiter and payload writes. The idle-connection scenario
+keeps its one-second `idle_timeout_ms`, observes both messages beside the silent connection, and
+measures the silent connection's close from before connecting. The runtime task removes runner
+polling gaps; it does not remove scheduling delays on the worker itself or change the listener's
+deadline.
+
+The controlled NATS endpoint publishes a positive observation when it holds a complete publish
+and stops reading behind it. A connection-loss scenario waits for that observation, ends the
+active connections, and waits for a refused reconnect before forwarding again. The same fault
+can run beside STOP. These event boundaries establish the outage without a sleep or a negative
+observation window. The publication scenario requires every original sequence member, allowing
+the duplicates an uncertain Core NATS retry permits. The STOP scenario observes the pending-record
+uncertainty through a retained public session; terminal domain teardown may cancel unresolved
+host work under the source's existing acknowledgement contract.
 
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
 `just test-deloxide-stress` or `just test-deloxide-stress-restore` builds, starts its
@@ -837,6 +863,18 @@ The harness keeps these boundaries explicit.
   scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
   released observations. The scenario asserts the original execution reference's outcome and a
   dependent command through the public session protocol; it adds no setup delay or request retry.
+- **Restore publication failures.** A durable state publication failure armed for a restored
+  domain fails every publication of that domain's restored state, on whichever node publishes and
+  after the store has made the publication durable, until the scenario clears it. A failure that
+  the first publication consumed would let a leader that resumes the restore, because the failed
+  outcome was never recorded, publish again and complete the restore. The control keeps whether a
+  publication met it, so a scenario asserts the failure as pending before the restore and as
+  delivered once the restore failed, instead of inferring delivery from a successful publication.
+  Clearing it ends the condition without changing a recorded outcome, and the scenarios clear it
+  before asserting that the incomplete-state gate, not the injected failure, refuses `START`. The
+  three-node regression holds the first coordinator's failed outcome before it is recorded, moves
+  leadership, and requires recovery under the same execution reference to end failed and stay
+  failed once the condition is cleared.
 - **Console backup download pauses.** The console reload scenarios hold the archive's first
   download before it streams, so the reload interrupts a download in progress. The archive is
   assembled and served by the leader that completes the backup. A leadership move while the backup

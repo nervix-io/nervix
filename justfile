@@ -579,6 +579,10 @@ check-package-lib package *args:
 test-package-lib package *args:
     cargo test --package {{ package }} --lib -- {{ args }}
 
+# Qualify the pinned NATS driver's flush implementation through its own bounded stream tests.
+test-nats-driver checkout *args:
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/nats-driver") }} cargo test --manifest-path {{ quote(checkout + "/async-nats/Cargo.toml") }} --package async-nats --no-default-features --features aws-lc-rs,jetstream,server_2_10,server_2_11 --lib -- {{ args }}
+
 # Run the vocabulary settings' compiling and class-rejection API examples.
 test-settings:
     cargo test --package nervix-models --lib settings::
@@ -2265,6 +2269,7 @@ clippy_connector_packages := [
 ]
 
 clippy_shuttle_packages := [
+    "nervix-connector-fake",
     "nervix-client-core",
     "nervix-connector",
     "nervix-connector-clickhouse",
@@ -2296,7 +2301,7 @@ clippy-targets: ordinary-clippy-targets shuttle-clippy-targets turmoil-clippy-ta
 ordinary-clippy-targets: \
     *(clippy-target *clippy_all_features_packages ["--all-features", "--all-targets"]) \
     *(clippy-target *clippy_connector_packages ["--all-targets"]) \
-    *(clippy-target *["nervix-execution", "nervix-interconnect", "nervix-model-harness", "nervix-wasm"] ["--all-targets"]) \
+    *(clippy-target *["nervix-execution", "nervix-interconnect", "nervix-model-harness", "nervix-wasm", "nervix-connector-fake"] ["--all-targets"]) \
     (clippy-target "nervix-server" ["--all-targets", "--features", "benchmarks testing"]) \
     (clippy-target "nervix-client-core" ["--all-targets", "--features", "autocomplete"]) \
     (clippy-target "nervix-paced-simulation" ["--all-targets"]) \
@@ -2333,7 +2338,7 @@ cargo-clippy-loom jobs=default_jobs: (run-with-jobs "loom-clippy-targets" jobs)
 
 [private, parallel]
 loom-clippy-targets: \
-    *(clippy-target *["nervix-execution", "nervix-model-harness", "nervix-interconnect"] ["--all-targets", "--features", "loom"]) \
+    *(clippy-target *["nervix-execution", "nervix-model-harness", "nervix-interconnect", "nervix-connector-fake"] ["--all-targets", "--features", "loom"]) \
     (clippy-target "nervix-primitives" ["--all-targets", "--features", "loom native"]) \
     *(clippy-target *["nervix-consensus", "nervix-server"] ["--lib", "--features", "loom"]) \
     (clippy-target "nervix-server" ["--lib", "--profile", "test", "--features", "loom"]) \

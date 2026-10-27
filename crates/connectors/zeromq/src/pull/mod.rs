@@ -26,7 +26,7 @@ use nervix_connector::{
     BrokerIngestorConnector, IngestMessageHeaders, IngestMetadataRow, IngestorBatch,
     IngestorBatchRequest, IngestorConnector, IngestorError, IngestorMessage,
     IngestorReadCancellation, IngestorResult, IngestorResume, NoIngestHeaders, client_config_value,
-    optional_client_config_value,
+    optional_bool_client_config_value,
 };
 use nervix_models::ClientConfigEntry;
 use thiserror::Error;
@@ -74,8 +74,9 @@ impl ZeroMqPullIngestorPlan {
 
     async fn pull_socket(&self) -> ZeroMqPullIngestorResult<PullSocket> {
         let addr = Self::addr_from_config(&self.config)?;
+        let bind = Self::binds(&self.config)?;
         let mut socket = PullSocket::new();
-        if Self::binds(&self.config) {
+        if bind {
             socket.bind(&addr).await.map_err(|source| {
                 Report::new(ZeroMqPullIngestorError::Bind {
                     addr: addr.clone(),
@@ -98,11 +99,10 @@ impl ZeroMqPullIngestorPlan {
             .change_context(ZeroMqPullIngestorError::ClientConfig)
     }
 
-    fn binds(config: &[ClientConfigEntry]) -> bool {
-        match optional_client_config_value(config, "bind") {
-            Some(value) => value.eq_ignore_ascii_case("true"),
-            None => false,
-        }
+    fn binds(config: &[ClientConfigEntry]) -> ZeroMqPullIngestorResult<bool> {
+        let bind = optional_bool_client_config_value(config, "bind")
+            .change_context(ZeroMqPullIngestorError::ClientConfig)?;
+        Ok(bind.unwrap_or(false))
     }
 }
 
@@ -244,6 +244,7 @@ impl BrokerIngestorConnector for ZeroMqPullIngestor {
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
 
+    use meticulous::ResultExt as _;
     use nervix_primitives::net::TcpListener;
 
     use super::*;
@@ -262,11 +263,11 @@ mod tests {
             ZeroMqPullIngestorPlan::addr_from_config(&config).expect("addr"),
             "tcp://127.0.0.1:5555"
         );
-        assert!(ZeroMqPullIngestorPlan::binds(&config));
-        assert!(!ZeroMqPullIngestorPlan::binds(&[entry(
-            "addr",
-            "tcp://127.0.0.1:5555"
-        )]));
+        assert!(ZeroMqPullIngestorPlan::binds(&config).assured("TRUE is a valid Boolean"));
+        assert!(
+            !ZeroMqPullIngestorPlan::binds(&[entry("addr", "tcp://127.0.0.1:5555")])
+                .assured("omitting bind selects connect")
+        );
 
         let error = ZeroMqPullIngestorPlan::addr_from_config(&[]).expect_err("missing zeromq addr");
         assert!(matches!(
@@ -277,6 +278,23 @@ mod tests {
             format!("{error:?}").contains("missing ZeroMQ client config key 'addr'"),
             "the cause names the missing key: {error:?}"
         );
+    }
+
+    #[nervix_primitives::test]
+    async fn invalid_bind_is_a_configuration_refusal_before_the_socket_opens() {
+        let plan = ZeroMqPullIngestorPlan::new(vec![
+            entry("addr", "tcp://127.0.0.1:not-a-port"),
+            entry("bind", "yes"),
+        ]);
+        let error = match plan.pull_socket().await {
+            Ok(_) => panic!("an invalid bind value cannot open a socket"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error.current_context(),
+            ZeroMqPullIngestorError::ClientConfig
+        ));
+        assert!(error.contains::<nervix_connector::ClientConfigError>());
     }
 
     #[nervix_primitives::test]
