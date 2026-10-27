@@ -59,7 +59,7 @@ pub enum StorageFailure {
 /// renders its chain when a later report formats the I/O error as one of its own contexts.
 #[derive(Debug, Error)]
 #[error("{0:#}")]
-struct StorageReport<C>(Report<C>);
+pub(crate) struct StorageReport<C>(pub(crate) Report<C>);
 
 pub(crate) fn storage_report_io<C>(report: Report<C>) -> io::Error
 where
@@ -409,6 +409,10 @@ mod tests {
             .get_ref()
             .and_then(|error| error.downcast_ref::<StorageReport<StorageFailure>>())
             .expect("the I/O boundary retains its typed report");
+        assert!(matches!(
+            typed.0.current_context(),
+            StorageFailure::InvalidState
+        ));
         assert!(typed.0.downcast_ref::<RkyvError>().is_some());
         let carried = format!("{failure:#}");
         let report = error_stack::Report::new(failure).change_context(StorageFailure::InvalidState);
