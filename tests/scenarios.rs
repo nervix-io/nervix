@@ -11461,6 +11461,30 @@ async fn when_runtime_installation_is_paused(world: &mut ScenarioWorld, node_id:
         .pause_runtime_installation_on(crate::common::cluster::node_name(&node_id));
 }
 
+#[given(expr = "the next {int} runtime installations on node {string} are refused")]
+fn given_runtime_installations_are_refused(
+    world: &mut ScenarioWorld,
+    count: usize,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let count = std::num::NonZeroUsize::new(count)
+        .expect("the scenario arms a positive number of installation refusals");
+    world
+        .fault_injection
+        .refuse_runtime_installations_on(crate::common::cluster::node_name(&node_id), count);
+}
+
+#[then(expr = "all runtime installation refusals on node {string} were delivered")]
+fn then_runtime_installation_refusals_were_delivered(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    assert!(
+        world
+            .fault_injection
+            .runtime_installation_refusals_delivered(&crate::common::cluster::node_name(&node_id))
+    );
+}
+
 #[then(expr = "node {string} reaches its runtime installation pause")]
 async fn then_runtime_installation_is_paused(world: &mut ScenarioWorld, node_id: String) {
     let node_id = expand_placeholders(world, &node_id);

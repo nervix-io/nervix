@@ -1499,6 +1499,12 @@ revision the serving node read. An open that finds no endpoint there is therefor
 node installs its domain retries instead of requiring an explicit new open, and a removed or
 stopped endpoint is still classified, by the serving node, on the next attempt.
 
+A transient failure while reconstructing the executing node's graph does not require a client to
+submit another configuration command. The node's background installation supervisor retries the
+current admitted revision on the admission loop's half-second cadence, or sooner on a committed
+schedule or domain update. Until installation completes, the endpoint's existing
+temporary-unavailability behavior and the client's restoration backoff continue to apply.
+
 ## Emitter Consumers
 
 `OpenEmitterRequest` names the domain and `TO CLIENT` emitter, an exact field list, and requested

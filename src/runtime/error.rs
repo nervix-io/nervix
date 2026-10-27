@@ -18,6 +18,9 @@ use super::*;
 /// ingestor's, emitter's or generator's start report, stays beneath it.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[cfg(feature = "testing")]
+    #[error("the armed test refused runtime installation on node '{node}'")]
+    RuntimeInstallationRefused { node: ClusterNodeName },
     #[error("failed to retire the source of ingestor '{ingestor}' in domain '{domain}'")]
     RetireIngestorEntity {
         domain: DomainName,

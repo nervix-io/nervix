@@ -548,6 +548,13 @@ impl Runtime {
     }
 
     #[cfg(feature = "testing")]
+    pub(crate) fn take_runtime_installation_refusal(&self, node_id: &ClusterNodeName) -> bool {
+        self.inner
+            .fault_injection
+            .take_runtime_installation_refusal(node_id)
+    }
+
+    #[cfg(feature = "testing")]
     pub(crate) async fn pause_runtime_preparation_if_armed(&self, node_id: &ClusterNodeName) {
         self.inner
             .fault_injection

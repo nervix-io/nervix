@@ -1065,6 +1065,13 @@ revision before runtime installation. A planning failure leaves the previously a
 the predecessor for a retry; runtime installation adds domain context and never selects a fallback
 configuration.
 
+The background runtime-installation supervisor logs a failed application's complete typed report and
+retries on the admission loop's half-second cadence, or sooner when the committed schedule or domain
+state changes. It reads current admitted state on each attempt and retains the last successful
+schedule as its predecessor. A repeated failure remains visible; retry does not turn it into a
+successful command outcome, change its classification, or require a new configuration command.
+Successful installation ends the retry cadence, and shutdown ends a pending retry wait.
+
 Resource planning checks the committed lookup key and codec, generator materialized source,
 output branch and route construction, and WASM guest-state generation before runtime binding.
 These failures name the owning node and relevant relay, codec, or field. A missing

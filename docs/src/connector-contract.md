@@ -589,6 +589,13 @@ retirement and nothing cancels it, since a destruction cannot stop part way. It 
 client alone, never the ingestor's or emitter's host or its intake, and Nervix never hands a client to
 another ingestor or emitter, so a replacement opens a client of its own.
 
+An ingestor-open failure during graph construction propagates through the runtime installation
+report, before an ingestor host loop exists. The control-plane installation supervisor retries that
+failed application on the admission loop's half-second cadence, or on a committed schedule or domain
+update, using the current admitted state. An emitter initialization failure inside an already
+running host remains owned by that host's declared retry policy. Neither path requires a fresh
+configuration command.
+
 A joined consumer whose coordinator does not answer holds a connector worker for those five
 seconds, and a producer holds one for its polling thread's last poll and up to half a second of
 flushing. A broker that stops answering while its clients retire therefore delays the node's other

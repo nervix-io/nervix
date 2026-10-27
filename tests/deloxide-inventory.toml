@@ -106,6 +106,7 @@ kind = "cucumber"
 package = "nervix-server"
 selections = ["deloxide", "deloxide-order"]
 tags = [
+  "@runtime_installation_retry",
   "@wasm_reset_authority_recovery",
   "@wasm_reset_publication_failure",
   "@client_wire_pause_leadership",
@@ -2423,6 +2424,26 @@ invocation = "stress-scenarios"
 scenario = "A model command whose publication met a lapsed leader lease releases its own pause on <cluster_size> nodes"
 selections = ["deloxide-stress"]
 
+[[workload]]
+coverage = "A persisted running domain is installed after bounded construction refusals, with no new configuration or lifecycle command."
+examples = 1
+feature = "tests/features/runtime/runtime_installation_retry.feature"
+id = "scenario.runtime-installation-retry"
+invariant = "A restarted node retries refused installations of its committed runtime, forwards new Syslog traffic through the recovered graph, and retains its original relay owner."
+invocation = "scenarios"
+scenario = "A restarted node retries refused installations of its committed runtime"
+selections = ["deloxide", "deloxide-order"]
+
+[[workload]]
+coverage = "Under scheduling stress: installation of a persisted running domain after bounded construction refusals without another committed change."
+examples = 1
+feature = "tests/features/runtime/runtime_installation_retry.feature"
+id = "stress.runtime-installation-retry"
+invariant = "A restarted node retries refused installations of its committed runtime, forwards new Syslog traffic through the recovered graph, and retains its original relay owner."
+invocation = "stress-scenarios"
+scenario = "A restarted node retries refused installations of its committed runtime"
+selections = ["deloxide-stress"]
+
 [[owner]]
 path = "crates/checkpoint-replication/src/replication.rs"
 workloads = [
@@ -2803,6 +2824,8 @@ workloads = [
 gap = "The listed workloads reach scheduling, drain and entity-gate timing RwLocks. Ordinary branch-state-room scenarios retain their broader capture and restore coverage outside these workloads."
 path = "src/fault_injection.rs"
 workloads = [
+  "scenario.runtime-installation-retry",
+  "stress.runtime-installation-retry",
   "scenario.inferencer-inspection-admission",
   "stress.inferencer-inspection-admission",
   "scenario.shutdown-flush-before-freeze",
