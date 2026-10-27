@@ -39,8 +39,8 @@ counters.
 | --- | --- |
 | `just test-coverage` (`tests`) | Ordinary workspace unit, binary, benchmark test-mode and harness-liveness tests. Packages that own execution modes run separately with ordinary features, so an all-features invocation never combines modes. Exports `lcov-workspace.info` and `coverage-source-root.txt` as `coverage-tests`. |
 | `just test-scenarios-coverage` (`scenarios`) | The public Cucumber suite, including its instrumented server, CLI, report tool, paced Rust driver and shared binding. Exports the same report/root pair and the paced Python drivers' `python.lcov` as `coverage-scenarios`. |
-| `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures and their loaded procedural macro objects, using the analysis compiler's matching LLVM tools. API doctests finish separately without instrumentation. |
-| `coverage-native-extras bench-smoke` (`extra-tests`) | Every Criterion body once in test mode. Its instrumented timings are not performance evidence. |
+| `coverage-native-extras test-typed-ratchet` (`extra-tests`) | Source-contract compiler fixtures, including their paired fixture doctests and loaded procedural macro objects, using the analysis compiler's matching LLVM tools. Product API doctests and modeled fixture checks finish separately without instrumentation. |
+| `coverage-native-extras bench-smoke` (`extra-tests`) | The smoke recipe's benchmark bodies in test mode. Other Cargo benchmark test targets run in `test-coverage`. Instrumented timings are not performance evidence. |
 | `coverage-native-extras test-primitives-ordinary` (`extra-tests`) | The primitive boundary's native ordinary conformance checks. Other conformance modes remain separate. |
 | Language completion walk (`extra-tests`) | The composed grammar's completion reachability check for Plexus, the Nervix graph definition language, collected under the current `plexus-completion-walk` recipe. |
 | Connector declaration validation (`extra-tests`) | The compiled Plexus vocabulary export and comparison of generated capability tables and manual regions, collected by `validate-connector-matrix`. |
@@ -67,8 +67,8 @@ the downloaded artifact:
 Only reports the artifact actually exports are inputs; running a focused coverage recipe does not
 register it in CI by itself. Focused Backup, Visual Create, client and runtime recipes export local
 ordinary reports for `coverage-patch`, using the same normalization as the workspace merge.
-Miri, mutation testing, compile-only and browser probes, replay qualification and Loom weakening
-qualification have their own verdicts and contribute no current-source counters here.
+Checks [outside collected counters](#verification-outside-collected-counters) retain their own
+verdicts, including Deloxide supervision and compiler-cache qualification.
 
 The `diagnostic-evidence` job runs `just coverage-deadlock` and retains the `diagnostic-evidence`
 artifact separately. It collects `test-deadlock-evidence-order` in `deloxide-order` mode and
@@ -498,6 +498,22 @@ campaigns ran exactly when `fuzz` requested them. Without `fuzz`, the recorded d
 valid and supplies no report. A job that a later attempt of the run did not rerun keeps its earlier
 attempt's verdict and artifacts, so a collection of any attempt up to the current one is the run's.
 
+The event and tested source decide eligibility together:
+
+| Selection | Ordinary properties | Live sanitizer coverage | Full union |
+| --- | --- | --- | --- |
+| Code or test PR without `fuzz` | Required | Deliberately skipped; no fuzz report | Required, with the other label-selected producers |
+| Code or test PR carrying `fuzz` | Required | Required for the complete tested inventory | Required, with the requested fuzz campaign |
+| Verified prose-only PR carrying `fuzz` | Required | Required for the complete tested inventory | Skipped; the campaign keeps its own report and verdict |
+| Verified prose-only PR without `fuzz` | Entire Bolero call excluded | No campaign or report | Skipped; no union evidence |
+| Scheduled or manual Bolero workflow | Required | Deliberately skipped | No Check union is launched by this standalone workflow |
+
+Check runs on PR open, reopen, push and label changes. Each event records its own label snapshot;
+adding or removing a label changes the required producers for that event. `no-docker` never
+authorizes excluding code or tests. The [documentation-only selection contract](./property-testing-and-fuzzing.md#documentation-only-selection)
+owns the exact allowed paths and tested-merge identity. A skip records eligibility, never successful
+execution of a property, model, scenario or sanitizer campaign.
+
 A failed suite-selection job runs and fails the completion check rather than turning it into a
 skip. Missing downloads reach the union as missing inputs, with the selection retained, so its
 failure record and summary identify the producer, job and artifact to repair. A download failure
@@ -542,9 +558,9 @@ The job writes `target/coverage-full/` and retains it as the `coverage-full` art
 | `selection.json` | The recorded selection |
 
 No collector measures the browser console's WebAssembly build, WASM guest code, the client
-conformance probes in other languages, or the product processes the chaos suites kill. Miri,
-mutation testing, compile-only checks, `compile_fail` doctests and the Loom weakening qualification
-keep verdicts of their own, separate from executable coverage.
+conformance probes in other languages, or the product processes the chaos suites kill.
+[Independent verification](#verification-outside-collected-counters) remains required in its own
+selected jobs even when it contributes no counters to the union.
 
 The union reads reports and records only. Repeating it over a run's retained artifacts, at the
 tested revision the selection names, gives the same lines without binaries or a compiler:
@@ -563,6 +579,47 @@ unmodified working tree: name the `lcov-workspace.info` that `just coverage-merg
 attempt directory below `target/native-coverage`. `just test-coverage-full` exercises the
 selection, every validation, the attribution and the CI contract, and `just coverage-full-runner`
 exports the union's measured Python coverage for CI.
+
+## Verification Outside Collected Counters
+
+Coverage completion and a method's verification verdict answer different questions. The following
+checks retain their own verdicts outside the native source-line totals; their absence from a report
+does not authorize skipping them when their job or owning change requires them.
+
+| Check | Evidence and boundary |
+| --- | --- |
+| Product API doctests and compile/browser probes | `just test-capability-docs`, `just test-typed-ratchet-product-docs` and `just test-primitives-compile` check current supported calls beside `compile_fail` examples in their declared configurations. Rejected programs supply no executable counters. Positive examples establish the intended imports and signatures; neither proves runtime or concurrency behavior. |
+| Compiler-cache qualification | `just qualify-typed-ratchet-cache` checks current source, compiler and doctest identity across fresh, warm, interrupted and two-worktree runs with kache retained. These probe executions do not join the instrumented `test-typed-ratchet` producer. |
+| Deloxide supervision qualification | `just test-deloxide-qualification <selection>` proves that diagnostic-process failures fail the lane, preserve evidence and leave no process behind. It runs outside the lane collector; the diagnostic workloads' complete `lane.json` remains separately required for export. |
+| Replay and deliberate failure qualification | Shuttle schedule replay, Turmoil failure replay and Bolero failure/minimization checks qualify reproduction and supervision. Saved inputs or reproduced failures do not establish a completed current campaign or exploration. |
+| Loom weakening and mutation testing | Deliberately changed source proves that an oracle detects the change. Those counters cannot describe the unchanged source revision. |
+| Miri | Its interpreter verdict remains independent of native LLVM source coverage. |
+
+Source-contract compiler fixtures, including their paired fixture doctests, are part of the
+instrumented `test-typed-ratchet` recipe. They are distinct from its uninstrumented product API
+doctest finish step and the separate cache qualification. The [compiler contract](./data-plane-concurrency.md#resolved-architecture-boundaries)
+owns what those fixtures diagnose. Native host counters never imply browser, guest or
+other-language execution, and Chaos retains its real-process verdict against immutable images.
+
+## Adding Or Changing A Producer
+
+An existing ordinary test, registered property, model or scenario stays with its canonical runner;
+adding a check there does not create a second producer. A new native execution outside those
+runners joins `scripts/native_coverage.py` with its prepare, instrumented and finish recipes,
+declared mode and compiler. Classify compile-only, altered-source, replay and supervision checks
+explicitly as independent verdicts instead of inventing counters for them.
+
+When changing a producer, update its ordinary merge inputs or full-union requirement table and
+workflow downloads in the same change, including event/label eligibility, artifact identity and
+failure behavior. Keep one inventory for execution and collection: a focused filter can aid local
+diagnosis but cannot qualify the full inventory. Changes to a producer job or matrix also update
+`tests/release-evidence.toml` and the workflow contract tests that name it.
+
+Run the affected canonical command and its command/artifact tests. Retain the exact revision,
+selection, completion and replay records on the owning ClickUp task, including failures and the
+limits of reused evidence. A past complete report does not qualify targets added afterwards.
+Keep build/runtime, runner load and artifact-size measurements with that task; instrumented cost
+is collection overhead, while performance claims require ordinary builds on the same host.
 
 ## Limits And Failure Recovery
 
