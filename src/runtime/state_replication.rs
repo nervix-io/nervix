@@ -2317,14 +2317,15 @@ impl Runtime {
     pub(in crate::runtime) async fn reset_domain_kafka_offsets(
         &self,
         state: &KafkaOffsetStateOriginator,
+        generation: u64,
         offsets: Vec<KafkaOffsetPosition>,
     ) -> error_stack::Result<(), StateReplicationError> {
         let _publication = self.backup_publication(&state.placement().domain);
-        let (lsm, payload) = state.replace_offsets(offsets).change_context_lazy(|| {
-            StateReplicationError::ReplaceKafkaOffsets {
+        let (lsm, payload) = state
+            .apply_start(generation, offsets)
+            .change_context_lazy(|| StateReplicationError::ReplaceKafkaOffsets {
                 placement: state.placement().clone(),
-            }
-        })?;
+            })?;
         self.persist_kafka_offset_snapshot(&state.persistence(), lsm, &payload)
             .await
     }

@@ -146,6 +146,7 @@ checks = [
   "runtime::domain_execution::shuttle_tests::shuttle_a_reader_observes_one_complete_typed_routing_revision",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained",
+  # The host's retained-payload owner is driven by the dev-only connector-fake record script.
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_a_sibling_failure_resolves_each_fanned_in_member_once_despite_a_retry",
   "runtime::emitter_record_writes::shuttle_tests::shuttle_terminal_shutdown_leaves_an_unanswered_request_unacknowledged",
@@ -185,6 +186,7 @@ checks = [
   "runtime::ingestors::connector::shuttle_tests::shuttle_paced_ingestor_observes_engagement_during_dispatch",
   "runtime::ingestors::connector::shuttle_tests::shuttle_request_ingestor_observes_engagement_during_dispatch",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held",
+  "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_instances_apply_a_generation_start_once_without_rewinding_commits",
   "runtime::kafka_offset_state::tests::shuttle_checks::shuttle_a_replica_acknowledgement_racing_the_quorum_wait_is_never_missed",
   "runtime::local_drain::shuttle_tests::shuttle_a_batch_a_consumer_takes_while_a_drain_observes_is_never_missing_from_it",
   "runtime::local_drain::shuttle_tests::shuttle_a_batch_its_owner_hands_on_while_a_drain_observes_is_never_missing_from_it",

@@ -1095,12 +1095,13 @@ disk staging and transfer chunks, so checkpoint length is independent of the Bul
 
 Offset recovery details:
 
+- `START AT <timestamp>` and `START AT NOW` apply once per domain start generation across all instances. The first initialization persists the resolved partition positions and the applied generation together before reading. Quiescence, reconnects, rebalances, ownership changes and restarts in that generation resume acknowledged positions; they do not apply the timestamp again. A new partition without a recorded position starts at that generation's original timestamp. A later explicit `START AT` begins a new generation and replaces the positions again.
 - persisted per-partition offsets are clamped to the partition's currently available Kafka watermark range on reassignment
-- a partition without a stored domain offset, such as one added to the topic or any partition on a domain's first `START`, starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
+- in a generation begun with plain `START`, a partition without a stored domain offset starts in a paced domain at its first record at or after the domain's current logical time, or at its end as it stood before that lookup when it has no such record yet; in an unpaced domain it starts where the client's `auto.offset.reset` says: `earliest` at its earliest retained record, `latest`, librdkafka's default, at its end when the ingestor takes the partition up, and `error` refuses to start it, which `DESCRIBE INGESTOR` shows as the ingestor's transient error
 - the instance that takes such a partition up records its start as the partition's domain offset before it reads, so a reconnect resumes the partition there instead of placing it again past records the instance has not acknowledged
 
-Quiescing leaves a consumer group, or unassigns domain-owned partitions. In a generation begun
-with plain `START`, domain-owned partitions resume from their recorded offsets, and consumer-group
+Quiescing leaves a consumer group, or unassigns domain-owned partitions. Domain-owned partitions
+resume from their recorded offsets, and consumer-group
 partitions resume from the group's committed offsets or an outstanding rejection floor as described
 above. Topic time and size retention continue during the pause. For consumer-group
 offsets that age out, the client's pass-through `auto.offset.reset` setting decides whether resume
@@ -1108,13 +1109,6 @@ uses the earliest retained record, skips to new records, or raises a general sou
 offsets clamp to the partition's current low and high watermarks; records retention has removed
 cannot be recovered. Other members of a user-named group may consume and commit while Nervix is
 absent. Quiescing does not change the auto-commit loss windows of `MODE NO ACK`.
-
-A current limitation applies to a domain generation begun with `START AT <timestamp>` or
-`START AT NOW`: every resume of a `DOMAIN` ingestor reapplies the resolved start timestamp and
-replaces the stored offsets for the whole topic, including partitions assigned to other instances.
-A reconnect or quiesce/resume can therefore replay records already acknowledged in that generation.
-Use plain `START` when the domain should resume its saved positions. Consumer-group offsets do not
-use this domain start-point reset.
 
 ### Pulsar
 

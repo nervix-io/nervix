@@ -274,6 +274,12 @@ reads do not resolve the runtime's domain or execution registry again. A paused 
 its installed mapping while publishing pause, and a later generation still invalidates a clock
 bound to its predecessor.
 
+Kafka domain offsets retain the generation in which an explicit start was applied. Resuming an
+instance in that generation uses its recorded positions; a partition without one uses the original
+start timestamp. A later explicit start applies under its new generation. This source-position
+state travels with native checkpoints and backups, independently of clock authority or mapping;
+[Kafka ingestion](./ingestors.md#kafka) owns its acknowledgement and recovery contract.
+
 A pause-only publication does not notify installation observers when it keeps the installed
 mapping unchanged; intake sees pause through the lifecycle publication while execution keeps its
 existing logical waiters and mapping.

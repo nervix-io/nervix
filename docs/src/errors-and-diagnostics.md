@@ -14,6 +14,13 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+The ClickHouse declaration checks a required positive `timeout_ms` and the address/TLS pairing
+before inspecting mounted files or opening a client. Missing timeout or HTTPS trust is a
+`ClientConfigSchemaError::MissingRequired` or `RequiresKey`; a TLS key with an HTTP address is
+`InvalidValue` for that key. These reports name only the key, never its path or URL. A ClickHouse
+table locator with an empty or third dot-separated part is an `ExternalNameError` at Plexus Model
+construction; no malformed target reaches the insert SQL.
+
 ZeroMQ endpoint validation keeps the socket driver's endpoint error beneath
 `OfflineClientConfigError` for `addr`. Its socket owners keep the shared Boolean parser's
 `ClientConfigError` beneath their configuration context for `bind`; a malformed value does not
@@ -491,6 +498,12 @@ source composition with the protocol encoder's typed cause retained beneath the 
 
 ### Stored Shapes And Archives
 
+The native Kafka checkpoint decoder checks its required format signature before exposing offsets
+or the optional applied-start generation. A mismatched signature retains the typed
+`KafkaOffsetCheckpointError::FormatSignature` cause beneath `RuntimePersistenceError::DecodeState`.
+Loading, replica conversion and backup capture all use that owning decoder; no missing marker is
+filled from domain metadata.
+
 The vocabulary's `ArchivedCountError` reports a fixed-width archived count that the receiving
 target's `usize` cannot represent. Archive decoding retains it beneath the owning storage or
 transport failure. Registry Model records validate their current frame signature and report
@@ -820,6 +833,11 @@ acknowledgement, rather than failures to decode a record. A control call that ex
 `socket.timeout.ms` budget reports `KafkaTopicIngestorError::ControlTimeout` with that bound. Metadata,
 watermark, timestamp and seek failures preserve the driver's typed cause beneath the operation
 that failed.
+
+After an explicit domain start is accepted, another explicit start in the canonical-position read
+ends that resume attempt with `KafkaTopicIngestorError::UnresolvedDomainStart` beneath
+`IngestorError::Resume`. Its typed fields retain the accepted and observed generations. The host
+retries on its existing cadence; the connector polls only after it has canonical resume positions.
 
 A domain-offset Kafka ingestor that must start a partition without a domain offset while its
 client's `auto.offset.reset` is `error` fails its resume with

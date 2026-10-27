@@ -423,12 +423,15 @@ including the returning bootstrap node, omit them.
   replacement attempt. Design
   application effects for duplicates and uncertain ACK confirmation. Read `Emitters` → `Client emitters`,
   `Sessions` → `Emitter Consumers`, and the Client Implementation Manual for limits and recovery.
-- Request/response emitters do not take `ACK TIMEOUT`. When configuring SQS, Sentry, OTEL,
-  ClickHouse, or an Iceberg object-store client, put `timeout_ms` in the referenced client CONFIG
-  when the request needs an explicit bound; the emitter's declared retry policy owns pacing after
-  that request fails. A ZeroMQ client's `timeout_ms` bounds each send, which otherwise waits for as
-  long as the peer reads nothing. Prefer a bound ZeroMQ PULL ingestor and a connecting ZeroMQ
-  emitter: the driver never reconnects a connecting PULL socket after its peer goes away, and a
+- Request/response emitters do not take `ACK TIMEOUT`. A ClickHouse client requires a positive
+  `timeout_ms`; SQS, Sentry, OTEL, or Iceberg object-store clients use it when a request
+  needs an explicit bound. A ClickHouse HTTPS address also requires `tls_ca_file` from a mounted
+  resource, while HTTP refuses TLS file keys. Its table locator has one or two case-preserving
+  dot-separated parts, each quoted by the connector when sent. The emitter's declared retry
+  policy owns pacing after that request fails. A ZeroMQ client's `timeout_ms` bounds each send,
+  which otherwise waits for as long as the peer reads nothing. Prefer a bound ZeroMQ PULL
+  ingestor and a connecting ZeroMQ emitter: the driver never reconnects a connecting PULL socket
+  after its peer goes away, and a
   bound emitter can keep failing after one failed publish; read `Ingestors` → `ZeroMQ` and
   `Emitters` → `ZeroMQ`. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key. An OTEL
