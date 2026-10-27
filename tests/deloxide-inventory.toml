@@ -3553,7 +3553,7 @@ selections = [
 ]
 
 [[workload]]
-coverage = "A returning node adopts live policy before its stale log catches up."
+coverage = "A returning node answers public status and liveness, remains unready and returns a nonterminal outcome for an exact durable retry while initial discovery is held, then adopts live policy and recovers that execution."
 examples = 1
 feature = "tests/features/cluster/cluster_parameters.feature"
 id = "parameters.return"

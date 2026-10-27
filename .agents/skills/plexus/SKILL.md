@@ -220,6 +220,8 @@ per-route branch selection, while generator route bodies remain set-only.
 `ALTER DOMAIN SET PLACEMENT` is nameless, targets the active domain, and performs a normal schedule
 activation; a newly effective hard colocation requirement can relocate runtime nodes.
 
+During node startup, `SHOW CLUSTER STATUS;` and `DESCRIBE CLUSTER;` remain available while live cluster policy is discovered. Status reports `node.initialization=initializing` until initialization finishes; wait for `ready` before policy-dependent commands or transfers.
+
 Use `ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;`
 for committed Nervix cluster policy changes. Keep it outside domain transactions; it needs no
 selected domain. Read `Node Settings` for the complete parameter set, positive duration bounds,

@@ -11,19 +11,31 @@
 )]
 
 use nervix_consensus::{CommandExecution, ConsensusConflict};
-use nervix_models::{ClusterParameterRecord, ClusterParameterUpdates};
+use nervix_models::{
+    ClusterParameterCatchUp, ClusterParameterPublicationError, ClusterParameterRecord,
+    ClusterParameterUpdates, ClusterParameterValues,
+};
+use thiserror::Error;
 
-/// Bounds startup discovery independently of later live policy changes.
+/// A policy-dependent request cannot use a record before its live authority is established.
+#[derive(Debug, Error)]
 #[cfg_attr(
     nervix_lint,
-    nervix::constant(
-        fixed,
-        reason = "startup discovery has a bounded operation budget before any cluster policy is \
-                  installed"
+    nervix::error_boundary(
+        outcome,
+        reason = "refuses requests until live policy is known and caught up"
     )
 )]
-pub(in crate::application) const DISCOVERY_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(60);
+pub(in crate::application) enum ClusterParameterAdmissionError {
+    #[error("the node is waiting for a live cluster parameter publication")]
+    AwaitingPublication,
+    #[error("the node is catching up with its live cluster parameter publication")]
+    AwaitingCatchUp,
+    #[error("the node is completing initialization with its live cluster parameters")]
+    AwaitingInitialization,
+    #[error(transparent)]
+    Publication(#[from] ClusterParameterPublicationError),
+}
 
 pub(in crate::application) async fn announce_parameter_installation(
     events: &super::session_service::SessionEvents,
@@ -58,15 +70,43 @@ use super::{
 };
 
 impl SessionServiceImpl {
+    pub(in crate::application) fn caught_up_cluster_parameters(
+        &self,
+    ) -> Result<ClusterParameterValues, ClusterParameterAdmissionError> {
+        let construction = self
+            .inner
+            .runtime
+            .construction_parameters()
+            .ok_or(ClusterParameterAdmissionError::AwaitingPublication)?;
+        let applied = self
+            .inner
+            .consensus
+            .cluster_parameters()
+            .ok_or(ClusterParameterAdmissionError::AwaitingCatchUp)?;
+        match construction.catch_up(applied)? {
+            ClusterParameterCatchUp::Pending => {
+                Err(ClusterParameterAdmissionError::AwaitingCatchUp)
+            }
+            ClusterParameterCatchUp::Ready => Ok(applied.values),
+        }
+    }
+
+    pub(in crate::application) fn available_cluster_parameters(
+        &self,
+    ) -> Result<ClusterParameterValues, ClusterParameterAdmissionError> {
+        let parameters = self.caught_up_cluster_parameters()?;
+        if !self.inner.initialization.is_ready() {
+            return Err(ClusterParameterAdmissionError::AwaitingInitialization);
+        }
+        Ok(parameters)
+    }
+
     pub(in crate::application) fn cluster_parameters(
         &self,
     ) -> nervix_models::ClusterParameterValues {
-        use meticulous::OptionExt as _;
-        self.inner
-            .consensus
-            .cluster_parameters()
-            .verified("session services start only after the first parameter publication")
-            .values
+        use meticulous::ResultExt as _;
+        self.caught_up_cluster_parameters()
+            .assured("policy-dependent work starts only after live parameter initialization")
     }
 
     pub(in crate::application) fn command_execution_policy(

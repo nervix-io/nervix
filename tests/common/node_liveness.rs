@@ -74,8 +74,8 @@ pub(crate) enum ReadinessProbeOutcome {
 }
 
 impl ReadinessProbeOutcome {
-    /// Asks the node for its cluster status within `phase`. A node that is not the leader is ready
-    /// too, because it answered an authenticated command.
+    /// Asks the node for cluster status within `phase`. Public observation starts before
+    /// initialization completes, so a successful reply must publish completed initialization.
     pub(crate) async fn probe(endpoint: &StatusEndpoint, phase: PhaseDeadline) -> Self {
         let outcome = match endpoint.request(phase).await {
             Ok(outcome) => outcome,
@@ -83,8 +83,15 @@ impl ReadinessProbeOutcome {
         };
         let response_kind = ResponseKind::of(&outcome.disposition);
         match response_kind {
-            ResponseKind::Completed | ResponseKind::NotLeader => Self::Ready { response_kind },
-            ResponseKind::Failed | ResponseKind::Other => Self::UnsuccessfulResponse {
+            ResponseKind::Completed
+                if outcome
+                    .message
+                    .lines()
+                    .any(|line| line == "node.initialization=ready") =>
+            {
+                Self::Ready { response_kind }
+            }
+            _ => Self::UnsuccessfulResponse {
                 response_kind,
                 message: outcome.message,
                 diagnostics: outcome.diagnostics,

@@ -1458,3 +1458,8 @@ Domain-drain and entity-gate deadlines come from the installed committed paramet
 operation captures its deadline when it begins. Node drain and shutdown deadlines remain local
 capabilities. Startup installs a live construction policy and admits the matching consensus
 revision before activating graph tasks; it does not replay an unplaced local graph first.
+
+Live-policy discovery runs after public observation starts and is cancelled by the first stop
+request. A node stopped before quorum-confirmed runtime admission has no admitted graph to
+drain; it still closes listeners, joins its supervised tasks and closes storage through the normal
+shutdown owner. A join refusal retains its typed cause through that cleanup.

@@ -361,11 +361,17 @@ that has not applied the current record remains visibly behind. Sessions receive
 notice when their node installs a parameter revision. A joining or returning node obtains the
 live cluster's published record before activating services that consume it and verifies that
 record against consensus as it catches up.
-Live-policy discovery has a fixed 60-second budget and also ends at the first stop request. A
-prerequisite refusal retains its typed join error through startup cleanup, even before a policy
-publication is available. If the discovery budget expires, startup refuses to activate graph state.
-During a whole-cluster restart, peers must start without waiting for another node to report ready:
-each returning node needs another process's live publication before it can finish startup.
+Public session and observability listeners start before live-policy discovery. `SHOW CLUSTER
+STATUS` and `DESCRIBE CLUSTER` remain available while an isolated returning node waits; status
+reports `node.initialization=initializing` until initialization completes, then `ready`. Liveness
+and metrics remain available, while `/readyz` returns 503 until initialization finishes and a
+leader is known. Policy-dependent commands, session attachments, resource transfers and configured
+HTTP intake refuse work until the live publication is known, the local committed record has caught
+up, and initialization has registered its owners. No stale local record supplies startup policy. A durable command retains its execution reference and receives a nonterminal `OutcomeUnknown(NotYetAuthoritative)` during this wait, so reconnecting cannot turn an earlier committed result into a failure.
+Discovery waits for a live publication or the first stop request, including a typed join refusal;
+shutdown cancels the wait and retains that refusal through cleanup. During a whole-cluster restart,
+peers start concurrently: each returning node needs another process's live publication before it
+can finish startup.
 
 Only the first bootstrapping node supplies parameter seed flags; another node given them
 refuses startup. Changes validate the transition at commit: existing Models must fit a lowered

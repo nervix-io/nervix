@@ -15,8 +15,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("no live committed cluster parameter publication was available during startup")]
-    ClusterParametersUnavailable,
     #[error("invalid cluster parameters")]
     InvalidClusterParameters,
     #[error("{parameter} is a first-bootstrap seed; use ALTER CLUSTER SET")]

@@ -2422,7 +2422,14 @@ impl SessionServiceImpl {
                 self.show_emitters(domain).await
             }
             Statement::ShowClusterStatus(_) => {
-                command_ok(render_cluster_status(&self.inner.cluster, &self.inner.consensus).await)
+                let status =
+                    render_cluster_status(&self.inner.cluster, &self.inner.consensus).await;
+                let initialization = if self.inner.initialization.is_ready() {
+                    "ready"
+                } else {
+                    "initializing"
+                };
+                command_ok(format!("{status}\nnode.initialization={initialization}"))
             }
             Statement::AlterCluster(_) => {
                 command_error("ALTER CLUSTER SET requires durable command admission".to_string())

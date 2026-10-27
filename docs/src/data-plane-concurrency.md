@@ -2767,3 +2767,12 @@ data that fair `select!` polling requires. The separate nondeterminism run repea
 schedules twice for each search. Paused-clock unit tests separately check elapsed transition timing
 and unchanged publication. This check establishes notification liveness for the explored schedules;
 it makes no memory-ordering claim about the governed `ArcSwap` implementation.
+
+The application's `NodeInitialization` uses the primitive once-publication owner to open public
+policy-dependent work after live-policy catch-up and handler registration. Session and configured
+HTTP intake read that same publication before admission; it changes once per process and carries
+no row, batch or persisted state. The returning-parameter public scenario holds initial discovery
+through the existing test-pause owner and exercises observation, refusal and release. Its async
+pause, network waits and standard-library once publication remain outside the blocking-lock detector.
+The diagnostic parameter workloads reach the surrounding tracked owners; the public scenario and
+external partition recovery verify admission and observation during an isolated process restart.

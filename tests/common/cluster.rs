@@ -1089,6 +1089,33 @@ impl Cluster {
         .map_err(io::Error::other)
     }
 
+    /// Starts one owned node with live-policy discovery held. Readiness must remain false,
+    /// so this fixture waits for the explicit startup boundary instead of the ready probe.
+    pub(crate) async fn start_node_waiting_for_parameters(
+        &mut self,
+        node_id: &str,
+    ) -> io::Result<()> {
+        let handle = self
+            .nodes
+            .get_mut(node_id)
+            .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
+        let node = node_name(&handle.spec.node_id);
+        let fault = handle.fault_injection.clone();
+        fault.pause_initial_cluster_parameters_on(node.clone());
+        let deadline = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+        handle.start()?;
+        match deadline
+            .bound(fault.wait_for_initial_cluster_parameters_pause(&node))
+            .await
+        {
+            BeforeDeadline::Finished(()) => Ok(()),
+            BeforeDeadline::Passed => Err(io::Error::other(format!(
+                "node '{node_id}' did not reach initial live-policy discovery within {:?}",
+                deadline.elapsed()
+            ))),
+        }
+    }
+
     /// Names a setting `node_id` starts with from its next launch on, over the cluster's own. A
     /// node that is not a member yet starts with it when it is registered.
     pub(crate) fn override_node_setting(&mut self, node_id: &str, setting: SettingOverride) {

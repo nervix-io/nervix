@@ -2876,3 +2876,12 @@ append is logged with its complete consensus report, including the typed causes 
 A live publication that disagrees with an equal applied revision is a typed installation failure,
 not a default or retry interpretation. Invalid current consensus metadata preserves its decoder
 cause beneath a typed node-state recreation error.
+
+`ClusterParameterAdmissionError` distinguishes awaiting a live publication, awaiting local catch-up,
+and completing initialization. These are ordinary request refusals before policy-dependent work
+begins. A durable command projects this temporary absence into
+`OutcomeUnknown(NotYetAuthoritative)` because its reference may already name a committed execution;
+a read-only request can be refused definitively. An inconsistent equal-revision publication
+preserves its typed publication error. Public
+cluster inspection remains available while these refusals apply; transfer boundaries project the
+refusal into their existing installation, staging or read failure with its full message.

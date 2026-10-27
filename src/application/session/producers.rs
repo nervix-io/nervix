@@ -380,7 +380,13 @@ impl SessionProducers {
             ));
         }
         let service = &shared.service;
-        let maximum_bytes = service.cluster_parameters().client_producer_session_bytes();
+        let parameters = service.available_cluster_parameters().map_err(|error| {
+            OpenRefusal::new(
+                ClientProducerRefusal::EndpointUnavailable,
+                format!("{error:#}"),
+            )
+        })?;
+        let maximum_bytes = parameters.client_producer_session_bytes();
         if !limits.is_within_bounds() || limits.bytes.get() > maximum_bytes {
             return Err(OpenRefusal::new(
                 ClientProducerRefusal::InvalidLimits,

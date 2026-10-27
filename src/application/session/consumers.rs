@@ -192,7 +192,13 @@ impl SessionConsumers {
             ));
         }
         let service = &shared.service;
-        let maximum_bytes = service.cluster_parameters().client_consumer_session_bytes();
+        let parameters = service.available_cluster_parameters().map_err(|error| {
+            (
+                EmitterOpenRefusal::EndpointUnavailable,
+                format!("{error:#}"),
+            )
+        })?;
+        let maximum_bytes = parameters.client_consumer_session_bytes();
         if !open.limits.is_within_bounds() || open.limits.bytes.get() > maximum_bytes {
             return Err(refuse(
                 EmitterOpenRefusal::InvalidLimits,

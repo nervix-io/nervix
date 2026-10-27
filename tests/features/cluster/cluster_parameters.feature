@@ -59,14 +59,37 @@ Feature: Committed cluster parameters
   Scenario: A node down during a parameter change adopts the committed record when it returns
     Given a 3 node nervix cluster is started
     And node "node-3" is stopped
-    When these Plexus statements are executed through the client on node "node-1"
+    When this Plexus command request with execution reference "parameter-change" is sent once to node "node-1"
       """
       ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
       """
-    Then node "node-1" eventually reports status containing "node-unavailability-timeout committed=15s"
-    When node "node-3" is started
+    Then the last command request succeeded
+    And node "node-1" eventually reports status containing "node-unavailability-timeout committed=15s"
+    When node "node-3" is started with live parameter discovery paused
+    Then node "node-3" eventually reports status containing "node.initialization=initializing"
+    And node "node-3" eventually reports status containing "node=node-3 cluster parameters running=not installed"
+    And node "node-3" observability path "/livez" eventually responds with 200 and "live"
+    And node "node-3" observability path "/readyz" eventually responds with 503 and "waiting for live cluster parameters"
+    When this Plexus command request with execution reference "parameter-change" is sent once to node "node-3"
+      """
+      ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
+      """
+    Then the last command request reports that its outcome is not yet authoritative
+    When these Plexus commands fail through the client on node "node-3" with "waiting for a live cluster parameter publication"
+      """
+      SHOW TRANSACTIONS;
+      """
+    And live parameter discovery on node "node-3" is released
     Then node "node-3" eventually reports status containing "node=node-3 node-unavailability-timeout running=15s"
     And node "node-3" eventually reports status containing "node=node-3 state-snapshot-interval running=250ms"
+    And node "node-3" eventually reports status containing "node.initialization=ready"
+    And node "node-3" observability path "/readyz" eventually responds with 200 and "ready"
+
+    When this Plexus command request with execution reference "parameter-change" is executed on the leader node
+      """
+      ALTER CLUSTER SET NODE_UNAVAILABILITY_TIMEOUT = 15s, STATE_SNAPSHOT_INTERVAL = 250ms;
+      """
+    Then the last command request succeeded
 
   Scenario Outline: Lowering a cap refuses the existing model that exceeds it on a cluster of <cluster_size>
     Given a <cluster_size> node nervix cluster is started

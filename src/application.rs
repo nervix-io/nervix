@@ -174,6 +174,7 @@ mod leader_redirect;
 mod model_mutation;
 mod model_validation;
 mod node_identity;
+mod node_initialization;
 mod node_settings;
 mod observability_http;
 mod observation;
@@ -925,62 +926,214 @@ impl Application {
                 }
             }
         }));
-        let initial_parameters =
-            nervix_primitives::time::timeout(cluster_parameters::DISCOVERY_TIMEOUT, async {
-                loop {
-                    nervix_primitives::task::consume_budget().await;
-                    let record = if has_bootstrap_candidates {
-                        cluster.live_cluster_parameters().await
-                    } else {
-                        consensus.observer().cluster_parameters()
-                    };
-                    if let Some(record) = record {
-                        break Some(record);
-                    }
-                    nervix_primitives::select! {
-                        _ = shutdown.cancelled() => break None,
-                        _ = shutdown_coordinator.requested() => break None,
-                        _ = sleep(settings.membership.gossip_interval()) => {}
-                    }
-                }
-            })
-            .await;
-        let initial_parameters = match initial_parameters {
-            Ok(Some(record)) => {
-                match preflight::validate_resource_volume(&record.values, database_volume, &db_path)
-                {
-                    Ok(()) => Ok(record),
-                    Err(error) => Err(error.change_context(AppError::Preflight)),
-                }
-            }
-            _ => match join_refusal.borrow().clone() {
-                Some(refusal) => Err(Report::new(refusal).change_context(AppError::JoinRefused)),
-                None => Err(Report::new(AppError::ClusterParametersUnavailable)),
-            },
+        let certificates =
+            HttpsListenerCertificates::new(&resource_store, &fault_injection, &cluster);
+        certificates
+            .register_installation_handler(&interconnect)
+            .change_context(AppError::RegisterInterconnectRequestHandler)?;
+        let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
+        let service = SessionServiceImpl {
+            inner: Arc::new(SessionServiceInner {
+                cluster: cluster.clone(),
+                consensus: consensus.proposer(),
+                consensus_administrator: consensus.administrator(),
+                registry,
+                resource_store,
+                https_certificates: certificates,
+                runtime: runtime.clone(),
+                runtime_admission: runtime_admission.clone(),
+                initialization: Arc::new(node_initialization::NodeInitialization::default()),
+                admission_shutdown: shutdown_coordinator.admission_token(),
+                drain_support_shutdown: shutdown.clone(),
+                events: events.clone(),
+                subscription_interests: SubscriptionInterests::new(
+                    cluster.clone(),
+                    runtime.metrics(),
+                ),
+                subscription_sampler: SubscriptionSampler::default(),
+                interconnect: interconnect.clone(),
+                client_producers: ClientProducerRouter::new(
+                    runtime.clone(),
+                    interconnect.clone(),
+                    consensus.proposer().local_node_id().clone(),
+                ),
+                client_consumers: ClientConsumerRouter::new(
+                    runtime.clone(),
+                    interconnect.clone(),
+                    consensus.proposer().local_node_id().clone(),
+                ),
+                service_tasks: ServiceTasks::default(),
+                auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
+                failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
+                transaction_bindings: DashMap::with_hasher(RandomState::new()),
+                command_executions: Default::default(),
+                transaction_executions: DashMap::with_hasher(RandomState::new()),
+                transaction_recovery: Default::default(),
+                ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
+                resource_upload_executions: DashMap::with_hasher(RandomState::new()),
+                resource_replication_executions: DashMap::with_hasher(RandomState::new()),
+                retained_backups: Default::default(),
+                captured_backup_sections: DashMap::with_hasher(RandomState::new()),
+                restored_state_uploads: DashMap::with_hasher(RandomState::new()),
+                restore_archives: Default::default(),
+            }),
         };
-        let record = match initial_parameters {
-            Ok(record) => record,
-            Err(error) => {
-                shutdown.cancel();
-                consensus.shutdown().await;
-                interconnect.shutdown().await;
-                if let Err(shutdown_error) = cluster.shutdown().await {
-                    warn!(error = %shutdown_error, "failed to stop gossip while refusing cluster policy");
-                }
-                runtime.shutdown(runtime.domain_drain_timeout()).await;
-                for task in background_tasks {
-                    if let Err(error) = task.await {
-                        warn!(error = %error, "startup task ended while refusing cluster policy");
-                    }
-                }
-                return Err(error);
+        info!(mode = grpc_mode.scheme(), addr = %grpc_listen_addr, "nervix gRPC server listening");
+        info!(addr = %http_listen_addr, "nervix HTTP server listening");
+        info!(addr = %https_listen_addr, "nervix HTTPS server listening");
+        info!(addr = %observability_listen_addr, "nervix observability server listening");
+        info!(addr = %web_console_listen_addr, "nervix web console server listening");
+        if let Some(addr) = web_console_https_listen_addr {
+            info!(addr = %addr, "nervix web console TLS server listening");
+        }
+
+        let listener_shutdown = shutdown_coordinator.admission_token();
+
+        let grpc_service = service.clone();
+        let grpc_shutdown = listener_shutdown.clone();
+        let api_server = async move {
+            let mut builder = Server::builder();
+            builder = if grpc_mode.is_tls() {
+                builder
+                    .tls_config(
+                        grpc_tls_server_config.ok_or_else(|| Report::new(AppError::LoadGrpcTls))?,
+                    )
+                    .change_context(AppError::LoadGrpcTls)?
+            } else {
+                builder
+            };
+            // Closing admission ends every connection this listener accepted, so the server's
+            // graceful shutdown never waits for a client to finish or abandon a request.
+            let grpc_incoming =
+                AdmittingListener::new(grpc_listener, grpc_shutdown.clone()).into_connections();
+            builder
+                .add_service(SessionGrpcService::new(grpc_service.clone()))
+                .serve_with_incoming_shutdown(grpc_incoming, grpc_shutdown.cancelled_owned())
+                .await
+                .map_err(|e| Report::new(e).change_context(AppError::Serve))
+        };
+        let http_server = serve_http(
+            runtime.clone(),
+            service.inner.initialization.clone(),
+            service.inner.service_tasks.clone(),
+            http_listener,
+            listener_shutdown.clone(),
+        );
+        let https_server = serve_https(
+            runtime.clone(),
+            service.inner.initialization.clone(),
+            service.inner.service_tasks.clone(),
+            service.inner.https_certificates.clone(),
+            https_listener,
+            listener_shutdown.clone(),
+        );
+        let observability_server = serve_observability_http(
+            consensus.observer(),
+            service.inner.initialization.clone(),
+            runtime.clone(),
+            observability_listener,
+            listener_shutdown.clone(),
+        );
+        let web_console_server = serve_web_console_http(
+            service.clone(),
+            web_console_listener,
+            listener_shutdown.clone(),
+        );
+        let web_console_https_shutdown = listener_shutdown;
+        let web_console_https_service = service.clone();
+        let web_console_https_server = async move {
+            if let (Some(config), Some(listener)) =
+                (web_console_tls_server_config, web_console_https_listener)
+            {
+                serve_web_console_https(
+                    web_console_https_service,
+                    config,
+                    listener,
+                    web_console_https_shutdown.clone(),
+                )
+                .await
+            } else {
+                web_console_https_shutdown.cancelled().await;
+                Ok(())
             }
+        };
+
+        let public_listeners_shutdown = shutdown_coordinator.clone();
+        let public_listeners = nervix_primitives::task::spawn(async move {
+            let (
+                api_result,
+                http_result,
+                https_result,
+                observability_result,
+                web_console_result,
+                web_console_https_result,
+            ) = tokio::join!(
+                request_shutdown_on_completion(api_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_completion(http_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_completion(https_server, public_listeners_shutdown.clone()),
+                request_shutdown_on_completion(
+                    observability_server,
+                    public_listeners_shutdown.clone()
+                ),
+                request_shutdown_on_completion(
+                    web_console_server,
+                    public_listeners_shutdown.clone()
+                ),
+                request_shutdown_on_completion(
+                    web_console_https_server,
+                    public_listeners_shutdown.clone()
+                ),
+            );
+            api_result
+                .and(http_result)
+                .and(https_result)
+                .and(observability_result)
+                .and(web_console_result)
+                .and(web_console_https_result)
+        });
+
+        // Public observation stays available while live policy discovery fences execution.
+        // Cancelling this future leaves every task it already started in the same supervised
+        // collection that normal node shutdown owns.
+        let initialization_result = nervix_primitives::select! {
+            biased;
+            _ = shutdown_coordinator.requested() => Ok(()),
+            result = Box::pin(async {
+        let registry = service.inner.registry.clone();
+        let certificates = service.inner.https_certificates.clone();
+        #[cfg(feature = "testing")]
+        fault_injection.pause_initial_cluster_parameters_if_armed(&node_id).await;
+        let record = loop {
+            nervix_primitives::task::consume_budget().await;
+            let record = if has_bootstrap_candidates {
+                cluster.live_cluster_parameters().await
+            } else {
+                consensus.observer().cluster_parameters()
+            };
+            if let Some(record) = record {
+                preflight::validate_resource_volume(&record.values, database_volume, &db_path)
+                    .change_context(AppError::Preflight)?;
+                break record;
+            }
+            sleep(settings.membership.gossip_interval()).await;
         };
         runtime.install_cluster_parameters(record.values);
         registry.install_cluster_parameters(record.values);
         // Runtime admission waits for the same or a later committed publication before installing
         // the graph; a returning node never runs its stale local policy or schedule.
         runtime.set_construction_parameters(record);
+        loop {
+            match service.caught_up_cluster_parameters() {
+                Ok(_) => break,
+                Err(cluster_parameters::ClusterParameterAdmissionError::AwaitingPublication
+                    | cluster_parameters::ClusterParameterAdmissionError::AwaitingCatchUp) => {
+                    sleep(settings.membership.gossip_interval()).await;
+                }
+                Err(error) => {
+                    return Err(Report::new(error).change_context(AppError::InvalidClusterParameters));
+                }
+            }
+        }
         #[cfg(feature = "testing")]
         {
             let mut leadership_transfer_rx = runtime.subscribe_leadership_transfers();
@@ -1607,12 +1760,6 @@ impl Application {
             shutdown.clone(),
         ));
 
-        let certificates =
-            HttpsListenerCertificates::new(&resource_store, &fault_injection, &cluster);
-        certificates
-            .register_installation_handler(&interconnect)
-            .change_context(AppError::RegisterInterconnectRequestHandler)?;
-        let events = SessionEvents::new(SESSION_EVENT_CAPACITY);
         let parameter_events = events.clone();
         let certificates_for_schedule = certificates.clone();
         let runtime_for_schedule = runtime.clone();
@@ -1658,51 +1805,6 @@ impl Application {
                 }
             }
         }));
-        let service = SessionServiceImpl {
-            inner: Arc::new(SessionServiceInner {
-                cluster: cluster.clone(),
-                consensus: consensus.proposer(),
-                consensus_administrator: consensus.administrator(),
-                registry,
-                resource_store,
-                https_certificates: certificates,
-                runtime: runtime.clone(),
-                runtime_admission: runtime_admission.clone(),
-                admission_shutdown: shutdown_coordinator.admission_token(),
-                drain_support_shutdown: shutdown.clone(),
-                events: events.clone(),
-                subscription_interests: SubscriptionInterests::new(
-                    cluster.clone(),
-                    runtime.metrics(),
-                ),
-                subscription_sampler: SubscriptionSampler::default(),
-                interconnect: interconnect.clone(),
-                client_producers: ClientProducerRouter::new(
-                    runtime.clone(),
-                    interconnect.clone(),
-                    consensus.proposer().local_node_id().clone(),
-                ),
-                client_consumers: ClientConsumerRouter::new(
-                    runtime.clone(),
-                    interconnect.clone(),
-                    consensus.proposer().local_node_id().clone(),
-                ),
-                service_tasks: ServiceTasks::default(),
-                auth_rate_limiter: SessionServiceImpl::new_auth_rate_limiter(),
-                failed_auth_rate_limit_keys: DashMap::with_hasher(RandomState::new()),
-                transaction_bindings: DashMap::with_hasher(RandomState::new()),
-                command_executions: Default::default(),
-                transaction_executions: DashMap::with_hasher(RandomState::new()),
-                transaction_recovery: Default::default(),
-                ownership_handoff_operations: nervix_primitives::sync::Mutex::new(()),
-                resource_upload_executions: DashMap::with_hasher(RandomState::new()),
-                resource_replication_executions: DashMap::with_hasher(RandomState::new()),
-                retained_backups: Default::default(),
-                captured_backup_sections: DashMap::with_hasher(RandomState::new()),
-                restored_state_uploads: DashMap::with_hasher(RandomState::new()),
-                restore_archives: Default::default(),
-            }),
-        };
         #[cfg(feature = "testing")]
         service.register_wasm_state_reset_test_coordinator(&fault_injection, shutdown.clone());
         let domain_clock_progress_service = service.clone();
@@ -2600,116 +2702,21 @@ impl Application {
             }
         }));
 
-        info!(mode = grpc_mode.scheme(), addr = %grpc_listen_addr, "nervix gRPC server listening");
-        info!(addr = %http_listen_addr, "nervix HTTP server listening");
-        info!(addr = %https_listen_addr, "nervix HTTPS server listening");
-        info!(addr = %observability_listen_addr, "nervix observability server listening");
-        info!(addr = %web_console_listen_addr, "nervix web console server listening");
-        if let Some(addr) = web_console_https_listen_addr {
-            info!(addr = %addr, "nervix web console TLS server listening");
-        }
-
-        let listener_shutdown = shutdown_coordinator.admission_token();
-
-        let grpc_service = service.clone();
-        let grpc_shutdown = listener_shutdown.clone();
-        let api_server = async move {
-            let mut builder = Server::builder();
-            builder = if grpc_mode.is_tls() {
-                builder
-                    .tls_config(
-                        grpc_tls_server_config.ok_or_else(|| Report::new(AppError::LoadGrpcTls))?,
-                    )
-                    .change_context(AppError::LoadGrpcTls)?
-            } else {
-                builder
-            };
-            // Closing admission ends every connection this listener accepted, so the server's
-            // graceful shutdown never waits for a client to finish or abandon a request.
-            let grpc_incoming =
-                AdmittingListener::new(grpc_listener, grpc_shutdown.clone()).into_connections();
-            builder
-                .add_service(SessionGrpcService::new(grpc_service.clone()))
-                .serve_with_incoming_shutdown(grpc_incoming, grpc_shutdown.cancelled_owned())
-                .await
-                .map_err(|e| Report::new(e).change_context(AppError::Serve))
+                service.inner.initialization.complete();
+                Ok::<(), Report<AppError>>(())
+            }) => result,
         };
-        let http_server = serve_http(
-            runtime.clone(),
-            service.inner.service_tasks.clone(),
-            http_listener,
-            listener_shutdown.clone(),
-        );
-        let https_server = serve_https(
-            runtime.clone(),
-            service.inner.service_tasks.clone(),
-            service.inner.https_certificates.clone(),
-            https_listener,
-            listener_shutdown.clone(),
-        );
-        let observability_server = serve_observability_http(
-            consensus.observer(),
-            runtime.clone(),
-            observability_listener,
-            listener_shutdown.clone(),
-        );
-        let web_console_server = serve_web_console_http(
-            service.clone(),
-            web_console_listener,
-            listener_shutdown.clone(),
-        );
-        let web_console_https_shutdown = listener_shutdown;
-        let web_console_https_service = service.clone();
-        let web_console_https_server = async move {
-            if let (Some(config), Some(listener)) =
-                (web_console_tls_server_config, web_console_https_listener)
-            {
-                serve_web_console_https(
-                    web_console_https_service,
-                    config,
-                    listener,
-                    web_console_https_shutdown.clone(),
-                )
-                .await
-            } else {
-                web_console_https_shutdown.cancelled().await;
-                Ok(())
+        if let Err(error) = &initialization_result {
+            error!(error = %format_args!("{error:#}"), "node initialization was refused");
+            match shutdown_coordinator.request_stop() {
+                ShutdownRequestOutcome::Accepted(_) => {
+                    debug!("node initialization refusal requested shutdown");
+                }
+                ShutdownRequestOutcome::AlreadyRequested(_) => {
+                    debug!("the node was already stopping when initialization was refused");
+                }
             }
-        };
-
-        let public_listeners_shutdown = shutdown_coordinator.clone();
-        let public_listeners = nervix_primitives::task::spawn(async move {
-            let (
-                api_result,
-                http_result,
-                https_result,
-                observability_result,
-                web_console_result,
-                web_console_https_result,
-            ) = tokio::join!(
-                request_shutdown_on_completion(api_server, public_listeners_shutdown.clone()),
-                request_shutdown_on_completion(http_server, public_listeners_shutdown.clone()),
-                request_shutdown_on_completion(https_server, public_listeners_shutdown.clone()),
-                request_shutdown_on_completion(
-                    observability_server,
-                    public_listeners_shutdown.clone()
-                ),
-                request_shutdown_on_completion(
-                    web_console_server,
-                    public_listeners_shutdown.clone()
-                ),
-                request_shutdown_on_completion(
-                    web_console_https_server,
-                    public_listeners_shutdown.clone()
-                ),
-            );
-            api_result
-                .and(http_result)
-                .and(https_result)
-                .and(observability_result)
-                .and(web_console_result)
-                .and(web_console_https_result)
-        });
+        }
 
         // The node serves until its first stop request, whether a termination signal, the caller
         // embedding the application, or a failed listener made it. That request's deadline bounds
@@ -2733,7 +2740,7 @@ impl Application {
             .unless_deadline_passed(deadline);
         shutdown_coordinator.begin_drain_support(stop_admission_outcome);
 
-        let drain_support_outcome = if graceful_shutdown_drain {
+        let drain_support_outcome = if graceful_shutdown_drain && runtime_admission.is_admitted() {
             let drain = service.drain_local_node_before_shutdown(drain_timeout, deadline);
             let drained = deadline.bound(drain).await;
             match drained {
@@ -2800,6 +2807,7 @@ impl Application {
         if let Some(refusal) = refused_join {
             return Err(Report::new(refusal).change_context(AppError::JoinRefused));
         }
+        initialization_result?;
         listeners.result?;
         cluster_shutdown_result?;
         database_owner_outcome?;

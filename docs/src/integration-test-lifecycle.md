@@ -1432,8 +1432,9 @@ A node that never ends keeps what it holds until the process drops the runtime.
 
 A **readiness probe** is one status request, and it reports one of three outcomes:
 
-- **Ready.** The node returned a successful command result, or one saying it is not the leader.
-  Either way it answered an authenticated command.
+- **Ready.** The authenticated cluster-status command succeeded and reports
+  `node.initialization=ready`. A status response while live-policy discovery is pending remains a
+  non-ready response even though public observation already works.
 - **Request failed.** The status request ended with its typed failure, including the operation a
   passed deadline interrupted.
 - **Non-ready response.** The node answered with an unsuccessful result, kept with its kind,
@@ -1452,6 +1453,13 @@ node '<node>' startup attempt <n> failed after <elapsed>: <failure>; task state:
 
 The task state is `not started`, `running`, or `terminal` with the terminal outcome, and the last
 readiness outcome is the most recent probe or `no readiness probe completed`.
+
+The returning-parameter scenario deliberately starts one owned node with initial live-policy
+discovery paused after its public listeners start. That launch retains normal watchdog, storage,
+port and stop ownership, and waits once for the explicit fault boundary within the existing node
+startup budget. It does not call the readiness waiter, because the scenario asserts the node's
+unready public status and policy refusal before releasing discovery. The hook reuses the existing
+one-shot command-pause owner; ordinary launches retain their readiness and retry contracts.
 
 ## Node Startup
 

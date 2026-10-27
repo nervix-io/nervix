@@ -28,7 +28,7 @@ use nervix_interconnect::Transport;
 use nervix_models::{
     BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName, PlacementPolicy,
     RequestedResourceVersion, ResourceId, ResourceName, ResourceUploadKey, ResourceVersionStatus,
-    SemanticReference, TransactionPosition,
+    SemanticReference, Statement, TransactionPosition,
 };
 use nervix_plexus::{
     Token, Word,
@@ -55,6 +55,7 @@ use super::{
     command_execution::{CommandAdmission, CommandExecutionOwners, PersistentCommandRequest},
     command_result::{
         CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
+        OutcomeUnknownCause,
     },
     completion::{
         ApplicationRevisionParticipants, ApplicationRevisionPhase, wait_for_application_revision,
@@ -160,6 +161,8 @@ pub(in crate::application) struct SessionServiceInner {
     /// the schedule task that installs every admitted revision.
     pub(in crate::application) https_certificates: HttpsListenerCertificates,
     pub(in crate::application) runtime: Runtime,
+    /// Also read by configured endpoint admission and the readiness listener.
+    pub(in crate::application) initialization: Arc<super::node_initialization::NodeInitialization>,
     /// Also held by the initial schedule reconciliation task until process shutdown.
     pub(in crate::application) runtime_admission: Arc<RuntimeAdmission>,
     /// Stops external sessions after this node has advertised termination.
@@ -1676,6 +1679,14 @@ impl SessionServiceImpl {
             }
         };
 
+        let observes_cluster = client_statements.iter().all(|parsed| {
+            matches!(
+                parsed.statement,
+                ClientStatement::Server(
+                    Statement::ShowClusterStatus(_) | Statement::DescribeCluster(_)
+                )
+            )
+        });
         // A request that only inspects a transaction reads it rather than changing it, so it
         // takes none of the durable admission, replay and queue-position fencing a transaction
         // request needs, even while the session has one attached.
@@ -1694,6 +1705,27 @@ impl SessionServiceImpl {
                             | ClientStatement::RevertTransaction
                     )
                 }));
+        if (!observes_cluster || is_transaction_request)
+            && let Err(error) = self.available_cluster_parameters()
+        {
+            let may_have_durable_execution = is_transaction_request
+                || client_statements.iter().any(|parsed| {
+                    matches!(
+                        &parsed.statement,
+                        ClientStatement::Server(statement)
+                            if super::statement_routing::is_persistent_statement(statement)
+                    )
+                });
+            let disposition = if may_have_durable_execution {
+                CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::NotYetAuthoritative)
+            } else {
+                CommandDisposition::Failed
+            };
+            return Ok(CommandResponse::executed(CommandResult::new(
+                disposition,
+                format!("{error:#}"),
+            )));
+        }
         let mut execution_guard = None;
         if is_transaction_request {
             let leader = self.inner.consensus.current_leader().await;

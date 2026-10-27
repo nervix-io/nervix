@@ -172,6 +172,9 @@ impl SessionServiceImpl {
         user: &UserName,
         reference: &CommandExecutionReference,
     ) -> DownloadAnswer {
+        if let Err(error) = self.available_cluster_parameters() {
+            return refused(BackupDownloadFailure::ReadFailed, format!("{error:#}"));
+        }
         let now = current_timestamp();
         if self.backup_reference_expired(reference, now) {
             return expired(reference);

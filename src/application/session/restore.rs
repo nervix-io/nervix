@@ -109,6 +109,14 @@ impl SessionServiceImpl {
             }
         };
         let request_id = Some(start.request_id);
+        if let Err(error) = self.available_cluster_parameters() {
+            return Ok(refused(
+                request_id,
+                RestoreUploadFailure::StagingFailed,
+                format!("{error:#}"),
+            ));
+        }
+
         let restore = match parse_client_statement(&start.statement) {
             Ok(ClientStatement::Server(Statement::Restore(restore))) => restore,
             Ok(_) => {

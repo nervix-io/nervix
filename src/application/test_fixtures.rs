@@ -265,6 +265,13 @@ fn test_session_service(
         &ConfiguredFaultInjection::default(),
         &cluster,
     );
+    let parameters = consensus
+        .observer()
+        .cluster_parameters()
+        .expect("the fixture committed its initial parameter record before building its service");
+    runtime.install_cluster_parameters(parameters.values);
+    registry.install_cluster_parameters(parameters.values);
+    runtime.set_construction_parameters(parameters);
     let subscription_interests = SubscriptionInterests::new(cluster.clone(), runtime.metrics());
     let client_producers = super::client_producers::ClientProducerRouter::new(
         runtime.clone(),
@@ -286,6 +293,11 @@ fn test_session_service(
             https_certificates,
             runtime,
             runtime_admission: Arc::new(super::runtime_admission::RuntimeAdmission::new()),
+            initialization: {
+                let state = Arc::new(super::node_initialization::NodeInitialization::default());
+                state.complete();
+                state
+            },
             admission_shutdown: CancellationToken::new(),
             drain_support_shutdown: CancellationToken::new(),
             events: SessionEvents::new(16),

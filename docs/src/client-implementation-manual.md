@@ -1061,3 +1061,8 @@ limit returned in that grant. Do not reject a grant solely because it exceeds a 
 A parameter change governs new admission; an existing attachment retains its grant until it ends.
 `ALTER CLUSTER SET` uses the same durable command recovery and completion contract as other
 administrative commands. Its informational notice is not a replacement for a command outcome.
+
+During node initialization, cluster status and description are available before policy-dependent
+work. A durable command sent then can return `OutcomeUnknown(NotYetAuthoritative)`, including an
+exact retry of an execution that completed before restart. Keep the same execution reference and
+continue recovery; this response establishes neither success nor failure of that execution.

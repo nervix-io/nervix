@@ -979,3 +979,9 @@ has no record until first bootstrap; it never fills missing persisted fields fro
 A node's gossip publication keeps committed and optional running records together and validates
 their revision/value relationship. A live construction record distinguishes pending catch-up from
 ready installation and rejects equal revisions with unequal values.
+
+The application shares one `NodeInitialization` publication between session admission, configured
+HTTP intake and readiness. Its private `OnceLock<()>` distinguishes initialization pending from
+completed and can publish completion once. This state is separate from the live construction
+record and quorum-confirmed runtime admission: policy can be caught up while initialization is
+still registering owners, and observation is available throughout.
