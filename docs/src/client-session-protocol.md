@@ -1628,7 +1628,11 @@ it can be sent again. Once the complete body is admitted, installation belongs t
 continues when the uploading connection closes, a new leader resumes it, and `ResourceInstalled`
 arrives only after every live node incarnation has verified and installed the same digest. If
 leadership moves while the upload installs, the reply is a `LeaderRedirect`, and repeating the same
-identity and archive on the new leader recovers the recorded outcome. [Resource Versions And
+identity and archive on the new leader recovers the recorded outcome. A leader that cannot confirm
+it still leads refuses the upload's writes the same way, with a redirect that names no leader. When
+the refused write was the version's publication, the leader still holds the copy it installed and
+its reconciliation publishes that copy, so repeating the upload joins the installation or recovers
+its outcome rather than finding it failed. [Resource Versions And
 Bindings](./resource-versions.md#version-lifecycle) owns what admission, installation, publication,
 and completion mean, and [Command Completion](./command-completion.md#effect-specific-completion)
 owns the completion boundary.

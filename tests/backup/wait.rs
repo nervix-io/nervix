@@ -2,62 +2,103 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Delayed-cut workloads and assertions on command recovery and downloaded archives.
-//! - **Depends on.** The public Rust client, CLI, archive reader, controlled capture gates and the
-//!   injected holds of those gates.
+//! - **Depends on.** The public Rust client, CLI, archive reader, and the controlled capture gates
+//!   of the fault injector, which hold every cut that reaches them as a scenario declares.
 //! - **Must not know.** Command storage, mutation leases or private checkpoint representations.
+//!
+//! A backup whose outcome was not recorded runs again under its execution reference, and the
+//! outcome or archive a scenario observes may be that later run's. A gate therefore holds every
+//! cut that reaches it, and times each hold from the cut's own arrival on the cut's own task, so a
+//! stalled runner neither lengthens nor ends a hold.
 
-use std::future::Future;
+use error_stack::{Report, ResultExt as _};
 
 use super::*;
-use crate::common::{
-    injected_hold::{HeldGate, InjectedHold, hold_in_order},
-    runner_observation::observe_off_the_runner,
-};
+use crate::common::runner_observation::observe_off_the_runner;
 
-/// How long a backup may take to reach a controlled cut before the step fails.
-const CUT_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a backup may take to reach a controlled cut before the step fails. A cut reaches its
+/// gate only after its lease, its pause and its drain, each of which a loaded runner delays, and a
+/// backup that runs again under its reference reaches a later gate only once the earlier gates have
+/// held that run's cuts too. The wait ends as soon as a cut arrives, so the bound is generous, as
+/// the backup pause steps' bound is.
+const CUT_ARRIVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The controlled cut of one domain's quiesced backup, where the server waits after draining the
-/// domain until the scenario releases it.
-struct BackupCutGate {
+/// The controlled capture gate of one domain's quiesced cuts, where each cut of the domain waits
+/// after draining it until the scenario releases the gate or the cut's timed hold ends.
+struct CaptureGate {
     fault_injection: FaultInjection,
     domain: DomainName,
 }
 
-impl BackupCutGate {
+/// A backup reached no controlled capture gate of a domain within the arrival bound.
+#[derive(Debug, thiserror::Error)]
+#[error("the backup did not reach the capture of domain '{domain}' within {arrival:?}")]
+struct CaptureNotReached {
+    domain: DomainName,
+    arrival: Duration,
+}
+
+impl CaptureGate {
     fn of(world: &ScenarioWorld, raw_domain: &str) -> Self {
         Self {
             fault_injection: world.fault_injection.clone(),
             domain: scenario_domain(world, raw_domain),
         }
     }
-}
 
-impl fmt::Display for BackupCutGate {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "the backup cut of domain '{}'", self.domain)
-    }
-}
-
-impl HeldGate for BackupCutGate {
-    fn reached(&self) -> impl Future<Output = ()> + Send {
+    /// Holds every cut that reaches the gate, one already waiting there included, for `hold`
+    /// after its own arrival.
+    fn hold_each_cut_for(&self, hold: Duration) {
         self.fault_injection
-            .wait_for_backup_cut_pause(&self.domain, BackupCutBoundary::Capture)
+            .hold_backup_cuts_for(&self.domain, BackupCutBoundary::Capture, hold);
     }
 
+    /// Waits up to the arrival bound for the first cut to reach the gate, and returns when it did.
+    async fn first_cut_reached(&self) -> Result<Instant, Report<CaptureNotReached>> {
+        nervix_primitives::time::timeout(
+            CUT_ARRIVAL_TIMEOUT,
+            self.fault_injection
+                .wait_for_backup_cut_pause(&self.domain, BackupCutBoundary::Capture),
+        )
+        .await
+        .change_context_lazy(|| CaptureNotReached {
+            domain: self.domain.clone(),
+            arrival: CUT_ARRIVAL_TIMEOUT,
+        })
+    }
+
+    /// Waits for the first cut to reach the gate and for its `hold` to end. The gate ends the hold
+    /// itself, so this only learns when it did.
+    async fn first_cut_held(&self, hold: Duration) -> Result<(), Report<CaptureNotReached>> {
+        let arrival = self.first_cut_reached().await?;
+        if let Some(remaining) = hold.checked_sub(arrival.elapsed()) {
+            nervix_primitives::time::sleep(remaining).await;
+        }
+        Ok(())
+    }
+
+    /// Lets every cut waiting at the gate continue, and every later one pass it.
     fn release(&self) {
         self.fault_injection
             .release_backup_cut_pause(&self.domain, BackupCutBoundary::Capture);
     }
 }
 
+/// A capture gate and the hold a scenario times for every cut that reaches it.
+struct DelayedCut {
+    gate: CaptureGate,
+    hold: Duration,
+}
+
+/// Holds every cut of the domain that reaches its capture, a cut of a backup that runs again under
+/// its execution reference included, for the given seconds after its arrival. The step ends once
+/// the first one continues.
 #[when(expr = "backup cut {string} is held for {int} seconds and then released")]
 async fn when_backup_cut_is_delayed(world: &mut ScenarioWorld, raw_domain: String, seconds: u64) {
-    let hold = InjectedHold {
-        gate: BackupCutGate::of(world, &raw_domain),
-        duration: Duration::from_secs(seconds),
-    };
-    hold_in_order(vec![hold], CUT_ARRIVAL_TIMEOUT)
+    let gate = CaptureGate::of(world, &raw_domain);
+    let hold = Duration::from_secs(seconds);
+    gate.hold_each_cut_for(hold);
+    gate.first_cut_held(hold)
         .await
         .assured("the backup reaches the controlled cut");
 }
@@ -218,14 +259,19 @@ async fn when_plexus_cluster_backup_crosses_delayed_cuts(world: &mut ScenarioWor
         .assured("the backup client connects");
     let query = format!("BACKUP CLUSTER TO '{}' TIMEOUT 20s;", archive.display());
     let mut task = nervix_primitives::task::spawn(async move { client.execute(query).await });
-    let mut holds = Vec::new();
+    let mut delayed = Vec::new();
     for (suffix, seconds) in [("_a", 12), ("_b", 14)] {
-        holds.push(InjectedHold {
-            gate: BackupCutGate::of(world, &format!("{{{{backup_base}}}}{suffix}")),
-            duration: Duration::from_secs(seconds),
-        });
+        let gate = CaptureGate::of(world, &format!("{{{{backup_base}}}}{suffix}"));
+        let hold = Duration::from_secs(seconds);
+        gate.hold_each_cut_for(hold);
+        delayed.push(DelayedCut { gate, hold });
     }
-    let mut held = std::pin::pin!(hold_in_order(holds, CUT_ARRIVAL_TIMEOUT));
+    let mut held = std::pin::pin!(async {
+        for cut in &delayed {
+            cut.gate.first_cut_held(cut.hold).await?;
+        }
+        Ok::<_, Report<CaptureNotReached>>(())
+    });
     nervix_primitives::select! {
         biased;
         released = &mut held => released.assured("the backup reaches each domain's cut"),
@@ -256,11 +302,12 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld, first_c
     options.request_timeout = Duration::from_secs(20);
     options.retry_timeout = Duration::from_secs(20);
     options.backup_wait_timeout = Duration::from_secs(10);
-    let first = InjectedHold {
-        gate: BackupCutGate::of(world, "{{backup_base}}_a"),
-        duration: Duration::from_secs(first_cut_seconds),
+    let first = DelayedCut {
+        gate: CaptureGate::of(world, "{{backup_base}}_a"),
+        hold: Duration::from_secs(first_cut_seconds),
     };
-    let second = BackupCutGate::of(world, "{{backup_base}}_b");
+    first.gate.hold_each_cut_for(first.hold);
+    let second = CaptureGate::of(world, "{{backup_base}}_b");
     let recovered = observe_off_the_runner(async move {
         let client = Client::connect_with_options(&uri, domain.clone(), options.clone())
             .await
@@ -283,10 +330,13 @@ async fn when_native_backup_wait_is_recovered(world: &mut ScenarioWorld, first_c
         });
         // Expiry does not cancel admitted work and need not follow the second cut. Keep
         // observing both gates independently of the client's bounded wait.
-        hold_in_order(vec![first], CUT_ARRIVAL_TIMEOUT)
+        first
+            .gate
+            .first_cut_held(first.hold)
             .await
             .assured("the native backup reaches the first controlled cut");
-        nervix_primitives::time::timeout(CUT_ARRIVAL_TIMEOUT, second.reached())
+        second
+            .first_cut_reached()
             .await
             .assured("the native backup reaches the second controlled cut");
         let result = initial_wait.await;

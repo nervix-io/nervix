@@ -47,6 +47,8 @@ use nervix_recovery::NoReceiver as _;
 use crate::registry::SchedulerMode;
 
 mod backup_cut;
+#[cfg(test)]
+mod backup_cut_tests;
 mod consensus;
 mod domain_clock;
 mod domain_resume;
@@ -55,10 +57,16 @@ mod entity_drain;
 mod entity_drain_tests;
 mod execution;
 mod handoff_gate_link;
+mod live_view_gap;
+#[cfg(test)]
+mod live_view_gap_tests;
 mod model_publication;
 mod pause;
 mod relay_memory;
 mod relocation_commit;
+mod resource_publication;
+#[cfg(test)]
+mod resource_publication_tests;
 mod restarted_voter;
 mod restore_publication;
 #[cfg(test)]
@@ -74,17 +82,20 @@ mod transaction_cleanup;
 mod wasm_reset_publication;
 
 pub use backup_cut::BackupCutBoundary;
+use backup_cut::{BackupCutGate, BackupCutGateKey};
 use domain_clock::DomainClockProgressPausePoint;
 pub use domain_resume::DomainResumeBoundary;
 use entity_drain::ForcedEntityDrainTimeout;
 pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
+use live_view_gap::{LiveViewGap, LiveViewGapState};
 use model_publication::ModelPublicationRefusal;
 pub use model_publication::ModelPublicationRefusalKind;
 use pause::TestPause;
 use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
+use resource_publication::ResourcePublicationRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 use restore_publication::RestorePublicationFailure;
 pub use restore_staging::RestoreStagingKind;
@@ -189,6 +200,10 @@ struct FaultInjectionState {
     delayed_stopped_branch_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
+    /// Refusals of a node's next uploaded-version publication, each keeping whether a publication
+    /// met it and whether the node's reconciliation took the refused upload up.
+    refused_resource_publications:
+        DashMap<ClusterNodeName, watch::Sender<ResourcePublicationRefusal>, RandomState>,
     /// Failures of every staging of one kind of a restored domain's checkpoints until cleared,
     /// each keeping whether a staging met it.
     failed_restore_checkpoint_stagings:
@@ -224,6 +239,9 @@ struct FaultInjectionState {
     health_response_pauses: DashMap<HealthResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     command_pauses: DashMap<CommandPausePoint, Arc<TestPause>, RandomState>,
+    /// The gates every backup cut of a domain waits at, by domain and boundary. Runtime and
+    /// harness waiters clone a gate so it remains alive after its map guard drops.
+    backup_cut_gates: DashMap<BackupCutGateKey, Arc<BackupCutGate>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     entity_gate_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// A remote node pauses after engaging its gate but before replying to the coordinator.
@@ -239,6 +257,9 @@ struct FaultInjectionState {
     /// assuming it.
     lost_remote_acknowledgements:
         DashMap<RemoteAcknowledgementLink, watch::Sender<RemoteAcknowledgementLoss>, RandomState>,
+    /// Gaps a scenario opens in the live view one node's acknowledgement watchers read. Each keeps
+    /// whether a watcher read it, so a scenario waits for the read instead of assuming it.
+    live_view_gaps: DashMap<LiveViewGap, watch::Sender<LiveViewGapState>, RandomState>,
     /// Nodes whose relay memory a scenario fills, at once or just before their relay work reaches
     /// an armed point, and the memory each fill holds.
     relay_memory_fills: DashMap<ClusterNodeName, RelayMemoryFill, RandomState>,
@@ -417,10 +438,6 @@ enum CommandPausePoint {
         node_id: ClusterNodeName,
         step: RestoreStep,
     },
-    BackupCut {
-        domain: DomainName,
-        boundary: BackupCutBoundary,
-    },
     BackupDownload(ClusterNodeName),
     RestoreStatePublication {
         domain: DomainName,
@@ -499,6 +516,7 @@ impl Default for FaultInjection {
                 delayed_source_confirmations: DashMap::default(),
                 delayed_stopped_branch_state_writes: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
+                refused_resource_publications: DashMap::default(),
                 failed_restore_checkpoint_stagings: DashMap::default(),
                 failed_restore_state_publications: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
@@ -515,11 +533,13 @@ impl Default for FaultInjection {
                 startup_observation_end,
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
+                backup_cut_gates: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
                 entity_gate_response_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),
                 remote_relay_dispatch_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
+                live_view_gaps: DashMap::default(),
                 relay_memory_fills: DashMap::default(),
                 relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),

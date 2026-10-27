@@ -40,6 +40,12 @@ prove only the build configuration in which they run; Cargo graph and target pro
 fixtures, public scenarios and concurrency models keep their separate contracts in
 [Execution Primitives](./execution-primitives.md#verification-contracts).
 
+These product API checks keep independent verdicts outside native coverage totals. The compiler
+rules' paired fixture doctests are different: they run inside the instrumented source-contract
+producer, with product API doctests finishing separately. Compiler-cache and Deloxide supervision
+qualification also stay outside collection; the [coverage evidence boundary](./coverage-reports.md#verification-outside-collected-counters)
+records their scope without treating a passing qualification as a completed campaign or model.
+
 ## Target And Representation Register
 
 | ID | Package and invariant | Domain | Ordinary cases | Input limit |
