@@ -55,7 +55,8 @@ Feature: ClickHouse TLS resource mounts
           'addr' = '{{clickhouse_tls_addr}}',
           'user' = 'default',
           'password' = 'nervix',
-          'tls_ca_file' = '{{dev_tls}}/ca.pem'
+          'tls_ca_file' = '{{dev_tls}}/ca.pem',
+          'timeout_ms' = '5000'
         };
         CREATE CLICKHOUSE TABLE EMITTER to_ch FROM notifications TO clickhouse_client TABLE 'tls_notifications_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "clickhouse_user_id" = input.user_id, "clickhouse_now" = NOW() AS STRING, "clickhouse_action" = LOWER(input.action) } BATCH MAX MESSAGES 500 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB

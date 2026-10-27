@@ -14,6 +14,13 @@ errors; the public projection uses their value-free key contexts. Redis's capaci
 the ingestor plan's typed range error beneath `OfflineClientConfigError` for
 `subscription_buffer_messages`. See [Connector Contract](connector-contract.md) for the offline boundary.
 
+The ClickHouse declaration checks a required positive `timeout_ms` and the address/TLS pairing
+before inspecting mounted files or opening a client. Missing timeout or HTTPS trust is a
+`ClientConfigSchemaError::MissingRequired` or `RequiresKey`; a TLS key with an HTTP address is
+`InvalidValue` for that key. These reports name only the key, never its path or URL. A ClickHouse
+table locator with an empty or third dot-separated part is an `ExternalNameError` at Plexus Model
+construction; no malformed target reaches the insert SQL.
+
 ZeroMQ endpoint validation keeps the socket driver's endpoint error beneath
 `OfflineClientConfigError` for `addr`. Its socket owners keep the shared Boolean parser's
 `ClientConfigError` beneath their configuration context for `bind`; a malformed value does not

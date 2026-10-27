@@ -1013,7 +1013,7 @@ fn parses_create_emitter_clickhouse() {
     let input = r#"
         CREATE CLICKHOUSE TABLE EMITTER to_ch
             FROM notifications
-            TO clickhouse_client TABLE 'my_table'
+            TO clickhouse_client TABLE 'sales.Orders'
             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
                 "clickhouse_user_id" = input.user_id,
                 "clickhouse_now" = NOW(),
@@ -1037,7 +1037,8 @@ fn parses_create_emitter_clickhouse() {
     );
     assert_eq!(
         destination.table,
-        nervix_models::ClickHouseTableName::try_from("my_table").expect("valid table identifier")
+        nervix_models::ClickHouseTableName::try_from("sales.Orders")
+            .expect("valid table identifier")
     );
     assert_eq!(
         destination.values,
@@ -1057,6 +1058,15 @@ fn parses_create_emitter_clickhouse() {
         ]
     );
     assert_eq!(parsed.batch, Some(batch_policy(100, "1MiB")));
+}
+
+#[test]
+fn clickhouse_mode_completion_offers_only_ack() {
+    let input = "CREATE CLICKHOUSE TABLE EMITTER to_ch FROM notifications TO clickhouse_client \
+                 TABLE 'sales.Orders' MODE ";
+    let suggestions = suggest_create_emitter(input, input.len());
+    assert!(suggestions.contains(&"ACK".to_string()));
+    assert!(!suggestions.contains(&"NO ACK".to_string()));
 }
 
 #[test]
