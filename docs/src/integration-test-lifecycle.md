@@ -902,8 +902,21 @@ The harness keeps these boundaries explicit.
   after an unknown outcome, redirect or interrupted transport. It starts no further attempt after
   its 120-second recovery budget; each stream keeps its existing reply timeout. It returns a
   definitive failure or upload refusal immediately, and keeps the terminal reply's actual origin
-  and complete report. The staging scenario transfers leadership while publication is paused on
-  three nodes, while retaining the one-node example and its staging and branch-state checks.
+  and complete report. A scenario whose subject is what a restore did, rather than how the
+  protocol answered one stream, learns the restore's outcome through that probe: the deduplicator
+  and window conversions refused for room, the idle lifetime of restored materialized branches,
+  and the resume of materialized generations larger than the bulk budget. In a cluster of more
+  than one node a single stream can be answered `OutcomeUnknown` with cause `LeadershipLost`
+  without any election, when a loaded runner delays the heartbeats that confirm the leader's lease
+  as it records the outcome; a single-node leader is its own quorum, and its lease never lapses. A
+  raw probe therefore stays only where the answer is the subject: a repetition joining an applying
+  restore or returning its recorded outcome, a reference conflict, a redirect, a controlled
+  leadership loss, or an interrupted upload sent again. The room and idle-lifetime scenarios hold
+  the restore's outcome before its coordinator records it and transfer leadership on three nodes
+  before releasing it, so their three-node examples always learn the outcome under the same
+  reference as recovered, and their one-node examples report it as executed. The staging scenario
+  transfers leadership while publication is paused on three nodes, while retaining the one-node
+  example and its staging and branch-state checks.
   A paced-driver file fixture writes only the
   scenario's ledger or effect file before the driver starts. The published driver reads that
   file, and the scenario checks the process exit and the occurrence count of its terminal cause.
