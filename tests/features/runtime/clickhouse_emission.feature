@@ -46,7 +46,8 @@ Feature: ClickHouse emission
         CONFIG {
           'addr' = '{{clickhouse_addr}}',
           'user' = 'default',
-          'password' = 'nervix'
+          'password' = 'nervix',
+          'timeout_ms' = '5000'
         };
         CREATE CLICKHOUSE TABLE EMITTER to_ch FROM notifications TO clickhouse_client TABLE 'notifications_out_{{test_id}}' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES { "clickhouse_user_id" = input.user_id, "clickhouse_now" = NOW() AS STRING, "clickhouse_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } BATCH MAX MESSAGES 500 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
@@ -120,7 +121,8 @@ Feature: ClickHouse emission
       CONFIG {
         'addr' = '{{clickhouse_addr}}',
         'user' = 'default',
-        'password' = 'nervix'
+        'password' = 'nervix',
+        'timeout_ms' = '5000'
       };
       CREATE CLICKHOUSE TABLE EMITTER to_ch
       FROM notifications

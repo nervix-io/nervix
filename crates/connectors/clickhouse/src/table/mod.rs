@@ -81,7 +81,7 @@ pub struct ClickHouseTableEmitterConfig {
 /// The ClickHouse emitter, which encodes each mapped row as one `JSONEachRow` line.
 pub struct ClickHouseTableEmitter {
     client: ClickHouseClient,
-    request_timeout: Option<Duration>,
+    request_timeout: Duration,
     table: ClickHouseTableName,
     limits: RowRequestLimits,
 }
@@ -294,12 +294,12 @@ impl ClickHouseTableEmitter {
     /// The client `config` describes, whose every connection resolves through `dns`, and the
     /// request timeout of its inserts.
     ///
-    /// Without TLS entries the client speaks plain HTTP only, as the driver's own default client
-    /// does in a build without its TLS features; an `https` address needs the TLS entries.
+    /// Without TLS entries the client speaks plain HTTP. The validated plan requires the request
+    /// timeout and pairs an HTTPS address with mounted trust material.
     pub fn client_from_config(
         config: &[ClientConfigEntry],
         dns: DnsResolver,
-    ) -> EmitterStartResult<(ClickHouseClient, Option<Duration>)> {
+    ) -> EmitterStartResult<(ClickHouseClient, Duration)> {
         let invalid = || {
             Report::new(EmitterOpenError::InvalidConfiguration {
                 connector: CLICKHOUSE,
@@ -311,7 +311,8 @@ impl ClickHouseTableEmitter {
             .change_context(EmitterOpenError::InvalidConfiguration {
                 connector: CLICKHOUSE,
             })?
-            .map(ConfiguredDeadline::bound);
+            .ok_or_else(|| invalid().attach_printable("missing ClickHouse timeout_ms"))?
+            .bound();
         let tls_config = RustlsClientConfigProvider::new(config)
             .build()
             .map_err(|error| invalid().attach_printable(error.to_string()))?;
@@ -361,19 +362,29 @@ impl ClickHouseTableEmitter {
     /// carries.
     async fn insert(
         client: &ClickHouseClient,
-        table: &str,
+        table: &ClickHouseTableName,
         body: Bytes,
-        request_timeout: Option<Duration>,
+        request_timeout: Duration,
     ) -> error_stack::Result<(), ClickHouseWriteError> {
-        let sql = format!("INSERT INTO {table} FORMAT JSONEachRow");
+        let sql = format!(
+            "INSERT INTO {} FORMAT JSONEachRow",
+            Self::quoted_table(table)
+        );
         let mut insert = client
             .insert_formatted_with(sql)
-            .with_timeouts(request_timeout, request_timeout);
+            .with_timeouts(Some(request_timeout), Some(request_timeout));
         insert
             .send(body)
             .await
             .map_err(ClickHouseWriteError::report)?;
         insert.end().await.map_err(ClickHouseWriteError::report)
+    }
+
+    fn quoted_table(table: &ClickHouseTableName) -> String {
+        match table.as_str().split_once('.') {
+            Some((database, table)) => format!("`{database}`.`{table}`"),
+            None => format!("`{table}`"),
+        }
     }
 }
 
@@ -452,7 +463,7 @@ impl RowEmitter for ClickHouseTableEmitter {
             };
             let inserted = Self::insert(
                 &self.client,
-                self.table.as_str(),
+                &self.table,
                 lines.body(written.clone()),
                 self.request_timeout,
             )
@@ -475,7 +486,7 @@ impl RowEmitter for ClickHouseTableEmitter {
                             .assured("a row of the write is followed by at most its end");
                         let inserted = Self::insert(
                             &self.client,
-                            self.table.as_str(),
+                            &self.table,
                             lines.body(index..alone),
                             self.request_timeout,
                         )
@@ -533,8 +544,9 @@ mod connection_tests;
 )]
 mod tests {
     use arrow_array::{
-        Array as _, BinaryArray, FixedSizeListArray, Float32Array, Int64Array, ListArray,
-        RecordBatch, StringArray, TimestampNanosecondArray,
+        Array as _, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array,
+        Float64Array, Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray,
+        UInt64Array,
     };
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use nervix_primitives::sync::StdArc;
@@ -690,6 +702,52 @@ mod tests {
     }
 
     #[test]
+    fn encodes_full_width_numbers_nonfinite_floats_and_nested_octets() {
+        let mut nested =
+            arrow_array::builder::ListBuilder::new(arrow_array::builder::BinaryBuilder::new());
+        nested.values().append_value(b"\x80");
+        nested.values().append_null();
+        nested.append(true);
+        let data: Vec<(&str, ArrayRef)> = vec![
+            ("flag", StdArc::new(BooleanArray::from(vec![true]))),
+            ("largest", StdArc::new(UInt64Array::from(vec![u64::MAX]))),
+            (
+                "small_float",
+                StdArc::new(Float32Array::from(vec![f32::NAN])),
+            ),
+            (
+                "large_float",
+                StdArc::new(Float64Array::from(vec![f64::INFINITY])),
+            ),
+            ("text", StdArc::new(StringArray::from(vec!["a\"\\\n"]))),
+            ("at", StdArc::new(TimestampNanosecondArray::from(vec![0]))),
+            ("octets", StdArc::new(nested.finish())),
+        ];
+        let names = data
+            .iter()
+            .map(|(name, _)| (*name).to_string())
+            .collect::<Vec<_>>();
+        let fields = data
+            .iter()
+            .map(|(name, array)| Field::new(*name, array.data_type().clone(), true))
+            .collect::<Vec<_>>();
+        let batch = RecordBatch::try_new(
+            StdArc::new(Schema::new(fields)),
+            data.into_iter().map(|(_, array)| array).collect(),
+        )
+        .expect("the mapped batch should build");
+        let specs = ClickHouseTableEmitter::column_specs(&names);
+        let columns = JsonColumns::new(&batch, &specs, NestedNulls::Write)
+            .expect("each declared ClickHouse type has a JSONEachRow encoding");
+        let mut line = Vec::new();
+        columns.write_row(0, &mut line).expect("the row encodes");
+        assert_eq!(
+            line,
+            b"{\"flag\":true,\"largest\":18446744073709551615,\"small_float\":null,\"large_float\":null,\"text\":\"a\\\"\\\\\\n\",\"at\":\"1970-01-01T00:00:00+00:00\",\"octets\":[\"\x80\",null]}".to_vec()
+        );
+    }
+
+    #[test]
     fn an_insert_body_is_exactly_the_lines_of_its_rows_and_measures_its_length() {
         let schema = StdArc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
         let batch = RecordBatch::try_new(
@@ -757,7 +815,7 @@ mod tests {
         )
         .expect("ClickHouse client config should be valid");
 
-        assert_eq!(request_timeout, Some(Duration::from_millis(275)));
+        assert_eq!(request_timeout, Duration::from_millis(275));
     }
 
     #[nervix_primitives::test]
@@ -780,7 +838,7 @@ mod tests {
             Duration::from_millis(250),
             ClickHouseTableEmitter::insert(
                 &client,
-                "events",
+                &ClickHouseTableName::parse("events").expect("valid table name"),
                 Bytes::from_static(b"{\"id\":1}\n"),
                 request_timeout,
             ),
@@ -812,6 +870,10 @@ mod tests {
                     value: "https://127.0.0.1:8124".to_string(),
                 },
                 ClientConfigEntry {
+                    key: "timeout_ms".to_string(),
+                    value: "5000".to_string(),
+                },
+                ClientConfigEntry {
                     key: "tls_ca_file".to_string(),
                     value: "/tmp/nervix-missing-clickhouse-ca.pem".to_string(),
                 },
@@ -824,5 +886,16 @@ mod tests {
         let error = format!("{error:?}");
 
         assert!(error.contains("TLS CA certificate"));
+    }
+
+    #[test]
+    fn quotes_each_case_preserving_table_part_for_insert_sql() {
+        for (name, quoted) in [
+            ("Orders", "`Orders`"),
+            ("Sales.Order-Items", "`Sales`.`Order-Items`"),
+        ] {
+            let table = ClickHouseTableName::parse(name).expect("valid ClickHouse table name");
+            assert_eq!(ClickHouseTableEmitter::quoted_table(&table), quoted);
+        }
     }
 }

@@ -314,11 +314,16 @@ impl<'a> Values<'a> {
                 .assured("the generated offset is at most i64::MAX"),
             });
         }
+        let mut applied_start_generation = None;
+        if self.0.entropy().byte() % 2 == 0 {
+            applied_start_generation = Some(self.0.entropy().any_u64());
+        }
         KafkaOffsetsRecord {
             domain,
             entity: self.0.name(),
             schema: SchemaFingerprint::from_digest(self.digest()),
             revision: self.0.entropy().any_u64(),
+            applied_start_generation,
             offsets,
         }
     }

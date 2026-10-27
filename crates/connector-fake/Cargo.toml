@@ -1,0 +1,24 @@
+[package]
+description = "Scripted connector fixtures for tests of the Nervix ingestor and emitter hosts"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-fake"
+publish = false
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+loom = ["nervix-primitives/loom"]
+shuttle = ["nervix-connector/shuttle", "nervix-primitives/shuttle"]
+
+[dependencies]
+arrow-array = { workspace = true }
+async-trait = { workspace = true }
+error-stack = { workspace = true }
+meticulous = { workspace = true }
+nervix-connector = { workspace = true }
+nervix-models = { workspace = true }
+nervix-primitives = { workspace = true, features = ["native"] }
