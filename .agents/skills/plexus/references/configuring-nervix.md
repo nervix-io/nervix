@@ -330,6 +330,9 @@ current connection, retry and deadline limits.
   and only a mode its entity accepts. Every ingestor `ALTER` repeats the stored ingestor's head;
   reading another connector or entity takes `DROP INGESTOR` and a new `CREATE`.
 - Delivery-policy durations and direct-value keys and types are checked at `CREATE` and `ALTER`.
+  For OTEL's per-signal field constraints, histogram types, required client deadline, header
+  decoding, TLS pairing and unsupported features, read the generated `Connector Capabilities`
+  tables and `Emitters` → `OTEL` before constructing mappings.
   Follow `Ingestors` → `Delivery Modes` for duration bounds and retry ordering, and `Emitters` →
   `Direct-emitter values` for exact types and literal-only OTEL resources. For example, supply an
   I32 expression for OTEL `severity_number`; an integer literal is I64. A refused alteration

@@ -28,10 +28,15 @@ use super::{
 use crate::{
     ClientName, ConnectorKind, EmitterBatchLegality, EmitterBodyForm, EmitterClientReference,
     EmitterDeclaration, EmitterEntityBody, EmitterEntityCapabilities, EmitterReference,
-    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, MappedValueField,
-    MappedValueType, MappedValueTypes, OptionChoice, OptionDeclaration, OptionForm, OptionPresence,
-    OptionValue,
+    EmitterReferenceKind, EmitterValueMapping, EmitterValueMappings, MappedValueTypes,
+    OptionChoice, OptionDeclaration, OptionForm, OptionPresence, OptionValue,
 };
+
+#[cfg(test)]
+mod tests;
+
+mod value_contract;
+pub use value_contract::*;
 
 configured_client!(Otel: unpooled, config CLIENT_CONFIG, CreateClientOtel => OtelConfigEntry);
 
@@ -44,7 +49,7 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
             K::required("endpoint", V::Url(&["http", "https"])),
             K::optional("headers", V::String).secret(),
             K::required("protocol", V::Choice(&["grpc", "http/protobuf"])),
-            K::TIMEOUT,
+            K::required("timeout_ms", V::Milliseconds),
             K::TLS_CA,
             K::TLS_CERT,
             K::TLS_KEY,
@@ -55,38 +60,6 @@ const CLIENT_CONFIG: crate::ClientConfigSchema = {
 };
 
 pub type OtelValueMapping = EmitterValueMapping;
-
-macro_rules! value_types {
-    ($($key:literal => $kind:ident),+ $(,)?) => {
-        MappedValueTypes::Fields {
-            values: &[$(MappedValueField { key: $key, value_type: MappedValueType::$kind },)+],
-            attributes: MappedValueType::Attribute,
-            resource: MappedValueType::Literal,
-        }
-    };
-}
-
-/// The exact fields and mapped types of this OTEL signal shape.
-pub const OTEL_LOG_VALUE_TYPES: MappedValueTypes = value_types! {
-    "time" => Datetime, "severity_text" => String, "severity_number" => I32,
-    "body" => String, "trace_id" => String, "span_id" => String,
-};
-/// The exact fields and mapped types of this OTEL signal shape.
-pub const OTEL_TRACE_VALUE_TYPES: MappedValueTypes = value_types! {
-    "trace_id" => String, "span_id" => String, "parent_span_id" => String,
-    "name" => String, "kind" => String, "start_time" => Datetime, "end_time" => Datetime,
-    "status_code" => String, "status_message" => String,
-};
-/// The exact fields and mapped types of this OTEL signal shape.
-pub const OTEL_NUMBER_VALUE_TYPES: MappedValueTypes = value_types! {
-    "time" => Datetime, "start_time" => Datetime, "value" => Number,
-};
-/// The exact fields and mapped types of this OTEL signal shape.
-pub const OTEL_HISTOGRAM_VALUE_TYPES: MappedValueTypes = value_types! {
-    "time" => Datetime, "start_time" => Datetime, "count" => Integer,
-    "sum" => Number, "bucket_counts" => IntegerSequence, "explicit_bounds" => FloatSequence,
-    "min" => Number, "max" => Number,
-};
 
 /// What every OTEL emitter maps a record to, whichever signal it exports: the signal's own fields,
 /// its attributes, the attributes of the resource that produced it, and the instrumentation scope.
@@ -277,7 +250,7 @@ const OTEL_BOUNDS: DeclaredBounds = DeclaredBounds {
         wait: "an export: name resolution, connection, TLS and the response",
         bound: WaitBound::Key {
             key: DeadlineKey::Timeout,
-            omitted: OmittedDeadline::Unbounded,
+            omitted: OmittedDeadline::Required,
         },
     }],
     driver_limits: &["gRPC responses above 4 MiB are refused."],
@@ -356,6 +329,26 @@ connector_emitters! {
 }
 
 impl OtelEmitter {
+    /// The complete current VALUES table of the selected signal and metric shape.
+    pub fn value_fields(&self) -> &'static [OtelValueField] {
+        match self {
+            Self::Logs(_) => OTEL_LOG_VALUE_FIELDS,
+            Self::Traces(_) => OTEL_TRACE_VALUE_FIELDS,
+            Self::Metrics(connector) => match connector.metric.kind {
+                OtelMetricKind::Gauge | OtelMetricKind::Sum { .. } => OTEL_NUMBER_VALUE_FIELDS,
+                OtelMetricKind::Histogram { .. } => OTEL_HISTOGRAM_VALUE_FIELDS,
+            },
+        }
+    }
+
+    pub fn is_delta(&self) -> bool {
+        if let Self::Metrics(connector) = self {
+            connector.metric.kind.is_delta()
+        } else {
+            false
+        }
+    }
+
     pub fn client(&self) -> &ClientName {
         match self {
             Self::Logs(connector) => &connector.client,
@@ -371,6 +364,20 @@ impl OtelEmitter {
             Self::Traces(connector) => &connector.mappings,
             Self::Metrics(connector) => &connector.mappings,
         }
+    }
+}
+
+impl OtelMetricKind {
+    pub const fn is_delta(&self) -> bool {
+        matches!(
+            self,
+            Self::Sum {
+                temporality: OtelAggregationTemporality::Delta,
+                ..
+            } | Self::Histogram {
+                temporality: OtelAggregationTemporality::Delta
+            }
+        )
     }
 }
 

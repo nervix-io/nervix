@@ -5,14 +5,14 @@
 //! - **Owns.** Registration of the focused node-liveness, readiness-history, node-startup,
 //!   node-stop, phase-deadline, status-request, port-pool, node-bound address, process-cluster
 //!   convergence, cluster-teardown, scenario-phase, suite-watchdog, Redis-client, HTTP-receiver,
-//!   Iceberg-catalog-gate, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag,
+//!   Iceberg-catalog-gate, backup phase, materialized-state diagnostic, gRPC-receiver, NATS-observer, runner-lag,
 //!   runner-offload, server-executable, stallable-TCP-proxy, unaccepted-address,
 //!   process-observation, process-report, WebSocket close-reply, console-connection and WebSocket peer regressions
 //!   with Rust's test runner, and the stand-in nodes, clients, images and processes those regressions
 //!   talk to.
 //! - **Depends on.** The node-liveness, node-startup, node-stop, phase-deadline, status-request,
 //!   port-pool, node-bound address, process-cluster convergence, cluster-teardown, scenario-phase,
-//!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, gRPC-receiver,
+//!   suite-watchdog, Redis-client, HTTP-receiver, Iceberg-catalog-gate, backup phase, gRPC-receiver,
 //!   NATS-observer, runner-lag, runner-offload, server-executable, stallable-TCP-proxy,
 //!   unaccepted-address, process-observation, process-report, WebSocket close-reply,
 //!   console-connection, WebSocket peer and materialized-state diagnostic harness modules, the product's shutdown
@@ -23,6 +23,10 @@
 
 use websocket_close::reply_to_close;
 
+#[path = "common/backup_phase.rs"]
+mod backup_phase;
+#[path = "common/backup_phase_tests.rs"]
+mod backup_phase_tests;
 #[path = "common/broker_observer.rs"]
 mod broker_observer;
 #[path = "common/broker_observer_tests.rs"]
