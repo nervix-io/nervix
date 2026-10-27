@@ -60,6 +60,11 @@ plan identifies those relays; channel-generation retirement and record delivery 
 handles, without another recurring map lookup. Publication or domain teardown keeps ownership of
 the registry entries. The read guard ends before waiting for dispatch quiescence.
 
+`SHOW EMITTERS` is an observer path: it lists the selected domain's emitter identifiers and reads
+each current Model once through the registry, with the command work budget checked per entry.
+It adds no recurring data-plane access or retained map guard; concurrent deletion skips the
+vanished emitter, matching other configuration listings.
+
 Kafka domain-offset resume clones its committed partition schedule from `RuntimeInner::executions`.
 A normal resume reads it once; accepting an explicit start adds a canonical reread, for at most two
 reads per resume attempt. Each guard ends before persistence, replica waits or native connector I/O.
@@ -379,6 +384,7 @@ awaiting replicas offers its revision through the offset state it retains and re
 | `FaultInjectionState::failed_wasm_reset_publications` | Armed before ordinary graph publications; only reset generation publication reads it, and delivery is recorded after unpublished preparation is aborted; it stays enabled through uncertain outcome recording, then is explicitly cleared before exact replay; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped WASM publication failure in `fault_injection/wasm_reset_publication.rs` |
 | `FaultInjectionState::failed_restore_state_publications` | Armed before a restore for one restored domain; a testing build's state owner looks the domain up once after each durable publication of that domain's restored state and records the delivery there; it stays enabled through uncertain outcome recording and a resumed restore, then is explicitly cleared; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped restore publication failure in `fault_injection/restore_publication.rs` |
 | `FaultInjectionState::failed_restore_checkpoint_stagings` | Armed before a restore for one restored domain and one checkpoint kind; a testing build's state owner looks the domain and kind up once before it stages each WASM, materialized, deduplicator or window checkpoint of that domain's restored state, and records the delivery there; it stays enabled through uncertain outcome recording and a resumed restore, then is explicitly cleared; observations distinguish pending/delivered from disabled; disposed on clear or that world's injector drop and absent from product builds | test-only scoped restore checkpoint staging failure in `fault_injection/restore_staging.rs` |
+| `FaultInjectionState::forced_entity_drain_timeouts` | Armed for one scenario domain; a testing build's coordinator checks the domain once per entity drain status round and, only while a timeout is armed or claimed there, reads the domain's mutation owner and claims, refuses with or ends the entry: the first observation binds it to that drain of the owning durable execution, later observations of the same drain by that execution are refused, and the entry is removed once another execution or none owns the domain, or after one refusal no execution owned; disposed then or on that world's injector drop and absent from product builds | test-only entity drain timeout control in `fault_injection/entity_drain.rs` |
 | Other `src/fault_injection.rs` maps, consensus `append_stream_counts`, the test DNS authority | test-only; the consensus probe counts each setup attempt and successful open and reads only for explicit harness observations | test-only |
 
 A leader's transaction reconciliation takes one replicated snapshot for cleanup eligibility in

@@ -291,7 +291,10 @@ Feature: Ingestors name their connector and entity in the statement head
       """
     Then the last command output contains
       """
-      from: KAFKA TOPIC kafka_main TOPIC 'Orders' OFFSET BY CONSUMER GROUP 'Readers' MODE NO ACK ON QUIESCE SUSPEND
+      from: KAFKA TOPIC kafka_main TOPIC 'Orders'
+      options: OFFSET BY CONSUMER GROUP 'Readers' INSTANCES 1
+      mode: NO ACK
+      quiesce: SUSPEND
       """
     When these Plexus commands are executed on the leader node
       """
@@ -299,7 +302,10 @@ Feature: Ingestors name their connector and entity in the statement head
       """
     Then the last command output contains
       """
-      from: CLIENT PRODUCER SCHEMA event MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s ON QUIESCE SUSPEND
+      from: CLIENT PRODUCER SCHEMA event
+      options: none
+      mode: ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 1s MAX 2s
+      quiesce: SUSPEND
       """
     When these Plexus commands are executed on the leader node
       """

@@ -61,7 +61,8 @@ const REDIS_CHANNEL_MAX: usize = 1024;
 
 external_names! {
     /// A Redis Pub/Sub channel: 1 to 1,024 bytes. A Redis channel is binary-safe, so any text is a
-    /// channel, and a `*` is the character itself: a pattern subscription is another entity.
+    /// channel, and a `*` is the character itself. The same rule serves both directions; neither
+    /// trims, lowercases or interprets the channel as a subscription pattern.
     pub struct RedisChannelName => redis_channel_rule, label "redis_channel", example "orders";
 }
 
@@ -136,6 +137,7 @@ const REDIS_EMITTER_BOUNDS: DeclaredBounds = DeclaredBounds {
 
 impl IngestorDeclaration for RedisPubSubIngestor {
     const CAPABILITIES: IngestorEntityCapabilities = IngestorEntityCapabilities {
+        // Redis Pub/Sub carries the channel and payload, without transport headers.
         headers: None,
         metadata: IngestorMetadataScope::Headers,
         executes_on_every_cluster_node: false,
@@ -143,6 +145,7 @@ impl IngestorDeclaration for RedisPubSubIngestor {
         position_class: PositionClass::None,
         acknowledgement_confirmation: AcknowledgementConfirmation::None,
         delivery: &[DeclaredDelivery::NO_ACK],
+        // Redis has no retained Pub/Sub backlog. Intake must keep reading and buffer or drop.
         quiesce: &[DeclaredQuiesce::BUFFER, DeclaredQuiesce::DROP],
         locator: Some(LocatorDeclaration {
             keywords: "CHANNEL",
@@ -210,9 +213,11 @@ pub struct RedisPubSubEmitter {
 
 impl EmitterDeclaration for RedisPubSubEmitter {
     const CAPABILITIES: EmitterEntityCapabilities = EmitterEntityCapabilities {
+        // PUBLISH accepts a channel and payload, without transport headers or an envelope.
         headers: None,
         reference: EmitterReferenceKind::Client(ConnectorKind::Redis),
         body: EmitterBodyForm::Codec,
+        // The server enforces proto-max-bulk-len; this transport learns no size ceiling.
         batch: EmitterBatchLegality::Optional { maximum: None },
         requires_batch_transformation: false,
         publishing_modes: RedisPubSubPublishingMode::KINDS,
@@ -257,3 +262,7 @@ super::publishing::emitter_modes! {
         NoAck { retry_policy: crate::RetryPolicy } => NoAck,
     }
 }
+
+#[cfg(test)]
+#[path = "redis_tests.rs"]
+mod tests;

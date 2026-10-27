@@ -1,5 +1,9 @@
 # Arrow, Codec And Interconnect Representation Coverage
 
+Names drawn from `nervix-arbitrary` include current Plexus keyword spellings where their name
+kind and domain admit them. The [property register](../docs/src/property-testing-and-fuzzing.md)
+records each generated domain's revision and input bounds.
+
 Every target is registered in `tests/bolero-targets.toml` for ordinary randomized/corpus checks and
 sanitizer libFuzzer. The same bounded generators, production encoders and decoders and complete
 assertions run in both modes. The properties run in memory: no target opens a socket, a broker or a

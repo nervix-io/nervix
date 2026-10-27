@@ -60,6 +60,7 @@ const LITERAL_FILLERS: &[(&str, &str)] = &[
     // rule of its kind.
     ("clickhouse_table", "'nx_table'"),
     ("iceberg_table", "'nx_table'"),
+    ("iceberg_namespace", "'Analytics.Events'"),
     ("mongodb_collection", "'nx_collection'"),
     ("mqtt_topic", "'nx/topic'"),
     ("mysql_table", "'nx_table'"),

@@ -23,6 +23,14 @@ use crate::{
     parser_support::*,
 };
 
+/// SHOW EMITTERS lists the configured emitters of the selected domain.
+pub fn show_emitters_parser<'src>()
+-> impl Parser<'src, &'src [Token], ShowEmitters, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase2(Identifier::Show, Identifier::Emitters)
+        .to(ShowEmitters)
+        .then_ignore(tok(Token::Semicolon).or_not())
+}
+
 // Typed constructors share lexical patterns; each entity's closed enum owns its mode set.
 macro_rules! broker_mode {
     ($Mode:ident) => {
@@ -132,11 +140,7 @@ fn batch_clause<'src>()
                 .map_err(|error| Rich::custom(span, error.to_string()))
         }))
         .then_ignore(kw_phrase2(Identifier::Max, Identifier::Size))
-        .then(byte_size_lit().try_map(|literal, span| {
-            literal
-                .parse::<PayloadSizeLimit>()
-                .map_err(|issue| Rich::custom(span, format!("BATCH MAX SIZE {issue}")))
-        }))
+        .then(payload_size_lit("BATCH MAX SIZE"))
         .map(|(max_messages, max_size)| EmitterBatchPolicy {
             max_messages,
             max_size,

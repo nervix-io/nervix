@@ -285,6 +285,9 @@ retain that table's `FileIO` and its initialized storage, so later object calls 
 an object URL for a different storage root is refused. OpenDAL's credential providers keep their
 own credential refresh. Storage calls make one attempt: the emitter host owns retry pacing, and
 neither an OpenDAL retry layer nor the HTTP client's retry policy multiplies that attempt.
+Azure locations select the Blob service with `wasb`/`wasbs` and the Data Lake service with
+`abfs`/`abfss`; their account hosts identify the corresponding `blob` or `dfs` service. Both use
+the same node resolver and storage-client operation deadline described here.
 The standalone OpenDAL S3 `detect_region` helper constructs its own client, but
 Nervix does not call it; S3 operator construction requires its configured region or the driver's
 environment policy.
@@ -647,6 +650,17 @@ statement's `MAX BODY SIZE`: a response that exceeds it fails the poll, which th
 as its transient error, and the next poll reads again. An `HTTP REQUEST` poll's response body has
 no such bound yet and is declared unbounded.
 
+A per-connection bound does not bound the total when the listener accepts an unlimited number of
+connections. The Syslog listener declares frame assembly and completed frames waiting for its
+intake queue as separate unbounded totals, with their per-connection limits in each description.
+Its assembly buffer holds at most `max_message_size + 11` bytes per connection, and each connection
+may also hold one completed frame of at most `max_message_size` bytes while its queue send waits.
+An oversized stream frame closes only its connection; it neither fails the listener's source read
+nor makes the host reconnect. UDP admission separately drops and counts a datagram above
+`max_message_size`, after receiving it into a fixed 65,535-byte scratch buffer. The shared stream
+intake queue holds at most 64 frames and applies backpressure; that queue does not limit the
+connection count or total connection-local retention.
+
 A wait ends at a client deadline key, a statement clause such as `ACK TIMEOUT`, a fixed bound Nervix
 sets, or the driver's own default. A wait that only the host's stop ends is declared unbounded. The
 deadline keys mean the same thing for every connector:
@@ -750,6 +764,15 @@ ZeroMQ uses its socket driver's endpoint parser for both TCP and IPC addresses. 
 uses the shared Boolean parser at the connector boundary, so a malformed value is a configuration
 refusal before either a PULL or PUSH socket opens; an omitted value selects connect.
 
+The MySQL offline check also applies the vocabulary's pooled-client reserved-key declaration to
+URL query parameters. A pool override is a value-free refusal naming `POOL SIZE`, before storage
+or connection attempts; the host uses that same declaration for resolved configuration. MySQL's
+current client schema declares only the address and CA file its implementation consumes. Its
+table declaration admits one or two nonempty, case-preserving identifier parts, and the connector
+quotes each part separately. Its declared placeholder bound is shared with the statement divider;
+the bound narrows rows by mapped column count. The [MySQL manual](emitters.md#mysql) gives its
+exact binary binding and conflict semantics.
+
 Offline refusals keep their driver cause beneath `OfflineClientConfigError`; lapin's URI parser
 exposes only a string, which remains an attached diagnostic. Public command outcomes select reviewed
 key-bearing contexts without rendering driver diagnostics that may contain credentials. Worker
@@ -767,6 +790,14 @@ an emitter accepts a publishing mode, whether its body needs a codec, and the ba
 maximum and its refusal for an emitter that cannot batch are all read from the declaration. The
 registry, the planner and the console keep their own copies of some of these facts until the work
 that owns those layers reads the declaration instead.
+
+`REDIS PUBSUB` shares one channel-name rule between ingestion and emission: a nonempty literal
+of at most 1,024 UTF-8 bytes, passed through without normalization or wildcard interpretation.
+Its declaration permits `NO ACK` in both directions and `BUFFER`/`DROP` for intake, since Redis
+retains no Pub/Sub backlog. Pub/Sub carries no transport headers or emitter envelope. Redis's
+own bulk-length refusal stays a record outcome; the emitter declares optional batching without
+a learned size ceiling. The Redis-specific declaration tests, generated grammar conformance and
+one-/three-node public declaration scenarios qualify these facts together.
 
 Every-node execution is independent of the kind of reference an ingestor names. HTTP and WebSocket
 endpoint ingestors reference endpoints, while a Syslog listener references a client; all three
@@ -805,6 +836,27 @@ Iceberg retains a storage-client reference in its destination Model. Validation 
 object-store client kinds; planning resolves the actual S3, GCS or Azure Blob client into the
 connector's storage-backend setting. The destination statement does not select that backend.
 The host receives the completed plan and performs no Model lookup to choose it.
+
+The Iceberg declaration also requires a case-preserving catalog namespace. Its validated identity
+passes from the statement through the execution plan into the connector; the connector supplies
+its dot-separated levels to the catalog API. The Nervix domain does not supply an implicit
+namespace. Location validation compares the URL scheme with the resolved storage-client kind
+before activation. Commit size and batch size share the vocabulary's positive whole-byte value,
+so planning consumes the decided count instead of parsing a second size string.
+
+The storage clients declare their Nervix-owned addresses, credentials, booleans and deadlines
+separately from `s3.*`/`client.*`, `gcs.*` and `adls.*` driver properties. The REST client owns its
+catalog locator and warehouse and delegates its catalog headers and storage-property namespaces.
+Registry validation, completion, inspection and the generated key reference consume these shared
+schemas; they do not keep another Iceberg key table. The network-free composition hook checks
+the storage properties the connector can interpret before a table location exists. Building an
+OpenDAL operator, credentials and connectivity remain initialization checks.
+
+The REST catalog's file I/O property map starts with the normalized storage properties and then
+applies catalog properties. A catalog entry for the same Iceberg property key takes precedence
+in that map, which the table's file I/O supplies to the configured storage factory for object
+operations. The factory retains the selected backend, resolver, location and storage deadline; it
+does not replace the effective catalog properties with a second client map.
 
 ### Capability inventory
 
@@ -880,6 +932,24 @@ positions. A name an expression computes is the emitter's to settle at run time 
 `headers: <layout>, <names> names`, or `headers: none`, and the per-entity tables of the
 [ingestor](./ingestors.md) and [emitter](./emitters.md) manuals and of
 [Connector Capabilities](./connector-capabilities.md) state it.
+
+### Shared entity presentation
+
+The vocabulary's `EntityPresentation` projects each configured source or sink once from its
+current Model. Its declaration supplies the connector/entity phrase, locator keywords, option
+order and effective defaults. Canonical Plexus and `DESCRIBE` consume that projection; canonical
+text preserves omitted optional Model fields, while inspection includes their effective defaults.
+`DESCRIBE INGESTOR` and `DESCRIBE EMITTER` begin their configuration block with `from:` or `to:`,
+then `options:`, `mode:`, `quiesce:`, `envelope:`, `batch:`, `flush:` and `errors:`. Empty options,
+unavailable quiesce/envelope and absent batching print `none`. An ingestor's flush and message
+error policies name their output relays; its general error policy belongs to the node. Runtime
+health and counters follow configuration, including Kafka's observed partition assignments.
+
+`SHOW INGESTORS`, `SHOW EMITTERS` and graph transport labels use the same declared entity phrase.
+The console's ingestor choices read the declared entities, locator, options, option choices,
+delivery modes and quiesce modes. Required option choices govern whether delivery and quiesce
+buttons are enabled, and the draft enforces those same requirements before constructing a Model.
+Typed field adapters bind declarations to draft storage; they do not define another allowed list.
 
 ## Ingestor boundary
 
@@ -1835,7 +1905,10 @@ shrink with a candidate: `connector-row-request-division` the division rule and 
 envelope grouping and the exact container bytes, `codec-bounded-encodings` and
 `bounded-write-limits` the exact sizes under `MAX SIZE`, `emitter-row-preparations` and
 `emitter-retained-payloads` the membership and byte-for-byte retry, `sqs-batch-requests`,
-`mqtt-publish-packets` and `postgres-insert-measures` the connector-specific measures.
+`mqtt-publish-packets`, `postgres-insert-measures` and `mysql-insert-measures` the connector-specific
+measures. The MySQL property compares the complete statement and bound parameters with the
+driver's binary serializer, including qualified table names, quoted column keys, nulls and
+nonempty slices of a rotated membership sequence.
 `mongodb-write-answers` checks the rows a failed MongoDB write delivers, rejects and leaves unresolved.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
 bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector

@@ -556,6 +556,12 @@ released before replacement admission and on
 quiescence or failure. They neither persist nor select a restore generation; complete publication,
 handle clearing and the installation gate remain the authority for resumption.
 
+Snapshot metadata and Arrow decoders request their scratch memory without queueing while their
+encoded input occupies the bulk pool. A refusal releases that input and preserves the typed
+admission cause; a generator tries a complete source read again on its next occurrence. It does
+not treat the refusal as absent or corrupt state. Small framing reads end before the next read,
+so a stored snapshot does not retain a preceding frame's storage working charge across it.
+
 ### The Installation Authority
 
 The coordinator first admits an installation generation through consensus. The admission is refused

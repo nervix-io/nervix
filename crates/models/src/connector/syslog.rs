@@ -68,16 +68,35 @@ pub struct SyslogListenerIngestor {
 
 /// What the connector of a SYSLOG LISTENER holds and how long it waits.
 const SYSLOG_LISTENER_BOUNDS: DeclaredBounds = DeclaredBounds {
-    buffers: &[DeclaredBuffer {
-        holds: "frames read from TCP and TLS connections",
-        bound: BufferBound::Bounded {
-            capacity: BufferCapacity::Items {
-                count: 64,
-                unit: "frames",
+    buffers: &[
+        DeclaredBuffer {
+            holds: "UDP datagrams admitted after a fixed 65,535-byte receive scratch buffer",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("max_message_size"),
+                overflow: BufferOverflow::DropAndCount,
             },
-            overflow: BufferOverflow::Backpressure,
         },
-    }],
+        DeclaredBuffer {
+            holds: "TCP and TLS frame assembly across unlimited connections (max_message_size + \
+                    11 bytes per connection; an oversized frame closes only that connection)",
+            bound: BufferBound::Unbounded,
+        },
+        DeclaredBuffer {
+            holds: "completed TCP and TLS frames waiting for the intake queue (one frame per \
+                    connection, at most max_message_size bytes; unlimited connections)",
+            bound: BufferBound::Unbounded,
+        },
+        DeclaredBuffer {
+            holds: "frames read from TCP and TLS connections",
+            bound: BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 64,
+                    unit: "frames",
+                },
+                overflow: BufferOverflow::Backpressure,
+            },
+        },
+    ],
     waits: &[
         DeclaredWait {
             wait: "the TLS handshake of an accepted connection",
@@ -235,6 +254,60 @@ connector_emitters! {
     /// The entities a syslog emitter writes.
     pub enum SyslogEmitterEntity {
         Collector(SyslogCollectorEmitter, SyslogCollectorPublishingMode) = "COLLECTOR";
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(
+        harness,
+        reason = "qualifies the Syslog listener's declared transport bounds"
+    )
+)]
+mod tests {
+    //! Layer: test harness.
+    //! - **Owns.** The listener declaration's admission, retention and overflow contract.
+    //! - **Depends on.** The Syslog vocabulary and shared buffer declarations.
+    //! - **Must not know.** Socket I/O, frame decoding or host execution.
+
+    use super::*;
+
+    #[test]
+    fn listener_declares_datagram_admission_and_all_stream_buffers_in_transport_order() {
+        let buffers = SyslogListenerIngestor::CAPABILITIES.bounds.buffers;
+        assert_eq!(buffers.len(), 4);
+        assert_eq!(
+            buffers[0].bound,
+            BufferBound::Bounded {
+                capacity: BufferCapacity::Setting("max_message_size"),
+                overflow: BufferOverflow::DropAndCount,
+            }
+        );
+        assert_eq!(buffers[1].bound, BufferBound::Unbounded);
+        assert!(
+            buffers[1]
+                .holds
+                .contains("max_message_size + 11 bytes per connection")
+        );
+        assert!(
+            buffers[1]
+                .holds
+                .contains("oversized frame closes only that connection")
+        );
+        assert_eq!(buffers[2].bound, BufferBound::Unbounded);
+        assert!(buffers[2].holds.contains("one frame per connection"));
+        assert!(buffers[2].holds.contains("max_message_size"));
+        assert_eq!(
+            buffers[3].bound,
+            BufferBound::Bounded {
+                capacity: BufferCapacity::Items {
+                    count: 64,
+                    unit: "frames",
+                },
+                overflow: BufferOverflow::Backpressure,
+            }
+        );
     }
 }
 

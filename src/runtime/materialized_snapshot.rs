@@ -1341,6 +1341,7 @@ impl<'a> SealedSource<'a> {
         if magic.as_ref() != SEALED_SNAPSHOT_MAGIC {
             return Err(Report::new(MaterializedSnapshotError::NotASnapshot));
         }
+        drop(magic);
         let header_bytes = u64::from(self.take_u32("header length").await?);
         let header_limit = executor.limits().snapshot_header_bytes.as_u64();
         if header_bytes > header_limit {
@@ -1513,8 +1514,8 @@ impl<'a> SealedSource<'a> {
         expected: SealedSectionKind,
         limit: u64,
     ) -> Result<ChargedBytes, Report<MaterializedSnapshotError>> {
-        let kind = self.take(1, "section kind").await?;
-        let Some(&kind) = kind.as_ref().first() else {
+        let kind_bytes = self.take(1, "section kind").await?;
+        let Some(&kind) = kind_bytes.as_ref().first() else {
             return Err(Report::new(MaterializedSnapshotError::Truncated {
                 section: "section kind",
             }));
@@ -1525,6 +1526,7 @@ impl<'a> SealedSource<'a> {
                 expected: expected.into(),
             }));
         }
+        drop(kind_bytes);
         let length = u64::from(self.take_u32("section length").await?);
         if length > limit {
             return Err(Report::new(match expected {
@@ -1664,9 +1666,10 @@ where
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>
         + RkyvDeserialize<T, rkyv::api::high::HighDeserializer<rkyv::rancor::Error>>,
 {
+    // The encoded input holds a bulk charge until decoding ends. Refuse instead of queuing
+    // another grant behind that input and the inputs of concurrent snapshot readers.
     let reservation = executor
-        .reserve(MemoryClass::Bulk, limit)
-        .await
+        .try_reserve(MemoryClass::Bulk, limit)
         .change_context(MaterializedSnapshotError::Admission)?;
     executor
         .run_cpu(CpuClass::Bulk, reservation, move |_charge, cancellation| {
@@ -1729,6 +1732,7 @@ fn estimated_identity_bytes(branch: Option<&BranchKey>) -> u64 {
 mod tests {
     use std::num::NonZeroU32;
 
+    use futures_util::FutureExt as _;
     use meticulous::ResultExt as _;
     use nervix_execution::{ExecutionConfig, MemoryBudgets, OperationLimits};
     use nervix_models::FieldName;
@@ -1747,6 +1751,62 @@ mod tests {
     /// How many records the snapshot carries. Their columns alone exceed eight mebibytes and the
     /// bulk transfer budget the narrow executor allows.
     const RECORDS: usize = 80;
+
+    #[nervix_primitives::test]
+    async fn snapshot_decoder_refuses_bulk_wait_while_retaining_its_metadata_input() {
+        let config = ExecutionConfig::default();
+        let bulk_bytes = config.budgets.bulk.as_u64();
+        let limit = config.limits.snapshot_header_bytes.as_u64();
+        let executor = Executor::new(config).assured("the default executor is valid");
+        let expected = SealedSnapshotHeader {
+            revision: 7,
+            fence: 9,
+            branch_generation: 11,
+            records: 0,
+            groups: 0,
+        };
+        let input = encode_rkyv(&executor, expected.clone(), limit)
+            .await
+            .assured("the current snapshot header encodes");
+        let input_bytes: u64 = input.len().arch_into();
+        let occupied_bytes = bulk_bytes
+            .checked_sub(input_bytes)
+            .assured("the header is smaller than the bulk budget");
+        let occupied = executor
+            .try_reserve(MemoryClass::Bulk, occupied_bytes)
+            .assured("the test occupies the memory outside the decoder's input");
+
+        let result = decode_rkyv::<SealedSnapshotHeader>(&executor, input, limit).now_or_never();
+        assert!(
+            result.is_some(),
+            "a snapshot decoder must refuse rather than wait while its input holds bulk memory"
+        );
+        let error = result
+            .verified("the decoder returned without waiting for its own input to be released")
+            .expect_err("the full bulk budget cannot admit metadata decoding");
+        assert_eq!(
+            error.downcast_ref::<AdmissionError>(),
+            Some(&AdmissionError::BudgetExhausted {
+                class: "bulk",
+                requested: limit,
+            })
+        );
+        assert_eq!(
+            executor.memory(MemoryClass::Bulk).reserved_bytes,
+            occupied.bytes(),
+            "refusal releases the complete input charge"
+        );
+        drop(occupied);
+
+        let input = encode_rkyv(&executor, expected.clone(), limit)
+            .await
+            .assured("the current snapshot header encodes after contention ends");
+        let decoded = decode_rkyv::<SealedSnapshotHeader>(&executor, input, limit)
+            .await
+            .assured("the complete header remains readable once bulk room is available");
+        assert_eq!(decoded, expected);
+        assert_eq!(executor.memory(MemoryClass::Bulk).reserved_bytes, 0);
+    }
 
     fn generated_schema_type(
         arbitrary: &mut nervix_arbitrary::Arbitrary<'_>,

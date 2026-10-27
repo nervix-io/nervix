@@ -46,6 +46,7 @@ pub(crate) mod sqs_answer_hold;
 pub(crate) mod stallable_tcp_proxy;
 pub(crate) mod status_request;
 pub(crate) mod suite_watchdog;
+pub(crate) mod syslog_tls;
 pub(crate) mod tcp_forwarder;
 pub(crate) mod unaccepted_address;
 pub(crate) mod websocket_close;

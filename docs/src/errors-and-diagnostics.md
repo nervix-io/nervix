@@ -181,6 +181,11 @@ provides.
 | WASM runtime | The saved-state verdict of the guest-call failure, an invalid emission, or an exhausted execution limit | The stage the failure is reported under, whether rejected-state recovery starts, and whether the instance is discarded |
 | Restore conversion | An execution admission or staging refusal among the report's contexts | Release what the conversion holds and convert again within its wait for room |
 
+Snapshot metadata and Arrow decoders refuse additional bulk scratch without queueing while they
+retain encoded input from that pool. The report preserves `AdmissionError` beneath the snapshot
+context, and refusal releases the input. A generator reports the failed read and tries a complete
+read again on its next occurrence; memory pressure never becomes absent or corrupt state.
+
 ### Outcomes That Are Not Reports
 
 An ordinary outcome is a typed value, never an error report. Waiting for or skipping a message
@@ -287,6 +292,11 @@ sequenceDiagram
     Registry-->>Session: Report with owning node and route context
     Session-->>Client: Failed command with diagnostic and source span
 ```
+
+Connector inspection renders configured error-policy expressions through the same canonical owner
+as Plexus output. A canonical-rendering failure remains `CanonicalPlexusError` until the command
+response boundary; `DESCRIBE INGESTOR` and `DESCRIBE EMITTER` return that failure instead of a
+partially rendered description.
 
 ## Ownership And Propagation
 
@@ -1049,6 +1059,13 @@ and the expression's inferred Arrow type, such as `VALUES key 'severity_number' 
 found Int64`. These are command refusals before publication, including during `ALTER`, rather
 than retried source or sink initialization failures. They never include a record's values.
 
+MySQL table-name construction refuses empty path parts and more than two parts with typed
+`ExternalNameError` outcomes. Its offline client check refuses pool-sizing URL parameters through
+`OfflineClientConfigError::PoolSizing`, whose public message names the setting key and `POOL SIZE`
+without the address, credentials or parameter value. Driver URL syntax failures keep the driver
+cause under the existing key-bearing offline context; public projection still renders only that
+reviewed context.
+
 Registry validation and planning refuse invalid models before graph activation. Validation names the
 owning node, the route when the rule is route-local, the operation, and relevant fields or
 references. A branch mismatch in an error route, for example, identifies the source route, error
@@ -1071,6 +1088,16 @@ TLS keys on `ws`, and unpaired identity files are typed refusals naming their ke
 its value; shared HTTP name, value and limit causes remain beneath it. Planning retains that typed
 cause if a ingestor cannot produce its validated header collection. Rendered client values are
 validated again by the connector before opening transport.
+An Iceberg emitter's location refusal names its domain, emitter and `LOCATION`, with the
+vocabulary's typed location failure beneath that context. A malformed URL retains its URL-parser
+cause; a storage-scheme mismatch names the found scheme and the schemes its declared client
+accepts. Namespace literals are validated external identities, and commit-size literals use the
+same positive whole-byte refusal as batch-size literals before a plan is installed.
+Its client schema names invalid Nervix-owned keys before commit. Offline storage inspection
+projects the offending driver property key through `OfflineClientConfigError`, retaining the
+Iceberg storage reader's typed error beneath it. The public refusal does not print the property's
+value. Properties requiring a table or an initialized OpenDAL operator remain initialization
+checks.
 An emitter whose connector keeps one value per header name and whose `INVOKE` clause writes one literal
 header name twice is refused with `RegistryError::ReplacedHeaderWrite`, which names the domain, the
 emitter, the emitter's connector and entity, the header as the emitter's

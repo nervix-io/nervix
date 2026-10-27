@@ -387,7 +387,7 @@ Feature: Prometheus ingestion
       """
     And the last command output contains
       """
-      prometheus max body size: 1KiB
+      options: QUERY 'bulk' MAX BODY SIZE 1KiB EVERY 1s
       """
 
     Examples:
@@ -426,7 +426,7 @@ Feature: Prometheus ingestion
     And within "30s" DESCRIBE DOMAIN section "input_output" metric "batches_total" "sent" relay "samples" across physical nodes totals 49
     And within "30s" DESCRIBE INGESTOR "prom_samples" on the leader node contains
       """
-      prometheus max body size: 16MiB
+      options: QUERY 'bulk' MAX BODY SIZE 16MiB EVERY 1s
       """
 
     Examples:

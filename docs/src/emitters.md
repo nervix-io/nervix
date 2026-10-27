@@ -60,7 +60,7 @@ The declared pairs are `CLIENT CONSUMER`, `HTTP REQUEST`, `KAFKA TOPIC`, `PULSAR
 `CLICKHOUSE TABLE`, `POSTGRES TABLE`, `MYSQL TABLE`, `MONGODB COLLECTION` and `ICEBERG TABLE`.
 A client consumer uses `TO SCHEMA <schema> MODE ACK ...`, with native output in place of a codec.
 All other destinations name a configured client. An Iceberg destination names its storage client;
-Nervix resolves S3, GCS or Azure Blob from that client's kind. Its `LOCATION`, `CATALOG` and
+Nervix resolves S3, GCS or Azure Blob from that client's kind. Its `NAMESPACE`, `LOCATION`, `CATALOG` and
 `COMMIT EACH` options precede `MODE`. OTEL metrics retain `METRIC '<name>' UNIT ...` before
 `MODE`; `VALUES`, `ATTRIBUTES`, `RESOURCE` and `SCOPE` form their payload section after it.
 Database conflict clauses follow `VALUES`.
@@ -74,7 +74,11 @@ refer to those exact external names. Nervix references such as clients, schemas 
 bare identifiers. The [capability reference](connector-capabilities.md) gives each locator's rule.
 
 `DESCRIBE EMITTER` exposes the kind and reference on its `to:` line. Dataflow transport labels use
-the same connector/entity phrase. `SHOW CREATE EMITTER` renders the complete current statement.
+the same connector/entity phrase. `SHOW EMITTERS;` lists the domain's emitters with that phrase
+as `to=<CONNECTOR> <ENTITY>`, the codec or `none`, and attachment mode. `SHOW CREATE EMITTER` renders
+the complete current statement. The shared [inspection block](connector-contract.md#shared-entity-presentation)
+shows options, mode, quiesce, envelope, batch, flush and error policies in that order. Emitter
+quiesce and envelope are `none` for the current Models.
 
 ## Branch Semantics
 
@@ -539,12 +543,17 @@ appears as its `leak_sensitive(...)` call and never as a value. `DESCRIBE EMITTE
 reports the request contract of the `deliver_event` example above in these lines:
 
 ```text
-codec: event_body_codec
-body: codec
-to: HTTP REQUEST api METHOD input.request_method PATH input.request_path
+to: HTTP REQUEST api
+options: METHOD input.request_method PATH input.request_path
+mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+quiesce: none
+envelope: none
 batch: none
 flush: FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-publishing mode: ACK RETRY POLICY BACKOFF 250ms MAX 30s
+errors: ON MESSAGE ERROR LOG ON GENERAL ERROR LOG
+from: outgoing
+codec: event_body_codec
+body: codec
 ```
 
 `body` reads `codec` for `ENCODE USING`, and `without body`, with `codec: none`, for `WITHOUT BODY`.
@@ -631,8 +640,8 @@ The codec forms are described in [Schemas and codecs](schemas-and-codecs.md#batc
 These checks cover the whole candidate graph, so replacing a codec that a batching emitter uses
 is validated against that emitter too.
 
-`SHOW CREATE EMITTER` renders the clause between the emitter clause and `FLUSH`, with the size in the
-unit it was written in. `DESCRIBE EMITTER` reports it on the line after `to:`, as
+`SHOW CREATE EMITTER` renders the clause between the entity clause and `FLUSH`, with the size in the
+unit it was written in. `DESCRIBE EMITTER` reports it on its `batch:` line, as
 `batch: MAX MESSAGES 500 MAX SIZE 1MiB` or `batch: none`.
 
 The complete contract for batch payloads — packing, containers per wire format, exact size
@@ -1360,6 +1369,12 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 
 See the [REDIS PUBSUB capability and mirror reference](connector-capabilities.md#redis-pubsub-emit).
 <!-- connector-matrix:emit-redis-pubsub:end -->
+
+`CHANNEL` uses the same rule as [Redis ingestion](ingestors.md#redis-pubsub): a nonempty literal
+of at most 1,024 UTF-8 bytes, preserved exactly. A star in `CHANNEL 'Orders:EU/*'` is part of the
+channel name. Pub/Sub has no transport headers or per-message envelope, so payload fields must
+carry application attributes. `BATCH` is optional; the emitter learns no additional size limit
+from Redis, whose `proto-max-bulk-len` refusal follows the ordinary record-error policy.
 
 Redis Pub/Sub has no subscriber delivery acknowledgment. The awaited `PUBLISH` response confirms
 server acceptance only. A record-specific server rejection follows `ON MESSAGE ERROR`; connection
@@ -2374,13 +2389,42 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | PROPERTIES keys and exact types | Not offered: This entity declares no typed PROPERTIES block; any encoded record fields belong to its payload or VALUES mapping. |
 | Buffers | connections the pool holds: set by POOL SIZE MAX; when full, holds back what fills it |
 | Network waits | connection, its handshake and an insert: unbounded |
-| Driver limits | The driver has no connect, read or write timeout. |
+| Driver limits | The driver has no connect, read or write timeout.<br>A prepared insert binds at most 65,535 placeholders; mapped column count narrows its row limit. |
 | Stalled-peer checks | None: no client deadline key bounds a wait. |
 
 See the [MYSQL TABLE capability and mirror reference](connector-capabilities.md#mysql-table-emit).
 <!-- connector-matrix:emit-mysql-table:end -->
 
-MySQL and MariaDB resolve conflicts through primary and unique keys already defined on the table, so the Plexus conflict policy does not accept a target list. `DO UPDATE` uses `ON DUPLICATE KEY UPDATE` for all mapped `VALUES` columns. `DO NOTHING` uses a no-op duplicate-key update.
+`TABLE` names one nonempty table part or two nonempty database/table parts, for example
+`'Orders'` or `'shop.Orders'`. The complete name uses 1–128 ASCII bytes from letters, digits,
+`_`, `-`, `~` and the separating dot. Nervix preserves case and quotes each part separately:
+`'shop.Orders'` becomes `` `shop`.`Orders` ``. Column keys are quoted as single identifiers,
+including any dot in a column key. Empty parts and more than two parts are refused when parsed
+or decoded.
+
+MySQL and MariaDB resolve conflicts through primary and unique keys already defined on the table,
+so the Plexus conflict policy takes no target list. `DO UPDATE` executes
+`ON DUPLICATE KEY UPDATE col = VALUES(col)` for every mapped `VALUES` column, including mapped
+key columns. `DO NOTHING` executes `ON DUPLICATE KEY UPDATE first = first`, where `first` is
+the first mapped column. This is a duplicate-key update and can run update triggers; it is not
+an insert-ignore operation.
+
+The connector binds the following exact Plexus types through MySQL's binary protocol. Nullable
+values bind as SQL `NULL`. The target table must already exist and provide compatible columns.
+
+| Plexus type | Bound representation |
+| --- | --- |
+| `BOOL` | Integer `0` or `1` |
+| `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `I64` | Signed 64-bit integer |
+| `U64` | Signed integer through `i64::MAX`; unsigned integer above it |
+| `F32`, `F64` | Double, including non-finite values; the server decides whether its column accepts the value |
+| `STRING` | UTF-8 bytes |
+| `BYTES` | The original octets |
+| `DATETIME` | RFC 3339 timestamp bytes with nanosecond precision where needed |
+| `ARRAY`, `VEC` | JSON text, recursively; byte elements use padded base64 and datetime elements use RFC 3339 strings; null elements and non-finite floating-point elements become JSON `null` |
+
+Other Arrow representations are outside the declared direct-value contract. Mapped expressions
+are checked at `CREATE` and `ALTER`; duplicate `VALUES` keys are refused before execution.
 
 MySQL clients declare their connection-pool bounds and use a mysql_async connection URL. See
 [Database Client Connection Pools](database-client-pools.md) for the accepted counts:
@@ -2394,6 +2438,12 @@ CREATE MYSQL CLIENT mysql
 ```
 
 For TLS connections, include `require_ssl=true`, mount a TLS resource, and set `'tls_ca_file'` to the mounted CA path.
+
+The current client CONFIG keys are required `addr` and optional `tls_ca_file`. The address must
+be a `mysql://` URL accepted by the driver's offline parser. URL query options belong to the
+driver, except connection-pool sizing: declare that capacity with `POOL SIZE MIN ... MAX ...`.
+Pool-size query parameters such as `pool_min` and `pool_max` are refused before the client is
+committed. Unknown standalone CONFIG keys are refused rather than ignored.
 
 ### MongoDB
 
@@ -2520,6 +2570,7 @@ For TLS connections, include `tls=true`, mount a TLS resource, and set `'tls_ca_
 CREATE ICEBERG TABLE EMITTER <name>
   FROM <relay>
   TO <storage_client> TABLE 'Orders'
+  (NAMESPACE 'Analytics.Events')
   (LOCATION 's3://warehouse/orders')
   (CATALOG catalog)
   (COMMIT EACH 10s MAX SIZE 64MiB)
@@ -2539,7 +2590,7 @@ Angle brackets and alternatives form a synopsis; option values shown are declare
 | Reference | S3 \| GCS \| AZURE_BLOB store and catalog clients |
 | Locator and validation rule | TABLE 'Orders' (iceberg_table) |
 | Modes (complete bodies after MODE) | ACK RETRY POLICY BACKOFF 1s MAX 30s |
-| Options in statement order | `LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |
+| Options in statement order | `NAMESPACE 'Analytics.Events'` (string literal); required<br>`LOCATION 's3://warehouse/orders'` (string literal); required<br>`CATALOG catalog` (ICEBERG_REST client); required<br>`COMMIT EACH 10s MAX SIZE 64MiB` (composed clause); required |
 | Headers | Not offered: The protocol writes structured values or rows; transport headers are not a per-record mapping in this entity. |
 | Body | VALUES { '&lt;field&gt;' = &lt;expression&gt;, ... } |
 | BATCH | optional |
@@ -2574,6 +2625,7 @@ CREATE ICEBERG_REST CLIENT iceberg_catalog
 CREATE ICEBERG TABLE EMITTER iceberg_notifications
   FROM notifications
   TO s3_main TABLE 'notifications'
+  NAMESPACE 'analytics'
   LOCATION 's3://nervix-iceberg/tables/notifications'
   CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
     'user_id' = input.user_id,
@@ -2583,7 +2635,44 @@ CREATE ICEBERG TABLE EMITTER iceberg_notifications
   ON GENERAL ERROR LOG;
 ```
 
-Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The referenced storage client selects the S3, GCS or Azure Blob implementation and supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `ICEBERG_REST CLIENT` that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
+Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The referenced storage client selects the S3, GCS or Azure Blob implementation and supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `ICEBERG_REST CLIENT` that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, catalog namespace, mapped output columns, table location, catalog client reference, and flush policy.
+
+`NAMESPACE '<namespace>'` is required immediately after the table name. Its dot-separated levels
+preserve case: `NAMESPACE 'Analytics.Events'` selects the two catalog levels `Analytics` and
+`Events`. The namespace is independent of the Nervix domain. Its literal follows the same
+1–128-byte identifier alphabet as the table, with no empty level. `SHOW CREATE EMITTER` retains
+the declared namespace.
+
+`LOCATION` must be an absolute object-store URL whose scheme matches the storage client: `s3`
+for `S3`, `gs` for `GCS`, and `wasb`, `wasbs`, `abfs` or `abfss` for `AZURE_BLOB`. Nervix refuses
+a mismatched scheme at `CREATE` or `ALTER`, naming `LOCATION`, before opening either client.
+`COMMIT EACH ... MAX SIZE` uses the same positive whole-byte size syntax as `BATCH MAX SIZE`.
+
+The four Iceberg client schemas distinguish Nervix-owned options from driver properties.
+Nervix validates declared addresses, booleans and deadlines at `CREATE CLIENT`; for example,
+`'path_style_access' = 'yes'` and `'no_auth' = 'yes'` are refused. Unknown unprefixed keys are
+refused rather than treated as driver settings. The generated
+[client key tables](./connector-capabilities.md#s3-client) list the current keys and file roles.
+S3 delegates `s3.*` and `client.*`, GCS delegates `gcs.*`, and Azure delegates `adls.*`.
+The REST catalog delegates `header.*` and those storage-property namespaces. Delegated names
+and values keep the driver's interpretation; a declaration is not a connectivity or credential
+check, and a property the offline check cannot inspect is checked when its driver opens.
+The offline storage reader refuses an unsupported encryption selection and Azure connection
+strings without opening an operator. The Azure table's `LOCATION` selects its endpoint; its client
+supplies account and authentication options. GCS inline credentials use the driver's
+Base64-encoded JSON form in `credentials_json`.
+
+HTTPS currently uses the catalog client's built-in web PKI roots. The declared catalog TLS-file
+keys participate in admission and mounting; the Iceberg HTTP transports do not yet apply those
+files.
+
+
+When building the REST catalog's file I/O properties, Nervix first supplies the storage client's
+properties and then the catalog client's properties. Within a storage client, the last entry
+for a normalized property takes precedence. A catalog entry for the same Iceberg
+property key takes precedence in the effective properties used by the table's file I/O,
+including its object-store operations. Keep the two clients' settings consistent when configuring
+both namespaces.
 
 The catalog and object-store HTTP clients resolve endpoint names through the node's configured
 DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
@@ -2608,6 +2697,7 @@ CREATE ICEBERG_REST CLIENT iceberg_catalog
 CREATE ICEBERG TABLE EMITTER iceberg_notifications
   FROM notifications
   TO gcs_main TABLE 'notifications'
+  NAMESPACE 'analytics'
   LOCATION 'gs://nervix-iceberg/tables/notifications'
   CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
     'user_id' = input.user_id,
@@ -2635,6 +2725,7 @@ CREATE ICEBERG_REST CLIENT iceberg_catalog
 CREATE ICEBERG TABLE EMITTER iceberg_notifications
   FROM notifications
   TO azure_main TABLE 'notifications'
+  NAMESPACE 'analytics'
   LOCATION 'wasbs://nervix-iceberg@myaccount.blob.core.windows.net/tables/notifications'
   CATALOG iceberg_catalog COMMIT EACH 1m MAX SIZE 512MiB MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s VALUES {
     'user_id' = input.user_id,

@@ -13,18 +13,14 @@
 
 use leptos::prelude::*;
 use nervix_models::{
-    HttpIngestorEntity, IngestQuiesceOverflow, IngestorEntityKind, KafkaIngestorEntity,
-    MqttIngestorEntity, MqttQos, MqttSession, NatsIngestorEntity, PrometheusIngestorEntity,
-    PulsarIngestorEntity, PulsarSubscriptionOwnership, RabbitMqIngestorEntity, RedisIngestorEntity,
-    SqsIngestorEntity,
+    IngestDeliveryKind, IngestQuiesceKind, IngestQuiesceOverflow, IngestorEntityKind,
+    OptionDeclaration, OptionForm, OptionPresence, WebsocketsUpgradeHeader,
 };
 
 use super::{
     ChoiceControl, ChoiceGroup, CreateSignals, RequestSender, event_target_textarea_value,
-    event_target_value,
-    ingestor_draft::TimestampDraft,
-    ingestor_route_editor::IngestorRouteEditor,
-    ingestor_source_draft::{DeliveryChoice, IngestorEntityDraft, QuiesceChoice},
+    event_target_value, ingestor_draft::TimestampDraft, ingestor_route_editor::IngestorRouteEditor,
+    ingestor_source_draft::IngestorEntityDraft,
 };
 
 #[derive(Clone, Copy)]
@@ -36,6 +32,7 @@ enum IngestorField {
     QueueGroup,
     Subscription,
     Query,
+    MaxBodySize,
     Every,
     Instances,
     ConsumerGroup,
@@ -57,11 +54,12 @@ impl IngestorField {
             Self::Subject => "Subject",
             Self::QueueGroup => "Queue group",
             Self::Subscription => "Subscription",
-            Self::Query => "Prometheus query",
+            Self::Query => "QUERY",
+            Self::MaxBodySize => "MAX BODY SIZE",
             Self::Every => "Every",
             Self::Instances => "Instances",
             Self::ConsumerGroup => "Consumer group",
-            Self::AckMax => "ACK parallel maximum",
+            Self::AckMax => "ACK maximum",
             Self::BatchTimeout => "Batch timeout",
             Self::AckTimeout => "ACK timeout",
             Self::RetryBackoff => "Retry backoff",
@@ -80,6 +78,7 @@ impl IngestorField {
             Self::QueueGroup => "create-ingestor-queue-group",
             Self::Subscription => "create-ingestor-subscription",
             Self::Query => "create-ingestor-query",
+            Self::MaxBodySize => "create-ingestor-max-body-size",
             Self::Every => "create-ingestor-every",
             Self::Instances => "create-ingestor-instances",
             Self::ConsumerGroup => "create-ingestor-consumer-group",
@@ -102,6 +101,7 @@ impl IngestorField {
             Self::QueueGroup => &source.queue_group,
             Self::Subscription => &source.subscription,
             Self::Query => &source.query,
+            Self::MaxBodySize => &source.max_body_size,
             Self::Every => &source.every,
             Self::Instances => &source.instances,
             Self::ConsumerGroup => &source.consumer_group,
@@ -124,6 +124,7 @@ impl IngestorField {
             Self::QueueGroup => &mut source.queue_group,
             Self::Subscription => &mut source.subscription,
             Self::Query => &mut source.query,
+            Self::MaxBodySize => &mut source.max_body_size,
             Self::Every => &mut source.every,
             Self::Instances => &mut source.instances,
             Self::ConsumerGroup => &mut source.consumer_group,
@@ -155,6 +156,165 @@ fn SourceFieldEditor(signals: CreateSignals, field: IngestorField) -> impl IntoV
     }
 }
 
+/// The typed control that stores one declared locator or option.
+enum EntityOptionField {
+    Scalar(IngestorField),
+    UpgradeHeaders,
+}
+
+impl EntityOptionField {
+    fn from_keywords(keywords: &str) -> Option<Self> {
+        let scalar = match keywords {
+            "HEADERS" => return Some(Self::UpgradeHeaders),
+            "TOPIC" => IngestorField::Topic,
+            "QUEUE" => IngestorField::Queue,
+            "CHANNEL" => IngestorField::Channel,
+            "SUBJECT" => IngestorField::Subject,
+            "QUEUE GROUP" => IngestorField::QueueGroup,
+            "SUBSCRIPTION" => IngestorField::Subscription,
+            "QUERY" => IngestorField::Query,
+            "MAX BODY SIZE" => IngestorField::MaxBodySize,
+            "EVERY" => IngestorField::Every,
+            "INSTANCES" => IngestorField::Instances,
+            _ => return None,
+        };
+        Some(Self::Scalar(scalar))
+    }
+}
+
+#[component]
+fn UpgradeHeadersEditor(signals: CreateSignals) -> impl IntoView {
+    let pending = move || signals.progress.get().is_pending();
+    view! {
+        <fieldset class="create-field create-ingestor-upgrade-headers" data-option="HEADERS">
+            <legend>"HEADERS · optional literal upgrade fields"</legend>
+            <For each=move || { (0..signals.ingestor.get().source.upgrade_headers.len()).collect::<Vec<_>>() }
+                key=|index| *index
+                children=move |index| view! {
+                    <div class="create-field-row">
+                        <label class="create-field"><span>"Name"</span>
+                            <input class="create-ingestor-upgrade-header-name" type="text" autocomplete="off"
+                                disabled=pending
+                                prop:value=move || match signals.ingestor.get().source.upgrade_headers.get(index) {
+                                    Some(header) => header.name.clone(), None => String::new(),
+                                }
+                                on:input=move |event| {
+                                    let value = event_target_value(&event);
+                                    signals.ingestor.update(|draft| {
+                                        if let Some(header) = draft.source.upgrade_headers.get_mut(index) { header.name = value; }
+                                    });
+                                    signals.edit();
+                                } />
+                        </label>
+                        <label class="create-field"><span>"Value"</span>
+                            <input class="create-ingestor-upgrade-header-value" type="text" autocomplete="off"
+                                disabled=pending
+                                prop:value=move || match signals.ingestor.get().source.upgrade_headers.get(index) {
+                                    Some(header) => header.value.clone(), None => String::new(),
+                                }
+                                on:input=move |event| {
+                                    let value = event_target_value(&event);
+                                    signals.ingestor.update(|draft| {
+                                        if let Some(header) = draft.source.upgrade_headers.get_mut(index) { header.value = value; }
+                                    });
+                                    signals.edit();
+                                } />
+                        </label>
+                        <button type="button" class="create-ingestor-upgrade-header-remove" disabled=pending
+                            on:click=move |_| {
+                                signals.ingestor.update(|draft| {
+                                    if index < draft.source.upgrade_headers.len() { draft.source.upgrade_headers.remove(index); }
+                                });
+                                signals.edit();
+                            }>"Remove"</button>
+                    </div>
+                } />
+            <button type="button" class="create-ingestor-upgrade-headers-add" disabled=pending
+                on:click=move |_| {
+                    signals.ingestor.update(|draft| draft.source.upgrade_headers.push(WebsocketsUpgradeHeader {
+                        name: String::new(), value: String::new(),
+                    }));
+                    signals.edit();
+                }>"Add upgrade header"</button>
+        </fieldset>
+    }
+}
+
+#[component]
+fn EntityValueEditor(
+    signals: CreateSignals,
+    keywords: &'static str,
+    default: Option<&'static str>,
+) -> impl IntoView {
+    match EntityOptionField::from_keywords(keywords) {
+        Some(EntityOptionField::Scalar(field)) => view! {
+            <label class="create-field" data-option=keywords>
+                <span>{keywords}</span>
+                <input class=field.class() type="text" autocomplete="off" placeholder=default.unwrap_or("")
+                    prop:value=move || field.value(&signals.ingestor.get().source).to_string()
+                    disabled=move || signals.progress.get().is_pending()
+                    on:input=move |event| {
+                        let value = event_target_value(&event);
+                        signals.ingestor.update(|draft| field.set(&mut draft.source, value));
+                        signals.edit();
+                    } />
+            </label>
+        }.into_any(),
+        Some(EntityOptionField::UpgradeHeaders) => view! { <UpgradeHeadersEditor signals=signals /> }.into_any(),
+        None => ().into_any(),
+    }
+}
+
+#[component]
+fn EntityOptionEditor(signals: CreateSignals, option: OptionDeclaration) -> impl IntoView {
+    let keywords = option.keywords;
+    let default = match option.presence {
+        OptionPresence::Required => None,
+        OptionPresence::Optional { default } => default,
+    };
+    let choices = match option.form {
+        OptionForm::Value { .. } => &[][..],
+        OptionForm::Choice(choices) => choices,
+    };
+    let class = match keywords {
+        "OFFSET BY" => "create-ingestor-offset",
+        "SUBSCRIPTION" => "create-ingestor-subscription-ownership",
+        "SESSION" => "create-ingestor-mqtt-session",
+        "QOS" => "create-ingestor-mqtt-qos",
+        _ => "create-ingestor-option",
+    };
+    view! {
+        <EntityValueEditor signals=signals keywords=keywords default=default />
+        <Show when=move || !choices.is_empty() fallback=|| ()>
+            <fieldset class=class data-option=keywords>
+                <legend>{keywords}</legend>
+                <For each=move || choices.to_vec() key=|choice| choice.name
+                    children=move |choice| {
+                        let key = choice.name.to_ascii_lowercase().replace(' ', "-");
+                        // Stable selectors identify the bound field; labels and choices come from the declaration.
+                        let ownership = key.strip_prefix("owned-by-").unwrap_or(&key).to_string();
+                        view! {
+                            <button type="button" data-choice=choice.name
+                                data-offset=(keywords == "OFFSET BY").then_some(key.clone())
+                                data-ownership=(keywords == "SUBSCRIPTION").then_some(ownership)
+                                data-session=(keywords == "SESSION").then_some(key.clone())
+                                data-qos=(keywords == "QOS").then_some(key)
+                                class:active=move || signals.ingestor.get().source.chosen_option(keywords) == Some(choice.name)
+                                disabled=move || signals.progress.get().is_pending()
+                                on:click=move |_| {
+                                    signals.ingestor.update(|draft| draft.source.choose_option(keywords, choice.name));
+                                    signals.edit();
+                                }>{choice.name}</button>
+                        }
+                    } />
+            </fieldset>
+        </Show>
+        <Show when=move || keywords == "OFFSET BY" && signals.ingestor.get().source.offset == Some(super::ingestor_source_draft::OffsetChoice::ConsumerGroup) fallback=|| ()>
+            <SourceFieldEditor signals=signals field=IngestorField::ConsumerGroup />
+        </Show>
+    }
+}
+
 #[component]
 pub(super) fn IngestorEditor(
     signals: CreateSignals,
@@ -165,14 +325,12 @@ pub(super) fn IngestorEditor(
     let pending = move || signals.progress.get().is_pending();
     let entity_kind = move || signals.ingestor.get().source.kind;
     let acknowledged = move || {
-        let source = &signals.ingestor.get().source;
-        matches!(
-            source.kind,
-            Some(
-                IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue)
-                    | IngestorEntityKind::Sqs(SqsIngestorEntity::Queue)
-            )
-        ) || source.delivery.is_some_and(DeliveryChoice::acknowledged)
+        signals
+            .ingestor
+            .get()
+            .source
+            .delivery
+            .is_some_and(IngestDeliveryKind::acknowledged)
     };
     view! {
         <label class="create-field">
@@ -197,7 +355,7 @@ pub(super) fn IngestorEditor(
                         on:click=move |_| {
                             signals.ingestor.update(|draft| draft.source.choose_kind(kind));
                             signals.edit();
-                        }>{kind.form_label()}</button>
+                        }>{kind.phrase()}</button>
                 } />
         </fieldset>
         <Show when=move || entity_kind().is_some() fallback=|| ()>
@@ -205,136 +363,68 @@ pub(super) fn IngestorEditor(
                 control=ChoiceControl::IngestSourceRef signals=signals request_tx=request_tx
                 session_generation=session_generation show_detail=true />
         </Show>
-        <Show when=move || matches!(entity_kind(), Some(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) | IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) | IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic))) fallback=|| ()>
-            <SourceFieldEditor signals=signals field=IngestorField::Topic />
-        </Show>
-        <Show when=move || matches!(entity_kind(), Some(IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) | IngestorEntityKind::Sqs(SqsIngestorEntity::Queue))) fallback=|| ()>
-            <SourceFieldEditor signals=signals field=IngestorField::Queue />
-        </Show>
-        <Show when=move || entity_kind() == Some(IngestorEntityKind::Redis(RedisIngestorEntity::PubSub)) fallback=|| ()>
-            <SourceFieldEditor signals=signals field=IngestorField::Channel />
-        </Show>
-        <Show when=move || entity_kind() == Some(IngestorEntityKind::Nats(NatsIngestorEntity::Subject)) fallback=|| ()>
-            <SourceFieldEditor signals=signals field=IngestorField::Subject />
-            <SourceFieldEditor signals=signals field=IngestorField::QueueGroup />
-        </Show>
-        <Show when=move || entity_kind() == Some(IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic)) fallback=|| ()>
-            <SourceFieldEditor signals=signals field=IngestorField::Subscription />
-            <fieldset class="create-field create-ingestor-subscription-ownership">
-                <legend>"Subscription ownership"</legend>
-                <button type="button" data-ownership="ingestor"
-                    class:active=move || signals.ingestor.get().source.subscription_ownership == Some(PulsarSubscriptionOwnership::Ingestor)
-                    disabled=pending
-                    on:click=move |_| {
-                        signals.ingestor.update(|draft| draft.source.subscription_ownership = Some(PulsarSubscriptionOwnership::Ingestor));
-                        signals.edit();
-                    }>{PulsarSubscriptionOwnership::Ingestor.keywords()}</button>
-                <button type="button" data-ownership="provisioned"
-                    class:active=move || signals.ingestor.get().source.subscription_ownership == Some(PulsarSubscriptionOwnership::Provisioned)
-                    disabled=pending
-                    on:click=move |_| {
-                        signals.ingestor.update(|draft| draft.source.subscription_ownership = Some(PulsarSubscriptionOwnership::Provisioned));
-                        signals.edit();
-                    }>{PulsarSubscriptionOwnership::Provisioned.keywords()}</button>
-            </fieldset>
-        </Show>
-        <Show when=move || entity_kind() == Some(IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query)) fallback=|| ()>
-            <SourceFieldEditor signals=signals field=IngestorField::Query />
-        </Show>
-        <Show when=move || matches!(entity_kind(), Some(IngestorEntityKind::Http(HttpIngestorEntity::Request) | IngestorEntityKind::Prometheus(PrometheusIngestorEntity::Query))) fallback=|| ()>
-            <SourceFieldEditor signals=signals field=IngestorField::Every />
-        </Show>
-        <Show when=move || matches!(entity_kind(), Some(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) | IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) | IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic) | IngestorEntityKind::Nats(NatsIngestorEntity::Subject) | IngestorEntityKind::RabbitMq(RabbitMqIngestorEntity::Queue) | IngestorEntityKind::Sqs(SqsIngestorEntity::Queue))) fallback=|| ()>
-            <SourceFieldEditor signals=signals field=IngestorField::Instances />
-        </Show>
-        <Show when=move || entity_kind() == Some(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic)) fallback=|| ()>
-            <fieldset class="create-field create-ingestor-offset">
-                <legend>"Offset ownership"</legend>
-                <button type="button" data-offset="domain"
-                    class:active=move || signals.ingestor.get().source.offset == Some(super::ingestor_source_draft::OffsetChoice::Domain)
-                    disabled=pending
-                    on:click=move |_| {
-                        signals.ingestor.update(|draft| draft.source.offset = Some(super::ingestor_source_draft::OffsetChoice::Domain));
-                        signals.edit();
-                    }>"DOMAIN"</button>
-                <button type="button" data-offset="consumer-group"
-                    class:active=move || signals.ingestor.get().source.offset == Some(super::ingestor_source_draft::OffsetChoice::ConsumerGroup)
-                    disabled=pending
-                    on:click=move |_| {
-                        signals.ingestor.update(|draft| draft.source.offset = Some(super::ingestor_source_draft::OffsetChoice::ConsumerGroup));
-                        signals.edit();
-                    }>"CONSUMER GROUP"</button>
-            </fieldset>
-            <Show when=move || signals.ingestor.get().source.offset == Some(super::ingestor_source_draft::OffsetChoice::ConsumerGroup) fallback=|| ()>
-                <SourceFieldEditor signals=signals field=IngestorField::ConsumerGroup />
-            </Show>
-        </Show>
+        <For each={move || entity_kind().and_then(|kind| kind.capabilities().locator).into_iter().collect::<Vec<_>>()}
+            key={move |locator| (entity_kind(), locator.keywords)}
+            children=move |locator| view! {
+                <EntityValueEditor signals=signals keywords=locator.keywords default=None />
+            } />
+        <For each={move || match entity_kind() {
+                Some(kind) => kind.capabilities().options.to_vec(),
+                None => Vec::new(),
+            }}
+            key={move |option| (entity_kind(), option.keywords)}
+            children=move |option| view! { <EntityOptionEditor signals=signals option=option /> } />
         <Show when=move || !signals.ingestor.get().source.available_modes().is_empty() fallback=|| ()>
             <fieldset class="create-field create-ingestor-mode">
                 <legend>"Delivery mode"</legend>
                 <For each=move || signals.ingestor.get().source.available_modes().to_vec()
-                    key=|mode| mode.key()
+                    key=|mode| mode.form_key()
                     children=move |mode| view! {
-                        <button type="button" data-mode=mode.key()
+                        <button type="button" data-mode=mode.form_key()
                             class:active=move || {
                                 let source = &signals.ingestor.get().source;
                                 source.delivery == Some(mode)
                                     || (source.available_modes().len() == 1
                                         && source.available_modes().first() == Some(&mode))
                             }
-                            disabled=move || pending() || !matches!(entity_kind(), Some(IngestorEntityKind::Kafka(KafkaIngestorEntity::Topic) | IngestorEntityKind::Pulsar(PulsarIngestorEntity::Topic) | IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)))
+                            disabled=move || pending() || !signals.ingestor.get().source.mode_enabled(mode)
                             on:click=move |_| {
                                 signals.ingestor.update(|draft| draft.source.delivery = Some(mode));
                                 signals.edit();
-                            }>{mode.label()}</button>
+                            }>{mode.phrase()}</button>
                     } />
             </fieldset>
         </Show>
-        <Show when=move || entity_kind() == Some(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic)) fallback=|| ()>
-            <fieldset class="create-field create-ingestor-mqtt-session">
-                <legend>"MQTT session"</legend>
-                <button type="button" data-session="clean" class:active=move || signals.ingestor.get().source.mqtt_session == Some(MqttSession::Clean)
-                    disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.source.mqtt_session = Some(MqttSession::Clean)); signals.edit(); }>"CLEAN"</button>
-                <button type="button" data-session="persistent" class:active=move || signals.ingestor.get().source.mqtt_session == Some(MqttSession::Persistent)
-                    disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.source.mqtt_session = Some(MqttSession::Persistent)); signals.edit(); }>"PERSISTENT"</button>
-            </fieldset>
-            <fieldset class="create-field create-ingestor-mqtt-qos">
-                <legend>"MQTT QOS"</legend>
-                <button type="button" data-qos="0" class:active=move || signals.ingestor.get().source.mqtt_qos == Some(MqttQos::AtMostOnce)
-                    disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.source.mqtt_qos = Some(MqttQos::AtMostOnce)); signals.edit(); }>"0"</button>
-                <button type="button" data-qos="1" class:active=move || signals.ingestor.get().source.mqtt_qos == Some(MqttQos::AtLeastOnce)
-                    disabled=pending on:click=move |_| { signals.ingestor.update(|draft| draft.source.mqtt_qos = Some(MqttQos::AtLeastOnce)); signals.edit(); }>"1"</button>
-            </fieldset>
-        </Show>
-        <Show when=move || signals.ingestor.get().source.delivery == Some(DeliveryChoice::AckParallel) fallback=|| ()>
+        <Show when=move || matches!(signals.ingestor.get().source.delivery, Some(IngestDeliveryKind::AckParallel | IngestDeliveryKind::AckRequest)) fallback=|| ()>
             <SourceFieldEditor signals=signals field=IngestorField::AckMax />
+        </Show>
+        <Show when=move || signals.ingestor.get().source.delivery == Some(IngestDeliveryKind::AckParallel) fallback=|| ()>
             <SourceFieldEditor signals=signals field=IngestorField::BatchTimeout />
         </Show>
         <Show when=acknowledged fallback=|| ()>
             <SourceFieldEditor signals=signals field=IngestorField::AckTimeout />
-            <SourceFieldEditor signals=signals field=IngestorField::RetryBackoff />
-            <SourceFieldEditor signals=signals field=IngestorField::RetryMax />
+            <Show when=move || signals.ingestor.get().source.delivery != Some(IngestDeliveryKind::AckRequest) fallback=|| ()>
+                <SourceFieldEditor signals=signals field=IngestorField::RetryBackoff />
+                <SourceFieldEditor signals=signals field=IngestorField::RetryMax />
+            </Show>
         </Show>
         <Show when=move || !signals.ingestor.get().source.available_quiesce().is_empty() fallback=|| ()>
             <fieldset class="create-field create-ingestor-quiesce">
                 <legend>"On quiesce"</legend>
                 <For each=move || signals.ingestor.get().source.available_quiesce().to_vec()
-                    key=|choice| choice.key()
+                    key=|choice| *choice
                     children=move |choice| view! {
-                        <button type="button" data-quiesce=choice.key()
+                        <button type="button" data-quiesce=choice.form_key()
                             class:active=move || signals.ingestor.get().source.quiesce == Some(choice)
-                            disabled=move || pending() || (choice == QuiesceChoice::Suspend
-                                && entity_kind() == Some(IngestorEntityKind::Mqtt(MqttIngestorEntity::Topic))
-                                && (signals.ingestor.get().source.mqtt_session != Some(MqttSession::Persistent)
-                                    || signals.ingestor.get().source.mqtt_qos != Some(MqttQos::AtLeastOnce)))
+                            disabled=move || pending() || !signals.ingestor.get().source.quiesce_enabled(choice)
                             on:click=move |_| {
                                 signals.ingestor.update(|draft| draft.source.quiesce = Some(choice));
                                 signals.edit();
-                            }>{choice.label()}</button>
+                            }>{choice.keyword()}</button>
                     } />
             </fieldset>
         </Show>
-        <Show when=move || signals.ingestor.get().source.quiesce == Some(QuiesceChoice::Buffer) fallback=|| ()>
+        <Show when=move || matches!(signals.ingestor.get().source.quiesce, Some(IngestQuiesceKind::Buffer | IngestQuiesceKind::EndpointBuffer)) fallback=|| ()>
             <SourceFieldEditor signals=signals field=IngestorField::BufferSize />
             <Show when=move || !signals.ingestor.get().source.reads_endpoint() fallback=|| ()>
                 <fieldset class="create-field create-ingestor-overflow">
@@ -346,7 +436,7 @@ pub(super) fn IngestorEditor(
                 </fieldset>
             </Show>
         </Show>
-        <Show when=move || signals.ingestor.get().source.quiesce == Some(QuiesceChoice::Reject) fallback=|| ()>
+        <Show when=move || signals.ingestor.get().source.quiesce == Some(IngestQuiesceKind::Reject) fallback=|| ()>
             <SourceFieldEditor signals=signals field=IngestorField::RetryAfter />
         </Show>
         <ChoiceGroup class_name="create-ingestor-codec" label="Decoding codec"
@@ -390,5 +480,47 @@ pub(super) fn IngestorEditor(
         } fallback=|| ()>
             <p class="create-reference-invalid" role="alert">"The selected domain, source or codec changed. Select affected references again."</p>
         </Show>
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(
+    nervix_lint,
+    nervix::layer(harness, reason = "test module remains outside product execution")
+)]
+mod tests {
+    //! Layer: test harness.
+    //! - **Owns.** Coverage of the binding from each declared value to its draft control.
+    //! - **Depends on.** Current entity declarations and the editor's field adapters.
+    //! - **Must not know.** Browser sessions, connector drivers or registry state.
+
+    use nervix_models::{IngestorEntityKind, OptionForm};
+
+    use super::EntityOptionField;
+
+    #[test]
+    fn every_declared_transport_value_has_an_editor_binding() {
+        for kind in IngestorEntityKind::modeled() {
+            let declaration = kind.capabilities();
+            if let Some(locator) = declaration.locator {
+                assert!(
+                    EntityOptionField::from_keywords(locator.keywords).is_some(),
+                    "{} {}",
+                    kind.phrase(),
+                    locator.keywords
+                );
+            }
+            for option in declaration.options {
+                match option.form {
+                    OptionForm::Value { .. } => assert!(
+                        EntityOptionField::from_keywords(option.keywords).is_some(),
+                        "{} {}",
+                        kind.phrase(),
+                        option.keywords
+                    ),
+                    OptionForm::Choice(choices) => assert!(!choices.is_empty()),
+                }
+            }
+        }
     }
 }

@@ -356,12 +356,13 @@ async fn then_materialized_generators_report_every_row(
 
 #[then(
     expr = "node {string} reuses its remote materialized generation across five complete \
-            observations of round {int}"
+            observations of round {int} with {int} KiB rows"
 )]
 async fn then_materialized_generation_is_reused(
     world: &mut ScenarioWorld,
     node: String,
     round: u32,
+    row_kib: usize,
 ) {
     let labels = [
         "class=\"bulk\"".to_string(),
@@ -373,8 +374,15 @@ async fn then_materialized_generation_is_reused(
         .await
         .assured("the remote reader exposes its transferred bulk bytes");
     for _ in 0..5 {
-        then_materialized_generators_report_every_row(world, "30s".to_string(), round, 64, 1, 2)
-            .await;
+        then_materialized_generators_report_every_row(
+            world,
+            "30s".to_string(),
+            round,
+            row_kib,
+            1,
+            2,
+        )
+        .await;
     }
     let after = world
         .cluster()

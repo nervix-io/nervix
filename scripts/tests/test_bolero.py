@@ -144,6 +144,8 @@ class InventoryTests(unittest.TestCase):
         inventory = bolero.load_inventory()
         self.assertEqual({target.id for target in inventory.targets}, {
             "client-config-schema",
+            "connector-entity-presentation",
+            "console-ingestor-source-drafts",
             "materialized-publication-lifetimes",
             "task-status-transitions",
             "entity-freeze-transitions",
@@ -221,6 +223,7 @@ class InventoryTests(unittest.TestCase):
             "models-durations",
             "models-duration-text",
             "models-header-model-round-trip",
+            "models-iceberg-declarations",
             "models-json-paths",
             "models-json-path-validation",
             "models-batch-limits",
@@ -343,6 +346,7 @@ class InventoryTests(unittest.TestCase):
             "http-request-heads",
             "mqtt-publish-packets",
             "postgres-insert-measures",
+            "mysql-insert-measures",
             "mongodb-write-answers",
             "websocket-signaling-protobuf-values",
             "websocket-acknowledgement-values",
@@ -392,6 +396,7 @@ class InventoryTests(unittest.TestCase):
             "nervix-connector-iceberg",
             "nervix-connector-mqtt",
             "nervix-connector-postgres",
+            "nervix-connector-mysql",
             "nervix-connector-mongodb",
             "nervix-connector-websockets",
             "nervix-connector-otel",

@@ -18109,6 +18109,23 @@ async fn when_bulk_execution_is_saturated(world: &mut ScenarioWorld, node_id: St
     });
 }
 
+/// Leave room for transport on the selected node while refusing larger decoding reservations.
+#[when(expr = "bulk memory on node {string} keeps only {string} bytes free")]
+async fn when_bulk_memory_on_node_keeps_only_bytes_free(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    room: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let room = expand_placeholders(world, &room);
+    let room = room
+        .parse::<u64>()
+        .unwrap_or_else(|error| panic!("the free bulk memory '{room}' must be bytes: {error}"));
+    world
+        .fault_injection
+        .hold_bulk_memory_leaving_room_on(&crate::common::cluster::node_name(&node_id), room);
+}
+
 /// Hold every byte of bulk memory on every node but `room`, so a charge that needs more room than
 /// that is refused until the scenario releases the hold.
 #[when(expr = "bulk memory on every node keeps only {string} bytes free")]
@@ -24636,6 +24653,22 @@ async fn given_iceberg_table_exists_at_with_columns(
         .expect("failed to create Iceberg table");
 }
 
+#[given(expr = "Iceberg table {string} in namespace {string} exists at {string} with columns")]
+async fn given_iceberg_table_in_namespace_exists(
+    world: &mut ScenarioWorld,
+    table: String,
+    namespace: String,
+    location: String,
+    #[step] step: &Step,
+) {
+    let mut fixture = IcebergTableFixture::from_step(world, table, location, docstring(step));
+    fixture.namespace = expand_placeholders(world, &namespace);
+    fixture
+        .ensure()
+        .await
+        .expect("failed to create Iceberg table in its explicit namespace");
+}
+
 #[given(expr = "Kafka topic {string} is observed")]
 async fn given_kafka_topic_is_observed(world: &mut ScenarioWorld, topic: String) {
     let topic = expand_placeholders(world, &topic);
@@ -26413,13 +26446,12 @@ async fn connect_syslog_tcp(addr: &str) -> nervix_primitives::net::TcpStream {
     }
 }
 
-/// A TLS session with a Syslog listener that authenticates with the identity, and trusts the CA,
-/// of the resource directory `resource_directory`.
-async fn connect_syslog_tls(
+/// Prepare the Syslog sender's identity and trust before opening its connection.
+fn syslog_tls_sender(
     world: &ScenarioWorld,
     addr: &str,
     resource_directory: &str,
-) -> tokio_rustls::client::TlsStream<nervix_primitives::net::TcpStream> {
+) -> common::syslog_tls::SyslogTlsSender {
     nervix_interconnect::install_rustls_crypto_provider();
     let parsed = url::Url::parse(&format!("syslog://{addr}"))
         .unwrap_or_else(|error| panic!("invalid Syslog TLS test address '{addr}': {error}"));
@@ -26448,17 +26480,9 @@ async fn connect_syslog_tls(
         .with_root_certificates(roots)
         .with_client_auth_cert(certificates, key)
         .expect("Syslog TLS test client identity must be valid");
-    let connector = tokio_rustls::TlsConnector::from(StdArc::new(config));
-    let stream = connect_syslog_tcp(addr).await;
-    stream
-        .set_nodelay(true)
-        .expect("the Syslog TLS test connection must accept TCP_NODELAY");
     let server_name =
         ServerName::try_from(server_name).expect("Syslog TLS test server name must be valid");
-    connector
-        .connect(server_name, stream)
-        .await
-        .expect("failed to establish Syslog TLS test session")
+    common::syslog_tls::SyslogTlsSender::new(addr.to_owned(), server_name, config)
 }
 
 #[when(
@@ -26471,24 +26495,11 @@ async fn when_syslog_tls_message_is_published_to(
     ca_resource_directory: String,
     #[step] step: &Step,
 ) {
-    use tokio::io::AsyncWriteExt as _;
-
     let addr = expand_placeholders(world, &addr);
-    let mut stream = connect_syslog_tls(world, &addr, &ca_resource_directory).await;
+    let sender = syslog_tls_sender(world, &addr, &ca_resource_directory);
     let payload = expand_placeholders(world, docstring(step));
-    let payload = payload.trim().as_bytes();
-    stream
-        .write_all(format!("{} ", payload.len()).as_bytes())
-        .await
-        .expect("failed to write Syslog TLS octet count");
-    stream
-        .write_all(payload)
-        .await
-        .expect("failed to write Syslog TLS payload");
-    stream
-        .shutdown()
-        .await
-        .expect("failed to close Syslog TLS test sender");
+    let frame = syslog_stream_frame("octet-counted", payload.trim());
+    sender.publish(frame).await;
 }
 
 /// One message in an RFC 6587 framing, as a stream carries it.
@@ -26530,17 +26541,18 @@ fn syslog_split_position(frame: &[u8], framing: &str, split: &str) -> usize {
     }
 }
 
-/// Writes the first docstring message as one complete frame and the second up to `split`, in one
-/// write, and keeps the connection and the rest of the second frame for a later step.
-async fn write_syslog_split_frames(
-    world: &mut ScenarioWorld,
-    mut stream: Box<dyn tokio::io::AsyncWrite + Send + Sync + Unpin>,
+/// The complete first frame and partial second frame, with the remainder retained for later.
+struct SyslogSplitFrames {
+    written: Vec<u8>,
+    rest: Vec<u8>,
+}
+
+fn syslog_split_frames(
+    world: &ScenarioWorld,
     framing: &str,
     split: &str,
     step: &Step,
-) {
-    use tokio::io::AsyncWriteExt as _;
-
+) -> SyslogSplitFrames {
     let messages = expand_placeholders(world, docstring(step))
         .lines()
         .map(str::trim)
@@ -26557,18 +26569,10 @@ async fn write_syslog_split_frames(
     let at = syslog_split_position(&second, framing, split);
     let mut written = first;
     written.extend_from_slice(&second[..at]);
-    stream
-        .write_all(&written)
-        .await
-        .expect("failed to write the frames before the split");
-    stream
-        .flush()
-        .await
-        .expect("failed to flush the frames before the split");
-    world.syslog_split_sender = Some(SyslogSplitSender {
-        stream,
+    SyslogSplitFrames {
+        written,
         rest: second[at..].to_vec(),
-    });
+    }
 }
 
 #[when(expr = "a Syslog TCP sender writes to {string} one {word} frame and another split {string}")]
@@ -26579,12 +26583,26 @@ async fn when_syslog_tcp_sender_writes_split_frames(
     split: String,
     #[step] step: &Step,
 ) {
+    use tokio::io::AsyncWriteExt as _;
+
     let addr = expand_placeholders(world, &addr);
-    let stream = connect_syslog_tcp(&addr).await;
+    let mut stream = connect_syslog_tcp(&addr).await;
     stream
         .set_nodelay(true)
         .expect("the Syslog TCP test connection must accept TCP_NODELAY");
-    write_syslog_split_frames(world, Box::new(stream), &framing, &split, step).await;
+    let frames = syslog_split_frames(world, &framing, &split, step);
+    stream
+        .write_all(&frames.written)
+        .await
+        .expect("failed to write the frames before the split");
+    stream
+        .flush()
+        .await
+        .expect("failed to flush the frames before the split");
+    world.syslog_split_sender = Some(SyslogSplitSender {
+        stream: Box::new(stream),
+        rest: frames.rest,
+    });
 }
 
 #[when(
@@ -26600,8 +26618,13 @@ async fn when_syslog_tls_sender_writes_split_frames(
     #[step] step: &Step,
 ) {
     let addr = expand_placeholders(world, &addr);
-    let stream = connect_syslog_tls(world, &addr, &resource_directory).await;
-    write_syslog_split_frames(world, Box::new(stream), &framing, &split, step).await;
+    let sender = syslog_tls_sender(world, &addr, &resource_directory);
+    let frames = syslog_split_frames(world, &framing, &split, step);
+    let stream = sender.write(frames.written).await;
+    world.syslog_split_sender = Some(SyslogSplitSender {
+        stream: Box::new(stream),
+        rest: frames.rest,
+    });
 }
 
 #[when("the Syslog sender writes the rest of the split frame")]
@@ -31133,8 +31156,27 @@ async fn then_iceberg_table_eventually_contains_row(
     table: String,
     #[step] step: &Step,
 ) {
+    assert_iceberg_table_contains_row(world, table, world.domain.clone(), step).await;
+}
+
+#[then(expr = "the Iceberg table {string} in namespace {string} eventually contains a row")]
+async fn then_iceberg_table_in_namespace_contains_row(
+    world: &mut ScenarioWorld,
+    table: String,
+    namespace: String,
+    #[step] step: &Step,
+) {
+    let namespace = expand_placeholders(world, &namespace);
+    assert_iceberg_table_contains_row(world, table, namespace, step).await;
+}
+
+async fn assert_iceberg_table_contains_row(
+    world: &ScenarioWorld,
+    table: String,
+    namespace: String,
+    step: &Step,
+) {
     let table = expand_placeholders(world, &table);
-    let domain = world.domain.clone();
     let expected = expand_placeholders(world, docstring(step));
     let expected = serde_json::from_str::<serde_json::Value>(&expected)
         .expect("Iceberg expected row must be valid JSON");
@@ -31144,7 +31186,7 @@ async fn then_iceberg_table_eventually_contains_row(
 
     loop {
         nervix_primitives::task::consume_budget().await;
-        match iceberg_table_rows(&dependencies, &domain, &table).await {
+        match iceberg_table_rows(&dependencies, &namespace, &table).await {
             Ok(rows) => {
                 if rows
                     .iter()
@@ -31411,7 +31453,9 @@ async fn rustfs_iceberg_table(
     table: &str,
 ) -> Result<iceberg::table::Table, String> {
     let catalog = rustfs_rest_catalog(dependencies).await?;
-    let table_ident = TableIdent::new(NamespaceIdent::new(domain.to_string()), table.to_string());
+    let namespace = NamespaceIdent::from_strs(domain.split('.'))
+        .map_err(|source| format!("invalid catalog namespace: {source}"))?;
+    let table_ident = TableIdent::new(namespace, table.to_string());
     catalog
         .load_table(&table_ident)
         .await
@@ -31468,7 +31512,7 @@ fn rustfs_iceberg_storage_factory() -> StdArc<dyn iceberg::io::StorageFactory> {
 
 struct IcebergTableFixture {
     dependencies: DependencyEndpoints,
-    domain: String,
+    namespace: String,
     table: String,
     location: String,
     fields: Vec<arrow_schema::Field>,
@@ -31481,7 +31525,7 @@ impl IcebergTableFixture {
     fn from_step(world: &ScenarioWorld, table: String, location: String, columns: &str) -> Self {
         Self {
             dependencies: world.dependencies.endpoints().clone(),
-            domain: world.domain.clone(),
+            namespace: world.domain.clone(),
             table: expand_placeholders(world, &table),
             location: expand_placeholders(world, &location),
             fields: Self::parse_fields(columns),
@@ -31514,7 +31558,8 @@ impl IcebergTableFixture {
 
     async fn ensure_once(&self) -> Result<(), String> {
         let catalog = rustfs_rest_catalog(&self.dependencies).await?;
-        let namespace = NamespaceIdent::new(self.domain.clone());
+        let namespace = NamespaceIdent::from_strs(self.namespace.split('.'))
+            .map_err(|source| format!("invalid catalog namespace: {source}"))?;
         if !catalog
             .namespace_exists(&namespace)
             .await

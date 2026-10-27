@@ -1052,7 +1052,7 @@ pub fn domain_clock_period_lit<'src>()
     })
 }
 
-pub fn byte_size_lit<'src>()
+fn byte_size_literal_text<'src>()
 -> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
     choice((
         select! { Token::NumberLiteral(value) => value }
@@ -1060,18 +1060,38 @@ pub fn byte_size_lit<'src>()
             .map(|(number, unit)| format!("{number}{unit}")),
         word_raw(),
     ))
-    .try_map(|value, span| {
-        let mapping_input = value.parse::<ubyte::ByteUnit>().map(|_| value);
-        match mapping_input {
-            Ok(mapped_value) => Ok(mapped_value),
-            Err(error) => Err(Rich::custom(
-                span,
-                format!("invalid byte_size_literal: {error}"),
-            )),
-        }
-    })
-    .labelled("byte_size_literal")
     .boxed()
+}
+
+pub fn byte_size_lit<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    byte_size_literal_text()
+        .try_map(|value, span| {
+            let mapping_input = value.parse::<ubyte::ByteUnit>().map(|_| value);
+            match mapping_input {
+                Ok(mapped_value) => Ok(mapped_value),
+                Err(error) => Err(Rich::custom(
+                    span,
+                    format!("invalid byte_size_literal: {error}"),
+                )),
+            }
+        })
+        .labelled("byte_size_literal")
+        .boxed()
+}
+
+/// A positive whole-byte limit, shared by payload, batch and commit clauses.
+pub fn payload_size_lit<'src>(
+    clause: &'static str,
+) -> impl Parser<'src, &'src [Token], PayloadSizeLimit, extra::Err<ParseError<'src>>> + Clone {
+    byte_size_literal_text()
+        .labelled("byte_size_literal")
+        .try_map(move |literal, span| {
+            literal
+                .parse::<PayloadSizeLimit>()
+                .map_err(|issue| Rich::custom(span, format!("{clause} {issue}")))
+        })
+        .boxed()
 }
 
 pub fn max_batch_size_clause<'src>()

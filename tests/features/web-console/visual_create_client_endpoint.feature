@@ -144,7 +144,7 @@ Feature: Web console visual client, vhost and endpoint creation
       | 3            |
 
   @visual_client_endpoint_create
-  Scenario Outline: A visual cloud client redacts its delegated endpoint query
+  Scenario Outline: An Iceberg storage client redacts an endpoint query in the visual form
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     When these Plexus commands are executed on the leader node
@@ -156,18 +156,18 @@ Feature: Web console visual client, vhost and endpoint creation
     When selector ".create-menu-button" is clicked
     And selector ".create-menu [data-create-kind='client']" is clicked
     And selector ".create-name" is filled with "visual_cloud"
-    And selector ".create-client-type [data-client-type='azure_blob-client']" is clicked
+    And selector ".create-client-type [data-client-type='s3-client']" is clicked
     Then selector "#client-config-keys option[value='endpoint']" exists
     When selector ".create-client-config-add" is clicked
     And selector ".create-client-config-key" is filled with "endpoint"
-    And selector ".create-client-config-value" is filled with "https://account.blob.example.com/?sig=visual-private-signature"
+    And selector ".create-client-config-value" is filled with "https://objects.example.com/?sig=visual-private-signature"
     Then selector ".create-preview" contains "'endpoint' = '********'"
     When selector ".create-submit" is clicked
     Then selector ".create-status" contains "Completed"
     When selector ".create-close" is clicked
     And selector ".prompt-row input" is filled with "SHOW CREATE CLIENT visual_cloud;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "CREATE AZURE_BLOB CLIENT visual_cloud"
+    Then selector ".terminal" contains "CREATE S3 CLIENT visual_cloud"
     And selector ".terminal" contains "'endpoint' = '********'"
 
     Examples:

@@ -228,6 +228,7 @@ TO received_syslog
 UDP follows RFC 5426. One datagram is one frame. A datagram larger than `max_message_size` is
 dropped and counted in `nervix_ingestor_oversized_payloads_total` on the node that received it,
 which that node's `DESCRIBE INGESTOR` renders; the listener goes on reading the next datagram.
+The listener receives into a fixed 65,535-byte scratch buffer before applying this admission limit.
 Datagrams the listener has not read yet wait in the socket's kernel receive buffer, which drops
 what does not fit without anything counting it.
 
@@ -246,6 +247,11 @@ queued, and hands every frame it completes to an intake queue of 64 frames that 
 listener's connections share. When the queue is full, a connection keeps its completed frame and
 reads nothing more until the queue has room, so TCP flow control holds its sender back and no
 frame is dropped.
+
+These are per-connection limits. The listener has no connection-count limit, so the total of its
+frame-assembly buffers and completed frames waiting for the queue is unbounded. The shared
+64-frame queue does not bound that total; the generated [capability declaration](connector-capabilities.md#syslog-listener-ingest)
+reports these buffers separately.
 
 A frame may arrive split across any number of reads, including inside its octet count or between
 its CR and LF. The listener keeps the part it has and completes the frame from the following
