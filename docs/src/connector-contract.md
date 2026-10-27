@@ -1910,6 +1910,14 @@ measures. The MySQL property compares the complete statement and bound parameter
 driver's binary serializer, including qualified table names, quoted column keys, nulls and
 nonempty slices of a rotated membership sequence.
 `mongodb-write-answers` checks the rows a failed MongoDB write delivers, rejects and leaves unresolved.
+`mongodb-bson-mapping` checks the complete native document encoding and stored-size measure:
+integer widths, floating-point bits (including non-finite values), native dates at millisecond
+precision, binary subtype, recursive arrays, nulls and field order. The MongoDB declaration owns
+the BSON document limit; the encoder consumes that same constant. Its mapped type family admits
+the current scalars and typed arrays/vectors, and shared validation refuses duplicate keys and
+types outside that family. Collection locators use a MongoDB-specific rule and retain their
+spelling through Models, plans and the connector. The complete namespace is checked with the
+resolved database before opening the emitter.
 `sentry-prepared-envelopes` checks complete event preservation, defaults, framing and attempt
 bytes; the one- and three-node Sentry scenarios qualify those bytes through a reopened connector
 after a mock endpoint's `503` response. See

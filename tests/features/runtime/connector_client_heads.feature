@@ -55,8 +55,8 @@ Feature: Connector names head client definitions
       | 3            | POSTGRES     | POOL SIZE MIN 0 MAX 1 | 'addr' = 'postgres://127.0.0.1:5432/events?sslmode=disable'                    |
       | 1            | MYSQL        | POOL SIZE MIN 0 MAX 1 | 'addr' = 'mysql://127.0.0.1:3306/events'                                       |
       | 3            | MYSQL        | POOL SIZE MIN 0 MAX 1 | 'addr' = 'mysql://127.0.0.1:3306/events'                                       |
-      | 1            | MONGODB      | POOL SIZE MIN 0 MAX 1 | 'addr' = 'mongodb://127.0.0.1:27017'                                           |
-      | 3            | MONGODB      | POOL SIZE MIN 0 MAX 1 | 'addr' = 'mongodb://127.0.0.1:27017'                                           |
+      | 1            | MONGODB      | POOL SIZE MIN 0 MAX 1 | 'addr' = 'mongodb://127.0.0.1:27017/events'                                    |
+      | 3            | MONGODB      | POOL SIZE MIN 0 MAX 1 | 'addr' = 'mongodb://127.0.0.1:27017/events'                                    |
       | 1            | S3           |                       |                                                                                |
       | 3            | S3           |                       |                                                                                |
       | 1            | GCS          |                       |                                                                                |

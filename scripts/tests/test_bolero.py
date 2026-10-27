@@ -348,6 +348,7 @@ class InventoryTests(unittest.TestCase):
             "postgres-insert-measures",
             "mysql-insert-measures",
             "mongodb-write-answers",
+            "mongodb-bson-mapping",
             "websocket-signaling-protobuf-values",
             "websocket-acknowledgement-values",
             "websocket-signaling-protobuf-malformed",

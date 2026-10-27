@@ -6926,6 +6926,7 @@ dependencies = [
  "bolero",
  "chrono",
  "error-stack",
+ "futures-util",
  "meticulous",
  "mongodb",
  "nervix-connector",
