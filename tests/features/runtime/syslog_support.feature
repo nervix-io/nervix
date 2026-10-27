@@ -643,6 +643,14 @@ Feature: Syslog support
       "message":"beside a stalled handshake"
       """
     And the Syslog client that sends nothing is disconnected no sooner than "1s" after it connected
+    When Syslog TLS message is published to "{{syslog_ingest_addr}}" using identity and CA from resource directory "syslog_tls_dir"
+      """
+      {{syslog_pri}}1 2003-10-11T22:14:15.003Z edge-3 secure 790 ID50 - after a stalled handshake
+      """
+    Then the relay subscription receives a payload
+      """
+      "message":"after a stalled handshake"
+      """
 
     Examples:
       | cluster_size | replica_count |
