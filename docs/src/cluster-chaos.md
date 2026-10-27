@@ -737,6 +737,11 @@ The pinned Pumba, nettools and probe images are already local from preflight, an
 runs keep automatic pulling disabled. The rules inspection has a 30-second bound that includes the
 Docker client and the helper's launch.
 
+Netem installation is ready only after the inspection sees Pumba's `504d:` prio root, its
+`5050:` leaf with 100% loss, and the destination classifier directing traffic to `504d:3`.
+Pumba installs those parts separately. The existing 30-observation readiness loop waits for all
+three before the blocked-traffic probe; a partial ruleset alone does not establish installation.
+
 `diagnostics/network-preflight/` keeps the evidence:
 
 - `result.json`, with the verdict, the failing stage, the original exit status, the elapsed time,
@@ -775,6 +780,8 @@ in this order:
    - an injector that cannot start its nettools image
    - a sidecar that disappeared, as against one whose inspection failed while still present
    - a refused Docker execution of the blocked-traffic probe
+   - a partial netem installation before its classifier, followed by the real injector's
+     installation, blocked traffic and healing before the deliberate iptables inspection refusal
 
 A control name, such as `probe-refusal`, runs that control with the live installation, effect and
 healing check. `just chaos self-test` runs every control after the verifier checks, and CI runs them
