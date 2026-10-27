@@ -58,10 +58,16 @@ mod entity_drain;
 mod entity_drain_tests;
 mod execution;
 mod handoff_gate_link;
+mod live_view_gap;
+#[cfg(test)]
+mod live_view_gap_tests;
 mod model_publication;
 mod pause;
 mod relay_memory;
 mod relocation_commit;
+mod resource_publication;
+#[cfg(test)]
+mod resource_publication_tests;
 mod restarted_voter;
 mod restore_publication;
 #[cfg(test)]
@@ -85,11 +91,13 @@ use entity_drain::ForcedEntityDrainTimeout;
 pub(crate) use entity_drain::ObservedEntityDrain;
 use execution::NodeExecution;
 use handoff_gate_link::HandoffGateLink;
+use live_view_gap::{LiveViewGap, LiveViewGapState};
 use model_publication::ModelPublicationRefusal;
 pub use model_publication::ModelPublicationRefusalKind;
 use pause::TestPause;
 use relay_memory::RelayMemoryFill;
 use relocation_commit::RelocationCommitRefusal;
+use resource_publication::ResourcePublicationRefusal;
 use restarted_voter::{StartupObservationEnd, StartupVoterGossip};
 use restore_publication::RestorePublicationFailure;
 pub use restore_staging::RestoreStagingKind;
@@ -197,8 +205,15 @@ struct FaultInjectionState {
     /// branches spends after the branch stopped before it writes what the branch published last,
     /// as storage slow to take a large checkpoint would.
     delayed_stopped_branch_state_writes: DashMap<DomainNodeRef, Duration, RandomState>,
+    /// Waits, keyed by a relay processor, that the processor spends before each read of its
+    /// materialized dependencies, as a read slow to reach the node that holds the state would.
+    delayed_materialized_dependency_reads: DashMap<DomainNodeRef, Duration, RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
+    /// Refusals of a node's next uploaded-version publication, each keeping whether a publication
+    /// met it and whether the node's reconciliation took the refused upload up.
+    refused_resource_publications:
+        DashMap<ClusterNodeName, watch::Sender<ResourcePublicationRefusal>, RandomState>,
     /// Failures of every staging of one kind of a restored domain's checkpoints until cleared,
     /// each keeping whether a staging met it.
     failed_restore_checkpoint_stagings:
@@ -252,6 +267,9 @@ struct FaultInjectionState {
     /// assuming it.
     lost_remote_acknowledgements:
         DashMap<RemoteAcknowledgementLink, watch::Sender<RemoteAcknowledgementLoss>, RandomState>,
+    /// Gaps a scenario opens in the live view one node's acknowledgement watchers read. Each keeps
+    /// whether a watcher read it, so a scenario waits for the read instead of assuming it.
+    live_view_gaps: DashMap<LiveViewGap, watch::Sender<LiveViewGapState>, RandomState>,
     /// Nodes whose relay memory a scenario fills, at once or just before their relay work reaches
     /// an armed point, and the memory each fill holds.
     relay_memory_fills: DashMap<ClusterNodeName, RelayMemoryFill, RandomState>,
@@ -509,7 +527,9 @@ impl Default for FaultInjection {
                 delayed_shutdown_cordon_releases: DashMap::default(),
                 delayed_source_confirmations: DashMap::default(),
                 delayed_stopped_branch_state_writes: DashMap::default(),
+                delayed_materialized_dependency_reads: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
+                refused_resource_publications: DashMap::default(),
                 failed_restore_checkpoint_stagings: DashMap::default(),
                 failed_restore_state_publications: DashMap::default(),
                 native_metadata_interruptions: DashMap::default(),
@@ -532,6 +552,7 @@ impl Default for FaultInjection {
                 remote_relay_admission_pauses: DashMap::default(),
                 remote_relay_dispatch_pauses: DashMap::default(),
                 lost_remote_acknowledgements: DashMap::default(),
+                live_view_gaps: DashMap::default(),
                 relay_memory_fills: DashMap::default(),
                 relay_memory_owners: DashMap::default(),
                 owner_relay_fanout_pauses: DashMap::default(),
@@ -1181,6 +1202,15 @@ impl FaultInjection {
     pub fn delay_stopped_branch_state_writes(&self, processor: DomainNodeRef, delay: Duration) {
         self.inner
             .delayed_stopped_branch_state_writes
+            .insert(processor, delay);
+    }
+
+    /// Makes `processor`, a relay processor, wait `delay` before each read of its materialized
+    /// dependencies, as a read slow to reach the node that holds the state would. Every read waits,
+    /// including each re-evaluation of a message the processor parked on `REQUIRED WAIT`.
+    pub fn delay_materialized_dependency_reads(&self, processor: DomainNodeRef, delay: Duration) {
+        self.inner
+            .delayed_materialized_dependency_reads
             .insert(processor, delay);
     }
 
@@ -2190,6 +2220,33 @@ impl FaultInjection {
             .delayed_stopped_branch_state_writes
             .get(&processor)?;
         Some(*delay)
+    }
+
+    #[cfg_attr(
+        nervix_lint,
+        nervix::context(
+            bounded,
+            reason = "a scenario-owned dependency read delay is read before every materialized \
+                      dependency read of the processor it names",
+            key = "one test processor",
+            bound = "one keyed read; its guard ends before the test-controlled wait"
+        )
+    )]
+    pub(crate) async fn delay_materialized_dependency_read_if_armed(
+        &self,
+        domain: &DomainName,
+        kind: ModelKind,
+        processor: &ModelName,
+    ) {
+        let processor = DomainNodeRef::node_in(domain.clone(), kind, processor.clone());
+        let delay = self
+            .inner
+            .delayed_materialized_dependency_reads
+            .get(&processor)
+            .map(|delay| *delay.value());
+        if let Some(delay) = delay {
+            nervix_primitives::time::sleep(delay).await;
+        }
     }
 
     pub(crate) async fn pause_transaction_commit_after_progress_if_armed(

@@ -48,6 +48,12 @@ impl RelayProcessorNode {
         })?;
         branch
             .runtime
+            .inner
+            .fault_injection
+            .delay_materialized_dependency_read_if_armed(&branch.domain, self.kind, &self.processor)
+            .await;
+        branch
+            .runtime
             .resolve_materialized_dependencies(
                 routing,
                 &branch.domain,
@@ -393,10 +399,49 @@ impl RelayProcessorNode {
         incoming_relay: &'a RelayName,
         batch: RelayRecordBatch,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        self.execute_input(branch, incoming_relay, batch, None)
+    }
+
+    /// Re-evaluates every message parked on `REQUIRED WAIT` against the state present now.
+    ///
+    /// A message keeps its park while its dependencies are read, and one whose dependency is still
+    /// absent returns to the queue with that same park. Unparking it for the read would report its
+    /// acknowledgement as active work for as long as the read takes, on this node and, through its
+    /// root's progress, at the node that admitted it, and a drain that observed that work would
+    /// request another flush generation, which re-evaluates the message once more.
+    pub(super) async fn retry_parked(&mut self, branch: &mut BranchRuntime) {
+        let parked = self.pending_materialized.len();
+        for _ in 0..parked {
+            nervix_primitives::task::consume_budget().await;
+            let Some(pending) = self.pending_materialized.pop_front() else {
+                break;
+            };
+            let ParkedMaterializedBatch {
+                input_relay,
+                batch,
+                required_wait,
+            } = pending.into_parked();
+            self.execute_input(branch, &input_relay, batch, Some(required_wait))
+                .await;
+        }
+    }
+
+    /// Takes `batch` through this processor's operation. A message re-evaluated from `REQUIRED
+    /// WAIT` brings `required_wait`, the park it still holds: it keeps that park when it has to
+    /// wait again, and leaves it before anything acknowledges, fails or forwards it. Fresh input
+    /// brings none.
+    fn execute_input<'a>(
+        &'a mut self,
+        branch: &'a mut BranchRuntime,
+        incoming_relay: &'a RelayName,
+        batch: RelayRecordBatch,
+        required_wait: Option<AckParkGuard>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let routing = match branch.domain_routing() {
                 Ok(routing) => routing,
                 Err(error) => {
+                    drop(required_wait);
                     branch.runtime.handle_internal_processor_error_for_acks(
                         &branch.domain,
                         self.kind,
@@ -412,6 +457,7 @@ impl RelayProcessorNode {
             let execution_snapshot = match branch.domain_clock.snapshot() {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
+                    drop(required_wait);
                     branch.runtime.handle_internal_processor_error_for_acks(
                         &branch.domain,
                         self.kind,
@@ -428,19 +474,31 @@ impl RelayProcessorNode {
                 .resolve_materialized_dependencies(branch, &batch.key, execution_now)
                 .await
             {
-                Ok(MaterializedDependencyResolution::Ready(values)) => values,
+                Ok(MaterializedDependencyResolution::Ready(values)) => {
+                    drop(required_wait);
+                    values
+                }
                 Ok(MaterializedDependencyResolution::Skip) => {
+                    drop(required_wait);
                     for ack in batch.acks.iter() {
                         ack.ack_success();
                     }
                     return;
                 }
                 Ok(MaterializedDependencyResolution::Wait) => {
-                    self.pending_materialized
-                        .push_back(PendingMaterializedBatch::new(incoming_relay.clone(), batch));
+                    let pending = match required_wait {
+                        Some(required_wait) => PendingMaterializedBatch::parked_again(
+                            incoming_relay.clone(),
+                            batch,
+                            required_wait,
+                        ),
+                        None => PendingMaterializedBatch::new(incoming_relay.clone(), batch),
+                    };
+                    self.pending_materialized.push_back(pending);
                     return;
                 }
                 Err(error) => {
+                    drop(required_wait);
                     branch.runtime.handle_internal_processor_error_for_acks(
                         &branch.domain,
                         self.kind,
