@@ -80,6 +80,14 @@ same oracle runs on one and three nodes. The broker's native round-trip control 
 in the scenario and again during teardown before diagnostics or node drain, including after a
 failed assertion. It does not change a product deadline or use a readiness sleep.
 
+The Kafka explicit-start scenarios use a provisioned real topic and an independent broker observer.
+Their exact payload sets distinguish new work from acknowledged records replayed after a codec
+quiescence, full-cluster restart or partition growth. A later explicit start must replay its selected
+history. The restore outline captures the running domain, replaces the cluster with fresh stores,
+and requires only new records after `RESUME`. Both topologies use the production sticky scheduler
+for recovery from persisted state. Their diagnostic inventory includes active/order execution and
+the corresponding lifecycle or restore stress selection. No phase or suite budget changes.
+
 The Kafka consumer-retirement scenario holds the same broker's replies before it drops an ingestor
 whose eight instances joined their group, so destroying each consumer waits for its LeaveGroup
 answer. It waits for a running connector-storage job before sending a record through an HTTP
@@ -166,6 +174,7 @@ resubmitting an outcome that might already have produced output.
 | Injected holds | One task on the binary's runtime per sequence of holds a step injects at controlled gates, aborted when the step drops it | `tests/common/injected_hold.rs` |
 | Bounded row and broker observations | One task on the binary's runtime per observation, owning its subscription session or broker observer until it returns and aborted when the step drops it. Its deadline is captured before dispatch, so a runner stall delays learning the result without extending the observation. Exact generator occurrences, broker counts and sequences, and materialized rows retain their assertions and budgets | `tests/common/runner_observation.rs`, used by the generator occurrence and broker-count steps in `tests/scenarios.rs` and the materialized-row step in `tests/backup/materialized.rs` |
 | Timed control probes | One task on the binary's runtime per probe, holding a clone of a named client the scenario connected beforehand until its statements return, and aborted when the step drops it. The deadline is captured before dispatch and enforced on that task, which records each statement's dispatch and completion with its domain, so a runner stall delays learning the result without extending the probe or what it measures | `tests/common/runner_observation.rs`, used by the timed client step in `tests/scenarios.rs` |
+| Syslog mixed-framing TCP publication | One abort-on-drop task on the binary's runtime, owning connection establishment, the complete framed bytes and the sender through shutdown | The mixed-framing sender step in `tests/scenarios.rs`, using `tests/common/runner_observation.rs` |
 | Command outcome recovery | On the task awaiting the command, including backup setup through the raw session, or on its background execution. It repeats the original execution reference on one session at a time, opening each node in turn until the current leader supplies a known outcome | `tests/common/command_recovery.rs`, over the raw session in `tests/common/raw_session.rs` |
 | Publication-relative receipt timing | A runtime task owns the subscription read before publication and retains its receipt timestamp. The assertion bounds completion after the HTTP publishing step returns; scenario teardown cancels an unfinished reader before stopping nodes | `tests/common/runner_observation.rs`, `tests/common/raw_session.rs` and the timed subscription steps in `tests/scenarios.rs` |
 | Synchronous step work | One task on the runtime's blocking pool per job a step hands off the runner task, such as reading, verifying or rewriting a backup archive, preparing ONNX fixtures or inspecting a stopped node's database; the step awaits the job and fails with its panic | `tests/common/runner_offload.rs` |
@@ -174,6 +183,23 @@ resubmitting an outcome that might already have produced output.
 | Broker observers | One task on the binary's runtime per observer, which reads the broker's client and hands each message to the step over a bounded channel and is aborted when the scenario drops the observer. A core NATS observer has no task of its own, because its client already buffers what the server delivers | The cluster fixture, `tests/common/cluster.rs`, the delivery owner, `tests/common/broker_observer.rs`, and the NATS observer, `tests/common/nats_observer.rs` |
 | Dependency endpoints | One listener task and one task per forwarded connection on the binary's runtime, for each endpoint a scenario stands in front of a dependency the run shares, so it can stall, hold or end that dependency's connections for its own clients alone. Dropping the endpoint, at cleanup, ends its listener and every connection it forwards | The stallable TCP proxy in the cluster fixture, `tests/common/cluster.rs`, the controlled NATS endpoint, `tests/common/nats_endpoint.rs`, which reads what a client sends one NATS operation at a time so it can stop after a number of publishes, and the Iceberg catalog gate, `tests/common/iceberg_catalog_gate.rs`, which serves HTTP/1.1 and holds each commit to one table until the scenario refuses or passes it |
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
+
+The Syslog mixed-framing sender assembles its octet-counted and non-transparent frames before
+connecting and writes them together on its runtime task. A stalled scenario runner cannot leave
+that sender idle between its count, delimiter and payload writes. The idle-connection scenario
+keeps its one-second `idle_timeout_ms`, observes both messages beside the silent connection, and
+measures the silent connection's close from before connecting. The runtime task removes runner
+polling gaps; it does not remove scheduling delays on the worker itself or change the listener's
+deadline.
+
+The controlled NATS endpoint publishes a positive observation when it holds a complete publish
+and stops reading behind it. A connection-loss scenario waits for that observation, ends the
+active connections, and waits for a refused reconnect before forwarding again. The same fault
+can run beside STOP. These event boundaries establish the outage without a sleep or a negative
+observation window. The publication scenario requires every original sequence member, allowing
+the duplicates an uncertain Core NATS retry permits. The STOP scenario observes the pending-record
+uncertainty through a retained public session; terminal domain teardown may cancel unresolved
+host work under the source's existing acknowledgement contract.
 
 A scenario binary built for the `deloxide` mode, which `just test-deloxide`, `just test-deloxide-order`,
 `just test-deloxide-stress` or `just test-deloxide-stress-restore` builds, starts its
@@ -837,6 +863,18 @@ The harness keeps these boundaries explicit.
   scenario releases it. Each barrier is one-shot and uses the shared pause owner's reached and
   released observations. The scenario asserts the original execution reference's outcome and a
   dependent command through the public session protocol; it adds no setup delay or request retry.
+- **Restore publication failures.** A durable state publication failure armed for a restored
+  domain fails every publication of that domain's restored state, on whichever node publishes and
+  after the store has made the publication durable, until the scenario clears it. A failure that
+  the first publication consumed would let a leader that resumes the restore, because the failed
+  outcome was never recorded, publish again and complete the restore. The control keeps whether a
+  publication met it, so a scenario asserts the failure as pending before the restore and as
+  delivered once the restore failed, instead of inferring delivery from a successful publication.
+  Clearing it ends the condition without changing a recorded outcome, and the scenarios clear it
+  before asserting that the incomplete-state gate, not the injected failure, refuses `START`. The
+  three-node regression holds the first coordinator's failed outcome before it is recorded, moves
+  leadership, and requires recovery under the same execution reference to end failed and stay
+  failed once the condition is cleared.
 - **Console backup download pauses.** The console reload scenarios hold the archive's first
   download before it streams, so the reload interrupts a download in progress. The archive is
   assembled and served by the leader that completes the backup. A leadership move while the backup
@@ -850,6 +888,25 @@ The harness keeps these boundaries explicit.
   same paused download, reload and verified resumed archive. The scenario whose reload must resume
   nothing arms the same pauses, so a backup the console resumed by mistake would stay held on
   whichever node served it instead of downloading and clearing its record.
+- **Console command response pauses.** The shared console session scenario that loses its session
+  connection holds the backup command's reply after the command ran and before either transport
+  delivers it, so the lost connection takes the reply with it and the console's reconnect must
+  recover the outcome under the command's execution reference. The command runs on whichever node
+  leads when the console sends it, and a leadership move after the redirect makes another node run
+  it, so no step can name that node in advance. The scenarios therefore arm the response pause on
+  every node, and the step that waits for it reports which node reached its pause. Each pause holds
+  only the first command its node completes, whoever sent it: the harness's status request is a
+  `SHOW CLUSTER STATUS;` command too, so no step polls a node's status while its pause is armed. A
+  command sent again under the same reference joins the held execution or returns its recorded
+  outcome without stopping there. The scenario releases every node's pause once the connection is
+  lost, and scenario teardown releases any pause still armed. Each shared session scenario has a
+  three-node variant in which leadership moves after the redirect, from the leader the console was
+  redirected to back to the node it was opened on, so the console's session, its download and its
+  restore streams follow a leader other than the one the scenario saved before the console opened.
+  The variant without a response pause moves leadership under the durably admitted backup command.
+  The variant that loses its session connection transfers leadership before the backup, waits until
+  the console reports the new leader, and only then arms the pauses, because the wait for a
+  leadership move polls the successor's status.
 - **Timed control probes.** The silent-peer health scenario connects a named production client
   before holding the peer's health response. Its nine-second probe then sends the user creation,
   relay creation and cluster-status statements in order on that client, under one deadline. The
@@ -1480,19 +1537,42 @@ the bounded selector predicate establishes clock readiness before the stability 
 Every console page starts with a connection recorder, a script the harness adds before the page's
 own scripts run. It subclasses the page's `WebSocket` constructor and notes, for each connection the
 console constructs, the console it reached, the call its path names (the session, a backup download
-or a restore stream), and when the page constructed it, saw it open, and let go of it by closing it
-or seeing it close. The record holds each connection's origin and path, never its query, which
-carries the credentials. One counter that only the page's event loop advances orders those moments,
-so a step reads the order the page acted in however late it reads and however loaded the machine
-is. The console lets go of its session connection before it constructs the next one, so `the web
-console never held two session connections at once` tells a reconnect of the console's one session
-from a second session without counting the leader notices, which every reconnect repeats. Other
-steps check which console each session connection reached around the leader redirect, and where
-the backup downloads and restores went. `the web console loses its session connection` closes the
-newest session connection the page holds, as a connection lost under the console closes, and notes
-that moment; `the web console's session reconnected to node ... after it was lost` then checks that
-a session connection the page constructed after that moment opened on that node. It reads the
-record once, after a step that waits for something only the new connection can deliver.
+or a restore stream), when the page constructed it, saw it open, and let go of it by closing it or
+seeing it close, and the first 16 and the last 64 binary frames of at most 16 KiB it received, with
+when the page received each, so a busy page keeps a bounded record. The record holds each
+connection's origin and path, never its query, which carries the credentials. One counter that only
+the page's event loop advances orders those moments, so a step reads the order the page acted in
+however late it reads and however loaded the machine is. The page receives a frame before it can
+act on it, so a frame comes before every connection the page makes because of it. The console lets go of its session connection before it constructs the next one, so
+`the web console never held two session connections at once` tells a reconnect of the console's one
+session from a second session without counting the leader notices, which every reconnect repeats.
+
+The harness reads from those frames which node the nodes reported as the leader on the page's own
+connections. The leader opens every console session it serves by reporting that it leads; any other
+node ends a console session with a redirect naming the leader's web console, and answers a command,
+a backup download or a restore it cannot serve because it does not lead with such a redirect too.
+A redirect that names no leader reports none. Every report comes first or last on its connection,
+because the console lets a session go as soon as a redirect names another leader, so the frames the
+recorder keeps hold every report. A frame larger than the recorder's bound is a domain snapshot or an
+archive chunk, which reports no leader, and a kept frame that does not decode as a frame of its
+connection's call fails the step that reads it. `the web console's session reached
+node ... until it was redirected to node ..., and then only nodes reported to it as the leader`
+checks that the session started where the page was opened, that its first connection anywhere else
+reached the node it names as the redirect's, and that from then on every session connection reached
+a node that some report had named the leader before the page made that connection. `the web
+console's backup downloads and restores reached only nodes reported to it as the leader` holds every
+download and restore stream to the same rule and requires at least one of each. A connection made
+again to a former leader, such as a restore streamed again to the node it was streaming to when
+leadership moved, still reached a node reported as the leader, and the redirect that node answers
+with names the next one. A leadership move after the redirect therefore only adds the new leader to
+the reports, and both checks hold however often leadership moves, while a connection to the page's
+origin or to a node no report named still fails them. `the web console loses its session
+connection` closes the newest session connection the page holds, as a connection lost under the
+console closes, and notes that moment; `the web console's session reconnected where it lost its
+connection` then checks that a session connection the page constructed after that moment opened on
+the console of the connection it lost, because the console connects its session again where its
+redirects took it. It reads the record once, after a step that waits for something only the new
+connection can deliver.
 
 The **active-scenario registry** holds every scenario that has started and not yet ended. A scenario
 registers in its before hook, before it acquires its permits, so a scenario that never gets them is
@@ -2733,10 +2813,27 @@ artifact carries `tests/logs`.
 Server processes write their logs into their own temporary directories, and a failure quotes the
 tail it needs.
 
+The materialized input round and the delayed-coordinator publication observation each own a
+`BackupPhase`. It captures the existing 120-second deadline before dispatching the operation through
+`observe_off_the_runner`; a runner delayed while polling other scenarios does not stop the input
+round from submitting its next row or the observer from recording a reached barrier. Reading the
+result later does not restart that deadline. Dropping the result future aborts its operation, and a
+real expiry still fails the step with its identity, budget and elapsed time. Producer close remains
+outside the input round's budget, as before.
+
+Input diagnostics retain domain, initial route, producer, attachment, generation, round, tenant,
+attempt and submission identity. A submission is logged separately from its ACK wait and terminal
+outcome. While an ACK is pending, a five-second progress observation records connection, admission,
+producer ending, pending submissions and remaining round budget. It does not resubmit unresolved
+work. Only a reported processing failure takes the fixture's existing replay path, preserving every
+row's event timestamp and complete value; the intentional successful replay also remains.
+
 The delayed-coordinator materialized restore fixture arms the existing publication hook on every
-candidate node, then captures the first coordinator that actually reaches it within the existing
-120-second bound. A terminal background outcome before that barrier is reported immediately. The
-fixture releases the unused hooks before transferring leadership, keeping only the captured
+candidate node, then captures the first coordinator that actually reaches it within that phase's
+deadline. The background task retains its immutable execution reference with its handle. Sending,
+reply and barrier observations retain that reference, route, archive size, candidate nodes and the
+coordinator that reached publication. A terminal background outcome before that barrier is reported
+immediately. The fixture releases the unused hooks before transferring leadership, keeping only the captured
 coordinator held while its successor completes the same immutable restore and produces new rows.
 Releasing that captured hook must be refused and must leave the complete materialized generations
 identical. The controlled first-route scenario moves leadership before submission as well; a saved
@@ -2941,6 +3038,7 @@ tasks, most of them on a paused clock, stand-in executable images and stand-in c
 | A failed server process startup keeps what its readiness probes saw and what the still-running process was doing, within a bound | `a_history_without_probes_says_none_completed`, `consecutive_probes_of_one_kind_form_one_run`, `a_kind_that_returns_starts_a_new_run`, `a_long_history_keeps_its_first_and_latest_runs`, `a_sleeping_child_is_described_with_its_thread_and_its_host`, `a_stopped_child_is_described_as_stopped`, `a_reaped_child_is_described_as_ended`, `a_description_lists_a_bounded_number_of_groups_and_names`, `a_description_orders_groups_from_the_largest` |
 | Synchronous step work leaves the runner task polling, and a stall of that task is measured | `a_step_job_leaves_the_runner_task_polling_other_scenarios`, `a_step_job_returns_its_result_to_the_step`, `a_step_job_fails_its_step_with_its_own_panic`, `a_step_that_blocks_the_runner_task_is_reported_with_its_length` |
 | A step takes the messages a NATS observer's client already holds without a poll of the runner task for each one, in the order the server delivered them | `a_step_takes_buffered_deliveries_without_a_poll_per_message` |
+| A bounded backup phase keeps progressing while its caller is unpolled, retains the original deadline and identifies a genuine expiry | `a_backup_phase_progresses_while_its_runner_is_unpolled`, `a_stalled_backup_phase_fails_at_its_original_deadline`, `an_expired_backup_phase_does_not_start_another_budget` |
 | NATS driver diagnostics distinguish a deliberately overflowing subscription from a disconnected TCP peer, and a disconnect preserves all 32,768 deliveries already buffered | `an_observer_records_the_drivers_slow_consumer_notifications`, `a_disconnected_observer_keeps_its_buffered_burst_and_reports_the_connection_end` |
 | The actual sequence/header assertion drains all 32,768 messages while its caller is unpolled past its deadline, preserves each oracle and still fails a stalled delivery at the original deadline | `a_buffered_sequence_meets_its_deadline_while_the_runner_is_stalled`, `a_sequence_keeps_every_message_and_header_oracle`, `a_stalled_delivery_still_fails_at_the_captured_sequence_deadline` |
 | The suite watchdog names what was running, publishes timing before cleanup, and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_suite_timeout_reports_before_it_drops_the_run`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |

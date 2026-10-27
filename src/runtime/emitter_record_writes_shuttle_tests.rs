@@ -23,7 +23,8 @@
 // scheduling step as the operation it records. The emitter's own counts are the production owner's
 // state, so they are the selected, modeled atomics.
 use futures_util::FutureExt as _;
-use nervix_connector::EmitterWriteError;
+use nervix_connector::{EmitterWriteError, RecordEmitter as _};
+use nervix_connector_fake::{FakeEmitter, PublishAnswer, Records};
 use nervix_model_harness::shuttle::check_interleavings;
 use nervix_primitives::{
     sync::{StdArc, atomic as selected},
@@ -150,6 +151,8 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
 
         let emitter = nervix_primitives::task::spawn(async move {
             let mut batches = vec![one_batch(emitter_shares)];
+            let mut connector =
+                FakeEmitter::<Records>::new([PublishAnswer::Fail, PublishAnswer::ConfirmAll]);
             let mut prepared = PreparedPayloads::default();
             prepared
                 .retain(payload(&[0, 1], CONFIRMED_PAYLOAD), &mut batches)
@@ -162,8 +165,9 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
                 .payload
                 .clone();
             nervix_primitives::task::yield_now().await;
+            let failed = connector.publish(first.records).await;
             let answers = prepared
-                .answers(&mut batches, first.payloads, stalled())
+                .answers(&mut batches, first.payloads, failed)
                 .assured("a stalled write answers for no record");
             assert!(
                 answers.unresolved.is_some(),
@@ -183,8 +187,7 @@ fn fanned_in_members_resolve_once(sibling_end: SiblingEnd) {
                 "a retry must write the retained payload exactly as it was first written"
             );
             emitter_confirmed.store(true, Ordering::SeqCst);
-            let mut confirmed = PerRecordOutcome::with_capacity(1);
-            confirmed.deliver(EmitterRecordId::new(0));
+            let confirmed = connector.publish(retry.records).await;
             let answers = prepared
                 .answers(&mut batches, retry.payloads, confirmed)
                 .assured("the confirmation names the one record of the retry");
